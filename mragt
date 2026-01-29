@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Run backend unit tests. Run from any directory.
+# Install deps first: pip install pytest pytest-asyncio httpx
+
+SCRIPT="$0"
+while [ -L "$SCRIPT" ]; do
+  TARGET="$(readlink "$SCRIPT")"
+  if [[ "$TARGET" == /* ]]; then
+    SCRIPT="$TARGET"
+  else
+    SCRIPT="$(dirname "$SCRIPT")/$TARGET"
+  fi
+done
+ROOT="$(cd "$(dirname "$SCRIPT")" && pwd)"
+cd "$ROOT" || exit 1
+source .venv/bin/activate
+exec python -m pytest tests -v

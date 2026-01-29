@@ -1,0 +1,36 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Environment
+ENV = os.getenv("ENV", "dev")  # dev or prod
+
+# Database
+if ENV == "prod":
+    DATABASE_URL = os.getenv("DATABASE_URL")  # e.g., postgresql+asyncpg://user:pass@host/db
+else:
+    # Dev defaults
+    DATABASE_URL = os.getenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://postgres:postgres@localhost:5432/mobius_rag"
+    )
+
+# GCS
+GCS_BUCKET = os.getenv("GCS_BUCKET", "mobius-rag-uploads-mobiusos")
+
+# LLM Provider Configuration
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")  # "ollama" or "vertex"
+
+# Ollama settings (for local development)
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "8192"))
+
+# Vertex AI settings (for production)
+VERTEX_PROJECT_ID = os.getenv("VERTEX_PROJECT_ID")
+VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "us-central1")
+VERTEX_MODEL = os.getenv("VERTEX_MODEL", "gemini-1.5-pro")
+
+# Critique retry: retry extraction when score < threshold (0.0–1.0). User can override via ?threshold=.
+CRITIQUE_RETRY_THRESHOLD = float(os.getenv("CRITIQUE_RETRY_THRESHOLD", "0.6"))

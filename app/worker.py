@@ -1,0 +1,774 @@
+"""
+Separate worker process for processing chunking jobs.
+This keeps the main API server responsive by offloading heavy processing.
+"""
+import asyncio
+import json
+import logging
+import os
+import re
+import sys
+from datetime import datetime, timezone
+from uuid import UUID
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.database import AsyncSessionLocal
+from app.models import Document, DocumentPage, ChunkingJob, ChunkingResult, ChunkingEvent
+from app.services.chunking import split_paragraphs_from_markdown
+from app.services.extraction import stream_extract_facts
+from app.services.critique import stream_critique, critique_extraction, normalize_critique_result
+from app.services.error_tracker import log_error, classify_error
+from app.services.utils import parse_json_response, parse_json_response_best_effort
+from app.config import CRITIQUE_RETRY_THRESHOLD
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - [WORKER] - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+
+def _normalize_whitespace(s: str) -> str:
+    """Collapse runs of whitespace to single space and strip."""
+    return " ".join(s.split()) if s else ""
+
+
+def _find_fact_span_in_markdown(
+    page_md: str,
+    fact_text: str,
+    fallback_start: int | None,
+    fallback_end: int | None,
+) -> tuple[int | None, int | None]:
+    """
+    Return (start, end) in page_md that best matches fact_text.
+    Verifies LLM-provided offsets; if the slice doesn't match fact_text, searches
+    for fact_text in page_md (exact or flexible whitespace) so highlights align.
+    """
+    if not fact_text or not page_md:
+        return fallback_start, fallback_end
+    # Verify LLM slice if we have offsets
+    if (
+        fallback_start is not None
+        and fallback_end is not None
+        and 0 <= fallback_start < fallback_end <= len(page_md)
+    ):
+        slice_text = page_md[fallback_start:fallback_end]
+        if _normalize_whitespace(slice_text) == _normalize_whitespace(fact_text):
+            return fallback_start, fallback_end
+    # Search with flexible whitespace (collapse \s+ in pattern)
+    try:
+        pattern = re.escape(fact_text).replace("\\ ", r"\\s+")
+        m = re.search(pattern, page_md)
+        if m:
+            return m.start(), m.end()
+    except re.error:
+        pass
+    # Exact substring
+    idx = page_md.find(fact_text)
+    if idx >= 0:
+        return idx, idx + len(fact_text)
+    return fallback_start, fallback_end
+
+
+def _utc_now_naive():
+    """Return naive UTC datetime for DB (TIMESTAMP WITHOUT TIME ZONE)."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+# Worker ID (unique per worker instance)
+WORKER_ID = f"worker-{os.getpid()}-{_utc_now_naive().isoformat()}"
+
+
+def _sanitize_fact_for_db(fact_data: dict) -> dict:
+    """Return a copy of fact_data safe for PostgreSQL (String columns). Category scores are parsed into columns separately."""
+    import math
+    out = {}
+    for k, v in fact_data.items():
+        if k == "category_scores":
+            continue  # Handled via category_scores_dict_to_columns -> individual columns
+        if v is None:
+            out[k] = None
+        elif isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+            out[k] = None
+        elif k in ("is_verified", "is_eligibility_related", "is_pertinent_to_claims_or_members", "confidence") and v is not None:
+            out[k] = str(v).lower() if isinstance(v, bool) else str(v)
+        else:
+            out[k] = v
+    return out
+
+
+def _classify_and_log_error(db, document_id, paragraph_id, err, context, stage_label, error_details=None):
+    """Determine error_type from context, call classify_error, return (error_type, severity, stage) for log_error."""
+    if context == "extraction":
+        error_type = "json_parse_error" if isinstance(err, json.JSONDecodeError) else "llm_failure"
+    elif context == "persistence":
+        error_type = "persistence_error"
+    elif context == "retry":
+        error_type = "other"
+    elif context == "critique":
+        error_type = "other"
+    else:
+        error_type = "other"
+    severity, stage = classify_error(error_type, err)
+    return error_type, severity, stage
+
+
+async def _create_event_buffer_callback(document_id: str, db: AsyncSession):
+    """Create an event callback that writes events to the database."""
+    from app.models import ChunkingEvent
+    from uuid import UUID
+    
+    doc_uuid = UUID(document_id)
+    event_count = 0
+    
+    async def event_callback(event_type: str, data: dict):
+        nonlocal event_count
+        try:
+            event = ChunkingEvent(
+                document_id=doc_uuid,
+                event_type=event_type,
+                event_data=data
+            )
+            db.add(event)
+            event_count += 1
+            # Commit each progress/chunking event so Live Updates sees it right away
+            await db.commit()
+            logger.debug(f"[{document_id}] Event #{event_count}: {event_type} - {data.get('message', data.get('current_paragraph', 'no key'))}")
+        except Exception as e:
+            logger.error(f"[{document_id}] Failed to write event {event_type}: {e}", exc_info=True)
+            await db.rollback()
+        yield ""  # Yield empty for compatibility
+    
+    logger.info(f"[{document_id}] Event callback created, will write events to database")
+    return event_callback
+
+
+async def _run_chunking_loop(
+    document_id: str,
+    doc_uuid: UUID,
+    pages: list,
+    threshold: float,
+    db: AsyncSession,
+    event_callback=None,
+):
+    """
+    Shared chunking loop logic. Runs the full paragraph processing loop.
+    This is the same function from main.py, but runs in worker process.
+    """
+    results_paragraphs: dict = {}
+    
+    try:
+        logger.info(f"[{document_id}] Starting chunking loop with threshold {threshold}")
+        # Materialize page (page_number, markdown) before any await; use text_markdown as canonical, fallback to raw->md
+        from app.services.page_to_markdown import raw_page_to_markdown
+        page_data_list = []
+        for page in pages:
+            md = page.text_markdown if getattr(page, "text_markdown", None) and (page.text_markdown or "").strip() else raw_page_to_markdown(page.text or "")
+            if not (md or "").strip():
+                continue
+            page_data_list.append((page.page_number, md))
+        total_pages = len(page_data_list)
+        total_paragraphs = sum(len(split_paragraphs_from_markdown(md)) for _, md in page_data_list)
+        logger.info(f"[{document_id}] Found {total_pages} pages with markdown, {total_paragraphs} total paragraphs to process")
+
+        async def _upsert(status: str = "in_progress"):
+            try:
+                # Check if document still exists
+                try:
+                    doc_check = await db.execute(select(Document).where(Document.id == doc_uuid))
+                    if doc_check.scalar_one_or_none() is None:
+                        logger.warning(f"[_upsert] Document {doc_uuid} no longer exists")
+                        return False
+                except Exception as check_err:
+                    logger.error(f"[_upsert] Error checking document: {check_err}", exc_info=True)
+                
+                # Get error counts
+                from app.models import ProcessingError
+                error_counts = {"critical": 0, "warning": 0, "info": 0}
+                try:
+                    error_result = await db.execute(
+                        select(ProcessingError).where(ProcessingError.document_id == doc_uuid)
+                    )
+                    errors = error_result.scalars().all()
+                    for err in errors:
+                        error_counts[err.severity] = error_counts.get(err.severity, 0) + 1
+                except Exception as err_err:
+                    logger.error(f"[_upsert] Error fetching error counts: {err_err}")
+                
+                # Upsert chunking result
+                result_query = await db.execute(
+                    select(ChunkingResult).where(ChunkingResult.document_id == doc_uuid)
+                )
+                chunking_result = result_query.scalar_one_or_none()
+                
+                if not chunking_result:
+                    chunking_result = ChunkingResult(
+                        document_id=doc_uuid,
+                        metadata_={},
+                        results={}
+                    )
+                    db.add(chunking_result)
+                
+                # Update metadata
+                metadata = chunking_result.metadata_ or {}
+                metadata.update({
+                    "status": status,
+                    "total_paragraphs": total_paragraphs,
+                    "completed_count": len(results_paragraphs),
+                    "total_pages": total_pages,
+                    "error_counts": error_counts,
+                    "last_updated": _utc_now_naive().isoformat()
+                })
+                chunking_result.metadata_ = metadata
+                chunking_result.results = results_paragraphs
+                chunking_result.updated_at = _utc_now_naive()
+                
+                await db.flush()
+                await db.commit()
+                return True
+            except Exception as e:
+                await db.rollback()
+                logger.error(f"[_upsert] Failed to upsert: {e}", exc_info=True)
+                return False
+
+        # Initial upsert
+        await _upsert("in_progress")
+        logger.info(f"[{document_id}] Initial progress state saved to database")
+        
+        # Process each page (use materialized markdown)
+        for page_num, (current_page_number, page_md) in enumerate(page_data_list, start=1):
+            paragraphs = split_paragraphs_from_markdown(page_md)
+            logger.info(f"[{document_id}] Processing page {current_page_number} ({page_num}/{total_pages}) with {len(paragraphs)} paragraphs")
+            
+            for para_idx, para_data in enumerate(paragraphs):
+                paragraph_text = para_data["text"] if isinstance(para_data, dict) else para_data
+                section_path = para_data.get("section_path") if isinstance(para_data, dict) else None
+                para_id = f"{current_page_number}_{para_idx}"
+                
+                # Skip if already processed successfully
+                if para_id in results_paragraphs:
+                    existing = results_paragraphs[para_id]
+                    if existing.get("status") == "passed" or existing.get("facts"):
+                        continue
+                
+                async def _send_status(msg: str):
+                    if event_callback:
+                        try:
+                            async for _ in event_callback("status_message", {"message": msg}):
+                                pass
+                        except Exception as e:
+                            logger.error(f"Failed to send status_message: {e}", exc_info=True)
+                
+                await _send_status(f"Paragraph {para_id} (page {current_page_number}) started...")
+                logger.info(f"[{document_id}] [{para_id}] Starting extraction (text length: {len(paragraph_text)} chars)")
+                
+                try:
+                    # Stage 1: Extract facts
+                    raw_extraction_output = ""
+                    extraction_result = None
+                    extraction_start = _utc_now_naive()
+                    try:
+                        async for chunk in stream_extract_facts(paragraph_text, section_path=section_path):
+                            raw_extraction_output += chunk
+                        
+                        extraction_duration = (_utc_now_naive() - extraction_start).total_seconds()
+                        logger.debug(f"[{document_id}] [{para_id}] Extraction completed in {extraction_duration:.2f}s, output length: {len(raw_extraction_output)}")
+                        
+                        extraction_result = parse_json_response(raw_extraction_output)
+                        if not extraction_result or "summary" not in extraction_result:
+                            raise ValueError("Invalid extraction result: missing summary")
+                        
+                        n_facts = len(extraction_result.get("facts", []))
+                        await _send_status(f"{n_facts} fact(s) found.")
+                        logger.info(f"[{document_id}] [{para_id}] Extraction successful: {n_facts} facts found, summary: {extraction_result.get('summary', '')[:100]}")
+                    except Exception as extract_err:
+                        # Try best-effort parse so we can proceed with whatever facts we can get; log and continue if we get something
+                        extraction_result = parse_json_response_best_effort(raw_extraction_output)
+                        if extraction_result is not None:
+                            n_facts = len(extraction_result.get("facts", []))
+                            logger.warning(f"[{document_id}] [{para_id}] Proceeding with best-effort extraction after parse error: {extract_err}; got {n_facts} fact(s)")
+                            await log_error(
+                                db=db,
+                                document_id=str(doc_uuid),
+                                paragraph_id=para_id,
+                                error_type="json_parse_error",
+                                severity="warning",
+                                error_message=str(extract_err),
+                                error_details={"stage": "extraction", "raw_output": raw_extraction_output[:500], "best_effort": True},
+                                stage="extraction"
+                            )
+                            await _send_status(f"{n_facts} fact(s) found (recovered from parse error).")
+                        else:
+                            error_type, severity, stage = _classify_and_log_error(
+                                db, doc_uuid, para_id, extract_err, "extraction", "extraction"
+                            )
+                            await log_error(
+                                db=db,
+                                document_id=str(doc_uuid),
+                                paragraph_id=para_id,
+                                error_type=error_type,
+                                severity=severity,
+                                error_message=str(extract_err),
+                                error_details={"stage": "extraction", "raw_output": raw_extraction_output[:500]},
+                                stage=stage
+                            )
+                            results_paragraphs[para_id] = {
+                                "paragraph_id": para_id,
+                                "status": "failed",
+                                "error": str(extract_err)
+                            }
+                            await _send_status(f"Paragraph {para_id} failed: extraction error.")
+                            await _upsert("in_progress")
+                            continue
+                    
+                    # Stage 2: Critique
+                    critique_result = None
+                    critique_start = _utc_now_naive()
+                    try:
+                        logger.debug(f"[{document_id}] [{para_id}] Starting critique (threshold: {threshold})")
+                        critique_result = await critique_extraction(paragraph_text, extraction_result)
+                        critique_duration = (_utc_now_naive() - critique_start).total_seconds()
+                        
+                        if critique_result and critique_result.get("pass"):
+                            score = critique_result.get("score", 0)
+                            await _send_status("Critique passed.")
+                            logger.info(f"[{document_id}] [{para_id}] Critique PASSED (score: {score:.3f}, duration: {critique_duration:.2f}s)")
+                        else:
+                            score = critique_result.get("score", 0) if critique_result else 0
+                            feedback = critique_result.get("feedback", "")[:100] if critique_result else "No feedback"
+                            await _send_status("Critique failed.")
+                            logger.info(f"[{document_id}] [{para_id}] Critique FAILED (score: {score:.3f}, duration: {critique_duration:.2f}s, feedback: {feedback})")
+                    except Exception as critique_err:
+                        error_type, severity, stage = _classify_and_log_error(
+                            db, doc_uuid, para_id, critique_err, "critique", "critique"
+                        )
+                        await log_error(
+                            db=db,
+                            document_id=str(doc_uuid),
+                            paragraph_id=para_id,
+                            error_type=error_type,
+                            severity=severity,
+                            error_message=str(critique_err),
+                            error_details={"stage": "critique"},
+                            stage=stage
+                        )
+                        await _send_status("Critique failed (exception).")
+                        # Continue with extraction result even if critique fails
+                    
+                    # Stage 3: Retry if needed (up to 2 retries)
+                    retry_count = 0
+                    max_retries = 2
+                    while retry_count < max_retries and critique_result and not critique_result.get("pass", False):
+                        retry_count += 1
+                        logger.info(f"[{document_id}] [{para_id}] Retry attempt {retry_count}/{max_retries}")
+                        try:
+                            feedback = critique_result.get("feedback", "")
+                            retry_start = _utc_now_naive()
+                            retry_extraction = stream_extract_facts(paragraph_text, critique_feedback=feedback, section_path=section_path)
+                            retry_output = ""
+                            async for chunk in retry_extraction:
+                                retry_output += chunk
+                            
+                            retry_duration = (_utc_now_naive() - retry_start).total_seconds()
+                            retry_result = parse_json_response(retry_output)
+                            if retry_result:
+                                extraction_result = retry_result
+                                n_facts_retry = len(extraction_result.get("facts", []))
+                                logger.info(f"[{document_id}] [{para_id}] Retry {retry_count} extraction completed ({n_facts_retry} facts, {retry_duration:.2f}s)")
+                                
+                                critique_start = _utc_now_naive()
+                                critique_result = await critique_extraction(paragraph_text, extraction_result)
+                                critique_duration = (_utc_now_naive() - critique_start).total_seconds()
+                                
+                                if critique_result and critique_result.get("pass"):
+                                    logger.info(f"[{document_id}] [{para_id}] Retry {retry_count} critique PASSED (score: {critique_result.get('score', 0):.3f})")
+                                else:
+                                    logger.info(f"[{document_id}] [{para_id}] Retry {retry_count} critique still FAILED (score: {critique_result.get('score', 0) if critique_result else 0:.3f})")
+                        except Exception as retry_err:
+                            error_type, severity, stage = _classify_and_log_error(
+                                db, doc_uuid, para_id, retry_err, "retry", "extraction"
+                            )
+                            await log_error(
+                                db=db,
+                                document_id=str(doc_uuid),
+                                paragraph_id=para_id,
+                                error_type=error_type,
+                                severity=severity,
+                                error_message=str(retry_err),
+                                error_details={"stage": "retry", "retry_count": retry_count},
+                                stage=stage
+                            )
+                            break
+                    
+                    # Stage 4: Persist facts
+                    facts = extraction_result.get("facts", [])
+                    if facts:
+                        try:
+                            logger.debug(f"[{document_id}] [{para_id}] Persisting {len(facts)} facts to database")
+                            from app.models import HierarchicalChunk, ExtractedFact, category_scores_dict_to_columns
+                            
+                            # Get or create hierarchical chunk
+                            chunk_query = await db.execute(
+                                select(HierarchicalChunk).where(
+                                    HierarchicalChunk.document_id == doc_uuid,
+                                    HierarchicalChunk.page_number == current_page_number,
+                                    HierarchicalChunk.paragraph_index == para_idx
+                                )
+                            )
+                            chunk = chunk_query.scalar_one_or_none()
+                            
+                            if not chunk:
+                                para_start = para_data.get("start_offset") if isinstance(para_data, dict) else None
+                                chunk = HierarchicalChunk(
+                                    document_id=str(doc_uuid),
+                                    page_number=current_page_number,
+                                    paragraph_index=para_idx,
+                                    section_path=section_path,
+                                    text=paragraph_text,
+                                    text_length=len(paragraph_text),
+                                    start_offset_in_page=para_start,
+                                    summary=extraction_result.get("summary"),
+                                    extraction_status="extracted"
+                                )
+                                db.add(chunk)
+                                await db.flush()
+                                logger.debug(f"[{document_id}] [{para_id}] Created new HierarchicalChunk {chunk.id}")
+                            else:
+                                if getattr(chunk, "start_offset_in_page", None) is None:
+                                    para_start = para_data.get("start_offset") if isinstance(para_data, dict) else None
+                                    if para_start is not None:
+                                        chunk.start_offset_in_page = para_start
+                                        await db.flush()
+                                logger.debug(f"[{document_id}] [{para_id}] Using existing HierarchicalChunk {chunk.id}")
+                            
+                            # Delete existing facts for this chunk
+                            from sqlalchemy import delete
+                            delete_result = await db.execute(
+                                delete(ExtractedFact).where(ExtractedFact.hierarchical_chunk_id == chunk.id)
+                            )
+                            deleted_count = delete_result.rowcount if hasattr(delete_result, 'rowcount') else 0
+                            if deleted_count > 0:
+                                logger.debug(f"[{document_id}] [{para_id}] Deleted {deleted_count} existing facts")
+                            
+                            # Insert new facts (sanitize strings; category scores -> individual columns)
+                            # LLM source highlighting: source_start/source_end in paragraph -> page markdown offsets; verify/correct so highlight matches fact_text
+                            for fact_idx, fact_data in enumerate(facts):
+                                safe = _sanitize_fact_for_db(fact_data)
+                                cat_cols = category_scores_dict_to_columns(safe.get("category_scores") or fact_data.get("category_scores"))
+                                fact_text = (safe.get("fact_text") or "").strip()
+                                fact_page_number = None
+                                fact_start_offset = None
+                                fact_end_offset = None
+                                chunk_start = getattr(chunk, "start_offset_in_page", None)
+                                src_start = fact_data.get("source_start")
+                                src_end = fact_data.get("source_end")
+                                if (
+                                    chunk_start is not None
+                                    and src_start is not None
+                                    and src_end is not None
+                                    and isinstance(paragraph_text, str)
+                                ):
+                                    try:
+                                        so = int(src_start)
+                                        eo = int(src_end)
+                                        if 0 <= so < eo <= len(paragraph_text):
+                                            fact_page_number = current_page_number
+                                            fact_start_offset = chunk_start + so
+                                            fact_end_offset = chunk_start + eo
+                                    except (TypeError, ValueError):
+                                        pass
+                                # Ensure stored offsets span fact_text in page markdown (fixes wrong LLM source_start/source_end)
+                                if fact_text:
+                                    fact_start_offset, fact_end_offset = _find_fact_span_in_markdown(
+                                        page_md, fact_text, fact_start_offset, fact_end_offset
+                                    )
+                                    if fact_start_offset is not None and fact_end_offset is not None and fact_page_number is None:
+                                        fact_page_number = current_page_number
+                                fact = ExtractedFact(
+                                    hierarchical_chunk_id=chunk.id,
+                                    document_id=str(doc_uuid),
+                                    fact_text=safe.get("fact_text", "") or "",
+                                    fact_type=safe.get("fact_type"),
+                                    who_eligible=safe.get("who_eligible"),
+                                    how_verified=safe.get("how_verified"),
+                                    conflict_resolution=safe.get("conflict_resolution"),
+                                    when_applies=safe.get("when_applies"),
+                                    limitations=safe.get("limitations"),
+                                    is_verified=safe.get("is_verified"),
+                                    is_eligibility_related=safe.get("is_eligibility_related"),
+                                    is_pertinent_to_claims_or_members=safe.get("is_pertinent_to_claims_or_members"),
+                                    confidence=safe.get("confidence"),
+                                    page_number=fact_page_number,
+                                    start_offset=fact_start_offset,
+                                    end_offset=fact_end_offset,
+                                    **cat_cols
+                                )
+                                db.add(fact)
+                            
+                            await db.commit()
+                            logger.info(f"[{document_id}] [{para_id}] Successfully persisted {len(facts)} facts to database")
+                            
+                            results_paragraphs[para_id] = {
+                                "paragraph_id": para_id,
+                                "summary": extraction_result.get("summary"),
+                                "facts": facts,
+                                "status": "passed" if (critique_result and critique_result.get("pass")) else "review",
+                                "critique": critique_result
+                            }
+                        except Exception as persist_err:
+                            await db.rollback()
+                            error_type, severity, stage = _classify_and_log_error(
+                                db, doc_uuid, para_id, persist_err, "persistence", "persistence"
+                            )
+                            await log_error(
+                                db=db,
+                                document_id=str(doc_uuid),
+                                paragraph_id=para_id,
+                                error_type=error_type,
+                                severity=severity,
+                                error_message=str(persist_err),
+                                error_details={"stage": "persistence"},
+                                stage=stage
+                            )
+                            results_paragraphs[para_id] = {
+                                "paragraph_id": para_id,
+                                "status": "failed",
+                                "error": str(persist_err)
+                            }
+                    else:
+                        results_paragraphs[para_id] = {
+                            "paragraph_id": para_id,
+                            "status": "no_facts",
+                            "summary": extraction_result.get("summary")
+                        }
+                    
+                    await _send_status(f"Paragraph {para_id} complete.")
+                    completed_after = len(results_paragraphs)
+                    progress_pct_after = (completed_after / total_paragraphs * 100) if total_paragraphs > 0 else 0
+                    logger.info(f"[{document_id}] [{para_id}] Paragraph complete. Progress: {completed_after}/{total_paragraphs} ({progress_pct_after:.1f}%)")
+                    
+                    # One progress update per paragraph (key progress only)
+                    if event_callback:
+                        try:
+                            async for _ in event_callback("progress_update", {
+                                "current_paragraph": para_id,
+                                "current_page": current_page_number,
+                                "total_pages": total_pages,
+                                "total_paragraphs": total_paragraphs,
+                                "completed_paragraphs": completed_after,
+                                "progress_percent": progress_pct_after
+                            }):
+                                pass
+                        except Exception as progress_err:
+                            logger.error(f"[{document_id}] Error sending progress_update event: {progress_err}", exc_info=True)
+                    
+                    # Update progress
+                    await _upsert("in_progress")
+                    
+                except Exception as para_err:
+                    logger.error(f"[{para_id}] Error processing paragraph: {para_err}", exc_info=True)
+                    error_type, severity, stage = _classify_and_log_error(
+                        db, doc_uuid, para_id, para_err, "other", "other"
+                    )
+                    await log_error(
+                        db=db,
+                        document_id=str(doc_uuid),
+                        paragraph_id=para_id,
+                        error_type=error_type,
+                        severity=severity,
+                        error_message=str(para_err),
+                        error_details={"stage": "paragraph_processing"},
+                        stage=stage
+                    )
+                    results_paragraphs[para_id] = {
+                        "paragraph_id": para_id,
+                        "status": "failed",
+                        "error": str(para_err)
+                    }
+                    
+                    await _send_status(f"Paragraph {para_id} failed: {str(para_err)[:80]}.")
+                    
+                    # Progress update on error too (so UI shows count)
+                    if event_callback:
+                        try:
+                            completed_after = len(results_paragraphs)
+                            progress_pct_after = (completed_after / total_paragraphs * 100) if total_paragraphs > 0 else 0
+                            async for _ in event_callback("progress_update", {
+                                "current_paragraph": para_id,
+                                "current_page": current_page_number,
+                                "total_pages": total_pages,
+                                "total_paragraphs": total_paragraphs,
+                                "completed_paragraphs": completed_after,
+                                "progress_percent": progress_pct_after,
+                                "error": str(para_err),
+                            }):
+                                pass
+                        except Exception as progress_err:
+                            logger.error(f"Error sending progress_update event: {progress_err}", exc_info=True)
+                    
+                    await _upsert("in_progress")
+        
+        # Send chunking_complete event
+        n_done = len(results_paragraphs)
+        logger.info(f"[{document_id}] Chunking loop complete: {n_done}/{total_paragraphs} paragraphs processed")
+        
+        if event_callback:
+            try:
+                async for _ in event_callback("status_message", {
+                    "message": f"Chunking complete. {n_done} of {total_paragraphs} paragraphs processed."
+                }):
+                    pass
+                async for _ in event_callback("chunking_complete", {
+                    "total_paragraphs": total_paragraphs,
+                    "completed_paragraphs": n_done
+                }):
+                    pass
+            except Exception as complete_err:
+                logger.error(f"[{document_id}] Error sending chunking_complete event: {complete_err}", exc_info=True)
+        
+        # Final upsert
+        await _upsert("completed")
+        logger.info(f"[{document_id}] Final state saved to database with status 'completed'")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error in chunking loop: {e}", exc_info=True)
+        await _upsert("failed")
+        return False
+
+
+async def process_job(job: ChunkingJob, db: AsyncSession):
+    """Process a single chunking job."""
+    job_start_time = _utc_now_naive()
+    try:
+        logger.info(f"[JOB {job.id}] Starting processing for document {job.document_id} (threshold: {job.threshold})")
+        
+        # Update job status
+        job.status = "processing"
+        job.worker_id = WORKER_ID
+        job.started_at = job_start_time
+        await db.commit()
+        logger.info(f"[JOB {job.id}] Job status updated to 'processing', assigned to worker {WORKER_ID}")
+        
+        # Get document
+        doc_uuid = UUID(str(job.document_id))
+        doc_result = await db.execute(select(Document).where(Document.id == doc_uuid))
+        document = doc_result.scalar_one_or_none()
+        
+        if not document:
+            raise ValueError(f"Document {job.document_id} not found")
+        
+        logger.info(f"[JOB {job.id}] Document found: {document.filename} (status: {document.status})")
+        
+        # Get pages
+        pages_result = await db.execute(
+            select(DocumentPage).where(DocumentPage.document_id == doc_uuid)
+            .order_by(DocumentPage.page_number)
+        )
+        pages = pages_result.scalars().all()
+        
+        if not pages:
+            raise ValueError(f"No pages found for document {job.document_id}")
+        
+        logger.info(f"[JOB {job.id}] Found {len(pages)} pages for document")
+        
+        # Parse threshold
+        threshold = float(job.threshold)
+        logger.info(f"[JOB {job.id}] Using critique threshold: {threshold}")
+        
+        # Create event callback (pass db session so it can write events)
+        event_callback = await _create_event_buffer_callback(str(job.document_id), db)
+        
+        # Run chunking loop
+        logger.info(f"[JOB {job.id}] Starting chunking loop...")
+        success = await _run_chunking_loop(
+            str(job.document_id),
+            doc_uuid,
+            pages,
+            threshold,
+            db,
+            event_callback=event_callback
+        )
+        
+        # Commit any remaining events
+        await db.commit()
+        
+        # Update job status
+        job_duration = (_utc_now_naive() - job_start_time).total_seconds()
+        if success:
+            job.status = "completed"
+            job.completed_at = _utc_now_naive()
+            logger.info(f"[JOB {job.id}] Job completed successfully in {job_duration:.2f}s")
+        else:
+            job.status = "failed"
+            job.error_message = "Chunking loop returned False"
+            logger.warning(f"[JOB {job.id}] Job failed after {job_duration:.2f}s: chunking loop returned False")
+        
+        await db.commit()
+        logger.info(f"[JOB {job.id}] Final status: {job.status}")
+        
+    except Exception as e:
+        job_duration = (_utc_now_naive() - job_start_time).total_seconds()
+        logger.error(f"[JOB {job.id}] Error processing job after {job_duration:.2f}s: {e}", exc_info=True)
+        await db.rollback()
+        job.status = "failed"
+        job.error_message = str(e)
+        job.completed_at = _utc_now_naive()
+        await db.commit()
+        logger.error(f"[JOB {job.id}] Job marked as failed with error: {str(e)[:200]}")
+
+
+async def worker_loop():
+    """Main worker loop - polls for pending jobs and processes them."""
+    logger.info(f"Worker {WORKER_ID} starting...")
+    # Ensure extracted_facts has category columns (same DB the worker uses)
+    try:
+        from app.migrations.category_scores_to_columns import migrate as migrate_category_columns
+        await migrate_category_columns()
+    except Exception as migrate_err:
+        logger.warning(f"Startup migration (category_scores_to_columns) skipped or failed: {migrate_err}")
+    poll_count = 0
+
+    while True:
+        try:
+            async with AsyncSessionLocal() as db:
+                # Find pending job
+                result = await db.execute(
+                    select(ChunkingJob)
+                    .where(ChunkingJob.status == "pending")
+                    .order_by(ChunkingJob.created_at)
+                    .limit(1)
+                )
+                job = result.scalar_one_or_none()
+                
+                if job:
+                    logger.info(f"Found pending job {job.id} for document {job.document_id}, processing...")
+                    await process_job(job, db)
+                    poll_count = 0  # Reset poll count after processing a job
+                else:
+                    poll_count += 1
+                    if poll_count % 10 == 0:  # Log every 10th poll (every ~20 seconds)
+                        logger.debug(f"No pending jobs, polling... (poll #{poll_count})")
+                    # No jobs, wait a bit
+                    await asyncio.sleep(2)
+        
+        except Exception as e:
+            logger.error(f"Error in worker loop: {e}", exc_info=True)
+            await asyncio.sleep(5)  # Wait longer on error
+
+
+def main():
+    """Entry point for worker process."""
+    try:
+        asyncio.run(worker_loop())
+    except KeyboardInterrupt:
+        logger.info("Worker shutting down...")
+    except Exception as e:
+        logger.error(f"Fatal error in worker: {e}", exc_info=True)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

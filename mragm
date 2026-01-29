@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Run migrations (create DB if missing, then init tables). Run from any directory.
+
+SCRIPT="$0"
+while [ -L "$SCRIPT" ]; do
+  TARGET="$(readlink "$SCRIPT")"
+  if [[ "$TARGET" == /* ]]; then
+    SCRIPT="$TARGET"
+  else
+    SCRIPT="$(dirname "$SCRIPT")/$TARGET"
+  fi
+done
+ROOT="$(cd "$(dirname "$SCRIPT")" && pwd)"
+cd "$ROOT" || exit 1
+source .venv/bin/activate
+
+echo "Mobius RAG migrations"
+echo "1. Create database (if missing)..."
+python create_db.py || true
+echo "2. Init tables..."
+python -m app.init_db || exit 1
+echo "Done."

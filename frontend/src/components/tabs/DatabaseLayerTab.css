@@ -1,0 +1,513 @@
+.database-layer-tab {
+  width: 100%;
+  height: 100%;
+}
+
+.db-admin-container {
+  display: grid;
+  grid-template-columns: 250px 1fr;
+  gap: 1.5rem;
+  height: 100%;
+}
+
+.db-admin-sidebar {
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  padding: 1rem;
+  overflow-y: auto;
+  max-height: calc(100vh - 200px);
+  box-shadow: 0 1px 2px var(--shadow-sm);
+}
+
+.db-sidebar-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.75rem;
+}
+
+.db-sidebar-header h4 {
+  margin: 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.db-admin-sidebar h4 {
+  margin: 0 0 0.75rem 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.db-table-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.db-table-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.625rem 0.75rem;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.875rem;
+  text-align: left;
+  transition: all 0.15s ease;
+  color: var(--text-primary);
+}
+
+.db-table-item:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-medium);
+}
+
+.db-table-item.active {
+  background: #f0f7ff;
+  border-color: var(--accent-blue);
+  font-weight: 500;
+}
+
+.db-table-count {
+  font-size: 0.75rem;
+  color: var(--text-tertiary);
+  background: var(--bg-hover);
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+}
+
+.db-admin-main {
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  padding: 1.5rem;
+  overflow-y: auto;
+  box-shadow: 0 1px 2px var(--shadow-sm);
+}
+
+.db-table-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.db-table-header h3 {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.db-table-actions {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.db-schema-info {
+  margin-bottom: 1.5rem;
+  padding: 1rem;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  font-size: 0.875rem;
+  border: 1px solid var(--border-light);
+}
+
+.db-schema-info strong {
+  display: block;
+  margin-bottom: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.db-schema-info ul {
+  margin: 0.5rem 0;
+  padding-left: 1.5rem;
+  list-style: disc;
+}
+
+.db-schema-info code {
+  background: var(--bg-card);
+  padding: 0.15rem 0.35rem;
+  border-radius: 4px;
+  font-family: ui-monospace, monospace;
+  font-size: 0.8125rem;
+  color: var(--text-primary);
+}
+
+.error-message {
+  padding: 0.75rem;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  color: var(--accent-red);
+  font-size: 0.875rem;
+  margin-bottom: 1rem;
+}
+
+.db-records-table-wrap {
+  max-height: 500px;
+  overflow: auto;
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  margin-bottom: 1rem;
+}
+
+.db-records-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.db-records-table th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-secondary);
+  padding: 0.75rem;
+  text-align: left;
+  font-weight: 600;
+  border-bottom: 2px solid var(--border-light);
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.db-records-table td {
+  padding: 0.75rem;
+  border-bottom: 1px solid var(--border-light);
+  color: var(--text-primary);
+}
+
+.db-records-table tbody tr:hover {
+  background: var(--bg-hover);
+}
+
+.col-actions {
+  position: sticky;
+  right: 0;
+  background: var(--bg-card);
+  z-index: 1;
+  min-width: 200px;
+}
+
+.db-records-table tbody tr:hover .col-actions {
+  background: var(--bg-hover);
+}
+
+.action-buttons {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.btn-sm {
+  padding: 0.375rem 0.75rem;
+  font-size: 0.8125rem;
+}
+
+.db-pagination {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem 0;
+}
+
+.db-pagination span {
+  font-size: 0.9375rem;
+  color: var(--text-secondary);
+}
+
+.no-table-selected,
+.empty-state {
+  text-align: center;
+  padding: 3rem 1rem;
+  color: var(--text-tertiary);
+}
+
+/* Record Editor */
+.db-record-editor {
+  padding: 1.5rem;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  border: 1px solid var(--border-light);
+}
+
+.db-record-editor h4 {
+  margin: 0 0 1.5rem 0;
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.form-field {
+  margin-bottom: 1rem;
+}
+
+.form-field label {
+  display: block;
+  margin-bottom: 0.5rem;
+  font-weight: 500;
+  font-size: 0.9375rem;
+  color: var(--text-secondary);
+}
+
+.required {
+  color: var(--accent-red);
+}
+
+.foreign-key {
+  color: var(--text-tertiary);
+  font-size: 0.8125rem;
+}
+
+.form-input,
+.form-textarea {
+  width: 100%;
+  padding: 0.625rem;
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  font-size: 0.9375rem;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  transition: all 0.2s ease;
+  font-family: inherit;
+}
+
+.form-input:focus,
+.form-textarea:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.form-input.disabled {
+  background: var(--bg-hover);
+  cursor: not-allowed;
+}
+
+.form-textarea {
+  min-height: 100px;
+  font-family: ui-monospace, monospace;
+  font-size: 0.875rem;
+}
+
+.form-actions {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+}
+
+/* Record Viewer */
+.record-viewer {
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.record-viewer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1.25rem 1.5rem;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-light);
+}
+
+.record-viewer-header h3 {
+  margin: 0;
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.close-btn {
+  background: transparent;
+  border: none;
+  font-size: 1.5rem;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  transition: all 0.2s ease;
+}
+
+.close-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.record-viewer-content {
+  padding: 1.5rem;
+}
+
+.record-breadcrumb {
+  font-size: 0.875rem;
+  color: var(--text-tertiary);
+  margin-bottom: 1.5rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.record-fields {
+  display: grid;
+  grid-template-columns: 1fr 2fr;
+  gap: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.record-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.field-label-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.field-label {
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.field-actions {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.btn-icon {
+  background: transparent;
+  border: 1px solid var(--border-light);
+  border-radius: 4px;
+  padding: 0.25rem 0.5rem;
+  cursor: pointer;
+  font-size: 0.875rem;
+  transition: all 0.2s ease;
+}
+
+.btn-icon:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-medium);
+}
+
+.field-value {
+  min-height: 2rem;
+}
+
+.field-value-text {
+  color: var(--text-primary);
+  word-wrap: break-word;
+  white-space: pre-wrap;
+  padding: 0.75rem;
+  background: var(--bg-secondary);
+  border-radius: 6px;
+  border: 1px solid var(--border-light);
+}
+
+.jsonb-field {
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.jsonb-content {
+  margin: 0;
+  padding: 0.75rem;
+  background: #1f2937;
+  color: #10b981;
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.jsonb-collapsed {
+  padding: 0.75rem;
+  background: var(--bg-secondary);
+  color: var(--text-tertiary);
+  cursor: pointer;
+  font-size: 0.875rem;
+  font-style: italic;
+}
+
+.record-viewer-actions {
+  display: flex;
+  gap: 0.75rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--border-light);
+}
+
+/* SQL Executor */
+.db-sql-executor {
+  margin-top: 2rem;
+  padding-top: 2rem;
+  border-top: 1px solid var(--border-light);
+}
+
+.db-sql-executor h4 {
+  margin: 0 0 1rem 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.sql-textarea {
+  width: 100%;
+  min-height: 120px;
+  padding: 0.75rem;
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+  font-size: 0.875rem;
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  margin-bottom: 0.75rem;
+  resize: vertical;
+}
+
+.sql-textarea:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.db-sql-results {
+  margin-top: 1rem;
+}
+
+.db-sql-results p {
+  margin: 0 0 0.75rem 0;
+  color: var(--text-secondary);
+}
+
+@media (max-width: 1024px) {
+  .db-admin-container {
+    grid-template-columns: 1fr;
+  }
+  
+  .db-admin-sidebar {
+    max-height: 200px;
+  }
+  
+  .record-fields {
+    grid-template-columns: 1fr;
+  }
+}

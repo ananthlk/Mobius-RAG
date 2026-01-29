@@ -1,0 +1,35 @@
+[project]
+name = "mobius-rag"
+version = "0.1.0"
+description = "Eligibility RAG system"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "python-multipart",
+    "google-cloud-storage",
+    "sqlalchemy",
+    "asyncpg",
+    "python-dotenv",
+    "pymupdf",
+    "greenlet",
+    "aiohttp",
+    "json-repair",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "httpx>=0.24",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["."]

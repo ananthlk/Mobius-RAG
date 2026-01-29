@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Start Mobius RAG frontend. Run from any directory.
+
+SCRIPT="$0"
+while [ -L "$SCRIPT" ]; do
+  TARGET="$(readlink "$SCRIPT")"
+  if [[ "$TARGET" == /* ]]; then
+    SCRIPT="$TARGET"
+  else
+    SCRIPT="$(dirname "$SCRIPT")/$TARGET"
+  fi
+done
+ROOT="$(cd "$(dirname "$SCRIPT")" && pwd)"
+cd "$ROOT/frontend" || exit 1
+echo "Mobius RAG frontend → http://localhost:5173"
+echo "Press Ctrl+C to stop"
+echo ""
+exec npm run dev

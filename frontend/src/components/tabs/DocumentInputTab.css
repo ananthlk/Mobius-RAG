@@ -1,0 +1,126 @@
+.document-input-tab {
+  width: 100%;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.input-methods {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 1.5rem;
+  margin-top: 1rem;
+}
+
+.input-method-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  padding: 1.5rem;
+  transition: all 0.2s ease;
+  box-shadow: 0 1px 2px var(--shadow-sm);
+}
+
+.input-method-card:hover {
+  box-shadow: 0 2px 4px var(--shadow-md);
+}
+
+.input-method-card.disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.method-title {
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 0.5rem 0;
+}
+
+.method-description {
+  font-size: 0.875rem;
+  color: var(--text-tertiary);
+  margin: 0 0 1.5rem 0;
+}
+
+.upload-area {
+  border: 2px dashed var(--border-medium);
+  border-radius: 10px;
+  padding: 2rem;
+  background: var(--bg-secondary);
+  text-align: center;
+  transition: all 0.2s ease;
+}
+
+.upload-area.drag-active {
+  border-color: var(--accent-blue);
+  background: #f0f7ff;
+}
+
+#file-input {
+  display: none;
+}
+
+.file-label {
+  display: inline-block;
+  padding: 0.625rem 1.25rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.9375rem;
+  margin-bottom: 1rem;
+  transition: all 0.2s ease;
+  color: var(--text-secondary);
+}
+
+.file-label:hover {
+  border-color: var(--accent-blue);
+  background: var(--bg-hover);
+}
+
+.file-info {
+  margin-bottom: 1rem;
+}
+
+.file-size {
+  font-size: 0.875rem;
+  color: var(--text-tertiary);
+}
+
+.upload-button {
+  width: 100%;
+  padding: 0.75rem 1rem;
+  margin-top: 0.5rem;
+}
+
+.coming-soon-badge {
+  display: inline-block;
+  padding: 0.5rem 1rem;
+  background: var(--bg-hover);
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  color: var(--text-tertiary);
+  font-size: 0.875rem;
+  font-weight: 500;
+  margin-top: 1rem;
+}
+
+.error-message {
+  margin-top: 1rem;
+  padding: 0.75rem;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  color: var(--accent-red);
+  font-size: 0.875rem;
+}
+
+@media (max-width: 768px) {
+  .input-methods {
+    grid-template-columns: 1fr;
+  }
+  
+  .input-method-card {
+    padding: 1.25rem;
+  }
+}
