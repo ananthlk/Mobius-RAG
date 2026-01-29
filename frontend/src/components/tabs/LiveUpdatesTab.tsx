@@ -78,158 +78,101 @@ export function LiveUpdatesTab({
     return <span className={statusClass}>{statusLabel}</span>
   }
 
-  /** Normalize progress to 0–100 for display; always show a number. */
-  const progressPercent = (job: ActiveJob) => {
+  const jobProgressPercent = (job: ActiveJob) => {
+    if (job.completed_paragraphs != null && job.total_paragraphs != null && job.total_paragraphs > 0) {
+      return Math.min(100, Math.round((job.completed_paragraphs / job.total_paragraphs) * 100))
+    }
     const p = typeof job.progress === 'number' && !Number.isNaN(job.progress) ? job.progress : 0
     return Math.min(100, Math.max(0, p))
   }
 
-  const selectedJob = activeJobs.find(job => job.document_id === selectedJobId)
-
   return (
     <div className="live-updates-tab">
-      <div className="live-updates-layout">
-        {/* Left Sidebar - Active Jobs List */}
-        <div className="jobs-sidebar">
-          <h3 className="sidebar-title">Jobs</h3>
-          {activeJobs.length === 0 ? (
-            <div className="empty-jobs">
-              <p>No jobs</p>
-              <p className="empty-hint">Start a chunking job from the Document Status tab. Completed and in-progress jobs appear here.</p>
-            </div>
-          ) : (
-            <div className="jobs-list">
-              {activeJobs.map((job) => (
-                <div
-                  key={job.document_id}
-                  className={`job-item ${selectedJobId === job.document_id ? 'active' : ''}`}
-                  onClick={() => onJobSelect(job.document_id)}
-                >
-                  <div className="job-header">
-                    <div className="job-name">{job.filename}</div>
-                    {getJobStatusBadge(job.status)}
-                  </div>
-                  <div className="job-progress">
-                    <div className="progress-bar">
-                      <div 
-                        className="progress-fill" 
-                        style={{ width: `${progressPercent(job)}%` }}
-                      />
-                      {job.completed_paragraphs !== undefined && job.total_paragraphs != null && (
-                        <span className="progress-text-overlay">
-                          {job.completed_paragraphs}/{job.total_paragraphs}
-                        </span>
-                      )}
-                    </div>
-                    <div className="progress-details">
-                      <span className="progress-text">{progressPercent(job)}%</span>
-                      {job.current_page != null && job.total_pages != null && (
-                        <span className="progress-page-info">
-                          Page {job.current_page}/{job.total_pages}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                  <div className="job-time">
-                    Started: {new Date(job.start_time).toLocaleTimeString()}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Right Panel - Job Details & Streaming */}
-        <div className="job-details-panel">
-          {selectedJob ? (
-            <>
-              <div className="job-metadata-card">
-                <h3 className="metadata-title">Document Information</h3>
-                <div className="metadata-grid">
-                  <div className="metadata-item">
-                    <span className="metadata-label">Filename:</span>
-                    <span className="metadata-value">{selectedJob.filename}</span>
-                  </div>
-                  <div className="metadata-item">
-                    <span className="metadata-label">Status:</span>
-                    {getJobStatusBadge(selectedJob.status)}
-                  </div>
-                  {selectedJob.current_page && selectedJob.total_pages && (
-                    <div className="metadata-item">
-                      <span className="metadata-label">Current Page:</span>
-                      <span className="metadata-value">
-                        Page {selectedJob.current_page} of {selectedJob.total_pages}
-                      </span>
-                    </div>
-                  )}
-                  {selectedJob.current_paragraph && (() => {
-                    const paraInfo = parseParagraphId(selectedJob.current_paragraph)
-                    return paraInfo && (
-                      <div className="metadata-item">
-                        <span className="metadata-label">Current Paragraph:</span>
-                        <span className="metadata-value">
-                          Paragraph {paraInfo.paragraph + 1} on page {paraInfo.page}
-                        </span>
+      <div className="live-updates-table-wrap">
+        {activeJobs.length === 0 ? (
+          <div className="empty-jobs">
+            <p>No jobs</p>
+            <p className="empty-hint">Start a chunking job from the Document Status tab. Jobs appear here with live output.</p>
+          </div>
+        ) : (
+          <table className="live-updates-table">
+            <thead>
+              <tr>
+                <th className="col-doc-name">Document</th>
+                <th className="col-started">Started</th>
+                <th className="col-status">Status</th>
+                <th className="col-output">Live output</th>
+              </tr>
+            </thead>
+            <tbody>
+              {activeJobs.map((job) => {
+                const isStreamingJob = selectedJobId === job.document_id
+                return (
+                  <tr
+                    key={job.document_id}
+                    className={`live-job-row ${isStreamingJob ? 'streaming' : ''}`}
+                    onClick={() => onJobSelect(job.document_id)}
+                  >
+                    <td className="col-doc-name">
+                      <span className="job-doc-name" title={job.filename}>{job.filename}</span>
+                    </td>
+                    <td className="col-started">
+                      {new Date(job.start_time).toLocaleString()}
+                    </td>
+                    <td className="col-status">
+                      <div className="status-cell">
+                        <div className="status-cell-top">
+                          {getJobStatusBadge(job.status)}
+                          {job.completed_paragraphs != null && job.total_paragraphs != null && job.total_paragraphs > 0 && (
+                            <span className="job-progress-hint">
+                              {job.completed_paragraphs}/{job.total_paragraphs} done
+                              {job.current_paragraph && (() => {
+                                const p = parseParagraphId(job.current_paragraph)
+                                return p ? (
+                                  <span className="job-current-para" title="Paragraph ID = page_paragraphIndex (e.g. 24_0 = page 24, 1st paragraph). We have completed 12 so far; this is the one we're working on now.">
+                                    {' · '}now page {p.page}
+                                  </span>
+                                ) : null
+                              })()}
+                            </span>
+                          )}
+                        </div>
+                        <div className="status-progress-bar">
+                          <div
+                            className="status-progress-fill"
+                            style={{ width: `${jobProgressPercent(job)}%` }}
+                          />
+                        </div>
                       </div>
-                    )
-                  })()}
-                  <div className="metadata-item">
-                    <span className="metadata-label">Progress:</span>
-                    <span className="metadata-value">
-                      {selectedJob.completed_paragraphs !== undefined && selectedJob.total_paragraphs != null
-                        ? `${selectedJob.completed_paragraphs} of ${selectedJob.total_paragraphs} paragraphs (${progressPercent(selectedJob)}%)`
-                        : `${progressPercent(selectedJob)}%`}
-                    </span>
-                  </div>
-                  {selectedJob.processing_stage && selectedJob.processing_stage !== 'idle' && (
-                    <div className="metadata-item">
-                      <span className="metadata-label">Stage:</span>
-                      <span className={`stage-badge stage-${selectedJob.processing_stage}`}>
-                        {selectedJob.processing_stage.charAt(0).toUpperCase() + selectedJob.processing_stage.slice(1)}
-                      </span>
-                    </div>
-                  )}
-                  <div className="metadata-item">
-                    <span className="metadata-label">Started:</span>
-                    <span className="metadata-value">
-                      {new Date(selectedJob.start_time).toLocaleString()}
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="streaming-container">
-                <div className="streaming-header">
-                  <h3 className="streaming-title">Live Output</h3>
-                  <div className="streaming-indicator">
-                    <span className="streaming-dot"></span>
-                    Streaming...
-                  </div>
-                </div>
-                <div className="streaming-output" ref={streamRef}>
-                  {streamingOutput ? (
-                    <pre className="streaming-pre">
-                      {isTruncated && (
-                        <span className="output-truncated">
-                          {'... (showing last 2500 characters, older content hidden) ...\n\n'}
-                        </span>
+                    </td>
+                    <td className="col-output">
+                      {isStreamingJob ? (
+                        <div className="streaming-cell">
+                          <div className="streaming-output" ref={streamRef}>
+                            {streamingOutput ? (
+                              <pre className="streaming-pre">
+                                {isTruncated && (
+                                  <span className="output-truncated">
+                                    {'... (last 2500 chars) ...\n\n'}
+                                  </span>
+                                )}
+                                {limitedOutput}
+                              </pre>
+                            ) : (
+                              <span className="streaming-empty">Waiting for output...</span>
+                            )}
+                          </div>
+                        </div>
+                      ) : (
+                        <span className="output-placeholder">—</span>
                       )}
-                      {limitedOutput}
-                    </pre>
-                  ) : (
-                    <div className="streaming-empty">
-                      Waiting for output...
-                    </div>
-                  )}
-                </div>
-              </div>
-            </>
-          ) : (
-            <div className="no-job-selected">
-              <p>Select a job from the left to view live updates</p>
-            </div>
-          )}
-        </div>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        )}
       </div>
     </div>
   )

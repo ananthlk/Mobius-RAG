@@ -342,7 +342,7 @@ function App() {
     
     // Create result-like object for View Documents section
     setResult({
-      filename: documentData.filename,
+      filename: documentData.display_name?.trim() || documentData.filename,
       content_type: 'application/pdf', // Default, could be fetched if needed
       size: 0, // Could be fetched if needed
       gcs_path: documentData.gcs_path || '',
@@ -1161,7 +1161,7 @@ function App() {
           
           return {
             document_id: doc.id,
-            filename: doc.filename,
+            filename: doc.display_name?.trim() || doc.filename,
             status: doc.chunking_status || 'idle',
             progress,
             start_time: doc.created_at,

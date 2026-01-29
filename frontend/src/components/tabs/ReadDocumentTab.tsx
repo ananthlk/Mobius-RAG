@@ -90,6 +90,7 @@ function SimpleMarkdown({ content }: { content: string }) {
 interface Document {
   id: string
   filename: string
+  display_name?: string | null
 }
 
 interface ReadDocumentTabProps {
@@ -157,7 +158,8 @@ function SegmentWithHighlights({
       nodes.push(<span key={`${pos}-pre`}>{segmentText.slice(pos, relStart)}</span>)
     }
     const approved = r.verificationStatus === 'approved'
-    const baseClass = r.source === 'user' ? 'reader-fact-highlight' : 'reader-llm-fact-highlight'
+    let baseClass = r.source === 'user' ? 'reader-fact-highlight' : 'reader-llm-fact-highlight'
+    if (r.source === 'llm' && r.isPertinent === false) baseClass += ' reader-llm-fact-highlight-non-pertinent'
     const className = approved ? `${baseClass} reader-fact-highlight-approved` : baseClass
     const tooltip = buildTooltip(r)
     nodes.push(
@@ -177,6 +179,27 @@ function SegmentWithHighlights({
     nodes.push(<span key={`${pos}-post`}>{segmentText.slice(pos)}</span>)
   }
   return <>{nodes}</>
+}
+
+/** Get the first section header label from page text (for sidebar/main title). Returns null if no header found. */
+function getFirstSectionHeader(text: string | null | undefined): string | null {
+  if (!text?.trim()) return null
+  const normalized = text
+    .split('\n')
+    .map(line => line.replace(/\s+/g, ' ').trim())
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+  const blocks = normalized.split(/\n\n+/)
+  for (const block of blocks) {
+    const firstLine = block.split('\n')[0]?.trim() ?? ''
+    if (isSectionHeader(firstLine)) {
+      if (firstLine.startsWith('## ')) return firstLine.slice(3).trim()
+      if (firstLine.endsWith(':')) return firstLine.slice(0, -1).trim()
+      return firstLine
+    }
+  }
+  return null
 }
 
 /** Detect section header: colon/numbered (backend-style) or short title-like line (e.g. "Contact information", "Provider services"). */
@@ -421,6 +444,8 @@ export function ReadDocumentTab({ documents, selectedDocumentId: selectedDocumen
   const [modalSubmitting, setModalSubmitting] = useState(false)
   const [modalError, setModalError] = useState<string | null>(null)
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
+  const [sectionsSidebarOpen, setSectionsSidebarOpen] = useState(true)
+  const [toolbarExpanded, setToolbarExpanded] = useState(true)
 
   const fetchPages = useCallback(async (documentId: string) => {
     setLoading(true)
@@ -483,7 +508,8 @@ export function ReadDocumentTab({ documents, selectedDocumentId: selectedDocumen
           if (isUserChunk) {
             if (!userByPage[pn]) userByPage[pn] = []
             userByPage[pn].push(range)
-          } else if (isPertinent) {
+          } else {
+            /* LLM facts: show both pertinent (blue) and non-pertinent (grey) */
             if (!llmByPage[pn]) llmByPage[pn] = []
             llmByPage[pn].push(range)
           }
@@ -590,6 +616,25 @@ export function ReadDocumentTab({ documents, selectedDocumentId: selectedDocumen
   const zoomIn = () => setPageZoom(prev => Math.min(prev + 0.25, 3.0))
   const zoomOut = () => setPageZoom(prev => Math.max(prev - 0.25, 0.5))
   const resetZoom = () => setPageZoom(1.0)
+
+  // Keyboard zoom: Ctrl/Cmd + Plus/Minus/0 (reading focus)
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return
+      if (e.key === '=' || e.key === '+') {
+        e.preventDefault()
+        setPageZoom(prev => Math.min(prev + 0.25, 3.0))
+      } else if (e.key === '-') {
+        e.preventDefault()
+        setPageZoom(prev => Math.max(prev - 0.25, 0.5))
+      } else if (e.key === '0') {
+        e.preventDefault()
+        setPageZoom(1.0)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
 
   const normalizeText = (text: string | null | undefined): string => {
     if (!text) return 'No text available'
@@ -932,83 +977,145 @@ export function ReadDocumentTab({ documents, selectedDocumentId: selectedDocumen
   const llmHighlightsForPage = selectedPage != null ? llmHighlightedRangesByPage[selectedPage] || [] : []
   const hasHighlights = userHighlightsForPage.length > 0 || llmHighlightsForPage.length > 0
   const showRawWithHighlights = hasHighlights && currentPage
+  const selectedDoc = documents.find(d => d.id === selectedDocumentId)
+  const documentDisplayName = selectedDoc?.display_name?.trim() || selectedDoc?.filename || 'Document'
+  const showReadingView = !!selectedDocumentId
 
   return (
     <div className="read-document-tab">
-      {/* Document Selector */}
-      <div className="document-selector">
-        <label htmlFor="document-select" className="selector-label">
-          Select Document:
-        </label>
-        <select
-          id="document-select"
-          value={selectedDocumentId || ''}
-          onChange={(e) => handleDocumentChange(e.target.value)}
-          className="document-select"
-        >
-          <option value="">-- Choose a document --</option>
-          {documents.map((doc) => (
-            <option key={doc.id} value={doc.id}>
-              {doc.filename}
-            </option>
-          ))}
-        </select>
-      </div>
+      {/* Top bar: collapsible when a document is selected (reading view) */}
+      {showReadingView && !toolbarExpanded ? (
+        <div className="read-tab-topbar read-tab-topbar-minimal">
+          <span className="read-tab-doc-name" title={documentDisplayName}>{documentDisplayName}</span>
+          <button
+            type="button"
+            className="btn-read-toolbar-expand"
+            onClick={() => setToolbarExpanded(true)}
+            title="Show document & zoom controls"
+            aria-label="Show controls"
+          >
+            ▾ Show controls
+          </button>
+        </div>
+      ) : (
+        <div className="read-tab-topbar">
+          <div className="document-selector">
+            <label htmlFor="document-select" className="selector-label">
+              Select Document:
+            </label>
+            <select
+              id="document-select"
+              value={selectedDocumentId || ''}
+              onChange={(e) => handleDocumentChange(e.target.value)}
+              className="document-select"
+            >
+              <option value="">-- Choose a document --</option>
+              {documents.map((doc) => (
+                <option key={doc.id} value={doc.id}>
+                  {doc.display_name?.trim() || doc.filename}
+                </option>
+              ))}
+            </select>
+          </div>
+          {showReadingView && (
+            <button
+              type="button"
+              className="btn-read-toolbar-hide"
+              onClick={() => setToolbarExpanded(false)}
+              title="Hide toolbar for reading"
+              aria-label="Hide toolbar"
+            >
+              Hide ›
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Floating zoom: always available when reading (keyboard: Ctrl/Cmd + − / + / 0) */}
+      {showReadingView && (
+        <div className="read-zoom-float" title="Zoom (or use Ctrl/Cmd + − / + / 0)">
+          <button type="button" className="read-zoom-float-btn" onClick={zoomOut} disabled={pageZoom <= 0.5} aria-label="Zoom out">−</button>
+          <span className="read-zoom-float-level">{Math.round(pageZoom * 100)}%</span>
+          <button type="button" className="read-zoom-float-btn" onClick={zoomIn} disabled={pageZoom >= 3.0} aria-label="Zoom in">+</button>
+          <button type="button" className="read-zoom-float-reset" onClick={resetZoom} aria-label="Reset zoom">Reset</button>
+        </div>
+      )}
 
       {selectedDocumentId && (
-        <div className="page-viewer-layout">
-          {/* Left Sidebar - Page Navigation */}
-          <div className="pages-sidebar">
-            <h3 className="sidebar-title">Pages</h3>
+        <div className={`page-viewer-layout ${sectionsSidebarOpen ? '' : 'sidebar-hidden'}`}>
+          {/* Left Sidebar - Section (page) list; collapsible */}
+          <div className="pages-sidebar" aria-hidden={!sectionsSidebarOpen}>
+            <h3 className="sidebar-title">Sections</h3>
             {loading ? (
-              <div className="loading-pages">Loading pages...</div>
+              <div className="loading-pages">Loading sections...</div>
             ) : (
               <div className="pages-list">
-                {pages.map((page) => (
-                  <button
-                    key={page.page_number}
-                    className={`page-item ${selectedPage === page.page_number ? 'active' : ''}`}
-                    onClick={() => handlePageSelect(page.page_number)}
-                  >
-                    Page {page.page_number}
-                    {page.extraction_status !== 'success' && (
-                      <span className="page-status-badge">{page.extraction_status}</span>
-                    )}
-                  </button>
-                ))}
+                {pages.map((page) => {
+                  const firstHeader = getFirstSectionHeader(page.text_markdown ?? page.text)
+                  const label = firstHeader ? `${page.page_number} – ${firstHeader}` : String(page.page_number)
+                  return (
+                    <button
+                      key={page.page_number}
+                      className={`page-item ${selectedPage === page.page_number ? 'active' : ''}`}
+                      onClick={() => handlePageSelect(page.page_number)}
+                      title={firstHeader ? `Page ${page.page_number}: ${firstHeader}` : `Page ${page.page_number}`}
+                    >
+                      <span className="page-item-label">{label}</span>
+                      {page.extraction_status !== 'success' && (
+                        <span className="page-status-badge">{page.extraction_status}</span>
+                      )}
+                    </button>
+                  )
+                })}
               </div>
             )}
           </div>
+
+          {/* Chevron to collapse/expand sections panel */}
+          <button
+            type="button"
+            className="sidebar-chevron"
+            onClick={() => setSectionsSidebarOpen(prev => !prev)}
+            title={sectionsSidebarOpen ? 'Collapse sections' : 'Expand sections'}
+            aria-label={sectionsSidebarOpen ? 'Collapse sections' : 'Expand sections'}
+          >
+            {sectionsSidebarOpen ? '‹' : '›'}
+          </button>
 
           {/* Main Area - Page Content */}
           <div className="page-content-area">
             {currentPage ? (
               <>
                 {successMessage && <div className="reader-success-message">{successMessage}</div>}
-                {/* Zoom Controls */}
-                <div className="page-zoom-controls">
-                  <button onClick={zoomOut} className="zoom-btn" disabled={pageZoom <= 0.5}>
-                    −
+                {/* Page content with left/right chevrons for simple navigation */}
+                <div className="page-reader-with-nav-chevrons">
+                  <button
+                    type="button"
+                    className="page-nav-chevron page-nav-chevron-left"
+                    onClick={goToPreviousPage}
+                    disabled={!selectedPage || selectedPage === 1}
+                    title="Previous section"
+                    aria-label="Previous section"
+                  >
+                    ‹
                   </button>
-                  <span className="zoom-level">{Math.round(pageZoom * 100)}%</span>
-                  <button onClick={zoomIn} className="zoom-btn" disabled={pageZoom >= 3.0}>
-                    +
-                  </button>
-                  <button onClick={resetZoom} className="zoom-reset-btn">
-                    Reset
-                  </button>
-                </div>
-
-                {/* Page Content - selectable for "Mark as fact" */}
-                <div className="page-content-wrapper" style={{ zoom: pageZoom }}>
-                  <div className="book-page">
+                  <div className="page-content-wrapper" style={{ zoom: pageZoom }}>
+                    <div className="book-page">
                     <h4>
-                      Page {currentPage.page_number}
-                      {currentPage.text_markdown && (
-                        <span className="reader-canonical-note" title="Content from markdown (canonical source)">
-                          {' '}MD
-                        </span>
-                      )}
+                      {(() => {
+                        const firstHeader = getFirstSectionHeader(currentPage.text_markdown ?? currentPage.text)
+                        const headerLine = firstHeader ? `${currentPage.page_number} – ${firstHeader}` : `Page ${currentPage.page_number}`
+                        return (
+                          <>
+                            {headerLine}
+                            {currentPage.text_markdown && (
+                              <span className="reader-canonical-note" title="Content from markdown (canonical source)">
+                                {' '}MD
+                              </span>
+                            )}
+                          </>
+                        )
+                      })()}
                     </h4>
                     <div
                       className="page-text-content"
@@ -1033,6 +1140,17 @@ export function ReadDocumentTab({ documents, selectedDocumentId: selectedDocumen
                       )}
                     </div>
                   </div>
+                </div>
+                  <button
+                    type="button"
+                    className="page-nav-chevron page-nav-chevron-right"
+                    onClick={goToNextPage}
+                    disabled={!selectedPage || selectedPage === totalPages}
+                    title="Next section"
+                    aria-label="Next section"
+                  >
+                    ›
+                  </button>
                 </div>
 
                 {/* Context menu */}
@@ -1114,7 +1232,7 @@ export function ReadDocumentTab({ documents, selectedDocumentId: selectedDocumen
               </>
             ) : (
               <div className="no-page-selected">
-                {loading ? 'Loading...' : 'Select a page from the sidebar'}
+                {loading ? 'Loading...' : 'Select a section from the sidebar'}
               </div>
             )}
           </div>

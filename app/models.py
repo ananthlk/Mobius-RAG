@@ -10,11 +10,15 @@ class Document(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     filename = Column(String(255), nullable=False)
+    display_name = Column(String(255), nullable=True)  # User-friendly name; when set, UI shows this instead of filename
     file_hash = Column(String(64), unique=True, nullable=False)
     file_path = Column(String(500), nullable=False)  # GCS path
     payer = Column(String(100))
     state = Column(String(2))
     program = Column(String(100))
+    authority_level = Column(String(100), nullable=True)
+    effective_date = Column(String(20), nullable=True)   # ISO date or free text, e.g. 2024-01-15
+    termination_date = Column(String(20), nullable=True)  # ISO date or free text
     status = Column(String(20), default="uploaded", nullable=False)  # uploaded, extracting, completed, failed, completed_with_errors
     has_errors = Column(String(10), default="false", nullable=False)  # 'true', 'false'
     error_count = Column(Integer, default=0, nullable=False)

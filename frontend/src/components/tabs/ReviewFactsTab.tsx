@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { approveFactApi, deleteFactApi, patchFactApi, rejectFactApi } from '../../lib/factActions'
+import { getStateLabel } from '../../lib/documentMetadata'
 import './ReviewFactsTab.css'
 
 // Category keys and labels (match backend CATEGORY_NAMES) for edit modal importance
@@ -31,9 +32,12 @@ interface Fact {
   category_scores: Record<string, { score: number; direction: number | null }> | null
   document_id: string
   document_filename?: string
+  document_display_name?: string | null
   payer?: string
   state?: string
   program?: string
+  effective_date?: string | null
+  termination_date?: string | null
   page_number?: number | null
   is_verified?: string | null
   confidence?: string | number | null
@@ -46,8 +50,21 @@ interface ReviewFactsTabProps {
   onViewDocument?: (documentId: string, options?: { pageNumber?: number; factId?: string }) => void
 }
 
+/** Document metadata from GET /documents for filter options and fact enrichment. */
+interface DocumentMeta {
+  id: string
+  filename: string
+  display_name?: string | null
+  payer?: string | null
+  state?: string | null
+  program?: string | null
+  effective_date?: string | null
+  termination_date?: string | null
+}
+
 export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
   const [facts, setFacts] = useState<Fact[]>([])
+  const [documents, setDocuments] = useState<DocumentMeta[]>([])
   const [loading, setLoading] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedFact, setSelectedFact] = useState<Fact | null>(null)
@@ -63,6 +80,9 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
   const [approvalFilter, setApprovalFilter] = useState<'all' | 'pending' | 'approved' | 'rejected'>('all')
   const [filtersOpen, setFiltersOpen] = useState(false)
 
+  // Actions dropdown (one card at a time)
+  const [actionsOpenFactId, setActionsOpenFactId] = useState<string | null>(null)
+
   // Edit modal
   const [editingFact, setEditingFact] = useState<Fact | null>(null)
   const [editFactText, setEditFactText] = useState('')
@@ -72,6 +92,8 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
   const [editError, setEditError] = useState<string | null>(null)
 
   const API_BASE = 'http://localhost:8000'
+
+  const closeActionsMenu = () => setActionsOpenFactId(null)
 
   /** Shared helper: approve fact via API and update local state. */
   const handleApprove = async (fact: Fact) => {
@@ -158,9 +180,63 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
     }
   }
 
+  /** Fetch GET /documents and return doc list + map by id (string) for merging into facts. */
+  const fetchDocumentsMap = async (): Promise<{ list: DocumentMeta[]; map: Record<string, DocumentMeta> }> => {
+    const res = await fetch(`${API_BASE}/documents`)
+    if (!res.ok) return { list: [], map: {} }
+    const json = await res.json()
+    const raw = Array.isArray(json) ? json : (json.documents || [])
+    const list: DocumentMeta[] = []
+    const map: Record<string, DocumentMeta> = {}
+    for (const d of raw) {
+      const id = d.id ?? d.document_id
+      if (id) {
+        const sid = String(id)
+        const meta: DocumentMeta = {
+          id: sid,
+          filename: d.filename || d.name || 'Unknown Document',
+          display_name: d.display_name ?? null,
+          payer: d.payer ?? null,
+          state: d.state ?? null,
+          program: d.program ?? null,
+          effective_date: d.effective_date ?? null,
+          termination_date: d.termination_date ?? null,
+        }
+        list.push(meta)
+        map[sid] = meta
+      }
+    }
+    return { list, map }
+  }
+
+  /** Merge document metadata (GET /documents) into facts so display name, filename, payer/state/program, and dates are up to date. */
+  const mergeDocumentMetadataIntoFacts = (
+    factsList: Fact[],
+    docMap: Record<string, DocumentMeta>
+  ): Fact[] => {
+    return factsList.map((f) => {
+      const meta = docMap[String(f.document_id)]
+      if (!meta) return f
+      const displayName = (meta.display_name && meta.display_name.trim()) ? meta.display_name.trim() : null
+      return {
+        ...f,
+        document_filename: meta.filename || f.document_filename,
+        document_display_name: displayName ?? f.document_display_name ?? null,
+        payer: meta.payer ?? f.payer,
+        state: meta.state ?? f.state,
+        program: meta.program ?? f.program,
+        effective_date: meta.effective_date ?? f.effective_date,
+        termination_date: meta.termination_date ?? f.termination_date,
+      }
+    })
+  }
+
   const loadFacts = async () => {
     setLoading(true)
     try {
+      const { list: docList, map: docMap } = await fetchDocumentsMap()
+      setDocuments(docList)
+
       // 1) Try admin table endpoint first
       const response = await fetch(`${API_BASE}/admin/db/tables/extracted_facts/records?limit=1000`)
       if (response.ok) {
@@ -187,46 +263,24 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
             verified_by: record.verified_by ?? null,
             verified_at: record.verified_at ?? null,
           }))
-          const factsWithMetadata = await Promise.all(
-            factsData.map(async (fact: Fact) => {
-              try {
-                const docResponse = await fetch(`${API_BASE}/admin/db/tables/documents/records/${fact.document_id}`)
-                if (docResponse.ok) {
-                  const docData = await docResponse.json()
-                  return {
-                    ...fact,
-                    document_filename: docData.record?.filename,
-                    payer: docData.record?.payer,
-                    state: docData.record?.state,
-                    program: docData.record?.program,
-                  }
-                }
-              } catch (err) {
-                console.error('Failed to fetch document metadata:', err)
-              }
-              return fact
-            })
-          )
-          setFacts(factsWithMetadata)
+          const factsWithIds = factsData.map((f: Fact) => ({ ...f, document_id: String(f.document_id) }))
+          const enriched = mergeDocumentMetadataIntoFacts(factsWithIds, docMap)
+          setFacts(enriched)
           return
         }
       }
 
       // 2) Fallback: load by document (normalized facts from GET /documents/:id/facts)
-      const docsResponse = await fetch(`${API_BASE}/documents`)
-      if (!docsResponse.ok) return
-      const docsData = await docsResponse.json()
-      const docs = Array.isArray(docsData) ? docsData : docsData.documents || []
       const allFacts: Fact[] = []
-      for (const doc of docs) {
-        const id = doc.id ?? doc.document_id
-        if (!id) continue
+      for (const doc of docList) {
+        const id = doc.id
         try {
           const factsResponse = await fetch(`${API_BASE}/documents/${id}/facts`)
           if (!factsResponse.ok) continue
           const factsData = await factsResponse.json()
           const chunks = factsData.chunks || []
-          const filename = doc.filename || doc.name || 'Unknown Document'
+          const displayName = (doc.display_name && doc.display_name.trim()) ? doc.display_name.trim() : null
+          const filename = doc.filename || 'Unknown Document'
           for (const chunk of chunks) {
             for (const f of chunk.facts || []) {
               allFacts.push({
@@ -243,9 +297,12 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
                 category_scores: f.category_scores ?? null,
                 document_id: id,
                 document_filename: filename,
-                payer: doc.payer,
-                state: doc.state,
-                program: doc.program,
+                document_display_name: displayName ?? null,
+                payer: doc.payer ?? undefined,
+                state: doc.state ?? undefined,
+                program: doc.program ?? undefined,
+                effective_date: doc.effective_date ?? undefined,
+                termination_date: doc.termination_date ?? undefined,
                 page_number: f.page_number != null ? Number(f.page_number) : null,
                 verification_status: f.verification_status ?? null,
                 verified_by: f.verified_by ?? null,
@@ -268,6 +325,15 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
   useEffect(() => {
     loadFacts()
   }, [])
+
+  useEffect(() => {
+    if (!filtersOpen) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setFiltersOpen(false)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [filtersOpen])
 
   const toNum = (x: number | string | null | undefined): number | null => {
     if (x == null) return null
@@ -353,9 +419,10 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
     return true
   })
 
-  const uniquePayers = Array.from(new Set(facts.map(f => f.payer).filter(Boolean))) as string[]
-  const uniqueStates = Array.from(new Set(facts.map(f => f.state).filter(Boolean))) as string[]
-  const uniquePrograms = Array.from(new Set(facts.map(f => f.program).filter(Boolean))) as string[]
+  // Filter options from document metadata (so dropdowns stay populated after metadata updates)
+  const uniquePayers = Array.from(new Set(documents.map(d => d.payer).filter(Boolean))).sort() as string[]
+  const uniqueStates = Array.from(new Set(documents.map(d => d.state).filter(Boolean))).sort() as string[]
+  const uniquePrograms = Array.from(new Set(documents.map(d => d.program).filter(Boolean))).sort() as string[]
   const uniqueFactTypes = Array.from(new Set(facts.map(f => f.fact_type).filter(Boolean))) as string[]
 
   const categories = [
@@ -371,6 +438,17 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
     'coordination_of_benefits',
     'other_important',
   ]
+
+  const activeFiltersCount =
+    (searchQuery.trim() ? 1 : 0) +
+    (selectedPayers.length || 0) +
+    (selectedStates.length || 0) +
+    (selectedPrograms.length || 0) +
+    (selectedFactTypes.length || 0) +
+    (isPertinentFilter !== 'all' ? 1 : 0) +
+    (isEligibilityFilter !== 'all' ? 1 : 0) +
+    (approvalFilter !== 'all' ? 1 : 0) +
+    (Object.keys(categoryThresholds).filter(k => (categoryThresholds[k] || 0) > 0).length)
 
   const clearFilters = () => {
     setSelectedPayers([])
@@ -481,6 +559,14 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
 
   return (
     <div className="review-facts-tab">
+      {/* Backdrop: click outside to close filters panel */}
+      {filtersOpen && (
+        <div
+          className="filters-float-backdrop"
+          onClick={() => setFiltersOpen(false)}
+          aria-hidden
+        />
+      )}
       {/* Floating filters panel (toggle to open) */}
       <div className={`filters-float ${filtersOpen ? 'filters-float-open' : ''}`}>
         <div className="filters-float-inner">
@@ -497,83 +583,70 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
           </div>
 
           <div className="filters-content">
-            {/* Search */}
-            <div className="filter-group">
-              <label className="filter-label">Search</label>
-              <input
-                type="text"
-                placeholder="Search facts..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="filter-input"
-              />
-            </div>
+            {/* Search is in the header toolbar */}
 
-            {/* Document Metadata Filters */}
+            {/* Document Metadata Filters (autopopulated from documents) */}
             <div className="filter-group">
               <label className="filter-label">Payer</label>
-              <div className="filter-checkboxes">
+              <select
+                multiple
+                size={Math.min(6, uniquePayers.length + 1)}
+                value={selectedPayers}
+                onChange={(e) => {
+                  const selected = Array.from(e.target.selectedOptions, (o) => o.value)
+                  setSelectedPayers(selected)
+                }}
+                className="filter-select"
+              >
                 {uniquePayers.map((payer) => (
-                  <label key={payer} className="filter-checkbox">
-                    <input
-                      type="checkbox"
-                      checked={selectedPayers.includes(payer)}
-                      onChange={(e) => {
-                        if (e.target.checked) {
-                          setSelectedPayers([...selectedPayers, payer])
-                        } else {
-                          setSelectedPayers(selectedPayers.filter(p => p !== payer))
-                        }
-                      }}
-                    />
-                    <span>{payer}</span>
-                  </label>
+                  <option key={payer} value={payer}>{payer}</option>
                 ))}
-              </div>
+              </select>
+              {uniquePayers.length === 0 && (
+                <span className="filter-hint">No payers in document metadata yet.</span>
+              )}
             </div>
 
             <div className="filter-group">
               <label className="filter-label">State</label>
-              <div className="filter-checkboxes">
+              <select
+                multiple
+                size={Math.min(6, uniqueStates.length + 1)}
+                value={selectedStates}
+                onChange={(e) => {
+                  const selected = Array.from(e.target.selectedOptions, (o) => o.value)
+                  setSelectedStates(selected)
+                }}
+                className="filter-select"
+              >
                 {uniqueStates.map((state) => (
-                  <label key={state} className="filter-checkbox">
-                    <input
-                      type="checkbox"
-                      checked={selectedStates.includes(state)}
-                      onChange={(e) => {
-                        if (e.target.checked) {
-                          setSelectedStates([...selectedStates, state])
-                        } else {
-                          setSelectedStates(selectedStates.filter(s => s !== state))
-                        }
-                      }}
-                    />
-                    <span>{state}</span>
-                  </label>
+                  <option key={state} value={state}>{getStateLabel(state) || state}</option>
                 ))}
-              </div>
+              </select>
+              {uniqueStates.length === 0 && (
+                <span className="filter-hint">No states in document metadata yet.</span>
+              )}
             </div>
 
             <div className="filter-group">
               <label className="filter-label">Program</label>
-              <div className="filter-checkboxes">
+              <select
+                multiple
+                size={Math.min(6, uniquePrograms.length + 1)}
+                value={selectedPrograms}
+                onChange={(e) => {
+                  const selected = Array.from(e.target.selectedOptions, (o) => o.value)
+                  setSelectedPrograms(selected)
+                }}
+                className="filter-select"
+              >
                 {uniquePrograms.map((program) => (
-                  <label key={program} className="filter-checkbox">
-                    <input
-                      type="checkbox"
-                      checked={selectedPrograms.includes(program)}
-                      onChange={(e) => {
-                        if (e.target.checked) {
-                          setSelectedPrograms([...selectedPrograms, program])
-                        } else {
-                          setSelectedPrograms(selectedPrograms.filter(p => p !== program))
-                        }
-                      }}
-                    />
-                    <span>{program}</span>
-                  </label>
+                  <option key={program} value={program}>{program}</option>
                 ))}
-              </div>
+              </select>
+              {uniquePrograms.length === 0 && (
+                <span className="filter-hint">No programs in document metadata yet.</span>
+              )}
             </div>
 
             {/* Category Filters - Sliders */}
@@ -690,24 +763,50 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
 
       {/* Full-width main area - Fact Cards */}
       <div className="facts-main">
-        <div className="facts-header">
-          <h2 className="facts-title">
-            Facts ({filteredFacts.length})
-          </h2>
-          <div className="facts-header-actions">
+        <header className="facts-toolbar">
+          <div className="facts-toolbar-left">
+            <h2 className="facts-toolbar-title">Facts</h2>
+            <span className="facts-toolbar-count" title={`${filteredFacts.length} of ${facts.length} facts`}>
+              {filteredFacts.length}{facts.length !== filteredFacts.length ? ` / ${facts.length}` : ''}
+            </span>
+            {activeFiltersCount > 0 && (
+              <span className="facts-toolbar-filters-badge" title={`${activeFiltersCount} filter(s) active`}>
+                {activeFiltersCount}
+              </span>
+            )}
+          </div>
+          <div className="facts-toolbar-search">
+            <input
+              type="search"
+              placeholder="Search facts..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="facts-toolbar-search-input"
+              aria-label="Search facts"
+            />
+          </div>
+          <div className="facts-toolbar-actions">
             <button
               type="button"
-              className={`btn btn-secondary filters-toggle-btn ${filtersOpen ? 'filters-toggle-btn-open' : ''}`}
+              className={`facts-toolbar-btn ${filtersOpen ? 'facts-toolbar-btn-active' : ''}`}
               onClick={() => setFiltersOpen(prev => !prev)}
               aria-label={filtersOpen ? 'Close filters' : 'Open filters'}
+              title={filtersOpen ? 'Close filters' : 'Open filters panel'}
             >
-              Filters{filtersOpen ? ' ▲' : ' ▼'}
+              Filters{activeFiltersCount > 0 ? ` (${activeFiltersCount})` : ''}{filtersOpen ? ' ▲' : ' ▼'}
             </button>
-            <button onClick={loadFacts} className="btn btn-secondary" disabled={loading} title="Reload facts">
-              {loading ? 'Loading...' : 'Refresh'}
+            <button
+              type="button"
+              className="facts-toolbar-btn"
+              onClick={loadFacts}
+              disabled={loading}
+              title="Reload facts from server"
+              aria-label="Refresh"
+            >
+              {loading ? '…' : '↻ Refresh'}
             </button>
           </div>
-        </div>
+        </header>
 
           {loading ? (
             <div className="loading-facts">Loading facts...</div>
@@ -725,96 +824,133 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
                 const isEligible = fact.is_eligibility_related === 'true'
                 const isExpanded = selectedFact?.id === fact.id
                 
+                const actionsOpen = actionsOpenFactId === fact.id
+
                 return (
                   <div
                     key={fact.id}
                     className={`fact-card ${isExpanded ? 'expanded' : ''}`}
-                    onClick={() => setSelectedFact(isExpanded ? null : fact)}
+                    onClick={() => { setSelectedFact(isExpanded ? null : fact); closeActionsMenu() }}
                   >
                     <div className="fact-card-content">
                       <div className="fact-card-header">
-                        <div className="fact-document-name">
-                          {fact.document_filename || 'Unknown Document'}
+                        <div className="fact-card-header-main">
+                          <span className="fact-document-name" title={fact.document_display_name && fact.document_filename ? `File: ${fact.document_filename}` : undefined}>
+                            {fact.document_display_name?.trim() || fact.document_filename || 'Unknown Document'}
+                          </span>
                         </div>
-                        <span className={`fact-verification-badge fact-verification-${fact.verification_status || 'pending'}`}>
-                          {fact.verification_status || 'pending'}
-                        </span>
-                        {fact.fact_type && (
-                          <span className="fact-type-badge">{fact.fact_type}</span>
-                        )}
+                        <div className="fact-card-actions-wrap" onClick={e => e.stopPropagation()}>
+                          <button
+                            type="button"
+                            className="fact-card-menu-btn"
+                            onClick={(e) => { e.stopPropagation(); setActionsOpenFactId(actionsOpen ? null : fact.id) }}
+                            aria-expanded={actionsOpen}
+                            aria-haspopup="true"
+                            title="Actions"
+                          >
+                            <span className="fact-card-menu-dots" aria-hidden>⋮</span>
+                          </button>
+                          {actionsOpen && (
+                            <>
+                              <div className="fact-card-menu-backdrop" onClick={closeActionsMenu} aria-hidden />
+                              <div className="fact-card-menu-dropdown" role="menu">
+                                {fact.verification_status === 'approved' ? (
+                                  <button type="button" className="fact-card-menu-item" disabled>Approved</button>
+                                ) : (
+                                  <button type="button" className="fact-card-menu-item" onClick={() => { onApprove(fact)({} as React.MouseEvent); closeActionsMenu() }} role="menuitem">Approve</button>
+                                )}
+                                {fact.verification_status === 'rejected' ? (
+                                  <button type="button" className="fact-card-menu-item" disabled>Rejected</button>
+                                ) : (
+                                  <button type="button" className="fact-card-menu-item" onClick={() => { onReject(fact)({} as React.MouseEvent); closeActionsMenu() }} role="menuitem">Reject</button>
+                                )}
+                                <button type="button" className="fact-card-menu-item" onClick={(e) => { onEdit(fact)(e); closeActionsMenu() }} role="menuitem">Edit</button>
+                                <button type="button" className="fact-card-menu-item fact-card-menu-item-danger" onClick={(e) => { onDelete(fact)(e); closeActionsMenu() }} role="menuitem">Delete</button>
+                                {onViewDocument && (
+                                  <button
+                                    type="button"
+                                    className="fact-card-menu-item fact-card-menu-item-primary"
+                                    onClick={() => {
+                                      onViewDocument(fact.document_id, { pageNumber: fact.page_number ?? undefined, factId: fact.id })
+                                      closeActionsMenu()
+                                    }}
+                                    role="menuitem"
+                                  >
+                                    View in Document
+                                  </button>
+                                )}
+                              </div>
+                            </>
+                          )}
+                        </div>
                       </div>
-                      
+
                       <div className="fact-text">
-                        {isExpanded 
+                        {isExpanded
                           ? fact.fact_text
-                          : fact.fact_text.length > 200
-                            ? `${fact.fact_text.substring(0, 200)}...`
+                          : fact.fact_text.length > 180
+                            ? `${fact.fact_text.substring(0, 180)}…`
                             : fact.fact_text}
                       </div>
-                      
-                      {topCategories.length > 0 && (
-                        <div className="fact-categories">
-                          {topCategories.slice(0, isExpanded ? 10 : 3).map((cat) => (
-                            <span key={cat.category} className="category-tag">
-                              {cat.category.replace(/_/g, ' ')} ({cat.score.toFixed(2)})
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                      
-                      <div className="fact-indicators">
-                        <button
-                          type="button"
-                          className={`pertinent-badge pertinent-badge-clickable ${isPertinent ? 'yes' : 'no'}`}
-                          onClick={e => handleTogglePertinent(fact, e)}
-                          title={isPertinent ? 'Click to mark not pertinent' : 'Click to mark pertinent'}
-                        >
-                          {isPertinent ? '✓ Pertinent' : '✗ Not Pertinent'}
-                        </button>
-                        {isEligible && (
-                          <span className="eligibility-badge">Eligibility Related</span>
-                        )}
-                      </div>
-                      
-                      {fact.payer || fact.state || fact.program ? (
-                        <div className="fact-metadata">
-                          {fact.payer && <span>{fact.payer}</span>}
-                          {fact.state && <span>{fact.state}</span>}
-                          {fact.program && <span>{fact.program}</span>}
-                        </div>
-                      ) : null}
 
-                      <div className="fact-card-actions" onClick={e => e.stopPropagation()}>
-                        {fact.verification_status === 'approved' ? (
-                          <button type="button" className="btn btn-small btn-secondary" disabled>
-                            Approved
+                      <div className="fact-card-footer">
+                        <div className="fact-status-group">
+                          <button
+                            type="button"
+                            className={`pertinent-badge pertinent-badge-clickable ${isPertinent ? 'yes' : 'no'}`}
+                            onClick={e => handleTogglePertinent(fact, e)}
+                            title={isPertinent ? 'Mark not pertinent' : 'Mark pertinent'}
+                          >
+                            {isPertinent ? 'Pertinent' : 'Not pertinent'}
                           </button>
-                        ) : (
-                          <button type="button" className="btn btn-small btn-secondary" onClick={onApprove(fact)}>
-                            Approve
+                          <button
+                            type="button"
+                            className={`fact-verification-badge fact-verification-badge-btn fact-verification-${fact.verification_status || 'pending'}`}
+                            onClick={fact.verification_status === 'pending' || !fact.verification_status ? (e) => { e.stopPropagation(); handleApprove(fact) } : undefined}
+                            disabled={fact.verification_status === 'approved' || fact.verification_status === 'rejected'}
+                            title={fact.verification_status === 'pending' || !fact.verification_status ? 'Click to approve' : undefined}
+                          >
+                            {fact.verification_status === 'approved' ? 'Approved' : fact.verification_status === 'rejected' ? 'Rejected' : 'Pending'}
                           </button>
+                          {isEligible && <span className="eligibility-badge">Eligibility related</span>}
+                        </div>
+                        {topCategories.length > 0 && (
+                          <div className="fact-categories">
+                            {topCategories.slice(0, isExpanded ? 10 : 3).map((cat) => {
+                              const tier = (cat.score >= 0.7) ? 'high' : (cat.score >= 0.4) ? 'medium' : 'low'
+                              return (
+                                <span key={cat.category} className={`category-tag category-tag-${tier}`} title={`Relevance: ${(cat.score * 100).toFixed(0)}%`}>
+                                  {cat.category.replace(/_/g, ' ')}
+                                </span>
+                              )
+                            })}
+                          </div>
                         )}
-                        {fact.verification_status === 'rejected' ? (
-                          <button type="button" className="btn btn-small btn-secondary" disabled>
-                            Rejected
-                          </button>
-                        ) : (
-                          <button type="button" className="btn btn-small btn-secondary" onClick={onReject(fact)}>
-                            Reject
-                          </button>
-                        )}
-                        <button type="button" className="btn btn-small btn-secondary" onClick={onEdit(fact)}>
-                          Edit
-                        </button>
-                        <button type="button" className="btn btn-small btn-secondary" onClick={onDelete(fact)}>
-                          Delete
-                        </button>
+                        <span className="fact-card-footer-spacer" />
+                        <div className="fact-card-footer-line">
+                          {(fact.payer || fact.state || fact.program) && (
+                            <span className="fact-metadata-inline">
+                              {[fact.payer, fact.state, fact.program].filter(Boolean).join(' · ')}
+                            </span>
+                          )}
+                          {(fact.effective_date || fact.termination_date) && (
+                            <span className="fact-dates-inline">
+                              Exp: {fact.effective_date || '—'}
+                            </span>
+                          )}
+                        </div>
                       </div>
                     </div>
                     
                     {/* Expanded Details */}
                     {isExpanded && (
                       <div className="fact-expanded-details">
+                        {fact.fact_type && (
+                          <div className="fact-detail-section">
+                            <label>Classification:</label>
+                            <p>{fact.fact_type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}</p>
+                          </div>
+                        )}
                         <div className="fact-detail-section">
                           <label>Full Fact Text:</label>
                           <p className="fact-full-text">{fact.fact_text}</p>
@@ -895,48 +1031,6 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
                             }
                           </div>
                         </div>
-                        
-                        <div className="fact-expanded-actions">
-                          {fact.verification_status === 'approved' ? (
-                            <button type="button" className="btn btn-secondary" disabled>
-                              Approved
-                            </button>
-                          ) : (
-                            <button type="button" className="btn btn-secondary" onClick={onApprove(fact)}>
-                              Approve
-                            </button>
-                          )}
-                          {fact.verification_status === 'rejected' ? (
-                            <button type="button" className="btn btn-secondary" disabled>
-                              Rejected
-                            </button>
-                          ) : (
-                            <button type="button" className="btn btn-secondary" onClick={onReject(fact)}>
-                              Reject
-                            </button>
-                          )}
-                          <button type="button" className="btn btn-secondary" onClick={onEdit(fact)}>
-                            Edit
-                          </button>
-                          <button type="button" className="btn btn-secondary" onClick={onDelete(fact)}>
-                            Delete
-                          </button>
-                          {onViewDocument && (
-                            <button
-                              type="button"
-                              className="btn btn-primary"
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                onViewDocument(fact.document_id, {
-                                  pageNumber: fact.page_number ?? undefined,
-                                  factId: fact.id,
-                                })
-                              }}
-                            >
-                              View in Document
-                            </button>
-                          )}
-                        </div>
                       </div>
                     )}
                   </div>
@@ -952,7 +1046,14 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
           <div className="fact-card-modal" onClick={e => e.stopPropagation()}>
             <h3 className="fact-card-modal-title">Edit fact</h3>
             <div className="fact-card-modal-body">
-              <p className="fact-card-modal-doc-name">{editingFact?.document_filename}</p>
+              <p className="fact-card-modal-doc-name" title={editingFact?.document_display_name && editingFact?.document_filename ? `File: ${editingFact.document_filename}` : undefined}>
+                {editingFact?.document_display_name?.trim() || editingFact?.document_filename || 'Unknown Document'}
+                {(editingFact?.effective_date || editingFact?.termination_date) && (
+                  <span className="fact-document-dates">
+                    {' '}(Effective: {editingFact?.effective_date || '—'} – Termination: {editingFact?.termination_date || '—'})
+                  </span>
+                )}
+              </p>
               <div className="fact-card-modal-field">
                 <label className="filter-label">Fact text</label>
                 <textarea

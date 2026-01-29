@@ -218,6 +218,21 @@ async def run_startup_migrations():
                 await migrate_facts_verification()
             except Exception as migrate_err:
                 logger.warning(f"Startup migration (extracted_facts verification) skipped: {migrate_err}")
+            try:
+                from app.migrations.add_document_authority_level import migrate as migrate_document_authority_level
+                await migrate_document_authority_level()
+            except Exception as migrate_err:
+                logger.warning(f"Startup migration (document authority_level) skipped: {migrate_err}")
+            try:
+                from app.migrations.add_document_effective_termination_dates import migrate as migrate_document_effective_termination_dates
+                await migrate_document_effective_termination_dates()
+            except Exception as migrate_err:
+                logger.warning(f"Startup migration (document effective_date/termination_date) skipped: {migrate_err}")
+            try:
+                from app.migrations.add_document_display_name import migrate as migrate_document_display_name
+                await migrate_document_display_name()
+            except Exception as migrate_err:
+                logger.warning(f"Startup migration (document display_name) skipped: {migrate_err}")
 
             logger.info("✓ Startup migrations completed successfully")
         except Exception as e:
@@ -472,6 +487,7 @@ async def list_documents(
         doc_item = {
             "id": str(doc.id),
             "filename": doc.filename,
+            "display_name": getattr(doc, "display_name", None),
             "extraction_status": doc.status,  # uploaded, extracting, completed, failed, completed_with_errors
             "chunking_status": chunking_status,  # idle, queued, in_progress, completed, stopped, failed
             "created_at": doc.created_at.isoformat(),
@@ -480,6 +496,12 @@ async def list_documents(
             "error_count": doc.error_count or 0,
             "critical_error_count": doc.critical_error_count or 0,
             "review_status": doc.review_status or "pending",
+            "payer": doc.payer,
+            "state": doc.state,
+            "program": doc.program,
+            "authority_level": getattr(doc, "authority_level", None),
+            "effective_date": getattr(doc, "effective_date", None),
+            "termination_date": getattr(doc, "termination_date", None),
         }
         if job_id is not None:
             doc_item["chunking_job_id"] = job_id
@@ -491,6 +513,69 @@ async def list_documents(
         "total": len(document_list),
         "documents": document_list
     }
+
+
+@app.patch("/documents/{document_id}")
+async def update_document_metadata(
+    document_id: str,
+    body: dict = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update document metadata (display_name, payer, state, program, authority_level, effective_date, termination_date)."""
+    from uuid import UUID
+    try:
+        doc_uuid = UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID")
+    result = await db.execute(select(Document).where(Document.id == doc_uuid))
+    doc = result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    for key in ("display_name", "payer", "state", "program", "authority_level", "effective_date", "termination_date"):
+        if key in body:
+            val = body[key]
+            if val is None or (isinstance(val, str) and val.strip() == ""):
+                setattr(doc, key, None)
+            else:
+                setattr(doc, key, val if isinstance(val, str) else str(val))
+    await db.commit()
+    await db.refresh(doc)
+    # Build same shape as one item in list_documents (including chunking_status)
+    job_result = await db.execute(
+        select(ChunkingJob).where(
+            ChunkingJob.document_id == doc.id,
+            ChunkingJob.status.in_(["pending", "processing"])
+        ).order_by(ChunkingJob.created_at.desc())
+    )
+    active_job = job_result.scalar_one_or_none()
+    chunking_status = "idle"
+    if active_job:
+        chunking_status = "queued" if active_job.status == "pending" else "in_progress"
+    else:
+        cr_result = await db.execute(select(ChunkingResult).where(ChunkingResult.document_id == doc.id))
+        chunking_row = cr_result.scalar_one_or_none()
+        if chunking_row and chunking_row.metadata_:
+            chunking_status = chunking_row.metadata_.get("status", "idle")
+    out = {
+        "id": str(doc.id),
+        "filename": doc.filename,
+        "display_name": getattr(doc, "display_name", None),
+        "extraction_status": doc.status,
+        "chunking_status": chunking_status,
+        "created_at": doc.created_at.isoformat(),
+        "gcs_path": doc.file_path,
+        "has_errors": doc.has_errors or "false",
+        "error_count": doc.error_count or 0,
+        "critical_error_count": doc.critical_error_count or 0,
+        "review_status": doc.review_status or "pending",
+        "payer": doc.payer,
+        "state": doc.state,
+        "program": doc.program,
+        "authority_level": getattr(doc, "authority_level", None),
+        "effective_date": getattr(doc, "effective_date", None),
+        "termination_date": getattr(doc, "termination_date", None),
+    }
+    return out
 
 
 @app.get("/documents/{document_id}/pages")
@@ -2325,6 +2410,15 @@ async def get_document_facts(
         "total_chunks": len(chunks_data),
         "total_facts": len(all_facts),
         "chunks": chunks_data,
+        "document_metadata": {
+            "display_name": getattr(document, "display_name", None),
+            "payer": document.payer,
+            "state": document.state,
+            "program": document.program,
+            "authority_level": getattr(document, "authority_level", None),
+            "effective_date": getattr(document, "effective_date", None),
+            "termination_date": getattr(document, "termination_date", None),
+        },
     }
 
 

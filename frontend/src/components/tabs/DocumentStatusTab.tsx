@@ -1,9 +1,13 @@
-import { useState, useEffect } from 'react'
+import React, { useState, useEffect } from 'react'
+import { STATE_OPTIONS, AUTHORITY_LEVEL_OPTIONS } from '../../lib/documentMetadata'
 import './DocumentStatusTab.css'
+
+const API_BASE = 'http://localhost:8000'
 
 interface Document {
   id: string
   filename: string
+  display_name?: string | null
   extraction_status: string
   chunking_status: string | null
   created_at: string
@@ -12,6 +16,12 @@ interface Document {
   error_count?: number
   critical_error_count?: number
   review_status?: string
+  payer?: string | null
+  state?: string | null
+  program?: string | null
+  authority_level?: string | null
+  effective_date?: string | null
+  termination_date?: string | null
 }
 
 export interface ChunkingOptions {
@@ -51,11 +61,43 @@ export function DocumentStatusTab({
   const [searchQuery, setSearchQuery] = useState('')
   const [sortColumn, setSortColumn] = useState<string>('created_at')
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc')
+  const [editingMetadataDocumentId, setEditingMetadataDocumentId] = useState<string | null>(null)
+  const [metadataForm, setMetadataForm] = useState<{ display_name: string; payer: string; state: string; program: string; authority_level: string; effective_date: string; termination_date: string }>({ display_name: '', payer: '', state: '', program: '', authority_level: '', effective_date: '', termination_date: '' })
+  const [metadataSaving, setMetadataSaving] = useState(false)
+  const [metadataError, setMetadataError] = useState<string | null>(null)
+  const [openChunkMenuDocId, setOpenChunkMenuDocId] = useState<string | null>(null)
+  const [openActionsMenuDocId, setOpenActionsMenuDocId] = useState<string | null>(null)
+
+  const openMetadataForm = (doc: Document) => {
+    setEditingMetadataDocumentId(doc.id)
+    setMetadataForm({
+      display_name: doc.display_name ?? '',
+      payer: doc.payer ?? '',
+      state: doc.state ?? '',
+      program: doc.program ?? '',
+      authority_level: doc.authority_level ?? '',
+      effective_date: doc.effective_date ?? '',
+      termination_date: doc.termination_date ?? '',
+    })
+    setMetadataError(null)
+  }
+
+  const closeMetadataForm = () => {
+    setEditingMetadataDocumentId(null)
+    setMetadataError(null)
+  }
+
+  const isMetadataMissing = (doc: Document) => {
+    const p = (doc.payer ?? '').trim()
+    const s = (doc.state ?? '').trim()
+    const prog = (doc.program ?? '').trim()
+    return p === '' && s === '' && prog === ''
+  }
 
   const loadDocuments = async () => {
     setLoading(true)
     try {
-      const response = await fetch('http://localhost:8000/documents')
+      const response = await fetch(`${API_BASE}/documents`)
       if (response.ok) {
         const data = await response.json()
         setDocuments(data.documents || [])
@@ -73,6 +115,25 @@ export function DocumentStatusTab({
     const interval = setInterval(loadDocuments, 5000)
     return () => clearInterval(interval)
   }, [])
+
+  useEffect(() => {
+    if (!openChunkMenuDocId && !openActionsMenuDocId) return
+    const closeMenus = () => {
+      setOpenChunkMenuDocId(null)
+      setOpenActionsMenuDocId(null)
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closeMenus()
+    }
+    const onDocClick = () => closeMenus()
+    const t = setTimeout(() => document.addEventListener('click', onDocClick), 0)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      clearTimeout(t)
+      document.removeEventListener('click', onDocClick)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [openChunkMenuDocId, openActionsMenuDocId])
 
   const handleSelectDoc = (docId: string) => {
     setSelectedDocs(prev => {
@@ -115,6 +176,29 @@ export function DocumentStatusTab({
     await loadDocuments()
   }
 
+  const handleSaveMetadata = async (docId: string, payload: { display_name?: string; payer?: string; state?: string; program?: string; authority_level?: string; effective_date?: string; termination_date?: string }) => {
+    setMetadataSaving(true)
+    setMetadataError(null)
+    try {
+      const response = await fetch(`${API_BASE}/documents/${docId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}))
+        setMetadataError(err.detail || 'Failed to update metadata')
+        return
+      }
+      await loadDocuments()
+      setEditingMetadataDocumentId(null)
+    } catch (err) {
+      setMetadataError('Failed to update metadata')
+    } finally {
+      setMetadataSaving(false)
+    }
+  }
+
   const handleDelete = async (docId: string) => {
     try {
       await onDeleteDocument(docId)
@@ -140,9 +224,12 @@ export function DocumentStatusTab({
     return <span className={statusClass}>{statusLabel}</span>
   }
 
-  const filteredDocuments = documents.filter(doc =>
-    doc.filename.toLowerCase().includes(searchQuery.toLowerCase())
-  )
+  const filteredDocuments = documents.filter(doc => {
+    const name = (doc.display_name || doc.filename || '').toLowerCase()
+    const filename = (doc.filename || '').toLowerCase()
+    const q = searchQuery.toLowerCase()
+    return name.includes(q) || filename.includes(q)
+  })
 
   const sortedDocuments = [...filteredDocuments].sort((a, b) => {
     let aVal: any = a[sortColumn as keyof Document]
@@ -163,51 +250,6 @@ export function DocumentStatusTab({
 
   return (
     <div className="document-status-tab">
-      {chunkingOptions && onChunkingOptionsChange && (
-        <div className="chunking-options-panel">
-          <h3 className="chunking-options-title">Chunking options (apply to Start / Restart)</h3>
-          <div className="chunking-options-grid">
-            <div className="chunking-option">
-              <label htmlFor="chunking-threshold">Critique pass threshold (0–1)</label>
-              <input
-                id="chunking-threshold"
-                type="number"
-                min={0}
-                max={1}
-                step={0.1}
-                value={chunkingOptions.threshold}
-                onChange={e => onChunkingOptionsChange.setThreshold(parseFloat(e.target.value) || 0.6)}
-              />
-            </div>
-            <div className="chunking-option">
-              <label className="chunking-option-checkbox">
-                <input
-                  type="checkbox"
-                  checked={chunkingOptions.critiqueEnabled}
-                  onChange={e => onChunkingOptionsChange.setCritiqueEnabled(e.target.checked)}
-                />
-                Run critique (QA)
-              </label>
-              <span className="chunking-option-hint">When off, extraction only (no critique or retries).</span>
-            </div>
-            <div className="chunking-option">
-              <label htmlFor="chunking-max-retries">Max retries on critique fail</label>
-              <input
-                id="chunking-max-retries"
-                type="number"
-                min={0}
-                max={10}
-                value={chunkingOptions.maxRetries}
-                onChange={e => onChunkingOptionsChange.setMaxRetries(parseInt(e.target.value, 10) || 0)}
-              />
-              <span className="chunking-option-hint">0 = no retries.</span>
-            </div>
-          </div>
-        </div>
-      )}
-      <p className="pipeline-copy" title="Upload stores file; Store = raw text per page; Convert to MD = canonical markdown per page; Chunk runs on markdown.">
-        Pipeline: Upload → Store → Convert to MD → Chunk
-      </p>
       <div className="status-toolbar">
         <div className="toolbar-left">
           <input
@@ -283,84 +325,267 @@ export function DocumentStatusTab({
               </tr>
             ) : (
               sortedDocuments.map((doc) => (
-                <tr key={doc.id}>
-                  <td className="col-checkbox">
-                    <input
-                      type="checkbox"
-                      checked={selectedDocs.has(doc.id)}
-                      onChange={() => handleSelectDoc(doc.id)}
-                    />
-                  </td>
-                  <td className="col-name">{doc.filename}</td>
-                  <td className="col-status">
-                    {getStatusBadge(doc.extraction_status, 'extraction')}
-                  </td>
-                  <td className="col-status">
-                    {getStatusBadge(doc.chunking_status, 'chunking')}
-                  </td>
-                  <td className="col-errors">
-                    {doc.has_errors === 'true' || (doc.error_count && doc.error_count > 0) ? (
-                      <span className="error-indicator" title={`${doc.error_count || 0} errors (${doc.critical_error_count || 0} critical)`}>
-                        {doc.critical_error_count && doc.critical_error_count > 0 ? (
-                          <span className="error-badge error-critical">
-                            {doc.critical_error_count} Critical
-                          </span>
-                        ) : (
-                          <span className="error-badge error-warning">
-                            {doc.error_count} Errors
-                          </span>
-                        )}
-                      </span>
-                    ) : (
-                      <span className="no-errors">—</span>
-                    )}
-                  </td>
-                  <td className="col-date">
-                    {new Date(doc.created_at).toLocaleString()}
-                  </td>
-                  <td className="col-actions">
-                    <div className="action-buttons">
-                      {doc.chunking_status === 'idle' || doc.chunking_status === null ? (
+                <React.Fragment key={doc.id}>
+                  <tr
+                    className={isMetadataMissing(doc) ? 'doc-row-missing-metadata' : ''}
+                  >
+                    <td className="col-checkbox">
+                      <input
+                        type="checkbox"
+                        checked={selectedDocs.has(doc.id)}
+                        onChange={() => handleSelectDoc(doc.id)}
+                      />
+                    </td>
+                    <td className="col-name">
+                      <span className="document-display-name">{doc.display_name?.trim() || doc.filename}</span>
+                      {doc.display_name?.trim() && (
+                        <span className="document-filename-hint" title={`File: ${doc.filename}`}> ({doc.filename})</span>
+                      )}
+                      {isMetadataMissing(doc) && (
+                        <span className="metadata-missing-badge" title="Payer, state, and program are empty">
+                          Missing metadata
+                        </span>
+                      )}
+                    </td>
+                    <td className="col-status">
+                      {getStatusBadge(doc.extraction_status, 'extraction')}
+                    </td>
+                    <td className="col-status col-chunk-with-menu">
+                      <div className="chunk-cell">
+                        {getStatusBadge(doc.chunking_status, 'chunking')}
+                        {(() => {
+                          const hasChunkActions =
+                            doc.chunking_status === 'idle' || doc.chunking_status === null ||
+                            doc.chunking_status === 'in_progress' ||
+                            ((doc.chunking_status === 'stopped' || doc.chunking_status === 'failed') && onRestartChunking)
+                          if (!hasChunkActions) return null
+                          return (
+                            <div className="dropdown-wrap">
+                              <button
+                                type="button"
+                                className="btn-icon btn-kebab"
+                                onClick={(e) => { e.stopPropagation(); setOpenChunkMenuDocId(prev => prev === doc.id ? null : doc.id) }}
+                                title="Chunk actions"
+                                aria-haspopup="true"
+                                aria-expanded={openChunkMenuDocId === doc.id}
+                              >
+                                ⋮
+                              </button>
+                              {openChunkMenuDocId === doc.id && (
+                                <div className="dropdown-menu" onClick={(e) => e.stopPropagation()}>
+                                  {(doc.chunking_status === 'idle' || doc.chunking_status === null) && (
+                                    <button
+                                      type="button"
+                                      className="dropdown-item"
+                                      disabled={doc.extraction_status !== 'completed'}
+                                      onClick={() => { onStartChunking(doc.id); setOpenChunkMenuDocId(null) }}
+                                    >
+                                      Start chunking
+                                    </button>
+                                  )}
+                                  {doc.chunking_status === 'in_progress' && (
+                                    <button
+                                      type="button"
+                                      className="dropdown-item dropdown-item-danger"
+                                      onClick={() => { onStopChunking(doc.id); setOpenChunkMenuDocId(null) }}
+                                    >
+                                      Stop chunking
+                                    </button>
+                                  )}
+                                  {((doc.chunking_status === 'stopped' || doc.chunking_status === 'failed') && onRestartChunking) && (
+                                    <button
+                                      type="button"
+                                      className="dropdown-item"
+                                      disabled={doc.extraction_status !== 'completed'}
+                                      title="Restart from last completed paragraph"
+                                      onClick={() => { onRestartChunking(doc.id); setOpenChunkMenuDocId(null) }}
+                                    >
+                                      Restart chunking
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          )
+                        })()}
+                      </div>
+                    </td>
+                    <td className="col-errors">
+                      {doc.has_errors === 'true' || (doc.error_count && doc.error_count > 0) ? (
+                        <span className="error-indicator" title={`${doc.error_count || 0} errors (${doc.critical_error_count || 0} critical)`}>
+                          {doc.critical_error_count && doc.critical_error_count > 0 ? (
+                            <span className="error-badge error-critical">
+                              {doc.critical_error_count} Critical
+                            </span>
+                          ) : (
+                            <span className="error-badge error-warning">
+                              {doc.error_count} Errors
+                            </span>
+                          )}
+                        </span>
+                      ) : (
+                        <span className="no-errors">—</span>
+                      )}
+                    </td>
+                    <td className="col-date">
+                      {new Date(doc.created_at).toLocaleString()}
+                    </td>
+                    <td className="col-actions">
+                      <div className="action-buttons">
                         <button
-                          onClick={() => onStartChunking(doc.id)}
-                          className="btn btn-sm btn-primary"
-                          disabled={doc.extraction_status !== 'completed'}
+                          type="button"
+                          onClick={() => editingMetadataDocumentId === doc.id ? closeMetadataForm() : openMetadataForm(doc)}
+                          className={`btn btn-sm btn-secondary ${isMetadataMissing(doc) ? 'metadata-btn-missing' : ''} ${editingMetadataDocumentId === doc.id ? 'metadata-btn-open' : ''}`}
+                          title="Edit document metadata (payer, state, program, authority level)"
                         >
-                          Start
+                          {editingMetadataDocumentId === doc.id ? 'Metadata ▲' : 'Metadata'}
                         </button>
-                      ) : doc.chunking_status === 'in_progress' ? (
                         <button
-                          onClick={() => onStopChunking(doc.id)}
-                          className="btn btn-sm btn-danger"
+                          type="button"
+                          onClick={() => onViewDocument(doc.id)}
+                          className="btn btn-sm btn-secondary"
                         >
-                          Stop
+                          View
                         </button>
-                      ) : (doc.chunking_status === 'stopped' || doc.chunking_status === 'failed') && onRestartChunking ? (
-                        <button
-                          onClick={() => onRestartChunking(doc.id)}
-                          className="btn btn-sm btn-primary"
-                          disabled={doc.extraction_status !== 'completed'}
-                          title="Restart from last completed paragraph"
-                        >
-                          Restart
-                        </button>
-                      ) : null}
-                      <button
-                        onClick={() => onViewDocument(doc.id)}
-                        className="btn btn-sm btn-secondary"
-                      >
-                        View
-                      </button>
-                      <button
-                        onClick={() => handleDelete(doc.id)}
-                        className="btn btn-sm btn-danger"
-                        title="Delete document"
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  </td>
-                </tr>
+                        <div className="dropdown-wrap">
+                          <button
+                            type="button"
+                            className="btn-icon btn-kebab"
+                            onClick={(e) => { e.stopPropagation(); setOpenActionsMenuDocId(prev => prev === doc.id ? null : doc.id) }}
+                            title="More actions"
+                            aria-haspopup="true"
+                            aria-expanded={openActionsMenuDocId === doc.id}
+                          >
+                            ⋮
+                          </button>
+                          {openActionsMenuDocId === doc.id && (
+                            <div className="dropdown-menu dropdown-menu-right" onClick={(e) => e.stopPropagation()}>
+                              <button
+                                type="button"
+                                className="dropdown-item dropdown-item-danger"
+                                onClick={() => { handleDelete(doc.id); setOpenActionsMenuDocId(null) }}
+                                title="Delete document"
+                              >
+                                Delete document
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                  {editingMetadataDocumentId === doc.id && (
+                    <tr key={`${doc.id}-meta`}>
+                      <td colSpan={7} className="metadata-form-cell">
+                        <div className="metadata-form-panel">
+                          <div className="metadata-form-grid">
+                            <div className="metadata-form-field metadata-form-field-full">
+                              <label htmlFor={`meta-display-name-${doc.id}`}>Display name</label>
+                              <input
+                                id={`meta-display-name-${doc.id}`}
+                                type="text"
+                                value={metadataForm.display_name}
+                                onChange={e => setMetadataForm(prev => ({ ...prev, display_name: e.target.value }))}
+                                placeholder="User-friendly name (shown instead of filename when set)"
+                              />
+                            </div>
+                            <div className="metadata-form-field">
+                              <label htmlFor={`meta-payer-${doc.id}`}>Payer</label>
+                              <input
+                                id={`meta-payer-${doc.id}`}
+                                type="text"
+                                value={metadataForm.payer}
+                                onChange={e => setMetadataForm(prev => ({ ...prev, payer: e.target.value }))}
+                                placeholder="Payor name"
+                              />
+                            </div>
+                            <div className="metadata-form-field">
+                              <label htmlFor={`meta-state-${doc.id}`}>State</label>
+                              <select
+                                id={`meta-state-${doc.id}`}
+                                value={metadataForm.state}
+                                onChange={e => setMetadataForm(prev => ({ ...prev, state: e.target.value }))}
+                              >
+                                <option value="">—</option>
+                                {STATE_OPTIONS.map(({ value, label }) => (
+                                  <option key={value} value={value}>{label} ({value})</option>
+                                ))}
+                                {metadataForm.state && !STATE_OPTIONS.some(s => s.value === metadataForm.state) && (
+                                  <option value={metadataForm.state}>{metadataForm.state} (other)</option>
+                                )}
+                              </select>
+                            </div>
+                            <div className="metadata-form-field">
+                              <label htmlFor={`meta-program-${doc.id}`}>Program</label>
+                              <input
+                                id={`meta-program-${doc.id}`}
+                                type="text"
+                                value={metadataForm.program}
+                                onChange={e => setMetadataForm(prev => ({ ...prev, program: e.target.value }))}
+                                placeholder="Program"
+                              />
+                            </div>
+                            <div className="metadata-form-field">
+                              <label htmlFor={`meta-authority-${doc.id}`}>Authority level</label>
+                              <select
+                                id={`meta-authority-${doc.id}`}
+                                value={metadataForm.authority_level}
+                                onChange={e => setMetadataForm(prev => ({ ...prev, authority_level: e.target.value }))}
+                              >
+                                <option value="">—</option>
+                                {AUTHORITY_LEVEL_OPTIONS.map(({ value, label }) => (
+                                  <option key={value} value={value}>{label}</option>
+                                ))}
+                                {metadataForm.authority_level && !AUTHORITY_LEVEL_OPTIONS.some(a => a.value === metadataForm.authority_level) && (
+                                  <option value={metadataForm.authority_level}>{metadataForm.authority_level} (other)</option>
+                                )}
+                              </select>
+                            </div>
+                            <div className="metadata-form-field">
+                              <label htmlFor={`meta-effective-${doc.id}`}>Effective date</label>
+                              <input
+                                id={`meta-effective-${doc.id}`}
+                                type="text"
+                                value={metadataForm.effective_date}
+                                onChange={e => setMetadataForm(prev => ({ ...prev, effective_date: e.target.value }))}
+                                placeholder="e.g. 2024-01-15 or Jan 2024"
+                              />
+                            </div>
+                            <div className="metadata-form-field">
+                              <label htmlFor={`meta-termination-${doc.id}`}>Termination date</label>
+                              <input
+                                id={`meta-termination-${doc.id}`}
+                                type="text"
+                                value={metadataForm.termination_date}
+                                onChange={e => setMetadataForm(prev => ({ ...prev, termination_date: e.target.value }))}
+                                placeholder="e.g. 2025-12-31 or ongoing"
+                              />
+                            </div>
+                          </div>
+                          {metadataError && <div className="metadata-form-error">{metadataError}</div>}
+                          <div className="metadata-form-actions">
+                            <button
+                              type="button"
+                              className="btn btn-secondary"
+                              onClick={closeMetadataForm}
+                              disabled={metadataSaving}
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-primary"
+                              onClick={() => handleSaveMetadata(doc.id, metadataForm)}
+                              disabled={metadataSaving}
+                            >
+                              {metadataSaving ? 'Saving...' : 'Save'}
+                            </button>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
               ))
             )}
           </tbody>

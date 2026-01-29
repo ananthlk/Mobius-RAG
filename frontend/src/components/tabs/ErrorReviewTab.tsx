@@ -21,6 +21,7 @@ interface ProcessingError {
 interface DocumentWithErrors {
   id: string
   filename: string
+  display_name?: string | null
   error_count: number
   critical_error_count: number
   review_status: string
@@ -224,7 +225,7 @@ export function ErrorReviewTab() {
               <option value="all">All Documents</option>
               {documents.map(doc => (
                 <option key={doc.id} value={doc.id}>
-                  {doc.filename} ({doc.error_count} errors)
+                  {(doc.display_name?.trim() || doc.filename)} ({doc.error_count} errors)
                 </option>
               ))}
             </select>
