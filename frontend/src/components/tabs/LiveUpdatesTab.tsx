@@ -72,9 +72,16 @@ export function LiveUpdatesTab({
   }, [streamingOutput])
 
   const getJobStatusBadge = (status: string) => {
-    const statusClass = `job-status-badge status-${status}`
-    const statusLabel = status.charAt(0).toUpperCase() + status.slice(1).replace('_', ' ')
+    const s = status || 'idle'
+    const statusClass = `job-status-badge status-${s}`
+    const statusLabel = s.charAt(0).toUpperCase() + s.slice(1).replace(/_/g, ' ')
     return <span className={statusClass}>{statusLabel}</span>
+  }
+
+  /** Normalize progress to 0–100 for display; always show a number. */
+  const progressPercent = (job: ActiveJob) => {
+    const p = typeof job.progress === 'number' && !Number.isNaN(job.progress) ? job.progress : 0
+    return Math.min(100, Math.max(0, p))
   }
 
   const selectedJob = activeJobs.find(job => job.document_id === selectedJobId)
@@ -106,17 +113,17 @@ export function LiveUpdatesTab({
                     <div className="progress-bar">
                       <div 
                         className="progress-fill" 
-                        style={{ width: `${job.progress}%` }}
+                        style={{ width: `${progressPercent(job)}%` }}
                       />
-                      {job.completed_paragraphs !== undefined && job.total_paragraphs && (
+                      {job.completed_paragraphs !== undefined && job.total_paragraphs != null && (
                         <span className="progress-text-overlay">
                           {job.completed_paragraphs}/{job.total_paragraphs}
                         </span>
                       )}
                     </div>
                     <div className="progress-details">
-                      <span className="progress-text">{job.progress}%</span>
-                      {job.current_page && job.total_pages && (
+                      <span className="progress-text">{progressPercent(job)}%</span>
+                      {job.current_page != null && job.total_pages != null && (
                         <span className="progress-page-info">
                           Page {job.current_page}/{job.total_pages}
                         </span>
@@ -169,9 +176,9 @@ export function LiveUpdatesTab({
                   <div className="metadata-item">
                     <span className="metadata-label">Progress:</span>
                     <span className="metadata-value">
-                      {selectedJob.completed_paragraphs !== undefined && selectedJob.total_paragraphs
-                        ? `${selectedJob.completed_paragraphs} of ${selectedJob.total_paragraphs} paragraphs (${selectedJob.progress}%)`
-                        : `${selectedJob.progress}%`}
+                      {selectedJob.completed_paragraphs !== undefined && selectedJob.total_paragraphs != null
+                        ? `${selectedJob.completed_paragraphs} of ${selectedJob.total_paragraphs} paragraphs (${progressPercent(selectedJob)}%)`
+                        : `${progressPercent(selectedJob)}%`}
                     </span>
                   </div>
                   {selectedJob.processing_stage && selectedJob.processing_stage !== 'idle' && (

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, type ReactNode } from 'react'
+import { approveFactApi, deleteFactApi, patchFactApi, rejectFactApi } from '../../lib/factActions'
 import './ReadDocumentTab.css'
 
 const API_BASE = 'http://localhost:8000'
@@ -108,6 +109,7 @@ export interface HighlightRange {
   factText?: string
   categoryScores?: Record<string, { score: number | null; direction: number | null }>
   isPertinent?: boolean
+  verificationStatus?: string | null
 }
 
 function buildTooltip(r: HighlightRange): string {
@@ -139,7 +141,7 @@ function SegmentWithHighlights({
   segmentText: string
   segStart: number
   segEnd: number
-  ranges: Array<{ start: number; end: number; source: HighlightSource; factId?: string; factText?: string; categoryScores?: Record<string, { score: number | null; direction: number | null }>; isPertinent?: boolean }>
+  ranges: Array<{ start: number; end: number; source: HighlightSource; factId?: string; factText?: string; categoryScores?: Record<string, { score: number | null; direction: number | null }>; isPertinent?: boolean; verificationStatus?: string | null }>
   normalizedLen: number
 }) {
   const nodes: ReactNode[] = []
@@ -154,7 +156,9 @@ function SegmentWithHighlights({
     if (relStart > pos) {
       nodes.push(<span key={`${pos}-pre`}>{segmentText.slice(pos, relStart)}</span>)
     }
-    const className = r.source === 'user' ? 'reader-fact-highlight' : 'reader-llm-fact-highlight'
+    const approved = r.verificationStatus === 'approved'
+    const baseClass = r.source === 'user' ? 'reader-fact-highlight' : 'reader-llm-fact-highlight'
+    const className = approved ? `${baseClass} reader-fact-highlight-approved` : baseClass
     const tooltip = buildTooltip(r)
     nodes.push(
       <span
@@ -370,7 +374,7 @@ function PageTextWithHighlights({
     } else {
       segmentEls.push(
         <div key={`p-${i}`} className="reader-section-body">
-          <p className="reader-raw-p">
+          <p className={`reader-raw-p ${rangesClipped.length > 0 ? 'reader-raw-p-with-highlights' : ''}`}>
             <SegmentWithHighlights
               segmentText={seg.text}
               segStart={seg.start}
@@ -474,12 +478,12 @@ export function ReadDocumentTab({ documents, selectedDocumentId: selectedDocumen
             factText: fact.fact_text,
             categoryScores: Object.keys(categoryScores).length ? categoryScores : undefined,
             isPertinent,
+            verificationStatus: fact.verification_status ?? null,
           }
           if (isUserChunk) {
             if (!userByPage[pn]) userByPage[pn] = []
             userByPage[pn].push(range)
-          } else {
-            // Show all LLM-extracted facts as highlights (not only pertinent)
+          } else if (isPertinent) {
             if (!llmByPage[pn]) llmByPage[pn] = []
             llmByPage[pn].push(range)
           }
@@ -686,10 +690,7 @@ export function ReadDocumentTab({ documents, selectedDocumentId: selectedDocumen
   const deleteFact = async () => {
     if (!selectedDocumentId || !contextMenuFactId) return
     try {
-      const response = await fetch(
-        `${API_BASE}/documents/${selectedDocumentId}/facts/${contextMenuFactId}`,
-        { method: 'DELETE' }
-      )
+      const response = await deleteFactApi(selectedDocumentId, contextMenuFactId, API_BASE)
       if (!response.ok) {
         const err = await response.json().catch(() => ({}))
         setSuccessMessage(err.detail || 'Failed to delete fact')
@@ -704,6 +705,78 @@ export function ReadDocumentTab({ documents, selectedDocumentId: selectedDocumen
       setTimeout(() => setSuccessMessage(null), 3000)
     } catch {
       setSuccessMessage('Failed to delete fact')
+      setTimeout(() => setSuccessMessage(null), 3000)
+    }
+  }
+
+  const approveFact = async () => {
+    if (!selectedDocumentId || !contextMenuFactId) return
+    try {
+      const response = await approveFactApi(selectedDocumentId, contextMenuFactId, API_BASE)
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}))
+        setSuccessMessage(err.detail || 'Failed to approve fact')
+        setTimeout(() => setSuccessMessage(null), 3000)
+        return
+      }
+      setContextMenu(null)
+      setContextMenuFactId(null)
+      setContextMenuFactContext(null)
+      if (selectedDocumentId) fetchFactsForHighlights(selectedDocumentId)
+      setSuccessMessage('Fact approved')
+      setTimeout(() => setSuccessMessage(null), 3000)
+    } catch {
+      setSuccessMessage('Failed to approve fact')
+      setTimeout(() => setSuccessMessage(null), 3000)
+    }
+  }
+
+  const rejectFact = async () => {
+    if (!selectedDocumentId || !contextMenuFactId) return
+    try {
+      const response = await rejectFactApi(selectedDocumentId, contextMenuFactId, API_BASE)
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}))
+        setSuccessMessage(err.detail || 'Failed to reject fact')
+        setTimeout(() => setSuccessMessage(null), 3000)
+        return
+      }
+      setContextMenu(null)
+      setContextMenuFactId(null)
+      setContextMenuFactContext(null)
+      if (selectedDocumentId) fetchFactsForHighlights(selectedDocumentId)
+      setSuccessMessage('Fact rejected')
+      setTimeout(() => setSuccessMessage(null), 3000)
+    } catch {
+      setSuccessMessage('Failed to reject fact')
+      setTimeout(() => setSuccessMessage(null), 3000)
+    }
+  }
+
+  const togglePertinentFact = async () => {
+    if (!selectedDocumentId || !contextMenuFactId || !contextMenuFactContext) return
+    const next = !contextMenuFactContext.isPertinent
+    try {
+      const response = await patchFactApi(
+        selectedDocumentId,
+        contextMenuFactId,
+        { is_pertinent_to_claims_or_members: next },
+        API_BASE
+      )
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}))
+        setSuccessMessage(err.detail || 'Failed to update pertinence')
+        setTimeout(() => setSuccessMessage(null), 3000)
+        return
+      }
+      setContextMenu(null)
+      setContextMenuFactId(null)
+      setContextMenuFactContext(null)
+      if (selectedDocumentId) fetchFactsForHighlights(selectedDocumentId)
+      setSuccessMessage(next ? 'Marked pertinent' : 'Marked not pertinent')
+      setTimeout(() => setSuccessMessage(null), 3000)
+    } catch {
+      setSuccessMessage('Failed to update pertinence')
       setTimeout(() => setSuccessMessage(null), 3000)
     }
   }
@@ -737,17 +810,15 @@ export function ReadDocumentTab({ documents, selectedDocumentId: selectedDocumen
         }
       }
       if (modalMode === 'edit' && modalFactId) {
-        const response = await fetch(
-          `${API_BASE}/documents/${selectedDocumentId}/facts/${modalFactId}`,
+        const response = await patchFactApi(
+          selectedDocumentId,
+          modalFactId,
           {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              fact_text: factText,
-              is_pertinent_to_claims_or_members: modalPertinent,
-              category_scores,
-            }),
-          }
+            fact_text: factText,
+            is_pertinent_to_claims_or_members: modalPertinent,
+            category_scores,
+          },
+          API_BASE
         )
         if (!response.ok) {
           const errData = await response.json().catch(() => ({}))
@@ -942,7 +1013,6 @@ export function ReadDocumentTab({ documents, selectedDocumentId: selectedDocumen
                     <div
                       className="page-text-content"
                       onContextMenu={handleContextMenu}
-                      title={currentPage.text_markdown ? 'Content: markdown (canonical)' : undefined}
                     >
                       {showRawWithHighlights ? (
                         <PageTextWithHighlights
@@ -974,6 +1044,38 @@ export function ReadDocumentTab({ documents, selectedDocumentId: selectedDocumen
                   >
                     {contextMenuFactId ? (
                       <>
+                        {(() => {
+                          const ur = (userHighlightedRangesByPage[selectedPage ?? 0] || []).find(r => r.factId === contextMenuFactId)
+                          const lr = (llmHighlightedRangesByPage[selectedPage ?? 0] || []).find(r => r.factId === contextMenuFactId)
+                          const r = ur ?? lr
+                          const isApproved = r?.verificationStatus === 'approved'
+                          const isRejected = r?.verificationStatus === 'rejected'
+                          return (
+                            <>
+                              {isApproved ? (
+                                <button type="button" className="reader-context-menu-item" disabled>
+                                  Approved
+                                </button>
+                              ) : (
+                                <button type="button" className="reader-context-menu-item" onClick={approveFact}>
+                                  Approve
+                                </button>
+                              )}
+                              {isRejected ? (
+                                <button type="button" className="reader-context-menu-item" disabled>
+                                  Rejected
+                                </button>
+                              ) : (
+                                <button type="button" className="reader-context-menu-item" onClick={rejectFact}>
+                                  Reject
+                                </button>
+                              )}
+                            </>
+                          )
+                        })()}
+                        <button type="button" className="reader-context-menu-item" onClick={togglePertinentFact}>
+                          {contextMenuFactContext?.isPertinent ? 'Mark not pertinent' : 'Mark pertinent'}
+                        </button>
                         <button type="button" className="reader-context-menu-item" onClick={openEditFactModal}>
                           Edit fact
                         </button>

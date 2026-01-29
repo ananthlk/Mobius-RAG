@@ -295,6 +295,17 @@
   color: var(--text-tertiary);
 }
 
+/* Paragraph with highlights: normal flow so single newlines don't create odd line breaks */
+.reader-raw-p-with-highlights {
+  white-space: normal;
+  word-wrap: break-word;
+}
+
+.reader-raw-p-with-highlights .reader-fact-highlight,
+.reader-raw-p-with-highlights .reader-llm-fact-highlight {
+  display: inline;
+}
+
 /* Text marked as fact (reader-added) - persistent highlight */
 .reader-fact-highlight {
   background: rgba(255, 243, 205, 0.85);
@@ -309,6 +320,17 @@
   border-left: 3px solid var(--accent-blue, #2563eb);
   padding: 0 2px;
   border-radius: 0 2px 2px 0;
+}
+
+/* Approved facts: different style so they stand out from unapproved */
+.reader-fact-highlight-approved.reader-fact-highlight {
+  background: rgba(220, 252, 231, 0.9);
+  border-left-color: var(--success-fg, #16a34a);
+}
+
+.reader-fact-highlight-approved.reader-llm-fact-highlight {
+  background: rgba(220, 252, 231, 0.9);
+  border-left-color: var(--success-fg, #16a34a);
 }
 
 /* Context menu (right-click "Mark as fact") */
@@ -338,6 +360,15 @@
 
 .reader-context-menu-item:hover {
   background: var(--bg-hover);
+}
+
+.reader-context-menu-item:disabled {
+  color: var(--text-muted, #6b7280);
+  cursor: default;
+}
+
+.reader-context-menu-item:disabled:hover {
+  background: transparent;
 }
 
 /* Modal: Add fact from selection */

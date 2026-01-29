@@ -207,6 +207,13 @@ function App() {
     loadDocuments()
   }, [])
 
+  // Refresh documents when chunking is active or Live tab is visible so status and progress stay correct
+  useEffect(() => {
+    if (!chunkingActive && activeTab !== 'live') return
+    const interval = setInterval(loadDocuments, 3000)
+    return () => clearInterval(interval)
+  }, [chunkingActive, activeTab])
+
   const _restartExtraction = async (documentId: string) => {
     try {
       const response = await fetch(`http://localhost:8000/documents/${documentId}/extract/restart`, {
@@ -1169,7 +1176,14 @@ function App() {
       )
       // Order by entry date (newest first) so the Live Updates list is never jumbled
       jobs.sort((a, b) => new Date(b.start_time).getTime() - new Date(a.start_time).getTime())
-      setActiveJobs(jobs)
+      // Merge with current state so SSE-driven progress is not overwritten by stale poll
+      setActiveJobs(prev => jobs.map(j => {
+        const existing = prev.find(p => p.document_id === j.document_id)
+        if (existing && (existing.progress > j.progress || (existing.completed_paragraphs != null && j.completed_paragraphs != null && existing.completed_paragraphs > j.completed_paragraphs))) {
+          return { ...j, progress: existing.progress, completed_paragraphs: existing.completed_paragraphs, total_paragraphs: existing.total_paragraphs ?? j.total_paragraphs, current_page: existing.current_page ?? j.current_page, total_pages: existing.total_pages ?? j.total_pages }
+        }
+        return j
+      }))
     }
     updateActiveJobs()
     const interval = setInterval(updateActiveJobs, 2000)

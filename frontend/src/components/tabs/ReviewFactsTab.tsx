@@ -1,5 +1,21 @@
 import { useState, useEffect } from 'react'
+import { approveFactApi, deleteFactApi, patchFactApi, rejectFactApi } from '../../lib/factActions'
 import './ReviewFactsTab.css'
+
+// Category keys and labels (match backend CATEGORY_NAMES) for edit modal importance
+const CATEGORIES: { key: string; label: string }[] = [
+  { key: 'contacting_marketing_members', label: 'Contacting / marketing members' },
+  { key: 'member_eligibility_molina', label: 'Member eligibility (Molina)' },
+  { key: 'benefit_access_limitations', label: 'Benefit access / limitations' },
+  { key: 'prior_authorization_required', label: 'Prior authorization required' },
+  { key: 'claims_authorization_submissions', label: 'Claims / authorization / submissions' },
+  { key: 'compliant_claim_requirements', label: 'Compliant claim requirements' },
+  { key: 'claim_disputes', label: 'Claim disputes' },
+  { key: 'credentialing', label: 'Credentialing' },
+  { key: 'claim_submission_important', label: 'Claim submission (important)' },
+  { key: 'coordination_of_benefits', label: 'Coordination of benefits' },
+  { key: 'other_important', label: 'Other important' },
+]
 
 interface Fact {
   id: string
@@ -44,8 +60,103 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
   const [selectedFactTypes, setSelectedFactTypes] = useState<string[]>([])
   const [isPertinentFilter, setIsPertinentFilter] = useState<'all' | 'yes' | 'no'>('all')
   const [isEligibilityFilter, setIsEligibilityFilter] = useState<'all' | 'yes' | 'no'>('all')
+  const [approvalFilter, setApprovalFilter] = useState<'all' | 'pending' | 'approved' | 'rejected'>('all')
+  const [filtersOpen, setFiltersOpen] = useState(false)
+
+  // Edit modal
+  const [editingFact, setEditingFact] = useState<Fact | null>(null)
+  const [editFactText, setEditFactText] = useState('')
+  const [editPertinent, setEditPertinent] = useState(true)
+  const [editCategoryScores, setEditCategoryScores] = useState<Record<string, { score: number; direction: number }>>({})
+  const [editSaving, setEditSaving] = useState(false)
+  const [editError, setEditError] = useState<string | null>(null)
 
   const API_BASE = 'http://localhost:8000'
+
+  /** Shared helper: approve fact via API and update local state. */
+  const handleApprove = async (fact: Fact) => {
+    try {
+      const res = await approveFactApi(fact.document_id, fact.id, API_BASE)
+      if (res.ok) {
+        const updated = await res.json()
+        setFacts(prev =>
+          prev.map(f =>
+            f.id === fact.id
+              ? { ...f, verification_status: 'approved', verified_by: updated.verified_by, verified_at: updated.verified_at }
+              : f
+          )
+        )
+        if (selectedFact?.id === fact.id) {
+          setSelectedFact(prev => (prev?.id === fact.id ? { ...prev, verification_status: 'approved', verified_by: updated.verified_by, verified_at: updated.verified_at } : prev))
+        }
+      }
+    } catch (e) {
+      console.error('Failed to approve fact:', e)
+    }
+  }
+
+  /** Shared helper: reject fact via API and update local state. */
+  const handleReject = async (fact: Fact) => {
+    try {
+      const res = await rejectFactApi(fact.document_id, fact.id, API_BASE)
+      if (res.ok) {
+        const updated = await res.json()
+        setFacts(prev =>
+          prev.map(f =>
+            f.id === fact.id
+              ? { ...f, verification_status: 'rejected', verified_by: updated.verified_by, verified_at: updated.verified_at }
+              : f
+          )
+        )
+        if (selectedFact?.id === fact.id) {
+          setSelectedFact(prev => (prev?.id === fact.id ? { ...prev, verification_status: 'rejected', verified_by: updated.verified_by, verified_at: updated.verified_at } : prev))
+        }
+      }
+    } catch (e) {
+      console.error('Failed to reject fact:', e)
+    }
+  }
+
+  /** Shared helper: delete fact via API and update local state. */
+  const handleDelete = async (fact: Fact, e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!confirm('Delete this fact? This cannot be undone.')) return
+    try {
+      const res = await deleteFactApi(fact.document_id, fact.id, API_BASE)
+      if (res.ok) {
+        setFacts(prev => prev.filter(f => f.id !== fact.id))
+        if (selectedFact?.id === fact.id) setSelectedFact(null)
+        if (editingFact?.id === fact.id) setEditingFact(null)
+      } else {
+        const err = await res.json().catch(() => ({}))
+        alert(err.detail || 'Failed to delete fact')
+      }
+    } catch (e) {
+      console.error('Failed to delete fact:', e)
+      alert('Failed to delete fact')
+    }
+  }
+
+  /** One-click toggle pertinence (is_pertinent_to_claims_or_members). */
+  const handleTogglePertinent = async (fact: Fact, e: React.MouseEvent) => {
+    e.stopPropagation()
+    const next = fact.is_pertinent_to_claims_or_members !== 'true'
+    try {
+      const res = await patchFactApi(fact.document_id, fact.id, { is_pertinent_to_claims_or_members: next }, API_BASE)
+      if (res.ok) {
+        const val = next ? 'true' : 'false'
+        setFacts(prev => prev.map(f => (f.id === fact.id ? { ...f, is_pertinent_to_claims_or_members: val } : f)))
+        if (selectedFact?.id === fact.id) {
+          setSelectedFact(prev => (prev?.id === fact.id ? { ...prev, is_pertinent_to_claims_or_members: val } : prev))
+        }
+        if (editingFact?.id === fact.id) {
+          setEditPertinent(next)
+        }
+      }
+    } catch (err) {
+      console.error('Failed to toggle pertinence:', err)
+    }
+  }
 
   const loadFacts = async () => {
     setLoading(true)
@@ -232,7 +343,13 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
         return false
       }
     }
-    
+
+    // Approval / verification status filter
+    if (approvalFilter !== 'all') {
+      const status = fact.verification_status || 'pending'
+      if (status !== approvalFilter) return false
+    }
+
     return true
   })
 
@@ -263,47 +380,120 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
     setSelectedFactTypes([])
     setIsPertinentFilter('all')
     setIsEligibilityFilter('all')
+    setApprovalFilter('all')
     setSearchQuery('')
   }
 
-  const handleApprove = async (fact: Fact) => {
+  const openEditModal = (fact: Fact, e: React.MouseEvent) => {
+    e.stopPropagation()
+    setEditingFact(fact)
+    setEditFactText(fact.fact_text)
+    setEditPertinent(fact.is_pertinent_to_claims_or_members === 'true')
+    const scores: Record<string, { score: number; direction: number }> = {}
+    for (const { key } of CATEGORIES) {
+      const data = fact.category_scores?.[key]
+      const score = typeof data?.score === 'number' ? data.score : 0
+      const direction = typeof data?.direction === 'number' ? data.direction : 0.5
+      scores[key] = { score, direction }
+    }
+    setEditCategoryScores(scores)
+    setEditError(null)
+  }
+
+  const closeEditModal = () => {
+    setEditingFact(null)
+    setEditError(null)
+  }
+
+  const handleEditCategoryScoreChange = (key: string, score: number) => {
+    setEditCategoryScores(prev => ({
+      ...prev,
+      [key]: { score, direction: prev[key]?.direction ?? 0.5 },
+    }))
+  }
+
+  const saveEditFact = async () => {
+    if (!editingFact || !editFactText.trim()) return
+    setEditSaving(true)
+    setEditError(null)
     try {
-      const res = await fetch(
-        `${API_BASE}/documents/${fact.document_id}/facts/${fact.id}`,
-        {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ verification_status: 'approved' }),
-        }
-      )
-      if (res.ok) {
-        const updated = await res.json()
-        setFacts(prev =>
-          prev.map(f =>
-            f.id === fact.id
-              ? { ...f, verification_status: 'approved', verified_by: updated.verified_by, verified_at: updated.verified_at }
-              : f
-          )
-        )
-        if (selectedFact?.id === fact.id) {
-          setSelectedFact(prev => (prev?.id === fact.id ? { ...prev, verification_status: 'approved', verified_by: updated.verified_by, verified_at: updated.verified_at } : prev))
+      const category_scores: Record<string, { score: number; direction: number }> = {}
+      for (const { key } of CATEGORIES) {
+        const entry = editCategoryScores[key]
+        if (entry && entry.score > 0) {
+          category_scores[key] = { score: entry.score, direction: entry.direction ?? 0.5 }
         }
       }
+      const res = await patchFactApi(
+        editingFact.document_id,
+        editingFact.id,
+        {
+          fact_text: editFactText.trim(),
+          is_pertinent_to_claims_or_members: editPertinent,
+          category_scores,
+        },
+        API_BASE
+      )
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        setEditError(err.detail || 'Failed to update fact')
+        return
+      }
+      const updatedPertinent = editPertinent ? 'true' : 'false'
+      const updatedScores: Record<string, { score: number; direction: number | null }> = {}
+      for (const { key } of CATEGORIES) {
+        const v = editCategoryScores[key] ?? { score: 0, direction: 0.5 }
+        updatedScores[key] = { score: v.score, direction: v.direction }
+      }
+      setFacts(prev =>
+        prev.map(f =>
+          f.id === editingFact.id
+            ? { ...f, fact_text: editFactText.trim(), is_pertinent_to_claims_or_members: updatedPertinent, category_scores: updatedScores }
+            : f
+        )
+      )
+      if (selectedFact?.id === editingFact.id) {
+        setSelectedFact(prev =>
+          prev?.id === editingFact.id
+            ? { ...prev, fact_text: editFactText.trim(), is_pertinent_to_claims_or_members: updatedPertinent, category_scores: updatedScores }
+            : prev
+        )
+      }
+      closeEditModal()
     } catch (e) {
-      console.error('Failed to approve fact:', e)
+      setEditError('Failed to update fact')
+    } finally {
+      setEditSaving(false)
     }
   }
 
+  // Consolidated action handlers for card and expanded (consistent with Read Document context menu)
+  const onApprove = (fact: Fact) => (e: React.MouseEvent) => {
+    e.stopPropagation()
+    handleApprove(fact)
+  }
+  const onReject = (fact: Fact) => (e: React.MouseEvent) => {
+    e.stopPropagation()
+    handleReject(fact)
+  }
+  const onEdit = (fact: Fact) => (e: React.MouseEvent) => openEditModal(fact, e)
+  const onDelete = (fact: Fact) => (e: React.MouseEvent) => handleDelete(fact, e)
+
   return (
     <div className="review-facts-tab">
-      <div className="facts-layout">
-        {/* Left Sidebar - Filters */}
-        <div className="filters-sidebar">
+      {/* Floating filters panel (toggle to open) */}
+      <div className={`filters-float ${filtersOpen ? 'filters-float-open' : ''}`}>
+        <div className="filters-float-inner">
           <div className="filters-header">
             <h3 className="filters-title">Filters</h3>
-            <button onClick={clearFilters} className="clear-filters-btn">
-              Clear All
-            </button>
+            <div className="filters-header-actions">
+              <button onClick={clearFilters} className="clear-filters-btn">
+                Clear All
+              </button>
+              <button type="button" className="filters-close-btn" onClick={() => setFiltersOpen(false)} aria-label="Close filters">
+                ×
+              </button>
+            </div>
           </div>
 
           <div className="filters-content">
@@ -480,19 +670,44 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
                 <option value="no">No</option>
               </select>
             </div>
+
+            <div className="filter-group">
+              <label className="filter-label">Approval status</label>
+              <select
+                value={approvalFilter}
+                onChange={(e) => setApprovalFilter(e.target.value as 'all' | 'pending' | 'approved' | 'rejected')}
+                className="filter-select"
+              >
+                <option value="all">All</option>
+                <option value="pending">Pending</option>
+                <option value="approved">Approved</option>
+                <option value="rejected">Rejected</option>
+              </select>
+            </div>
           </div>
         </div>
+      </div>
 
-        {/* Main Area - Fact Cards */}
-        <div className="facts-main">
-          <div className="facts-header">
-            <h2 className="facts-title">
-              Facts ({filteredFacts.length})
-            </h2>
-            <button onClick={loadFacts} className="btn btn-secondary" disabled={loading}>
+      {/* Full-width main area - Fact Cards */}
+      <div className="facts-main">
+        <div className="facts-header">
+          <h2 className="facts-title">
+            Facts ({filteredFacts.length})
+          </h2>
+          <div className="facts-header-actions">
+            <button
+              type="button"
+              className={`btn btn-secondary filters-toggle-btn ${filtersOpen ? 'filters-toggle-btn-open' : ''}`}
+              onClick={() => setFiltersOpen(prev => !prev)}
+              aria-label={filtersOpen ? 'Close filters' : 'Open filters'}
+            >
+              Filters{filtersOpen ? ' ▲' : ' ▼'}
+            </button>
+            <button onClick={loadFacts} className="btn btn-secondary" disabled={loading} title="Reload facts">
               {loading ? 'Loading...' : 'Refresh'}
             </button>
           </div>
+        </div>
 
           {loading ? (
             <div className="loading-facts">Loading facts...</div>
@@ -548,9 +763,14 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
                       )}
                       
                       <div className="fact-indicators">
-                        <span className={`pertinent-badge ${isPertinent ? 'yes' : 'no'}`}>
+                        <button
+                          type="button"
+                          className={`pertinent-badge pertinent-badge-clickable ${isPertinent ? 'yes' : 'no'}`}
+                          onClick={e => handleTogglePertinent(fact, e)}
+                          title={isPertinent ? 'Click to mark not pertinent' : 'Click to mark pertinent'}
+                        >
                           {isPertinent ? '✓ Pertinent' : '✗ Not Pertinent'}
-                        </span>
+                        </button>
                         {isEligible && (
                           <span className="eligibility-badge">Eligibility Related</span>
                         )}
@@ -563,6 +783,33 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
                           {fact.program && <span>{fact.program}</span>}
                         </div>
                       ) : null}
+
+                      <div className="fact-card-actions" onClick={e => e.stopPropagation()}>
+                        {fact.verification_status === 'approved' ? (
+                          <button type="button" className="btn btn-small btn-secondary" disabled>
+                            Approved
+                          </button>
+                        ) : (
+                          <button type="button" className="btn btn-small btn-secondary" onClick={onApprove(fact)}>
+                            Approve
+                          </button>
+                        )}
+                        {fact.verification_status === 'rejected' ? (
+                          <button type="button" className="btn btn-small btn-secondary" disabled>
+                            Rejected
+                          </button>
+                        ) : (
+                          <button type="button" className="btn btn-small btn-secondary" onClick={onReject(fact)}>
+                            Reject
+                          </button>
+                        )}
+                        <button type="button" className="btn btn-small btn-secondary" onClick={onEdit(fact)}>
+                          Edit
+                        </button>
+                        <button type="button" className="btn btn-small btn-secondary" onClick={onDelete(fact)}>
+                          Delete
+                        </button>
+                      </div>
                     </div>
                     
                     {/* Expanded Details */}
@@ -650,19 +897,34 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
                         </div>
                         
                         <div className="fact-expanded-actions">
-                          {(fact.verification_status !== 'approved') && (
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                handleApprove(fact)
-                              }}
-                              className="btn btn-secondary"
-                            >
+                          {fact.verification_status === 'approved' ? (
+                            <button type="button" className="btn btn-secondary" disabled>
+                              Approved
+                            </button>
+                          ) : (
+                            <button type="button" className="btn btn-secondary" onClick={onApprove(fact)}>
                               Approve
                             </button>
                           )}
+                          {fact.verification_status === 'rejected' ? (
+                            <button type="button" className="btn btn-secondary" disabled>
+                              Rejected
+                            </button>
+                          ) : (
+                            <button type="button" className="btn btn-secondary" onClick={onReject(fact)}>
+                              Reject
+                            </button>
+                          )}
+                          <button type="button" className="btn btn-secondary" onClick={onEdit(fact)}>
+                            Edit
+                          </button>
+                          <button type="button" className="btn btn-secondary" onClick={onDelete(fact)}>
+                            Delete
+                          </button>
                           {onViewDocument && (
                             <button
+                              type="button"
+                              className="btn btn-primary"
                               onClick={(e) => {
                                 e.stopPropagation()
                                 onViewDocument(fact.document_id, {
@@ -670,7 +932,6 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
                                   factId: fact.id,
                                 })
                               }}
-                              className="btn btn-primary"
                             >
                               View in Document
                             </button>
@@ -684,8 +945,78 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
             </div>
           )}
         </div>
-      </div>
 
+      {/* Edit fact modal */}
+      {editingFact && (
+        <div className="fact-card-modal-overlay" onClick={closeEditModal}>
+          <div className="fact-card-modal" onClick={e => e.stopPropagation()}>
+            <h3 className="fact-card-modal-title">Edit fact</h3>
+            <div className="fact-card-modal-body">
+              <p className="fact-card-modal-doc-name">{editingFact?.document_filename}</p>
+              <div className="fact-card-modal-field">
+                <label className="filter-label">Fact text</label>
+                <textarea
+                  className="fact-card-modal-textarea"
+                  value={editFactText}
+                  onChange={e => setEditFactText(e.target.value)}
+                  rows={5}
+                />
+              </div>
+              <div className="fact-card-modal-field">
+                <label className="fact-card-modal-checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={editPertinent}
+                    onChange={e => setEditPertinent(e.target.checked)}
+                  />
+                  Pertinent to claims or members
+                </label>
+              </div>
+              <div className="fact-card-modal-field">
+                <label className="filter-label">Category relevance (0–1)</label>
+                <p className="fact-card-modal-hint">Set score per category; 0 = not relevant.</p>
+                <div className="fact-card-modal-categories fact-card-modal-category-sliders">
+                  {CATEGORIES.map(({ key, label }) => (
+                    <div key={key} className="fact-card-modal-category-row">
+                      <label className="fact-card-modal-category-label" htmlFor={`edit-cat-${key}`}>
+                        {label}
+                      </label>
+                      <div className="fact-card-modal-category-slider-wrap">
+                        <input
+                          id={`edit-cat-${key}`}
+                          type="range"
+                          min={0}
+                          max={1}
+                          step={0.1}
+                          value={editCategoryScores[key]?.score ?? 0}
+                          onChange={e => handleEditCategoryScoreChange(key, parseFloat(e.target.value))}
+                        />
+                        <span className="fact-card-modal-category-value">
+                          {(editCategoryScores[key]?.score ?? 0).toFixed(1)}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              {editError && <div className="fact-card-modal-error">{editError}</div>}
+              <div className="fact-card-modal-actions">
+                <button type="button" className="btn btn-secondary" onClick={closeEditModal}>
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={saveEditFact}
+                  disabled={editSaving || !editFactText.trim()}
+                >
+                  {editSaving ? 'Saving...' : 'Save'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
