@@ -1,0 +1,15 @@
+# Default LLM config (matches env-based behavior when env is set).
+# Version can be file name (default) or a "version" field for content-addressed refs.
+version: "default"
+provider: "ollama"
+model: "llama3.1:8b"
+options:
+  num_predict: 8192
+  temperature: 0.1
+# Ollama-specific (used when provider is ollama)
+ollama:
+  base_url: "http://localhost:11434"
+# Vertex-specific (used when provider is vertex)
+vertex:
+  project_id: null  # set via env or override
+  location: "us-central1"

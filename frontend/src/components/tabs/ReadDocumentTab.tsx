@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, type ReactNode } from 'react'
+import { useState, useEffect, useCallback, type ReactNode } from 'react'
 import './ReadDocumentTab.css'
 
 const API_BASE = 'http://localhost:8000'
@@ -93,6 +93,7 @@ interface Document {
 
 interface ReadDocumentTabProps {
   documents: Document[]
+  selectedDocumentId?: string | null
   navigateToRead?: { documentId: string; pageNumber?: number; factId?: string } | null
   onNavigateToReadConsumed?: () => void
   onDocumentSelect?: (documentId: string) => void
@@ -133,7 +134,7 @@ function SegmentWithHighlights({
   segStart,
   segEnd,
   ranges,
-  normalizedLen,
+  normalizedLen: _normalizedLen,
 }: {
   segmentText: string
   segStart: number
@@ -385,8 +386,8 @@ function PageTextWithHighlights({
   return <div className="reader-markdown">{segmentEls}</div>
 }
 
-export function ReadDocumentTab({ documents, navigateToRead, onNavigateToReadConsumed, onDocumentSelect }: ReadDocumentTabProps) {
-  const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null)
+export function ReadDocumentTab({ documents, selectedDocumentId: selectedDocumentIdProp, navigateToRead, onNavigateToReadConsumed, onDocumentSelect }: ReadDocumentTabProps) {
+  const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(selectedDocumentIdProp ?? null)
   const [pages, setPages] = useState<Page[]>([])
   const [selectedPage, setSelectedPage] = useState<number | null>(null)
   const [pageZoom, setPageZoom] = useState(1.0)
@@ -449,9 +450,11 @@ export function ReadDocumentTab({ documents, navigateToRead, onNavigateToReadCon
         v != null && typeof v === 'number' && !isNaN(v) ? v : typeof v === 'string' ? parseFloat(v) : null
       for (const chunk of chunks) {
         const isUserChunk = chunkPageNum(chunk) === 0
+        const chunkPage = chunkPageNum(chunk)
         const facts = chunk.facts || []
         for (const fact of facts) {
-          const pn = fact.page_number != null ? Number(fact.page_number) : null
+          // Use fact.page_number with fallback to chunk.page_number (AI facts have offsets in page markdown)
+          const pn = fact.page_number != null ? Number(fact.page_number) : chunkPage
           const so = fact.start_offset != null ? Number(fact.start_offset) : null
           const eo = fact.end_offset != null ? Number(fact.end_offset) : null
           if (pn == null || so == null || eo == null || so >= eo) continue
@@ -475,7 +478,8 @@ export function ReadDocumentTab({ documents, navigateToRead, onNavigateToReadCon
           if (isUserChunk) {
             if (!userByPage[pn]) userByPage[pn] = []
             userByPage[pn].push(range)
-          } else if (isPertinent) {
+          } else {
+            // Show all LLM-extracted facts as highlights (not only pertinent)
             if (!llmByPage[pn]) llmByPage[pn] = []
             llmByPage[pn].push(range)
           }
@@ -495,12 +499,18 @@ export function ReadDocumentTab({ documents, navigateToRead, onNavigateToReadCon
     }
   }, [selectedDocumentId, fetchPages, fetchFactsForHighlights])
 
-  // Sync document when navigating from Review Facts
+  // Sync document when navigating from Review Facts or when App selection changes
   useEffect(() => {
     if (navigateToRead?.documentId) {
       setSelectedDocumentId(navigateToRead.documentId)
     }
   }, [navigateToRead?.documentId])
+
+  useEffect(() => {
+    if (selectedDocumentIdProp != null) {
+      setSelectedDocumentId(selectedDocumentIdProp)
+    }
+  }, [selectedDocumentIdProp])
 
   // Set page when navigating from Review Facts (after pages load)
   useEffect(() => {

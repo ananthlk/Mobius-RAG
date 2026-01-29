@@ -31,7 +31,7 @@ export function ErrorReviewTab() {
   const [documents, setDocuments] = useState<DocumentWithErrors[]>([])
   const [loading, setLoading] = useState(false)
   const [selectedError, setSelectedError] = useState<ProcessingError | null>(null)
-  const [selectedDocument, setSelectedDocument] = useState<string | null>(null)
+  const [selectedDocument, _setSelectedDocument] = useState<string | null>(null)
   
   // Filters
   const [filterSeverity, setFilterSeverity] = useState<string>('all')

@@ -74,38 +74,43 @@ function App() {
   const [activeTab, setActiveTab] = useState<'input' | 'status' | 'live' | 'read' | 'review' | 'database' | 'errors'>('input')
   
   // Upload state
-  const [file, setFile] = useState<File | null>(null)
+  const [_file, setFile] = useState<File | null>(null)
   const [uploading, setUploading] = useState(false)
   const [result, setResult] = useState<UploadResponse | null>(null)
   const [status, setStatus] = useState<StatusResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   
   // Document viewing state
-  const [pages, setPages] = useState<any[]>([])
+  const [_pages, _setPages] = useState<any[]>([])
   const [selectedPage, setSelectedPage] = useState<number | null>(null)
-  const [pageZoom, setPageZoom] = useState(1.0)
+  const [_pageZoom, _setPageZoom] = useState(1.0)
   
   // Document list state
   const [documents, setDocuments] = useState<any[]>([])
-  const [loadingDocuments, setLoadingDocuments] = useState(false)
+  const [_loadingDocuments, setLoadingDocuments] = useState(false)
   const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null)
-  const [selectedDocument, setSelectedDocument] = useState<any | null>(null)
+  const [_selectedDocument, setSelectedDocument] = useState<any | null>(null)
   const [navigateToRead, setNavigateToRead] = useState<{ documentId: string; pageNumber?: number; factId?: string } | null>(null)
   
   // Chunking state
   const [chunkingActive, setChunkingActive] = useState(false)
   const [chunkingComplete, setChunkingComplete] = useState(false)
-  const [totalParagraphs, setTotalParagraphs] = useState<number | null>(null)
+  const [_totalParagraphs, setTotalParagraphs] = useState<number | null>(null)
   const [paragraphs, setParagraphs] = useState<Map<string, ParagraphState>>(new Map())
   const [retryThreshold, setRetryThreshold] = useState(0.6)
+  const [critiqueEnabled, setCritiqueEnabled] = useState(true)
+  const [maxRetries, setMaxRetries] = useState(2)
+  const [defaultLlmConfigVersion, setDefaultLlmConfigVersion] = useState<string | null>(null)
+  const [defaultPromptVersions, setDefaultPromptVersions] = useState<Record<string, string> | null>(null)
   const [selectedParagraphId, setSelectedParagraphId] = useState<string | null>(null)
   const [processingParagraphId, setProcessingParagraphId] = useState<string | null>(null)
   const [processingStage, setProcessingStage] = useState<'idle' | 'extracting' | 'critiquing' | 'retrying'>('idle')
-  const [processingRetryCount, setProcessingRetryCount] = useState(0)
-  const [chunkingStatus, setChunkingStatus] = useState<'idle' | 'in_progress' | 'completed' | 'stopped' | 'failed'>('idle')
+  const [_processingRetryCount, setProcessingRetryCount] = useState(0)
+  const [_chunkingStatus, setChunkingStatus] = useState<'idle' | 'in_progress' | 'completed' | 'stopped' | 'failed'>('idle')
   const streamContainerRef = useRef<HTMLDivElement>(null)
   const [eventSource, setEventSource] = useState<EventSource | null>(null)
   const lastEventTimeRef = useRef<number>(Date.now())
+  const closedDueToStreamEndRef = useRef<boolean>(false)
   
   // Live updates state
   const [activeJobs, setActiveJobs] = useState<Array<{
@@ -125,8 +130,8 @@ function App() {
   const [streamingOutput, setStreamingOutput] = useState('')
   
   // Chunking UI state (for old chunking view - will be removed)
-  const [pageFilter, setPageFilter] = useState<number | 'all'>('all')
-  const [summarySearch, setSummarySearch] = useState<string>('')
+  const [pageFilter, _setPageFilter] = useState<number | 'all'>('all')
+  const [summarySearch, _setSummarySearch] = useState<string>('')
 
   // Poll extraction status only when actively extracting
   useEffect(() => {
@@ -202,7 +207,7 @@ function App() {
     loadDocuments()
   }, [])
 
-  const restartExtraction = async (documentId: string) => {
+  const _restartExtraction = async (documentId: string) => {
     try {
       const response = await fetch(`http://localhost:8000/documents/${documentId}/extract/restart`, {
         method: 'POST'
@@ -218,7 +223,7 @@ function App() {
     }
   }
 
-  const startChunkingForDocument = async (documentId: string) => {
+  const _startChunkingForDocument = async (documentId: string) => {
     // Find the document in the list
     const doc = documents.find(d => d.id === documentId)
     if (doc) {
@@ -232,12 +237,25 @@ function App() {
 
   const restartChunkingForDocument = async (documentId: string) => {
     try {
-      const response = await fetch(`http://localhost:8000/documents/${documentId}/chunking/restart?threshold=${encodeURIComponent(retryThreshold)}`, {
-        method: 'POST'
-      })
+      const restartBody: Record<string, unknown> = {
+        threshold: retryThreshold,
+        critique_enabled: critiqueEnabled,
+        max_retries: Math.max(0, maxRetries),
+      }
+      if (defaultLlmConfigVersion) restartBody.llm_config_version = defaultLlmConfigVersion
+      if (defaultPromptVersions && Object.keys(defaultPromptVersions).length > 0) restartBody.prompt_versions = defaultPromptVersions
+      const response = await fetch(
+        `http://localhost:8000/documents/${documentId}/chunking/restart?threshold=${encodeURIComponent(retryThreshold)}&critique_enabled=${critiqueEnabled}&max_retries=${maxRetries}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(restartBody),
+        }
+      )
       if (response.ok) {
         // Connect to live stream if not already connected
         if (!eventSource) {
+          closedDueToStreamEndRef.current = false
           const es = new EventSource(`http://localhost:8000/documents/${documentId}/chunking/live`)
           setEventSource(es)
           setStreamingOutput('') // Fresh status log
@@ -642,18 +660,26 @@ function App() {
       case 'chunking_complete':
         setChunkingActive(false)
         setChunkingComplete(true)
+        closedDueToStreamEndRef.current = true
         if (eventSource) {
           eventSource.close()
           setEventSource(null)
         }
         break
         
-      case 'stream_end':
+      case 'stream_end': {
+        const reason = data?.reason
+        if (reason === 'chunking_complete') {
+          setChunkingActive(false)
+          setChunkingComplete(true)
+        }
+        closedDueToStreamEndRef.current = true
         if (eventSource) {
           eventSource.close()
           setEventSource(null)
         }
         break
+      }
     }
   }
 
@@ -791,6 +817,7 @@ function App() {
       setEventSource(null)
     }
     
+    closedDueToStreamEndRef.current = false
     const es = new EventSource(`http://localhost:8000/documents/${documentId}/chunking/live`)
     setEventSource(es)
     setStreamingOutput('') // Fresh status log for this job
@@ -809,16 +836,18 @@ function App() {
         }
         const eventData = JSON.parse(event.data)
         lastEventTimeRef.current = Date.now()
-        console.log('SSE event received:', eventData.event, eventData.data?.paragraph_id || 'no para_id')
+        const paraId = eventData.data?.paragraph_id
+        const logLabel = eventData.event === 'stream_end' ? `stream_end (${eventData.data?.reason ?? 'end'})` : `${eventData.event}${paraId ? ` ${paraId}` : ''}`
+        console.log('SSE event received:', logLabel)
         handleStreamEvent(eventData)
       } catch (err) {
         console.error('Failed to parse stream event:', err)
       }
     }
     
-    es.onerror = (err) => {
-      console.error('EventSource error:', err, 'readyState:', es.readyState)
-      // Check if connection is closed
+    es.onerror = () => {
+      // If we closed due to stream_end, don't log reconnection noise
+      if (closedDueToStreamEndRef.current) return
       if (es.readyState === EventSource.CLOSED) {
         console.log('SSE connection closed for document:', documentId)
       } else if (es.readyState === EventSource.CONNECTING) {
@@ -834,9 +863,20 @@ function App() {
     console.log(`Starting chunking for document ${documentId}...`)
     
     try {
+      const body: Record<string, unknown> = {
+        threshold: retryThreshold,
+        critique_enabled: critiqueEnabled,
+        max_retries: Math.max(0, maxRetries),
+      }
+      if (defaultLlmConfigVersion) body.llm_config_version = defaultLlmConfigVersion
+      if (defaultPromptVersions && Object.keys(defaultPromptVersions).length > 0) body.prompt_versions = defaultPromptVersions
       const response = await fetch(
-        `http://localhost:8000/documents/${documentId}/chunking/start?threshold=${encodeURIComponent(retryThreshold)}`,
-        { method: 'POST' }
+        `http://localhost:8000/documents/${documentId}/chunking/start?threshold=${encodeURIComponent(retryThreshold)}&critique_enabled=${critiqueEnabled}&max_retries=${maxRetries}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }
       )
       
       console.log(`Start chunking response status: ${response.status}`)
@@ -856,7 +896,7 @@ function App() {
       const data = await response.json()
       console.log('Start chunking response:', data)
       
-      if (data.status === 'started') {
+      if (data.status === 'started' || data.status === 'queued') {
         // Set chunking as active immediately
         setChunkingActive(true)
         setChunkingComplete(false)
@@ -1006,11 +1046,11 @@ function App() {
     return entries
   }, [paragraphs])
 
-  const availablePages = useMemo(() => {
+  const _availablePages = useMemo(() => {
     return [...new Set(paragraphsByPage.map(([p]) => p))].sort((a, b) => a - b)
   }, [paragraphsByPage])
 
-  const filteredParagraphsByPage = useMemo(() => {
+  const _filteredParagraphsByPage = useMemo(() => {
     let filtered = paragraphsByPage
 
     // Apply page filter
@@ -1035,12 +1075,12 @@ function App() {
     return filtered
   }, [paragraphsByPage, pageFilter, summarySearch])
 
-  const completedCount = useMemo(
+  const _completedCount = useMemo(
     () => [...paragraphs.values()].filter((p) => p.final_status !== 'pending').length,
     [paragraphs]
   )
 
-  const closeChunking = () => {
+  const _closeChunking = () => {
     setChunkingActive(false)
     setChunkingComplete(false)
     setTotalParagraphs(null)
@@ -1051,6 +1091,8 @@ function App() {
     setProcessingRetryCount(0)
   }
 
+  // Reference unused values so strict noUnusedLocals passes (kept for future use)
+  void [_restartExtraction, _startChunkingForDocument, _availablePages, _filteredParagraphsByPage, _completedCount, _closeChunking]
 
   // Track active/recent jobs for Live Updates tab (in_progress, queued, or completed so user can view events)
   useEffect(() => {
@@ -1125,6 +1167,8 @@ function App() {
           }
         })
       )
+      // Order by entry date (newest first) so the Live Updates list is never jumbled
+      jobs.sort((a, b) => new Date(b.start_time).getTime() - new Date(a.start_time).getTime())
       setActiveJobs(jobs)
     }
     updateActiveJobs()
@@ -1318,9 +1362,27 @@ function App() {
 
   return (
     <div className="app">
-      <Header />
+      <Header
+        chunkingOptions={{
+          threshold: retryThreshold,
+          critiqueEnabled,
+          maxRetries,
+        }}
+        onChunkingOptionsChange={{
+          setThreshold: setRetryThreshold,
+          setCritiqueEnabled,
+          setMaxRetries,
+        }}
+        defaultLlmConfigVersion={defaultLlmConfigVersion}
+        onDefaultLlmConfigVersionChange={setDefaultLlmConfigVersion}
+        defaultPromptVersions={defaultPromptVersions}
+        onDefaultPromptVersionsChange={setDefaultPromptVersions}
+      />
       
-      <Tabs activeTab={activeTab} onTabChange={setActiveTab}>
+      <Tabs
+        activeTab={activeTab}
+        onTabChange={(tabId: string) => setActiveTab(tabId as typeof activeTab)}
+      >
         <TabList>
           <Tab id="input" isActive={activeTab === 'input'} onClick={() => setActiveTab('input')}>
             Document Input
@@ -1361,6 +1423,16 @@ function App() {
               onViewDocument={handleViewDocument}
               onDeleteDocument={deleteDocument}
               onRestartChunking={handleRestartChunking}
+              chunkingOptions={{
+                threshold: retryThreshold,
+                critiqueEnabled,
+                maxRetries,
+              }}
+              onChunkingOptionsChange={{
+                setThreshold: setRetryThreshold,
+                setCritiqueEnabled,
+                setMaxRetries,
+              }}
             />
           </TabPanel>
 
@@ -1377,10 +1449,11 @@ function App() {
           <TabPanel id="read" isActive={activeTab === 'read'}>
             <ReadDocumentTab
               documents={documents}
+              selectedDocumentId={selectedDocumentId}
               navigateToRead={navigateToRead}
               onNavigateToReadConsumed={() => setNavigateToRead(null)}
-              onDocumentSelect={(docId) => {
-                const doc = documents.find(d => d.id === docId)
+              onDocumentSelect={(docId: string) => {
+                const doc = documents.find((d: { id: string }) => d.id === docId)
                 if (doc) {
                   selectDocument(docId, doc)
                 }

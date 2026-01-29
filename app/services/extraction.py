@@ -1,7 +1,7 @@
 """Extraction service for extracting facts from paragraphs."""
 import json
 import logging
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from app.services.llm_provider import get_llm_provider
 from app.services.utils import parse_json_response
 
@@ -119,29 +119,44 @@ def _paragraph_block(paragraph_text: str, section_path: str | None = None) -> st
     return paragraph_text.strip()
 
 
-async def extract_facts(paragraph_text: str, critique_feedback: str = None, issues: List[str] = None, section_path: str | None = None) -> Dict[str, Any]:
+async def extract_facts(
+    paragraph_text: str,
+    critique_feedback: str = None,
+    issues: List[str] = None,
+    section_path: str | None = None,
+    extraction_prompt_body: Optional[str] = None,
+    retry_extraction_prompt_body: Optional[str] = None,
+    llm=None,
+) -> Dict[str, Any]:
     """
     Extract facts from a paragraph using LLM.
-    
+
     Args:
         paragraph_text: The paragraph text to analyze
         critique_feedback: Optional feedback from critique agent for retry
         issues: Optional list of issues identified
-    
+        section_path: Optional section path for context
+        extraction_prompt_body: Optional prompt template (overrides in-code default)
+        retry_extraction_prompt_body: Optional retry prompt template
+        llm: Optional LLM provider instance (uses get_llm_provider() if None)
+
     Returns:
         Dict with 'summary' and 'facts' keys
     """
-    llm = get_llm_provider()
-    
+    if llm is None:
+        llm = get_llm_provider()
+
     block = _paragraph_block(paragraph_text, section_path)
     if critique_feedback:
-        prompt = RETRY_EXTRACTION_PROMPT.format(
+        template = retry_extraction_prompt_body if retry_extraction_prompt_body else RETRY_EXTRACTION_PROMPT
+        prompt = template.format(
             paragraph_block=block,
             critique_feedback=critique_feedback,
             issues="\n".join(f"- {issue}" for issue in (issues or []))
         )
     else:
-        prompt = EXTRACTION_PROMPT.format(paragraph_block=block)
+        template = extraction_prompt_body if extraction_prompt_body else EXTRACTION_PROMPT
+        prompt = template.format(paragraph_block=block)
     try:
         response = await llm.generate(prompt)
         result = parse_json_response(response)
@@ -166,26 +181,36 @@ async def extract_facts(paragraph_text: str, critique_feedback: str = None, issu
         }
 
 
-async def stream_extract_facts(paragraph_text: str, critique_feedback: str = None, issues: List[str] = None, section_path: str | None = None):
+async def stream_extract_facts(
+    paragraph_text: str,
+    critique_feedback: str = None,
+    issues: List[str] = None,
+    section_path: str | None = None,
+    extraction_prompt_body: Optional[str] = None,
+    retry_extraction_prompt_body: Optional[str] = None,
+    llm=None,
+):
     """
     Stream extraction and collect full response.
-    
+
     Yields:
         Chunks of text as they arrive
-    
-    Returns:
-        Final parsed result after stream completes
+
+    Optional: extraction_prompt_body, retry_extraction_prompt_body, llm (provider instance).
     """
-    llm = get_llm_provider()
+    if llm is None:
+        llm = get_llm_provider()
     block = _paragraph_block(paragraph_text, section_path)
     if critique_feedback:
-        prompt = RETRY_EXTRACTION_PROMPT.format(
+        template = retry_extraction_prompt_body if retry_extraction_prompt_body else RETRY_EXTRACTION_PROMPT
+        prompt = template.format(
             paragraph_block=block,
             critique_feedback=critique_feedback,
             issues="\n".join(f"- {issue}" for issue in (issues or []))
         )
     else:
-        prompt = EXTRACTION_PROMPT.format(paragraph_block=block)
+        template = extraction_prompt_body if extraction_prompt_body else EXTRACTION_PROMPT
+        prompt = template.format(paragraph_block=block)
     
     # Stream response and collect
     try:

@@ -2,6 +2,7 @@ import hashlib
 import logging
 from typing import Optional
 from fastapi import FastAPI, UploadFile, HTTPException, Depends, Body
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -207,6 +208,16 @@ async def run_startup_migrations():
                 await migrate_chunk_offset()
             except Exception as migrate_err:
                 logger.warning(f"Startup migration (chunk start_offset_in_page) skipped: {migrate_err}")
+            try:
+                from app.migrations.add_chunking_job_run_config import migrate as migrate_chunking_job_run_config
+                await migrate_chunking_job_run_config()
+            except Exception as migrate_err:
+                logger.warning(f"Startup migration (chunking_job run_config) skipped: {migrate_err}")
+            try:
+                from app.migrations.add_extracted_facts_verification import migrate as migrate_facts_verification
+                await migrate_facts_verification()
+            except Exception as migrate_err:
+                logger.warning(f"Startup migration (extracted_facts verification) skipped: {migrate_err}")
 
             logger.info("✓ Startup migrations completed successfully")
         except Exception as e:
@@ -434,25 +445,31 @@ async def list_documents(
         active_job = job_result.scalar_one_or_none()
         
         chunking_status = None
+        job_id = None
+        job_critique_enabled = None
+        job_max_retries = None
         if active_job:
             # Job exists - map job status to chunking_status
             if active_job.status == "pending":
                 chunking_status = "queued"
             elif active_job.status == "processing":
                 chunking_status = "in_progress"
+            job_id = str(active_job.id)
+            job_critique_enabled = active_job.critique_enabled is None or str(active_job.critique_enabled).lower() == "true"
+            job_max_retries = active_job.max_retries if active_job.max_retries is not None else 2
         else:
             # No active job - check chunking results
             chunking_result = await db.execute(
                 select(ChunkingResult).where(ChunkingResult.document_id == doc.id)
             )
             chunking = chunking_result.scalar_one_or_none()
-            
+
             if chunking and chunking.metadata_:
                 chunking_status = chunking.metadata_.get("status", "idle")
             else:
                 chunking_status = "idle"
-        
-        document_list.append({
+
+        doc_item = {
             "id": str(doc.id),
             "filename": doc.filename,
             "extraction_status": doc.status,  # uploaded, extracting, completed, failed, completed_with_errors
@@ -463,7 +480,12 @@ async def list_documents(
             "error_count": doc.error_count or 0,
             "critical_error_count": doc.critical_error_count or 0,
             "review_status": doc.review_status or "pending",
-        })
+        }
+        if job_id is not None:
+            doc_item["chunking_job_id"] = job_id
+            doc_item["critique_enabled"] = job_critique_enabled
+            doc_item["max_retries"] = job_max_retries
+        document_list.append(doc_item)
     
     return {
         "total": len(document_list),
@@ -738,31 +760,34 @@ async def delete_gcs_file(
             doc_uuid = document.id
             
             # Delete in correct order to respect foreign key constraints
-            # 1. Delete extracted_facts (references both documents and hierarchical_chunks)
+            await db.execute(
+                text("DELETE FROM chunking_events WHERE document_id = :doc_id"),
+                {"doc_id": doc_uuid}
+            )
+            await db.execute(
+                text("DELETE FROM chunking_jobs WHERE document_id = :doc_id"),
+                {"doc_id": doc_uuid}
+            )
+            await db.execute(
+                text("DELETE FROM processing_errors WHERE document_id = :doc_id"),
+                {"doc_id": doc_uuid}
+            )
             await db.execute(
                 text("DELETE FROM extracted_facts WHERE document_id = :doc_id"),
                 {"doc_id": doc_uuid}
             )
-            
-            # 2. Delete hierarchical_chunks (references documents)
             await db.execute(
                 text("DELETE FROM hierarchical_chunks WHERE document_id = :doc_id"),
                 {"doc_id": doc_uuid}
             )
-            
-            # 3. Delete chunking_results (references documents)
             await db.execute(
                 text("DELETE FROM chunking_results WHERE document_id = :doc_id"),
                 {"doc_id": doc_uuid}
             )
-            
-            # 4. Delete document_pages (references documents)
             await db.execute(
                 text("DELETE FROM document_pages WHERE document_id = :doc_id"),
                 {"doc_id": doc_uuid}
             )
-            
-            # 5. Delete document (master table)
             await db.execute(
                 text("DELETE FROM documents WHERE id = :doc_id"),
                 {"doc_id": doc_uuid}
@@ -806,16 +831,28 @@ async def delete_document(
         raise HTTPException(status_code=404, detail="Document not found")
     
     try:
-        # Delete related records first (foreign key constraints)
-        # Delete chunking results
+        # Delete related records first (foreign key constraints), in dependency order
+        await db.execute(
+            delete(ChunkingEvent).where(ChunkingEvent.document_id == doc_uuid)
+        )
+        await db.execute(
+            delete(ChunkingJob).where(ChunkingJob.document_id == doc_uuid)
+        )
+        await db.execute(
+            delete(ProcessingError).where(ProcessingError.document_id == doc_uuid)
+        )
+        await db.execute(
+            delete(ExtractedFact).where(ExtractedFact.document_id == doc_uuid)
+        )
+        await db.execute(
+            delete(HierarchicalChunk).where(HierarchicalChunk.document_id == doc_uuid)
+        )
         await db.execute(
             delete(ChunkingResult).where(ChunkingResult.document_id == doc_uuid)
         )
-        # Delete pages
         await db.execute(
             delete(DocumentPage).where(DocumentPage.document_id == doc_uuid)
         )
-        # Delete document
         await db.execute(
             delete(Document).where(Document.id == doc_uuid)
         )
@@ -2258,6 +2295,9 @@ async def get_document_facts(
                 "page_number": fact.page_number,
                 "start_offset": fact.start_offset,
                 "end_offset": fact.end_offset,
+                "verified_by": getattr(fact, "verified_by", None),
+                "verified_at": fact.verified_at.isoformat() if getattr(fact, "verified_at", None) else None,
+                "verification_status": getattr(fact, "verification_status", None),
             })
     
     # Build response
@@ -2440,9 +2480,25 @@ async def update_document_fact(
         cat_cols = category_scores_dict_to_columns(cat_scores)
         for k, v in cat_cols.items():
             setattr(fact, k, v)
+    # Verification (facts sheet: approve, reject, delete)
+    if "verification_status" in body:
+        status = body.get("verification_status")
+        if status in ("pending", "approved", "rejected", "deleted"):
+            fact.verification_status = status
+            if status == "approved" and "verified_by" not in body:
+                fact.verified_by = "human"
+                fact.verified_at = datetime.utcnow()
+            elif status in ("rejected", "deleted") and body.get("verified_by"):
+                fact.verified_by = body.get("verified_by")
+                fact.verified_at = datetime.utcnow()
+    if "verified_by" in body and body.get("verified_by") in ("ai", "human"):
+        fact.verified_by = body["verified_by"]
+    if "verified_at" in body:
+        # Client can send ISO string; we leave as None and set above when approving
+        pass
     await db.commit()
     await db.refresh(fact)
-    return {
+    out = {
         "id": str(fact.id),
         "fact_text": fact.fact_text,
         "page_number": fact.page_number,
@@ -2450,6 +2506,11 @@ async def update_document_fact(
         "end_offset": fact.end_offset,
         "category_scores": fact_to_category_scores_dict(fact),
     }
+    if hasattr(fact, "verified_by"):
+        out["verified_by"] = fact.verified_by
+        out["verified_at"] = fact.verified_at.isoformat() if fact.verified_at else None
+        out["verification_status"] = fact.verification_status
+    return out
 
 
 @app.post("/documents/{document_id}/chunking/stop")
@@ -2490,30 +2551,93 @@ async def stop_chunking(document_id: str):
     return {"status": "ok", "message": "Stop requested"}
 
 
+@app.get("/config/prompts")
+async def list_prompt_versions():
+    """List available prompt names and their versions (for UI / run-configured refs). Default set: extraction v1, extraction_retry v1, critique v1."""
+    from app.services.prompt_registry import list_versions
+    names = ["extraction", "extraction_retry", "critique"]
+    result = {}
+    for name in names:
+        versions = list_versions(name)
+        result[name] = versions or []
+    return {
+        "prompts": result,
+        "default": {"extraction": "v1", "extraction_retry": "v1", "critique": "v1"},
+    }
+
+
+@app.get("/config/llm")
+async def list_llm_configs():
+    """List available LLM config names (for UI / run-configured refs). Default: default."""
+    import os
+    from pathlib import Path
+    configs_dir = Path(__file__).resolve().parent / "llm_configs"
+    names = []
+    if configs_dir.is_dir():
+        for p in configs_dir.iterdir():
+            if p.suffix == ".yaml" and p.stem:
+                names.append(p.stem)
+    return {
+        "configs": sorted(names) if names else ["default"],
+        "default": "default",
+    }
+
+
+class ChunkingStartBody(BaseModel):
+    """Optional body for chunking start: run mode and run-configured refs."""
+    threshold: Optional[float] = None
+    critique_enabled: Optional[bool] = None
+    max_retries: Optional[int] = None
+    prompt_versions: Optional[dict] = None
+    llm_config_version: Optional[str] = None
+
+
 @app.post("/documents/{document_id}/chunking/start")
 async def start_chunking(
     document_id: str,
     db: AsyncSession = Depends(get_db),
     threshold: float | None = None,
+    critique_enabled: bool | None = None,
+    max_retries: int | None = None,
+    llm_config_version: str | None = None,
+    body: ChunkingStartBody | None = Body(None),
 ):
-    """Queue a chunking job. Returns immediately. Worker process will pick it up."""
+    """Queue a chunking job. Returns immediately. Worker process will pick it up. Optional body can include prompt_versions, llm_config_version, run mode."""
     from uuid import UUID
+
+    # Merge body with query params (query takes precedence)
+    prompt_versions = None
+    if body:
+        if threshold is None and body.threshold is not None:
+            threshold = body.threshold
+        if critique_enabled is None and body.critique_enabled is not None:
+            critique_enabled = body.critique_enabled
+        if max_retries is None and body.max_retries is not None:
+            max_retries = body.max_retries
+        if llm_config_version is None and body.llm_config_version is not None:
+            llm_config_version = body.llm_config_version
+        prompt_versions = body.prompt_versions
 
     th = threshold if threshold is not None else CRITIQUE_RETRY_THRESHOLD
     th = max(0.0, min(1.0, th))
-    
+
+    # Run mode defaults: critique on, max_retries 2
+    ce = critique_enabled if critique_enabled is not None else True
+    mr = max_retries if max_retries is not None else 2
+    mr = max(0, mr)
+
     try:
         doc_uuid = UUID(document_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid document ID")
-    
+
     # Check if document exists
     result = await db.execute(select(Document).where(Document.id == doc_uuid))
     document = result.scalar_one_or_none()
-    
+
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
-    
+
     # Check if there's already a pending or processing job for this document
     existing_job = await db.execute(
         select(ChunkingJob).where(
@@ -2523,19 +2647,34 @@ async def start_chunking(
     )
     if existing_job.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Chunking job already queued or in progress for this document")
-    
-    # Create new job
+
+    # Create new job (run-configured: prompt_versions, llm_config_version optional)
     job = ChunkingJob(
         document_id=doc_uuid,
         status="pending",
-        threshold=str(th)
+        threshold=str(th),
+        critique_enabled="true" if ce else "false",
+        max_retries=mr,
+        prompt_versions=prompt_versions,
+        llm_config_version=llm_config_version,
     )
     db.add(job)
     await db.commit()
-    
-    logger.info(f"Queued chunking job {job.id} for document {document_id} with threshold {th}")
-    
-    return {"status": "queued", "document_id": document_id, "job_id": str(job.id)}
+
+    logger.info(f"Queued chunking job {job.id} for document {document_id} with threshold {th}, critique_enabled={ce}, max_retries={mr}")
+
+    out = {
+        "status": "queued",
+        "document_id": document_id,
+        "job_id": str(job.id),
+        "critique_enabled": ce,
+        "max_retries": mr,
+    }
+    if prompt_versions is not None:
+        out["prompt_versions"] = prompt_versions
+    if llm_config_version is not None:
+        out["llm_config_version"] = llm_config_version
+    return out
 
 
 @app.post("/documents/{document_id}/chunking/restart")
@@ -2711,10 +2850,10 @@ async def stream_chunking_live(
         
         while True:
             try:
-                # Query for new events from database
+                # Query for new events from database (chronological order, id for deterministic tie-break)
                 query = select(ChunkingEvent).where(
                     ChunkingEvent.document_id == doc_uuid
-                ).order_by(ChunkingEvent.created_at)
+                ).order_by(ChunkingEvent.created_at, ChunkingEvent.id)
                 
                 if last_event_id:
                     # Only get events after the last one we sent
@@ -2814,10 +2953,10 @@ async def get_chunking_events(
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     
-    # Query events
+    # Query events in chronological order (created_at, then id for deterministic order)
     query = select(ChunkingEvent).where(
         ChunkingEvent.document_id == doc_uuid
-    ).order_by(ChunkingEvent.created_at).limit(limit)
+    ).order_by(ChunkingEvent.created_at, ChunkingEvent.id).limit(limit)
     
     result = await db.execute(query)
     events = result.scalars().all()
@@ -3299,6 +3438,7 @@ async def get_table_record(
 ):
     """Get a single record from a table by ID."""
     from sqlalchemy import text, select
+    from sqlalchemy.dialects.postgresql import UUID as PG_UUID
     from uuid import UUID
     
     try:
@@ -3318,9 +3458,9 @@ async def get_table_record(
         if not pk_col:
             raise HTTPException(status_code=400, detail="Table has no primary key")
         
-        # Convert record_id to appropriate type
+        # Convert record_id to appropriate type (PK may be PostgreSQL UUID)
         pk_value = record_id
-        if isinstance(pk_col.type, UUID):
+        if isinstance(pk_col.type, PG_UUID):
             try:
                 pk_value = UUID(record_id)
             except ValueError:
@@ -3374,6 +3514,7 @@ async def create_record(
 ):
     """Create a new record in a table."""
     from sqlalchemy import text, inspect
+    from sqlalchemy.dialects.postgresql import UUID as PG_UUID
     from uuid import UUID
     from datetime import datetime
     
@@ -3389,8 +3530,8 @@ async def create_record(
         for col_name, col in table.columns.items():
             if col_name in record:
                 value = record[col_name]
-                # Convert string UUIDs to UUID objects
-                if isinstance(col.type, UUID) and isinstance(value, str):
+                # Convert string UUIDs to UUID objects (PostgreSQL UUID columns)
+                if isinstance(col.type, PG_UUID) and isinstance(value, str):
                     try:
                         value = UUID(value)
                     except ValueError:
@@ -3442,6 +3583,7 @@ async def update_record(
 ):
     """Update a record in a table."""
     from sqlalchemy import text
+    from sqlalchemy.dialects.postgresql import UUID as PG_UUID
     from uuid import UUID
     from datetime import datetime
     
@@ -3468,8 +3610,8 @@ async def update_record(
         for col_name, col in table.columns.items():
             if col_name in updates and col_name != pk_col.name:
                 value = updates[col_name]
-                # Type conversions
-                if isinstance(col.type, UUID) and isinstance(value, str):
+                # Type conversions (PostgreSQL UUID columns)
+                if isinstance(col.type, PG_UUID) and isinstance(value, str):
                     try:
                         value = UUID(value)
                     except ValueError:
@@ -3485,9 +3627,9 @@ async def update_record(
         if not set_clauses:
             raise HTTPException(status_code=400, detail="No fields to update")
         
-        # Convert record_id to appropriate type
+        # Convert record_id to appropriate type (PK may be PostgreSQL UUID)
         pk_value = record_id
-        if isinstance(pk_col.type, UUID):
+        if isinstance(pk_col.type, PG_UUID):
             try:
                 pk_value = UUID(record_id)
             except ValueError:
@@ -3531,6 +3673,7 @@ async def delete_record(
 ):
     """Delete a record from a table."""
     from sqlalchemy import text
+    from sqlalchemy.dialects.postgresql import UUID as PG_UUID
     from uuid import UUID
     
     try:
@@ -3550,9 +3693,9 @@ async def delete_record(
         if not pk_col:
             raise HTTPException(status_code=400, detail="Table has no primary key")
         
-        # Convert record_id to appropriate type
+        # Convert record_id to appropriate type (PK may be PostgreSQL UUID)
         pk_value = record_id
-        if isinstance(pk_col.type, UUID):
+        if isinstance(pk_col.type, PG_UUID):
             try:
                 pk_value = UUID(record_id)
             except ValueError:
@@ -3670,31 +3813,34 @@ async def delete_document_cascade(
     
     try:
         # Delete in correct order to respect foreign key constraints
-        # 1. Delete extracted_facts (references both documents and hierarchical_chunks)
+        await db.execute(
+            text("DELETE FROM chunking_events WHERE document_id = :doc_id"),
+            {"doc_id": doc_uuid}
+        )
+        await db.execute(
+            text("DELETE FROM chunking_jobs WHERE document_id = :doc_id"),
+            {"doc_id": doc_uuid}
+        )
+        await db.execute(
+            text("DELETE FROM processing_errors WHERE document_id = :doc_id"),
+            {"doc_id": doc_uuid}
+        )
         await db.execute(
             text("DELETE FROM extracted_facts WHERE document_id = :doc_id"),
             {"doc_id": doc_uuid}
         )
-        
-        # 2. Delete hierarchical_chunks (references documents)
         await db.execute(
             text("DELETE FROM hierarchical_chunks WHERE document_id = :doc_id"),
             {"doc_id": doc_uuid}
         )
-        
-        # 3. Delete chunking_results (references documents)
         await db.execute(
             text("DELETE FROM chunking_results WHERE document_id = :doc_id"),
             {"doc_id": doc_uuid}
         )
-        
-        # 4. Delete document_pages (references documents)
         await db.execute(
             text("DELETE FROM document_pages WHERE document_id = :doc_id"),
             {"doc_id": doc_uuid}
         )
-        
-        # 5. Delete document (master table)
         await db.execute(
             text("DELETE FROM documents WHERE id = :doc_id"),
             {"doc_id": doc_uuid}

@@ -152,15 +152,24 @@ async def _run_chunking_loop(
     threshold: float,
     db: AsyncSession,
     event_callback=None,
+    critique_enabled: bool = True,
+    max_retries: int = 2,
+    extraction_prompt_body=None,
+    retry_extraction_prompt_body=None,
+    critique_prompt_body=None,
+    llm=None,
 ):
     """
     Shared chunking loop logic. Runs the full paragraph processing loop.
-    This is the same function from main.py, but runs in worker process.
+    critique_enabled: if False, skip critique and retries (extraction only).
+    max_retries: when critique enabled, max extraction retries on critique fail (0 = no retry).
+    extraction_prompt_body, retry_extraction_prompt_body, critique_prompt_body: optional prompt templates (from registry).
+    llm: optional LLM provider instance (from llm_config).
     """
     results_paragraphs: dict = {}
-    
+
     try:
-        logger.info(f"[{document_id}] Starting chunking loop with threshold {threshold}")
+        logger.info(f"[{document_id}] Starting chunking loop with threshold {threshold}, critique_enabled={critique_enabled}, max_retries={max_retries}")
         # Materialize page (page_number, markdown) before any await; use text_markdown as canonical, fallback to raw->md
         from app.services.page_to_markdown import raw_page_to_markdown
         page_data_list = []
@@ -270,7 +279,13 @@ async def _run_chunking_loop(
                     extraction_result = None
                     extraction_start = _utc_now_naive()
                     try:
-                        async for chunk in stream_extract_facts(paragraph_text, section_path=section_path):
+                        async for chunk in stream_extract_facts(
+                            paragraph_text,
+                            section_path=section_path,
+                            extraction_prompt_body=extraction_prompt_body,
+                            retry_extraction_prompt_body=retry_extraction_prompt_body,
+                            llm=llm,
+                        ):
                             raw_extraction_output += chunk
                         
                         extraction_duration = (_utc_now_naive() - extraction_start).total_seconds()
@@ -323,50 +338,68 @@ async def _run_chunking_loop(
                             await _upsert("in_progress")
                             continue
                     
-                    # Stage 2: Critique
+                    # Stage 2: Critique (skip if critique_enabled is False)
                     critique_result = None
-                    critique_start = _utc_now_naive()
-                    try:
-                        logger.debug(f"[{document_id}] [{para_id}] Starting critique (threshold: {threshold})")
-                        critique_result = await critique_extraction(paragraph_text, extraction_result)
-                        critique_duration = (_utc_now_naive() - critique_start).total_seconds()
-                        
-                        if critique_result and critique_result.get("pass"):
-                            score = critique_result.get("score", 0)
-                            await _send_status("Critique passed.")
-                            logger.info(f"[{document_id}] [{para_id}] Critique PASSED (score: {score:.3f}, duration: {critique_duration:.2f}s)")
-                        else:
-                            score = critique_result.get("score", 0) if critique_result else 0
-                            feedback = critique_result.get("feedback", "")[:100] if critique_result else "No feedback"
-                            await _send_status("Critique failed.")
-                            logger.info(f"[{document_id}] [{para_id}] Critique FAILED (score: {score:.3f}, duration: {critique_duration:.2f}s, feedback: {feedback})")
-                    except Exception as critique_err:
-                        error_type, severity, stage = _classify_and_log_error(
-                            db, doc_uuid, para_id, critique_err, "critique", "critique"
-                        )
-                        await log_error(
-                            db=db,
-                            document_id=str(doc_uuid),
-                            paragraph_id=para_id,
-                            error_type=error_type,
-                            severity=severity,
-                            error_message=str(critique_err),
-                            error_details={"stage": "critique"},
-                            stage=stage
-                        )
-                        await _send_status("Critique failed (exception).")
-                        # Continue with extraction result even if critique fails
-                    
-                    # Stage 3: Retry if needed (up to 2 retries)
+                    if critique_enabled:
+                        critique_start = _utc_now_naive()
+                        try:
+                            logger.debug(f"[{document_id}] [{para_id}] Starting critique (threshold: {threshold})")
+                            critique_result = await critique_extraction(
+                                paragraph_text,
+                                extraction_result,
+                                critique_prompt_body=critique_prompt_body,
+                                llm=llm,
+                            )
+                            critique_duration = (_utc_now_naive() - critique_start).total_seconds()
+
+                            if critique_result and critique_result.get("pass"):
+                                score = critique_result.get("score", 0)
+                                await _send_status("Critique passed.")
+                                logger.info(f"[{document_id}] [{para_id}] Critique PASSED (score: {score:.3f}, duration: {critique_duration:.2f}s)")
+                            else:
+                                score = critique_result.get("score", 0) if critique_result else 0
+                                feedback = critique_result.get("feedback", "")[:100] if critique_result else "No feedback"
+                                await _send_status("Critique failed.")
+                                logger.info(f"[{document_id}] [{para_id}] Critique FAILED (score: {score:.3f}, duration: {critique_duration:.2f}s, feedback: {feedback})")
+                        except Exception as critique_err:
+                            error_type, severity, stage = _classify_and_log_error(
+                                db, doc_uuid, para_id, critique_err, "critique", "critique"
+                            )
+                            await log_error(
+                                db=db,
+                                document_id=str(doc_uuid),
+                                paragraph_id=para_id,
+                                error_type=error_type,
+                                severity=severity,
+                                error_message=str(critique_err),
+                                error_details={"stage": "critique"},
+                                stage=stage
+                            )
+                            await _send_status("Critique failed (exception).")
+                            # Continue with extraction result even if critique fails
+
+                    # Stage 3: Retry if needed (only when critique enabled and max_retries > 0)
                     retry_count = 0
-                    max_retries = 2
-                    while retry_count < max_retries and critique_result and not critique_result.get("pass", False):
+                    while (
+                        critique_enabled
+                        and max_retries > 0
+                        and retry_count < max_retries
+                        and critique_result
+                        and not critique_result.get("pass", False)
+                    ):
                         retry_count += 1
                         logger.info(f"[{document_id}] [{para_id}] Retry attempt {retry_count}/{max_retries}")
                         try:
                             feedback = critique_result.get("feedback", "")
                             retry_start = _utc_now_naive()
-                            retry_extraction = stream_extract_facts(paragraph_text, critique_feedback=feedback, section_path=section_path)
+                            retry_extraction = stream_extract_facts(
+                                paragraph_text,
+                                critique_feedback=feedback,
+                                section_path=section_path,
+                                extraction_prompt_body=extraction_prompt_body,
+                                retry_extraction_prompt_body=retry_extraction_prompt_body,
+                                llm=llm,
+                            )
                             retry_output = ""
                             async for chunk in retry_extraction:
                                 retry_output += chunk
@@ -379,13 +412,18 @@ async def _run_chunking_loop(
                                 logger.info(f"[{document_id}] [{para_id}] Retry {retry_count} extraction completed ({n_facts_retry} facts, {retry_duration:.2f}s)")
                                 
                                 critique_start = _utc_now_naive()
-                                critique_result = await critique_extraction(paragraph_text, extraction_result)
+                                critique_result = await critique_extraction(
+                                paragraph_text,
+                                extraction_result,
+                                critique_prompt_body=critique_prompt_body,
+                                llm=llm,
+                            )
                                 critique_duration = (_utc_now_naive() - critique_start).total_seconds()
                                 
                                 if critique_result and critique_result.get("pass"):
                                     logger.info(f"[{document_id}] [{para_id}] Retry {retry_count} critique PASSED (score: {critique_result.get('score', 0):.3f})")
                                 else:
-                                    logger.info(f"[{document_id}] [{para_id}] Retry {retry_count} critique still FAILED (score: {critique_result.get('score', 0) if critique_result else 0:.3f})")
+                                    logger.info(f"[{document_id}] [{para_id}] Retry {retry_count} critique still FAILED (score: {(critique_result.get('score', 0) if critique_result else 0):.3f})")
                         except Exception as retry_err:
                             error_type, severity, stage = _classify_and_log_error(
                                 db, doc_uuid, para_id, retry_err, "retry", "extraction"
@@ -421,6 +459,9 @@ async def _run_chunking_loop(
                             
                             if not chunk:
                                 para_start = para_data.get("start_offset") if isinstance(para_data, dict) else None
+                                chunk_critique_status = "skipped" if not critique_enabled else (
+                                    "passed" if (critique_result and critique_result.get("pass")) else "failed"
+                                )
                                 chunk = HierarchicalChunk(
                                     document_id=str(doc_uuid),
                                     page_number=current_page_number,
@@ -430,7 +471,8 @@ async def _run_chunking_loop(
                                     text_length=len(paragraph_text),
                                     start_offset_in_page=para_start,
                                     summary=extraction_result.get("summary"),
-                                    extraction_status="extracted"
+                                    extraction_status="extracted",
+                                    critique_status=chunk_critique_status,
                                 )
                                 db.add(chunk)
                                 await db.flush()
@@ -514,7 +556,11 @@ async def _run_chunking_loop(
                                 "paragraph_id": para_id,
                                 "summary": extraction_result.get("summary"),
                                 "facts": facts,
-                                "status": "passed" if (critique_result and critique_result.get("pass")) else "review",
+                                "status": (
+                                    "passed" if (critique_result and critique_result.get("pass"))
+                                    else "skipped" if not critique_enabled
+                                    else "review"
+                                ),
                                 "critique": critique_result
                             }
                         except Exception as persist_err:
@@ -681,6 +727,35 @@ async def process_job(job: ChunkingJob, db: AsyncSession):
         # Create event callback (pass db session so it can write events)
         event_callback = await _create_event_buffer_callback(str(job.document_id), db)
         
+        # Run mode from job (default: critique on, max_retries 2)
+        critique_enabled = job.critique_enabled is None or (str(job.critique_enabled).lower() == "true")
+        max_retries = 2 if job.max_retries is None else max(0, int(job.max_retries))
+
+        # Resolve prompt versions and LLM config from job (run-configured)
+        extraction_prompt_body = None
+        retry_extraction_prompt_body = None
+        critique_prompt_body = None
+        llm = None
+        prompt_versions = getattr(job, "prompt_versions", None) or {}
+        llm_config_version = getattr(job, "llm_config_version", None)
+        if isinstance(prompt_versions, dict):
+            from app.services.prompt_registry import get_prompt
+            ext_ver = prompt_versions.get("extraction") or "v1"
+            retry_ver = prompt_versions.get("extraction_retry") or "v1"
+            crit_ver = prompt_versions.get("critique") or "v1"
+            extraction_prompt_body = get_prompt("extraction", ext_ver)
+            retry_extraction_prompt_body = get_prompt("extraction_retry", retry_ver)
+            critique_prompt_body = get_prompt("critique", crit_ver)
+        if llm_config_version:
+            from app.services.llm_config import get_llm_config, get_llm_provider_from_config
+            cfg = get_llm_config(llm_config_version)
+            if cfg:
+                llm = get_llm_provider_from_config(cfg)
+                logger.info(f"[JOB {job.id}] Using LLM config: {llm_config_version}")
+        if not llm:
+            from app.services.llm_provider import get_llm_provider
+            llm = get_llm_provider()
+
         # Run chunking loop
         logger.info(f"[JOB {job.id}] Starting chunking loop...")
         success = await _run_chunking_loop(
@@ -689,7 +764,13 @@ async def process_job(job: ChunkingJob, db: AsyncSession):
             pages,
             threshold,
             db,
-            event_callback=event_callback
+            event_callback=event_callback,
+            critique_enabled=critique_enabled,
+            max_retries=max_retries,
+            extraction_prompt_body=extraction_prompt_body,
+            retry_extraction_prompt_body=retry_extraction_prompt_body,
+            critique_prompt_body=critique_prompt_body,
+            llm=llm,
         )
         
         # Commit any remaining events

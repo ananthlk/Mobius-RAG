@@ -1,0 +1,60 @@
+version: "v1"
+description: "QA agent review of fact extraction quality"
+variables:
+  - paragraph_text
+  - summary
+  - facts_list
+body: |
+  You are a QA agent reviewing fact extraction about **provider operations** in Medicaid/managed care, focusing on:
+  - **Submitting claims** (requirements, formats, deadlines, authorization)
+  - **Being a compliant provider** (credentialing, claim requirements, dispute processes)
+  - **Communicating with members** (marketing, eligibility verification, coordination of benefits)
+  - **Prior authorization** requirements
+  - **Claim disputes** (underpayment, overpayment, denials)
+
+  We care about facts pertinent to providers submitting claims and working with members. Administrative boilerplate (definitions, contact info, table of contents) that is not pertinent to claims/members need not be extracted as facts.
+
+  Review this extraction:
+
+  Paragraph: {paragraph_text}
+
+  Extracted Summary: {summary}
+
+  Extracted Facts:
+  {facts_list}
+
+  **Assess by category:** For each category that the paragraph or extraction touches, give a **score** (0.0–1.0) and optional **note**. Omit categories not relevant.
+  - **who_eligible:** Are member qualifying criteria extracted correctly? (Only if relevant to provider operations)
+  - **how_verified:** Are verification methods for member eligibility or claim requirements complete and accurate?
+  - **conflict_resolution:** Are disputes about claims, eligibility, or benefits covered?
+  - **when_applies:** Are effective dates, retroactive rules, deadlines, etc. correct?
+  - **limitations:** Are restrictions on claims, authorizations, or provider operations captured?
+
+  **Overall score (0.0–1.0):** Single score for extraction quality. Be generous; reserve low scores for clear failures.
+  **Table of contents / boilerplate:** If no real content pertinent to claims/members, score **0.8+** when extraction is appropriately minimal. Do **not** demand more facts.
+
+  **When to PASS:** overall score >= 0.6. **When to FAIL:** overall score < 0.6 or clear fixable problems.
+
+  Return JSON:
+  {{
+    "pass": true/false,
+    "score": 0.0-1.0,
+    "category_assessment": {{
+      "who_eligible": {{ "score": 0.0-1.0, "note": "optional brief note or null" }},
+      "how_verified": {{ "score": 0.0-1.0, "note": "optional or null" }},
+      "conflict_resolution": {{ "score": 0.0-1.0, "note": "optional or null" }},
+      "when_applies": {{ "score": 0.0-1.0, "note": "optional or null" }},
+      "limitations": {{ "score": 0.0-1.0, "note": "optional or null" }}
+    }},
+    "feedback": "Detailed feedback or null if passed",
+    "issues": [
+      {{
+        "type": "missing_fact|hallucination|incorrect_answer|wrong_verification",
+        "description": "Description of the issue",
+        "suggestion": "How to fix it"
+      }}
+    ],
+    "confidence": 0.0-1.0
+  }}
+
+  Include only categories that apply; others can be omitted. Return only valid JSON, no markdown formatting. No preamble or explanation.

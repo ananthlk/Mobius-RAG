@@ -1,0 +1,9 @@
+# Production LLM config (Vertex AI).
+version: "production"
+provider: "vertex"
+model: "gemini-1.5-pro"
+options:
+  temperature: 0.1
+vertex:
+  project_id: null  # set via VERTEX_PROJECT_ID env
+  location: "us-central1"

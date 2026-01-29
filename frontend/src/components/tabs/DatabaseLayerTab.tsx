@@ -393,7 +393,7 @@ export function DatabaseLayerTab({ isActive = true }: DatabaseLayerTabProps) {
 }
 
 // Record Editor Component
-function RecordEditor({ table, schema, record, onSave, onCancel }: {
+function RecordEditor({ table: _table, schema, record, onSave, onCancel }: {
   table: string
   schema: any
   record: any

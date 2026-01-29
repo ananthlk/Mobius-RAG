@@ -1,4 +1,4 @@
-import { ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import './Tabs.css'
 
 interface TabsProps {
@@ -28,7 +28,7 @@ interface TabPanelProps {
   children: ReactNode
 }
 
-export function Tabs({ activeTab, onTabChange, children }: TabsProps) {
+export function Tabs({ children }: TabsProps) {
   return (
     <div className="tabs-container">
       {children}

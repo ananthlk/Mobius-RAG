@@ -17,6 +17,12 @@
   font-size: 0.9375rem;
 }
 
+.read-tab-hint {
+  color: var(--text-tertiary, #6b7280);
+  font-size: 0.9375rem;
+  margin-top: 1rem;
+}
+
 .document-select {
   flex: 1;
   max-width: 400px;
@@ -72,6 +78,20 @@
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.pages-list li {
+  list-style: none;
+}
+
+.pages-list .page-item {
+  width: 100%;
+  border: 1px solid var(--border-light);
+  font: inherit;
+  cursor: pointer;
 }
 
 .page-item {

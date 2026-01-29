@@ -100,6 +100,14 @@ class ChunkingJob(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
+    # Run-configured: immutable refs to prompt set and LLM config (append-only)
+    prompt_versions = Column(JSONB, nullable=True)  # e.g. {"extraction": "v1", "extraction_retry": "v1", "critique": "v1"}
+    llm_config_version = Column(String(100), nullable=True)  # e.g. "default" or "v1" or content SHA
+
+    # Run mode: critique on/off, retries on/off
+    critique_enabled = Column(String(10), nullable=True)  # 'true', 'false' (store as string for consistency)
+    max_retries = Column(Integer, nullable=True)  # 0 = no retry; 1, 2, etc.
+
 
 class ChunkingEvent(Base):
     """Events generated during chunking - stored in database for SSE streaming."""
@@ -225,7 +233,12 @@ class ExtractedFact(Base):
     page_number = Column(Integer, nullable=True)  # Source page in reader; Review can show "From page N"
     start_offset = Column(Integer, nullable=True)  # Character start in raw page text for highlight
     end_offset = Column(Integer, nullable=True)   # Character end in raw page text for highlight
-    
+
+    # Verification (AI or human): who verified, when, status for facts sheet
+    verified_by = Column(String(20), nullable=True)  # 'ai' | 'human' | null
+    verified_at = Column(DateTime, nullable=True)   # When verified (AI or human)
+    verification_status = Column(String(20), nullable=True)  # pending | approved | rejected | deleted
+
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 

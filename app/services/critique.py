@@ -1,7 +1,7 @@
 """Critique agent service for reviewing extraction quality."""
 import json
 import logging
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from app.services.llm_provider import get_llm_provider
 from app.services.utils import parse_json_response
 
@@ -96,20 +96,8 @@ Return JSON:
 Include only categories that apply; others can be omitted. Return only valid JSON, no markdown formatting. No preamble or explanation."""
 
 
-async def critique_extraction(paragraph_text: str, extraction_result: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Critique an extraction result.
-    
-    Args:
-        paragraph_text: Original paragraph text
-        extraction_result: Result from extract_facts()
-    
-    Returns:
-        Dict with 'pass', 'feedback', 'issues', 'confidence'
-    """
-    llm = get_llm_provider()
-    
-    # Format facts for prompt
+def _format_facts_list(extraction_result: Dict[str, Any]) -> List[str]:
+    """Format extracted facts for critique prompt."""
     facts_list = []
     for fact in extraction_result.get("facts", []):
         fact_str = f"- {fact.get('fact_text', '')}"
@@ -137,13 +125,38 @@ async def critique_extraction(paragraph_text: str, extraction_result: Dict[str, 
                     dir_label = {1.0: 'Encourages', 0.5: 'Neutral', 0.0: 'Restricts'}.get(direction, 'N/A')
                     fact_str += f"\n    - {cat}: {score:.2f} ({dir_label})"
         facts_list.append(fact_str)
-    
-    prompt = CRITIQUE_PROMPT.format(
+    return facts_list
+
+
+async def critique_extraction(
+    paragraph_text: str,
+    extraction_result: Dict[str, Any],
+    critique_prompt_body: Optional[str] = None,
+    llm=None,
+) -> Dict[str, Any]:
+    """
+    Critique an extraction result.
+
+    Args:
+        paragraph_text: Original paragraph text
+        extraction_result: Result from extract_facts()
+        critique_prompt_body: Optional prompt template (overrides in-code default)
+        llm: Optional LLM provider instance (uses get_llm_provider() if None)
+
+    Returns:
+        Dict with 'pass', 'feedback', 'issues', 'confidence'
+    """
+    if llm is None:
+        llm = get_llm_provider()
+
+    facts_list = _format_facts_list(extraction_result)
+    template = critique_prompt_body if critique_prompt_body else CRITIQUE_PROMPT
+    prompt = template.format(
         paragraph_text=paragraph_text,
         summary=extraction_result.get("summary", ""),
         facts_list="\n".join(facts_list) if facts_list else "No facts extracted"
     )
-    
+
     try:
         response = await llm.generate(prompt)
         result = parse_json_response(response)
@@ -170,48 +183,21 @@ async def critique_extraction(paragraph_text: str, extraction_result: Dict[str, 
         }
 
 
-async def stream_critique(paragraph_text: str, extraction_result: Dict[str, Any]):
+async def stream_critique(
+    paragraph_text: str,
+    extraction_result: Dict[str, Any],
+    critique_prompt_body: Optional[str] = None,
+    llm=None,
+):
     """
-    Stream critique response.
-    
-    Yields:
-        Chunks of text as they arrive
-    
-    Returns:
-        Final parsed result after stream completes (handled by caller)
+    Stream critique response. Optional: critique_prompt_body, llm (provider instance).
     """
-    llm = get_llm_provider()
-    
-    # Format facts for prompt
-    facts_list = []
-    for fact in extraction_result.get("facts", []):
-        fact_str = f"- {fact.get('fact_text', '')}"
-        if fact.get('is_pertinent_to_claims_or_members') is not None:
-            fact_str += f"\n  Pertinent to Claims/Members: {fact.get('is_pertinent_to_claims_or_members')}"
-        if fact.get('who_eligible'):
-            fact_str += f"\n  WHO: {fact.get('who_eligible')}"
-        if fact.get('how_verified'):
-            fact_str += f"\n  HOW: {fact.get('how_verified')}"
-        if fact.get('conflict_resolution'):
-            fact_str += f"\n  WHAT: {fact.get('conflict_resolution')}"
-        if fact.get('when_applies'):
-            fact_str += f"\n  WHEN: {fact.get('when_applies')}"
-        if fact.get('limitations'):
-            fact_str += f"\n  LIMITATIONS: {fact.get('limitations')}"
-        # Include category scores if present
-        if fact.get('category_scores'):
-            relevant_cats = [(k, v) for k, v in fact.get('category_scores', {}).items() 
-                           if isinstance(v, dict) and (v.get('score', 0) or 0) > 0]
-            if relevant_cats:
-                fact_str += "\n  Category Scores:"
-                for cat, data in relevant_cats[:3]:  # Show top 3
-                    score = data.get('score', 0)
-                    direction = data.get('direction')
-                    dir_label = {1.0: 'Encourages', 0.5: 'Neutral', 0.0: 'Restricts'}.get(direction, 'N/A')
-                    fact_str += f"\n    - {cat}: {score:.2f} ({dir_label})"
-        facts_list.append(fact_str)
-    
-    prompt = CRITIQUE_PROMPT.format(
+    if llm is None:
+        llm = get_llm_provider()
+
+    facts_list = _format_facts_list(extraction_result)
+    template = critique_prompt_body if critique_prompt_body else CRITIQUE_PROMPT
+    prompt = template.format(
         paragraph_text=paragraph_text,
         summary=extraction_result.get("summary", ""),
         facts_list="\n".join(facts_list) if facts_list else "No facts extracted"

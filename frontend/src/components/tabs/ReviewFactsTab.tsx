@@ -19,6 +19,11 @@ interface Fact {
   state?: string
   program?: string
   page_number?: number | null
+  is_verified?: string | null
+  confidence?: string | number | null
+  verification_status?: string | null
+  verified_by?: string | null
+  verified_at?: string | null
 }
 
 interface ReviewFactsTabProps {
@@ -67,6 +72,9 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
             category_scores: record.category_scores ?? null,
             document_id: record.document_id,
             page_number: record.page_number != null ? Number(record.page_number) : null,
+            verification_status: record.verification_status ?? null,
+            verified_by: record.verified_by ?? null,
+            verified_at: record.verified_at ?? null,
           }))
           const factsWithMetadata = await Promise.all(
             factsData.map(async (fact: Fact) => {
@@ -128,6 +136,9 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
                 state: doc.state,
                 program: doc.program,
                 page_number: f.page_number != null ? Number(f.page_number) : null,
+                verification_status: f.verification_status ?? null,
+                verified_by: f.verified_by ?? null,
+                verified_at: f.verified_at ?? null,
               })
             }
           }
@@ -253,6 +264,34 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
     setIsPertinentFilter('all')
     setIsEligibilityFilter('all')
     setSearchQuery('')
+  }
+
+  const handleApprove = async (fact: Fact) => {
+    try {
+      const res = await fetch(
+        `${API_BASE}/documents/${fact.document_id}/facts/${fact.id}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ verification_status: 'approved' }),
+        }
+      )
+      if (res.ok) {
+        const updated = await res.json()
+        setFacts(prev =>
+          prev.map(f =>
+            f.id === fact.id
+              ? { ...f, verification_status: 'approved', verified_by: updated.verified_by, verified_at: updated.verified_at }
+              : f
+          )
+        )
+        if (selectedFact?.id === fact.id) {
+          setSelectedFact(prev => (prev?.id === fact.id ? { ...prev, verification_status: 'approved', verified_by: updated.verified_by, verified_at: updated.verified_at } : prev))
+        }
+      }
+    } catch (e) {
+      console.error('Failed to approve fact:', e)
+    }
   }
 
   return (
@@ -482,6 +521,9 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
                         <div className="fact-document-name">
                           {fact.document_filename || 'Unknown Document'}
                         </div>
+                        <span className={`fact-verification-badge fact-verification-${fact.verification_status || 'pending'}`}>
+                          {fact.verification_status || 'pending'}
+                        </span>
                         {fact.fact_type && (
                           <span className="fact-type-badge">{fact.fact_type}</span>
                         )}
@@ -607,8 +649,19 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
                           </div>
                         </div>
                         
-                        {onViewDocument && (
-                          <div className="fact-expanded-actions">
+                        <div className="fact-expanded-actions">
+                          {(fact.verification_status !== 'approved') && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                handleApprove(fact)
+                              }}
+                              className="btn btn-secondary"
+                            >
+                              Approve
+                            </button>
+                          )}
+                          {onViewDocument && (
                             <button
                               onClick={(e) => {
                                 e.stopPropagation()
@@ -621,8 +674,8 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
                             >
                               View in Document
                             </button>
-                          </div>
-                        )}
+                          )}
+                        </div>
                       </div>
                     )}
                   </div>

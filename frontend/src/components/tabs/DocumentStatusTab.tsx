@@ -14,12 +14,26 @@ interface Document {
   review_status?: string
 }
 
+export interface ChunkingOptions {
+  threshold: number
+  critiqueEnabled: boolean
+  maxRetries: number
+}
+
+export interface ChunkingOptionsSetters {
+  setThreshold: (v: number) => void
+  setCritiqueEnabled: (v: boolean) => void
+  setMaxRetries: (v: number) => void
+}
+
 interface DocumentStatusTabProps {
   onStartChunking: (documentId: string) => Promise<void>
   onStopChunking: (documentId: string) => Promise<void>
   onViewDocument: (documentId: string) => void
   onDeleteDocument: (documentId: string) => Promise<void>
   onRestartChunking?: (documentId: string) => Promise<void>
+  chunkingOptions?: ChunkingOptions
+  onChunkingOptionsChange?: ChunkingOptionsSetters
 }
 
 export function DocumentStatusTab({ 
@@ -27,7 +41,9 @@ export function DocumentStatusTab({
   onStopChunking,
   onViewDocument,
   onDeleteDocument,
-  onRestartChunking
+  onRestartChunking,
+  chunkingOptions,
+  onChunkingOptionsChange,
 }: DocumentStatusTabProps) {
   const [documents, setDocuments] = useState<Document[]>([])
   const [loading, setLoading] = useState(false)
@@ -115,7 +131,7 @@ export function DocumentStatusTab({
     }
   }
 
-  const getStatusBadge = (status: string | null, type: 'extraction' | 'chunking') => {
+  const getStatusBadge = (status: string | null, _type: 'extraction' | 'chunking') => {
     if (!status) return <span className="status-badge status-idle">—</span>
     
     const statusClass = `status-badge status-${status}`
@@ -147,6 +163,48 @@ export function DocumentStatusTab({
 
   return (
     <div className="document-status-tab">
+      {chunkingOptions && onChunkingOptionsChange && (
+        <div className="chunking-options-panel">
+          <h3 className="chunking-options-title">Chunking options (apply to Start / Restart)</h3>
+          <div className="chunking-options-grid">
+            <div className="chunking-option">
+              <label htmlFor="chunking-threshold">Critique pass threshold (0–1)</label>
+              <input
+                id="chunking-threshold"
+                type="number"
+                min={0}
+                max={1}
+                step={0.1}
+                value={chunkingOptions.threshold}
+                onChange={e => onChunkingOptionsChange.setThreshold(parseFloat(e.target.value) || 0.6)}
+              />
+            </div>
+            <div className="chunking-option">
+              <label className="chunking-option-checkbox">
+                <input
+                  type="checkbox"
+                  checked={chunkingOptions.critiqueEnabled}
+                  onChange={e => onChunkingOptionsChange.setCritiqueEnabled(e.target.checked)}
+                />
+                Run critique (QA)
+              </label>
+              <span className="chunking-option-hint">When off, extraction only (no critique or retries).</span>
+            </div>
+            <div className="chunking-option">
+              <label htmlFor="chunking-max-retries">Max retries on critique fail</label>
+              <input
+                id="chunking-max-retries"
+                type="number"
+                min={0}
+                max={10}
+                value={chunkingOptions.maxRetries}
+                onChange={e => onChunkingOptionsChange.setMaxRetries(parseInt(e.target.value, 10) || 0)}
+              />
+              <span className="chunking-option-hint">0 = no retries.</span>
+            </div>
+          </div>
+        </div>
+      )}
       <p className="pipeline-copy" title="Upload stores file; Store = raw text per page; Convert to MD = canonical markdown per page; Chunk runs on markdown.">
         Pipeline: Upload → Store → Convert to MD → Chunk
       </p>

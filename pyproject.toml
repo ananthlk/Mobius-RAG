@@ -15,6 +15,7 @@ dependencies = [
     "greenlet",
     "aiohttp",
     "json-repair",
+    "pyyaml",
 ]
 
 [project.optional-dependencies]

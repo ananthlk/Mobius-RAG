@@ -1,0 +1,25 @@
+version: "v1"
+description: "Re-extraction with critique feedback"
+variables:
+  - critique_feedback
+  - issues
+  - paragraph_block
+body: |
+  Previous extraction had issues. Please re-extract with this feedback:
+
+  {critique_feedback}
+
+  Issues identified:
+  {issues}
+
+  Use the **same extraction format** as before, including:
+  - is_pertinent_to_claims_or_members (true if pertinent to submitting claims or working with members, false otherwise)
+  - All category relevance scores (0.0-1.0) and directions (1.0 = encourages, 0.5 = neutral, 0.0 = restricts, or null) for: contacting_marketing_members, member_eligibility_molina, benefit_access_limitations, prior_authorization_required, claims_authorization_submissions, compliant_claim_requirements, claim_disputes, credentialing, claim_submission_important, coordination_of_benefits, other_important.
+  - source_start and source_end (0-based character indices in the paragraph text for the span this fact was derived from; source_end is exclusive).
+
+  The following excerpt is from a provider manual. Section context (if any) is in markdown.
+
+  Excerpt:
+  {paragraph_block}
+
+  Return only valid JSON, no markdown formatting. Do not include any text before or after the JSON. No preamble or explanation.
