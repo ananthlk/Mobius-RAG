@@ -1,12 +1,12 @@
 import hashlib
 import logging
-from typing import Optional
-from fastapi import FastAPI, UploadFile, HTTPException, Depends, Body
+from typing import Optional, List
+from fastapi import FastAPI, UploadFile, HTTPException, Depends, Body, Query
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete, func
+from sqlalchemy import select, delete, func, text, bindparam, and_, or_
 from google.cloud import storage
 import json
 from datetime import datetime
@@ -15,7 +15,7 @@ from asyncio import Lock
 import asyncio
 from app.config import GCS_BUCKET, ENV, CRITIQUE_RETRY_THRESHOLD
 from app.database import get_db, Base
-from app.models import Document, DocumentPage, ChunkingResult, HierarchicalChunk, ExtractedFact, ProcessingError, ChunkingJob, ChunkingEvent, fact_to_category_scores_dict
+from app.models import Document, DocumentPage, ChunkingResult, HierarchicalChunk, ExtractedFact, ProcessingError, ChunkingJob, ChunkingEvent, LlmConfig, fact_to_category_scores_dict
 from app.services.error_tracker import log_error, classify_error
 from app.services.extract_text import extract_text_from_gcs
 from app.services.chunking import split_paragraphs, split_paragraphs_from_markdown
@@ -432,13 +432,35 @@ async def create_database_endpoint():
         return {"status": "error", "message": str(e)}
 
 
+def _chunking_status_from_latest_event(event_type: str, event_data: dict) -> tuple[str, str | None]:
+    """Derive chunking_status and processing_stage from latest chunking event. Returns (chunking_status, processing_stage)."""
+    if event_type == "chunking_complete":
+        return ("completed", None)
+    if event_type in (
+        "paragraph_start", "llm_stream", "extraction_complete",
+        "critique_start", "critique_complete", "retry_start", "retry_extraction_complete",
+        "paragraph_complete", "paragraph_persisted", "progress_update", "status_message", "paragraph_error", "error",
+    ):
+        stage = "idle"
+        if event_type in ("paragraph_start", "llm_stream", "extraction_complete"):
+            stage = "extracting"
+        elif event_type in ("critique_start", "critique_complete"):
+            stage = "critiquing"
+        elif event_type in ("retry_start", "retry_extraction_complete"):
+            stage = "retrying"
+        elif event_type == "paragraph_persisted":
+            stage = "persisting"
+        return ("in_progress", stage)
+    return ("in_progress", "idle")
+
+
 @app.get("/documents")
 async def list_documents(
     skip: int = 0,
     limit: int = 100,
     db: AsyncSession = Depends(get_db)
 ):
-    """List all documents with extraction and chunking status."""
+    """List all documents with extraction and chunking status. Chunking status is derived from the latest chunking_event when present to avoid fluctuation."""
     result = await db.execute(
         select(Document)
         .order_by(Document.created_at.desc())
@@ -446,50 +468,84 @@ async def list_documents(
         .limit(limit)
     )
     documents = result.scalars().all()
-    
-    # Get chunking status for each document
+    if not documents:
+        return {"total": 0, "documents": []}
+
+    # Latest chunking event per document (by created_at desc, id desc) – single source of truth for status
+    doc_ids = [doc.id for doc in documents]
+    if doc_ids:
+        latest_events_result = await db.execute(
+            text("""
+                SELECT DISTINCT ON (document_id) document_id, event_type, event_data
+                FROM chunking_events
+                WHERE document_id IN :doc_ids
+                ORDER BY document_id, created_at DESC, id DESC
+            """).bindparams(bindparam("doc_ids", expanding=True)),
+            {"doc_ids": doc_ids},
+        )
+        latest_events = {str(row.document_id): {"event_type": row.event_type, "event_data": row.event_data or {}} for row in latest_events_result}
+    else:
+        latest_events = {}
+
     document_list = []
     for doc in documents:
-        # First check for active jobs (pending or processing)
-        job_result = await db.execute(
-            select(ChunkingJob).where(
-                ChunkingJob.document_id == doc.id,
-                ChunkingJob.status.in_(["pending", "processing"])
-            ).order_by(ChunkingJob.created_at.desc())
-        )
-        active_job = job_result.scalar_one_or_none()
-        
-        chunking_status = None
-        job_id = None
-        job_critique_enabled = None
-        job_max_retries = None
-        if active_job:
-            # Job exists - map job status to chunking_status
-            if active_job.status == "pending":
-                chunking_status = "queued"
-            elif active_job.status == "processing":
-                chunking_status = "in_progress"
-            job_id = str(active_job.id)
-            job_critique_enabled = active_job.critique_enabled is None or str(active_job.critique_enabled).lower() == "true"
-            job_max_retries = active_job.max_retries if active_job.max_retries is not None else 2
-        else:
-            # No active job - check chunking results
-            chunking_result = await db.execute(
-                select(ChunkingResult).where(ChunkingResult.document_id == doc.id)
-            )
-            chunking = chunking_result.scalar_one_or_none()
+        doc_id_str = str(doc.id)
+        latest = latest_events.get(doc_id_str)
+        chunking_meta = None  # ChunkingResult.metadata_ when used in fallback (for progress)
 
-            if chunking and chunking.metadata_:
-                chunking_status = chunking.metadata_.get("status", "idle")
+        if latest:
+            chunking_status, processing_stage = _chunking_status_from_latest_event(
+                latest["event_type"], latest["event_data"]
+            )
+        else:
+            chunking_status = None
+            processing_stage = None
+
+        if chunking_status is None:
+            # No events: fall back to ChunkingJob + ChunkingResult
+            job_result = await db.execute(
+                select(ChunkingJob).where(
+                    ChunkingJob.document_id == doc.id,
+                    ChunkingJob.status.in_(["pending", "processing"])
+                ).order_by(ChunkingJob.created_at.desc())
+            )
+            active_job = job_result.scalar_one_or_none()
+            if active_job:
+                chunking_status = "queued" if active_job.status == "pending" else "in_progress"
+                job_id = str(active_job.id)
+                job_critique_enabled = active_job.critique_enabled is None or str(active_job.critique_enabled).lower() == "true"
+                job_max_retries = active_job.max_retries if active_job.max_retries is not None else 2
             else:
-                chunking_status = "idle"
+                chunking_result = await db.execute(
+                    select(ChunkingResult).where(ChunkingResult.document_id == doc.id)
+                )
+                chunking = chunking_result.scalar_one_or_none()
+                if chunking and chunking.metadata_:
+                    chunking_meta = chunking.metadata_
+                    chunking_status = chunking_meta.get("status", "idle")
+                else:
+                    chunking_status = "idle"
+                job_id = None
+                job_critique_enabled = None
+                job_max_retries = None
+        else:
+            job_result = await db.execute(
+                select(ChunkingJob).where(
+                    ChunkingJob.document_id == doc.id,
+                    ChunkingJob.status.in_(["pending", "processing"])
+                ).order_by(ChunkingJob.created_at.desc())
+            )
+            active_job = job_result.scalar_one_or_none()
+            job_id = str(active_job.id) if active_job else None
+            job_critique_enabled = (active_job.critique_enabled is None or str(active_job.critique_enabled).lower() == "true") if active_job else None
+            job_max_retries = (active_job.max_retries if active_job.max_retries is not None else 2) if active_job else None
 
         doc_item = {
-            "id": str(doc.id),
+            "id": doc_id_str,
             "filename": doc.filename,
             "display_name": getattr(doc, "display_name", None),
-            "extraction_status": doc.status,  # uploaded, extracting, completed, failed, completed_with_errors
-            "chunking_status": chunking_status,  # idle, queued, in_progress, completed, stopped, failed
+            "extraction_status": doc.status,
+            "chunking_status": chunking_status,
             "created_at": doc.created_at.isoformat(),
             "gcs_path": doc.file_path,
             "has_errors": doc.has_errors or "false",
@@ -503,16 +559,312 @@ async def list_documents(
             "effective_date": getattr(doc, "effective_date", None),
             "termination_date": getattr(doc, "termination_date", None),
         }
+        if processing_stage is not None:
+            doc_item["chunking_processing_stage"] = processing_stage
         if job_id is not None:
             doc_item["chunking_job_id"] = job_id
             doc_item["critique_enabled"] = job_critique_enabled
             doc_item["max_retries"] = job_max_retries
+        # Progress for Live Updates: from latest event event_data or ChunkingResult metadata (no per-doc fetch needed)
+        if latest and isinstance(latest.get("event_data"), dict):
+            ed = latest["event_data"]
+            if ed.get("total_paragraphs") is not None:
+                doc_item["chunking_total_paragraphs"] = ed["total_paragraphs"]
+            if ed.get("completed_paragraphs") is not None:
+                doc_item["chunking_completed_paragraphs"] = ed["completed_paragraphs"]
+            if ed.get("current_paragraph") is not None:
+                doc_item["chunking_current_paragraph"] = ed["current_paragraph"]
+            elif ed.get("paragraph_id") is not None:
+                doc_item["chunking_current_paragraph"] = ed["paragraph_id"]
+            if ed.get("page_number") is not None:
+                doc_item["chunking_current_page"] = ed["page_number"]
+            if ed.get("total_pages") is not None:
+                doc_item["chunking_total_pages"] = ed["total_pages"]
+        elif chunking_meta:
+            if chunking_meta.get("total_paragraphs") is not None:
+                doc_item["chunking_total_paragraphs"] = chunking_meta["total_paragraphs"]
+            if chunking_meta.get("completed_count") is not None:
+                doc_item["chunking_completed_paragraphs"] = chunking_meta["completed_count"]
         document_list.append(doc_item)
-    
+
     return {
         "total": len(document_list),
         "documents": document_list
     }
+
+
+@app.get("/facts")
+async def list_facts(
+    db: AsyncSession = Depends(get_db),
+    document_id: Optional[List[str]] = Query(None, description="Filter by document ID(s)"),
+    page_number: Optional[int] = Query(None, description="Filter by page number"),
+    section_path: Optional[str] = Query(None, description="Filter by section (contains)"),
+    search: Optional[str] = Query(None, description="Search in fact text"),
+    payer: Optional[List[str]] = Query(None, description="Filter by payer"),
+    state: Optional[List[str]] = Query(None, description="Filter by state"),
+    program: Optional[List[str]] = Query(None, description="Filter by program"),
+    fact_type: Optional[List[str]] = Query(None, description="Filter by fact type"),
+    is_pertinent: Optional[str] = Query(None, description="Filter by pertinent: all, yes, no"),
+    is_eligibility: Optional[str] = Query(None, description="Filter by eligibility: all, yes, no"),
+    verification_status: Optional[str] = Query(None, description="Filter by status: all, pending, approved, rejected"),
+    category_min_scores: Optional[str] = Query(None, description="JSON object of category -> min score, e.g. {\"prior_authorization_required\":0.5}"),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=1000),
+    sort: str = Query("created_at", description="Sort by: created_at, document, page"),
+):
+    """List extracted facts with server-side filtering and pagination."""
+    from uuid import UUID
+    from app.models import CATEGORY_NAMES
+
+    # Use raw SQL for flexibility with joins and filters
+    conditions = ["1=1"]
+    params = {"skip": skip, "limit": limit}
+
+    # Document filter
+    if document_id and len(document_id) > 0:
+        try:
+            uuids = [str(UUID(d)) for d in document_id]
+            placeholders = ", ".join([f":doc_id_{i}" for i in range(len(uuids))])
+            conditions.append(f"ef.document_id IN ({placeholders})")
+            for i, u in enumerate(uuids):
+                params[f"doc_id_{i}"] = u
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid document_id")
+
+    # Page number filter
+    if page_number is not None:
+        conditions.append("(ef.page_number = :page_number OR (ef.page_number IS NULL AND hc.page_number = :page_number))")
+        params["page_number"] = page_number
+
+    # Section filter (from hierarchical_chunks)
+    if section_path and section_path.strip():
+        conditions.append("hc.section_path ILIKE :section_pattern")
+        params["section_pattern"] = f"%{section_path.strip()}%"
+
+    # Search in fact text
+    if search and search.strip():
+        conditions.append("ef.fact_text ILIKE :search_pattern")
+        params["search_pattern"] = f"%{search.strip()}%"
+
+    # Payer, state, program (from documents)
+    def _in_clause(param_name: str, values: list, col: str, params_dict: dict, conditions_list: list) -> None:
+        if not values:
+            return
+        placeholders = ", ".join([f":{param_name}_{i}" for i in range(len(values))])
+        conditions_list.append(f"{col} IN ({placeholders})")
+        for i, v in enumerate(values):
+            params_dict[f"{param_name}_{i}"] = v
+
+    if payer and len(payer) > 0:
+        _in_clause("payer", payer, "d.payer", params, conditions)
+    if state and len(state) > 0:
+        _in_clause("state", state, "d.state", params, conditions)
+    if program and len(program) > 0:
+        _in_clause("program", program, "d.program", params, conditions)
+    if fact_type and len(fact_type) > 0:
+        _in_clause("fact_type", fact_type, "ef.fact_type", params, conditions)
+
+    # is_pertinent filter
+    if is_pertinent and is_pertinent not in ("all", ""):
+        if is_pertinent == "yes":
+            conditions.append("ef.is_pertinent_to_claims_or_members = 'true'")
+        elif is_pertinent == "no":
+            conditions.append("(ef.is_pertinent_to_claims_or_members IS NULL OR ef.is_pertinent_to_claims_or_members != 'true')")
+
+    # is_eligibility filter
+    if is_eligibility and is_eligibility not in ("all", ""):
+        if is_eligibility == "yes":
+            conditions.append("ef.is_eligibility_related = 'true'")
+        elif is_eligibility == "no":
+            conditions.append("(ef.is_eligibility_related IS NULL OR ef.is_eligibility_related != 'true')")
+
+    # verification_status filter
+    if verification_status and verification_status not in ("all", ""):
+        if verification_status == "pending":
+            conditions.append("(ef.verification_status IS NULL OR ef.verification_status = 'pending')")
+        else:
+            conditions.append("ef.verification_status = :ver_status")
+            params["ver_status"] = verification_status
+
+    # Category min scores (JSON: {"category_name": 0.5, ...})
+    if category_min_scores and category_min_scores.strip():
+        try:
+            cat_mins = json.loads(category_min_scores)
+            if isinstance(cat_mins, dict):
+                for cat, min_val in cat_mins.items():
+                    if cat in CATEGORY_NAMES and isinstance(min_val, (int, float)) and min_val > 0:
+                        col = f"{cat}_score"
+                        if hasattr(ExtractedFact, col):
+                            conditions.append(f"ef.{col} >= :min_{cat}")
+                            params[f"min_{cat}"] = float(min_val)
+        except json.JSONDecodeError:
+            pass
+
+    where_clause = " AND ".join(conditions)
+
+    # Sort
+    sort_col = "ef.created_at"
+    if sort == "document":
+        sort_col = "d.display_name, d.filename, ef.created_at"
+    elif sort == "page":
+        sort_col = "COALESCE(ef.page_number, hc.page_number), ef.created_at"
+
+    # Count query
+    count_sql = text(f"""
+        SELECT COUNT(*) as cnt
+        FROM extracted_facts ef
+        JOIN hierarchical_chunks hc ON ef.hierarchical_chunk_id = hc.id
+        JOIN documents d ON ef.document_id = d.id
+        WHERE {where_clause}
+    """)
+    count_result = await db.execute(count_sql, params)
+    total = count_result.scalar() or 0
+
+    # Data query with limit/offset (include category score columns)
+    fact_cols = [f"{c}_score" for c in CATEGORY_NAMES] + [f"{c}_direction" for c in CATEGORY_NAMES]
+    cols_str = ", ".join([f"ef.{c}" for c in fact_cols])
+    data_sql2 = text(f"""
+        SELECT ef.id, ef.fact_text, ef.fact_type, ef.who_eligible, ef.how_verified, ef.conflict_resolution,
+               ef.when_applies, ef.limitations, ef.is_pertinent_to_claims_or_members, ef.is_eligibility_related,
+               ef.is_verified, ef.confidence, ef.document_id, ef.page_number, ef.verification_status, ef.verified_by, ef.verified_at, ef.created_at,
+               hc.section_path, hc.page_number as chunk_page,
+               d.filename, d.display_name, d.payer, d.state, d.program, d.effective_date, d.termination_date,
+               {cols_str}
+        FROM extracted_facts ef
+        JOIN hierarchical_chunks hc ON ef.hierarchical_chunk_id = hc.id
+        JOIN documents d ON ef.document_id = d.id
+        WHERE {where_clause}
+        ORDER BY {sort_col}
+        OFFSET :skip LIMIT :limit
+    """)
+    data_result2 = await db.execute(data_sql2, params)
+    rows2 = data_result2.fetchall()
+    col_keys = [c for c in data_result2.keys()]
+
+    records = []
+    for row in rows2:
+        r = dict(zip(col_keys, row))
+        category_scores = {}
+        for c in CATEGORY_NAMES:
+            score = r.get(f"{c}_score")
+            direction = r.get(f"{c}_direction")
+            category_scores[c] = {"score": score, "direction": direction}
+        page_num = r.get("page_number")
+        if page_num is None:
+            page_num = r.get("chunk_page")
+        records.append({
+            "id": str(r["id"]),
+            "fact_text": r["fact_text"],
+            "fact_type": r["fact_type"],
+            "who_eligible": r["who_eligible"],
+            "how_verified": r["how_verified"],
+            "conflict_resolution": r["conflict_resolution"],
+            "when_applies": r["when_applies"],
+            "limitations": r["limitations"],
+            "is_pertinent_to_claims_or_members": r["is_pertinent_to_claims_or_members"],
+            "is_eligibility_related": r["is_eligibility_related"],
+            "is_verified": r["is_verified"],
+            "confidence": r["confidence"],
+            "document_id": str(r["document_id"]),
+            "document_filename": r["filename"],
+            "document_display_name": r["display_name"],
+            "payer": r["payer"],
+            "state": r["state"],
+            "program": r["program"],
+            "effective_date": r["effective_date"],
+            "termination_date": r["termination_date"],
+            "page_number": page_num,
+            "section_path": r.get("section_path"),
+            "verification_status": r.get("verification_status"),
+            "verified_by": r.get("verified_by"),
+            "verified_at": r["verified_at"].isoformat() if r.get("verified_at") else None,
+            "category_scores": category_scores,
+        })
+
+    # Get documents list for filter dropdowns
+    docs_result = await db.execute(
+        select(Document).order_by(Document.display_name, Document.filename)
+    )
+    all_docs = docs_result.scalars().all()
+    documents = [
+        {
+            "id": str(d.id),
+            "filename": d.filename,
+            "display_name": d.display_name,
+            "payer": d.payer,
+            "state": d.state,
+            "program": d.program,
+            "effective_date": d.effective_date,
+            "termination_date": d.termination_date,
+        }
+        for d in all_docs
+    ]
+
+    # Get distinct filter options (payers, states, programs, fact_types) from filtered facts
+    filter_options = {"payers": [], "states": [], "programs": [], "fact_types": []}
+    if total > 0:
+        opts_sql = text(f"""
+            SELECT DISTINCT d.payer, d.state, d.program, ef.fact_type
+            FROM extracted_facts ef
+            JOIN hierarchical_chunks hc ON ef.hierarchical_chunk_id = hc.id
+            JOIN documents d ON ef.document_id = d.id
+            WHERE {where_clause}
+        """)
+        opts_result = await db.execute(opts_sql, params)
+        opts_rows = opts_result.fetchall()
+        payers = sorted({r[0] for r in opts_rows if r[0]})
+        states = sorted({r[1] for r in opts_rows if r[1]})
+        programs = sorted({r[2] for r in opts_rows if r[2]})
+        fact_types = sorted({r[3] for r in opts_rows if r[3]})
+        filter_options = {"payers": payers, "states": states, "programs": programs, "fact_types": fact_types}
+
+    return {
+        "total": total,
+        "skip": skip,
+        "limit": limit,
+        "records": records,
+        "documents": documents,
+        "filter_options": filter_options,
+    }
+
+
+@app.get("/facts/sections")
+async def list_fact_sections(
+    db: AsyncSession = Depends(get_db),
+    document_id: Optional[List[str]] = Query(None, description="Filter by document ID(s)"),
+):
+    """List distinct section_path values for filter dropdown."""
+    from uuid import UUID
+
+    if not document_id or len(document_id) == 0:
+        # All sections across all documents
+        result = await db.execute(
+            text("""
+                SELECT DISTINCT hc.section_path
+                FROM hierarchical_chunks hc
+                WHERE hc.section_path IS NOT NULL AND hc.section_path != ''
+                ORDER BY hc.section_path
+            """)
+        )
+    else:
+        try:
+            uuids = [str(UUID(d)) for d in document_id]
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid document_id")
+        placeholders = ", ".join([f":doc_{i}" for i in range(len(uuids))])
+        result = await db.execute(
+            text(f"""
+                SELECT DISTINCT hc.section_path
+                FROM hierarchical_chunks hc
+                WHERE hc.document_id IN ({placeholders})
+                  AND hc.section_path IS NOT NULL AND hc.section_path != ''
+                ORDER BY hc.section_path
+            """),
+            {f"doc_{i}": u for i, u in enumerate(uuids)}
+        )
+    rows = result.fetchall()
+    sections = [r[0] for r in rows]
+    return {"sections": sections}
 
 
 @app.patch("/documents/{document_id}")
@@ -540,22 +892,32 @@ async def update_document_metadata(
                 setattr(doc, key, val if isinstance(val, str) else str(val))
     await db.commit()
     await db.refresh(doc)
-    # Build same shape as one item in list_documents (including chunking_status)
-    job_result = await db.execute(
-        select(ChunkingJob).where(
-            ChunkingJob.document_id == doc.id,
-            ChunkingJob.status.in_(["pending", "processing"])
-        ).order_by(ChunkingJob.created_at.desc())
+    # Build same shape as list_documents: derive chunking_status from latest chunking_event when present
+    latest_ev = await db.execute(
+        select(ChunkingEvent).where(ChunkingEvent.document_id == doc.id)
+        .order_by(ChunkingEvent.created_at.desc(), ChunkingEvent.id.desc())
+        .limit(1)
     )
-    active_job = job_result.scalar_one_or_none()
-    chunking_status = "idle"
-    if active_job:
-        chunking_status = "queued" if active_job.status == "pending" else "in_progress"
+    latest_event = latest_ev.scalar_one_or_none()
+    if latest_event:
+        chunking_status, processing_stage = _chunking_status_from_latest_event(
+            latest_event.event_type, latest_event.event_data or {}
+        )
     else:
-        cr_result = await db.execute(select(ChunkingResult).where(ChunkingResult.document_id == doc.id))
-        chunking_row = cr_result.scalar_one_or_none()
-        if chunking_row and chunking_row.metadata_:
-            chunking_status = chunking_row.metadata_.get("status", "idle")
+        processing_stage = None
+        job_result = await db.execute(
+            select(ChunkingJob).where(
+                ChunkingJob.document_id == doc.id,
+                ChunkingJob.status.in_(["pending", "processing"])
+            ).order_by(ChunkingJob.created_at.desc())
+        )
+        active_job = job_result.scalar_one_or_none()
+        if active_job:
+            chunking_status = "queued" if active_job.status == "pending" else "in_progress"
+        else:
+            cr_result = await db.execute(select(ChunkingResult).where(ChunkingResult.document_id == doc.id))
+            chunking_row = cr_result.scalar_one_or_none()
+            chunking_status = chunking_row.metadata_.get("status", "idle") if (chunking_row and chunking_row.metadata_) else "idle"
     out = {
         "id": str(doc.id),
         "filename": doc.filename,
@@ -575,6 +937,8 @@ async def update_document_metadata(
         "effective_date": getattr(doc, "effective_date", None),
         "termination_date": getattr(doc, "termination_date", None),
     }
+    if processing_stage is not None:
+        out["chunking_processing_stage"] = processing_stage
     return out
 
 
@@ -1412,12 +1776,16 @@ async def _run_chunking_loop(
     threshold: float,
     db: AsyncSession,
     event_callback=None,  # Optional async generator callback: async def callback(event_type, data) -> yields SSE strings
+    critique_enabled: bool = True,
+    max_retries: int = 2,
 ):
     """
     Shared chunking loop logic. Runs the full paragraph processing loop.
     - If event_callback is provided, it should be an async generator that yields SSE event strings
     - Otherwise, just processes and persists results (for background task)
     - Checks _chunking_cancel at the start of each paragraph iteration
+    - critique_enabled: if False, skip critique and retries (extraction only)
+    - max_retries: when critique enabled, max extraction retries on critique fail
     """
     results_paragraphs: dict = {}
     
@@ -1674,10 +2042,9 @@ async def _run_chunking_loop(
                         # Check if parse_json_response recovered (it tries partial recovery)
                         recovered = False
                         try:
-                            # Try to see if we got any partial data
                             if raw_extraction_output and "{" in raw_extraction_output:
                                 recovered = True
-                        except:
+                        except Exception:
                             pass
                         # Log as warning if recovered, critical if not
                         try:
@@ -1715,105 +2082,111 @@ async def _run_chunking_loop(
                         except Exception as event_err:
                             logger.error(f"Error sending extraction_complete event: {event_err}", exc_info=True)
                     
-                    # Stage 3: Critique agent
-                    if event_callback:
+                    # Stage 3: Critique agent (skip if critique_enabled is False)
+                    critique = {"pass": True, "score": 1.0, "category_assessment": {}, "feedback": None, "issues": []}
+                    if critique_enabled:
+                        if event_callback:
+                            try:
+                                async for line in event_callback("critique_start", {"paragraph_id": para_id}):
+                                    yield line
+                            except Exception as event_err:
+                                logger.error(f"Error sending critique_start event: {event_err}", exc_info=True)
+                        
+                        # Stream critique
+                        # logger.debug(f"[{para_id}] Starting critique streaming (extraction has {len(extraction.get('facts', []))} facts)")  # Reduced logging
+                        raw_critique_output = ""
                         try:
-                            async for line in event_callback("critique_start", {"paragraph_id": para_id}):
-                                yield line
-                        except Exception as event_err:
-                            logger.error(f"Error sending critique_start event: {event_err}", exc_info=True)
-                    
-                    # Stream critique
-                    # logger.debug(f"[{para_id}] Starting critique streaming (extraction has {len(extraction.get('facts', []))} facts)")  # Reduced logging
-                    raw_critique_output = ""
-                    try:
-                        async for chunk in stream_critique(paragraph_text, extraction):
-                            # Check for cancellation during streaming
-                            if document_id in _chunking_cancel:
-                                _chunking_cancel.discard(document_id)
-                                logger.info(f"Stop requested during critique for {para_id}, stopping...")
-                                await _upsert("stopped")
-                                return
-                            
-                            raw_critique_output += chunk
-                            if event_callback:
-                                try:
-                                    async for line in event_callback("llm_stream", {
-                                        "paragraph_id": para_id,
-                                        "chunk": chunk
-                                    }):
-                                        yield line
-                                except Exception as event_err:
-                                    logger.error(f"Error sending llm_stream event during critique: {event_err}", exc_info=True)
-                    except Exception as stream_err:
-                        logger.error(f"[{para_id}] Error streaming critique: {stream_err}", exc_info=True)
-                        raw_critique_output = ""  # Set empty so parsing will create error critique
-                    
-                    # Parse critique result
-                    # logger.debug(f"[{para_id}] Parsing critique result (output length: {len(raw_critique_output)})")  # Reduced logging
-                    try:
-                        critique = normalize_critique_result(parse_json_response(raw_critique_output))
-                    except Exception as e:
-                        logger.error(f"Failed to parse critique: {e}")
-                        # Log critique parse error
+                            async for chunk in stream_critique(paragraph_text, extraction):
+                                # Check for cancellation during streaming
+                                if document_id in _chunking_cancel:
+                                    _chunking_cancel.discard(document_id)
+                                    logger.info(f"Stop requested during critique for {para_id}, stopping...")
+                                    await _upsert("stopped")
+                                    return
+                                
+                                raw_critique_output += chunk
+                                if event_callback:
+                                    try:
+                                        async for line in event_callback("llm_stream", {
+                                            "paragraph_id": para_id,
+                                            "chunk": chunk
+                                        }):
+                                            yield line
+                                    except Exception as event_err:
+                                        logger.error(f"Error sending llm_stream event during critique: {event_err}", exc_info=True)
+                        except Exception as stream_err:
+                            logger.error(f"[{para_id}] Error streaming critique: {stream_err}", exc_info=True)
+                            raw_critique_output = ""  # Set empty so parsing will create error critique
+                        
+                        # Parse critique result
+                        # logger.debug(f"[{para_id}] Parsing critique result (output length: {len(raw_critique_output)})")  # Reduced logging
                         try:
-                            recovered = False
-                            if raw_critique_output and "{" in raw_critique_output:
-                                recovered = True
-                            severity, stage = classify_error("json_parse_error", e, recovered=recovered)
-                            await log_error(
-                                db=db,
-                                document_id=document_id,
-                                error_type="json_parse_error",
-                                error_message=f"Failed to parse critique JSON: {str(e)}",
-                                severity=severity,
-                                stage="critique",
-                                paragraph_id=para_id,
-                                error_details={
-                                    "exception_type": type(e).__name__,
-                                    "exception_message": str(e),
-                                    "recovered": recovered,
-                                    "raw_output_preview": raw_critique_output[:500] if raw_critique_output else None,
-                                    "paragraph_id": para_id
-                                }
-                            )
-                        except Exception as log_err:
-                            logger.error(f"Failed to log error: {log_err}", exc_info=True)
-                        critique = {
-                            "pass": False,
-                            "score": 0.0,
-                            "category_assessment": {},
-                            "feedback": f"Failed to parse critique: {str(e)}",
-                            "issues": []
-                        }
+                            critique = normalize_critique_result(parse_json_response(raw_critique_output))
+                        except Exception as e:
+                            logger.error(f"Failed to parse critique: {e}")
+                            # Log critique parse error
+                            try:
+                                recovered = False
+                                if raw_critique_output and "{" in raw_critique_output:
+                                    recovered = True
+                                severity, stage = classify_error("json_parse_error", e, recovered=recovered)
+                                await log_error(
+                                    db=db,
+                                    document_id=document_id,
+                                    error_type="json_parse_error",
+                                    error_message=f"Failed to parse critique JSON: {str(e)}",
+                                    severity=severity,
+                                    stage="critique",
+                                    paragraph_id=para_id,
+                                    error_details={
+                                        "exception_type": type(e).__name__,
+                                        "exception_message": str(e),
+                                        "recovered": recovered,
+                                        "raw_output_preview": raw_critique_output[:500] if raw_critique_output else None,
+                                        "paragraph_id": para_id
+                                    }
+                                )
+                            except Exception as log_err:
+                                logger.error(f"Failed to log error: {log_err}", exc_info=True)
+                            critique = {
+                                "pass": False,
+                                "score": 0.0,
+                                "category_assessment": {},
+                                "feedback": f"Failed to parse critique: {str(e)}",
+                                "issues": []
+                            }
+                        
+                        # Send critique results
+                        if event_callback:
+                            try:
+                                async for line in event_callback("critique_complete", {
+                                    "paragraph_id": para_id,
+                                    "pass": critique.get("pass", False),
+                                    "score": critique.get("score", 0.5),
+                                    "category_assessment": critique.get("category_assessment", {}),
+                                    "feedback": critique.get("feedback"),
+                                    "issues": critique.get("issues", [])
+                                }):
+                                    yield line
+                            except Exception as event_err:
+                                logger.error(f"Error sending critique_complete event: {event_err}", exc_info=True)
                     
-                    # Send critique results
-                    if event_callback:
-                        try:
-                            async for line in event_callback("critique_complete", {
-                                "paragraph_id": para_id,
-                                "pass": critique.get("pass", False),
-                                "score": critique.get("score", 0.5),
-                                "category_assessment": critique.get("category_assessment", {}),
-                                "feedback": critique.get("feedback"),
-                                "issues": critique.get("issues", [])
-                            }):
-                                yield line
-                        except Exception as event_err:
-                            logger.error(f"Error sending critique_complete event: {event_err}", exc_info=True)
-                    
-                    # Stage 4: Retry if needed (score < threshold)
-                    retry_count = 0
-                    max_retries = 2
-                    current_extraction = extraction
-                    current_critique = critique
+                    # Stage 4: Retry if needed (score < threshold) - only when critique enabled
+                    if critique_enabled:
+                        retry_count = 0
+                        current_extraction = extraction
+                        current_critique = critique
+                    else:
+                        current_extraction = extraction
+                        current_critique = {"pass": True, "score": 1.0, "category_assessment": {}, "feedback": None, "issues": []}
+                        retry_count = 0
                     consecutive_errors = 0
                     max_consecutive_errors = 3  # Break retry loop if too many errors
                     
                     critique_score = _critique_score(current_critique)
                     # logger.debug(f"[{para_id}] Initial critique score: {critique_score}, threshold: {threshold}, needs retry: {critique_score < threshold}")  # Reduced logging
                     
-                    while _critique_score(current_critique) < threshold and retry_count < max_retries and consecutive_errors < max_consecutive_errors:
+                    while critique_enabled and _critique_score(current_critique) < threshold and retry_count < max_retries and consecutive_errors < max_consecutive_errors:
                         retry_count += 1
                         logger.info(f"[{para_id}] Starting retry attempt {retry_count}/{max_retries}")  # Keep retry attempts visible
                         
@@ -2648,22 +3021,112 @@ async def stop_chunking(document_id: str):
 @app.get("/config/prompts")
 async def list_prompt_versions():
     """List available prompt names and their versions (for UI / run-configured refs). Default set: extraction v1, extraction_retry v1, critique v1."""
-    from app.services.prompt_registry import list_versions
-    names = ["extraction", "extraction_retry", "critique"]
+    from app.services.prompt_registry import list_names, list_versions
+    names = list_names() or ["extraction", "extraction_retry", "critique"]
     result = {}
     for name in names:
         versions = list_versions(name)
         result[name] = versions or []
     return {
         "prompts": result,
+        "names": names,
         "default": {"extraction": "v1", "extraction_retry": "v1", "critique": "v1"},
     }
+
+
+def _safe_version(version: str) -> bool:
+    """Allow alphanumeric, hyphen, underscore for prompt version (no path traversal)."""
+    if not version or len(version) > 80:
+        return False
+    return all(c.isalnum() or c in "-_" for c in version)
+
+
+@app.get("/config/prompts/{name}/{version}")
+async def get_prompt_version(name: str, version: str):
+    """Get one prompt by name and version (body, variables, description)."""
+    if not _safe_config_name(name) or not _safe_version(version):
+        raise HTTPException(status_code=400, detail="Invalid name or version")
+    from app.services.prompt_registry import get_prompt_with_meta
+    data = get_prompt_with_meta(name, version)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Prompt not found")
+    return data
+
+
+class PromptCreateUpdateBody(BaseModel):
+    body: str = ""
+    description: str = ""
+    variables: Optional[list[str]] = None
+
+
+@app.post("/config/prompts/{name}/{version}")
+async def create_prompt_version(name: str, version: str, body: PromptCreateUpdateBody = Body(...)):
+    """Create a new prompt version (file)."""
+    if not _safe_config_name(name) or not _safe_version(version):
+        raise HTTPException(status_code=400, detail="Invalid name or version")
+    from app.services.prompt_registry import save_prompt, list_versions, create_prompt_name
+    existing = list_versions(name)
+    if version in existing:
+        raise HTTPException(status_code=409, detail="Version already exists; use PUT to update")
+    create_prompt_name(name)
+    ok = save_prompt(
+        name, version,
+        body.body,
+        body.description or "",
+        body.variables,
+    )
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to save prompt")
+    return {"name": name, "version": version, "status": "created"}
+
+
+@app.put("/config/prompts/{name}/{version}")
+async def update_prompt_version(name: str, version: str, body: PromptCreateUpdateBody = Body(...)):
+    """Update an existing prompt version."""
+    if not _safe_config_name(name) or not _safe_version(version):
+        raise HTTPException(status_code=400, detail="Invalid name or version")
+    from app.services.prompt_registry import save_prompt, list_versions
+    if version not in list_versions(name):
+        raise HTTPException(status_code=404, detail="Prompt not found")
+    ok = save_prompt(
+        name, version,
+        body.body,
+        body.description or "",
+        body.variables,
+    )
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to save prompt")
+    return {"name": name, "version": version, "status": "updated"}
+
+
+@app.delete("/config/prompts/{name}/{version}")
+async def delete_prompt_version(name: str, version: str):
+    """Delete a prompt version (file)."""
+    if not _safe_config_name(name) or not _safe_version(version):
+        raise HTTPException(status_code=400, detail="Invalid name or version")
+    from app.services.prompt_registry import delete_prompt
+    ok = delete_prompt(name, version)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to delete prompt")
+    return {"name": name, "version": version, "status": "deleted"}
+
+
+@app.post("/config/prompts/names")
+async def create_prompt_name_api(body: dict = Body(...)):
+    """Create a new prompt name (folder). Expects JSON: {\"name\": \"my_prompt\"}."""
+    prompt_name = (body.get("name") or "").strip()
+    if not prompt_name or not _safe_config_name(prompt_name):
+        raise HTTPException(status_code=400, detail="Invalid or missing name")
+    from app.services.prompt_registry import create_prompt_name
+    ok = create_prompt_name(prompt_name)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to create prompt name")
+    return {"name": prompt_name, "status": "created"}
 
 
 @app.get("/config/llm")
 async def list_llm_configs():
     """List available LLM config names (for UI / run-configured refs). Default: default."""
-    import os
     from pathlib import Path
     configs_dir = Path(__file__).resolve().parent / "llm_configs"
     names = []
@@ -2675,6 +3138,167 @@ async def list_llm_configs():
         "configs": sorted(names) if names else ["default"],
         "default": "default",
     }
+
+
+def _safe_config_name(name: str) -> bool:
+    """Allow only alphanumeric, hyphen, underscore (no path traversal)."""
+    if not name or len(name) > 100:
+        return False
+    return all(c.isalnum() or c in "-_" for c in name)
+
+
+_SECRET_KEYS = frozenset({"api_key", "apikey", "secret"})
+
+
+def _sanitize_secrets_for_storage(obj: dict) -> dict:
+    """Replace real secret values with placeholder so we never persist secrets to PostgreSQL."""
+    out = {}
+    for k, v in obj.items():
+        if isinstance(v, dict):
+            out[k] = _sanitize_secrets_for_storage(v)
+        elif k in _SECRET_KEYS and isinstance(v, str) and v.strip() and v.strip() != "***":
+            out[k] = "***"
+        else:
+            out[k] = v
+    return out
+
+
+def _redact_secrets(obj: dict) -> dict:
+    """Return a copy with secret-like values replaced by a placeholder."""
+    out = {}
+    for k, v in obj.items():
+        key_lower = k.lower().replace("-", "").replace("_", "")
+        if key_lower in ("apikey", "apisecret", "secret") and v:
+            out[k] = "***"
+        elif isinstance(v, dict):
+            out[k] = _redact_secrets(v)
+        else:
+            out[k] = v
+    return out
+
+
+@app.get("/config/llm/providers")
+async def list_llm_providers():
+    """List registered LLM provider names (ollama, vertex, openai, etc.)."""
+    from app.services.llm_provider import list_providers
+    return {"providers": list_providers()}
+
+
+@app.get("/config/llm/{version}")
+async def get_llm_config_version(version: str, db: AsyncSession = Depends(get_db)):
+    """Get one LLM config by version/name (DB first, then YAML). Secrets are redacted for display."""
+    if not _safe_config_name(version):
+        raise HTTPException(status_code=400, detail="Invalid config name")
+    from app.services.llm_config import get_llm_config_resolved
+    cfg = await get_llm_config_resolved(version, db)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail="Config not found")
+    return _redact_secrets(cfg)
+
+
+@app.post("/config/llm/{version}/test")
+async def test_llm_config(version: str, db: AsyncSession = Depends(get_db)):
+    """Build the LLM provider for this config and run a short generate to verify credentials and connectivity."""
+    if not _safe_config_name(version):
+        raise HTTPException(status_code=400, detail="Invalid config name")
+    from app.services.llm_config import get_llm_config_resolved, get_llm_provider_from_config
+    cfg = await get_llm_config_resolved(version, db)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail="Config not found")
+    try:
+        llm = get_llm_provider_from_config(cfg)
+        reply = await llm.generate("Say hi in one word.", temperature=0)
+        reply_text = (reply or "").strip()[:200]
+        return {"ok": True, "message": reply_text or "Connected.", "reply": reply_text}
+    except ImportError as e:
+        err = str(e).strip()
+        if "vertex" in err.lower() or "aiplatform" in err.lower() or "vertexai" in err.lower():
+            return {
+                "ok": False,
+                "error": "Vertex AI SDK not installed. Run: pip install -e \".[vertex]\" (with venv active), then restart the backend.",
+            }
+        return {"ok": False, "error": err}
+    except ValueError as e:
+        err = str(e).strip()
+        if "project_id" in err.lower() or "vertex" in err.lower():
+            return {
+                "ok": False,
+                "error": f"{err} Set VERTEX_PROJECT_ID in .env and restart the backend.",
+            }
+        return {"ok": False, "error": err}
+    except Exception as e:
+        logger.exception("LLM config test failed for %s", version)
+        err = str(e).strip()
+        if "api has not been used" in err.lower() or "is disabled" in err.lower() or "service_disabled" in err.lower() or "activationurl" in err.lower():
+            return {
+                "ok": False,
+                "error": "Vertex AI API is not enabled for this project. Enable it: https://console.cloud.google.com/apis/library/aiplatform.googleapis.com (select your project). Wait a few minutes after enabling, then try again.",
+            }
+        if "not found" in err.lower() and ("model" in err.lower() or "publisher" in err.lower()):
+            return {
+                "ok": False,
+                "error": "Model not found. Use a valid Vertex AI model ID, e.g. gemini-1.5-pro, gemini-1.5-flash, or gemini-1.0-pro. Change the Model field in this config and try again.",
+            }
+        if "credentials" in err.lower() or "auth" in err.lower():
+            return {
+                "ok": False,
+                "error": f"{err} Ensure .env has GOOGLE_APPLICATION_CREDENTIALS (full path to JSON key) and restart the backend.",
+            }
+        return {"ok": False, "error": err}
+
+
+class LLMConfigUpdate(BaseModel):
+    """Body for updating an LLM config (partial or full)."""
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    version: Optional[str] = None
+    options: Optional[dict] = None
+    ollama: Optional[dict] = None
+    vertex: Optional[dict] = None
+    openai: Optional[dict] = None
+
+
+@app.put("/config/llm/{version}")
+async def update_llm_config(version: str, body: LLMConfigUpdate, db: AsyncSession = Depends(get_db)):
+    """Update an LLM config (saved to DB). Preserves existing secret values if new value is '***' or missing."""
+    if not _safe_config_name(version):
+        raise HTTPException(status_code=400, detail="Invalid config name")
+    from app.services.llm_config import get_llm_config_resolved, save_llm_config
+
+    existing = await get_llm_config_resolved(version, db) or {}
+    merged = dict(existing)
+
+    if body.provider is not None:
+        merged["provider"] = body.provider
+    if body.model is not None:
+        merged["model"] = body.model
+    if body.version is not None:
+        merged["version"] = body.version
+    if body.options is not None:
+        merged["options"] = {**(merged.get("options") or {}), **body.options}
+    for key in ("ollama", "vertex", "openai"):
+        block = getattr(body, key, None)
+        if block is None:
+            continue
+        current = merged.get(key) or {}
+        updated = dict(current)
+        for k, v in block.items():
+            if v is None:
+                continue
+            if k in _SECRET_KEYS and (v == "***" or v == ""):
+                if k in current and current[k]:
+                    updated[k] = current[k]
+                else:
+                    updated[k] = v
+            else:
+                updated[k] = v
+        merged[key] = updated
+
+    # Never store real secrets in PostgreSQL; resolve at runtime from env or secret manager
+    merged = _sanitize_secrets_for_storage(merged)
+    saved = await save_llm_config(db, version, merged)
+    await db.commit()
+    return _redact_secrets(saved)
 
 
 class ChunkingStartBody(BaseModel):
@@ -2771,18 +3395,31 @@ async def start_chunking(
     return out
 
 
+class ChunkingRestartBody(BaseModel):
+    """Optional body for chunking restart: run mode."""
+    threshold: Optional[float] = None
+    critique_enabled: Optional[bool] = None
+    max_retries: Optional[int] = None
+
+
 @app.post("/documents/{document_id}/chunking/restart")
 async def restart_chunking(
     document_id: str,
     db: AsyncSession = Depends(get_db),
     threshold: float | None = None,
+    body: ChunkingRestartBody | None = Body(None),
 ):
     """Restart chunking for a document that failed or was stopped."""
     from uuid import UUID
     import asyncio
     
     th = threshold if threshold is not None else CRITIQUE_RETRY_THRESHOLD
+    if body and body.threshold is not None:
+        th = body.threshold
     th = max(0.0, min(1.0, th))
+    ce = body.critique_enabled if body and body.critique_enabled is not None else True
+    mr = body.max_retries if body and body.max_retries is not None else 2
+    mr = max(0, mr)
     
     try:
         doc_uuid = UUID(document_id)
@@ -2820,11 +3457,11 @@ async def restart_chunking(
         db_session = None
         try:
             _chunking_running.add(document_id)
-            logger.info(f"Restarting background chunking task for document {document_id} with threshold {th}")
+            logger.info(f"Restarting background chunking task for document {document_id} with threshold {th}, critique_enabled={ce}, max_retries={mr}")
             db_session = AsyncSessionLocal()
             try:
                 event_callback = await _create_event_buffer_callback(document_id, db_session)
-                async for _ in _run_chunking_loop(document_id, doc_uuid, pages, th, db_session, event_callback=event_callback):
+                async for _ in _run_chunking_loop(document_id, doc_uuid, pages, th, db_session, event_callback=event_callback, critique_enabled=ce, max_retries=mr):
                     pass
             finally:
                 await db_session.close()
@@ -2917,123 +3554,16 @@ async def stream_chunking_process(
     )
 
 
-@app.get("/documents/{document_id}/chunking/live")
-async def stream_chunking_live(
-    document_id: str,
-    db: AsyncSession = Depends(get_db),
-):
-    """Stream live chunking events via SSE. Reads from database events table."""
-    from uuid import UUID
-    
-    try:
-        doc_uuid = UUID(document_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid document ID")
-    
-    # Verify document exists
-    result = await db.execute(select(Document).where(Document.id == doc_uuid))
-    document = result.scalar_one_or_none()
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-    
-    async def event_generator():
-        last_event_id = None
-        consecutive_no_events = 0
-        max_no_events = 120  # 120 polls * 0.5s = 60 seconds of no events before closing
-        initial_events_sent = False
-        
-        while True:
-            try:
-                # Query for new events from database (chronological order, id for deterministic tie-break)
-                query = select(ChunkingEvent).where(
-                    ChunkingEvent.document_id == doc_uuid
-                ).order_by(ChunkingEvent.created_at, ChunkingEvent.id)
-                
-                if last_event_id:
-                    # Only get events after the last one we sent
-                    query = query.where(ChunkingEvent.id > last_event_id)
-                
-                result = await db.execute(query)
-                events = result.scalars().all()
-                
-                if events:
-                    if not initial_events_sent and last_event_id is None:
-                        logger.info(f"SSE: Sending {len(events)} existing events for document {document_id} on initial connection")
-                        initial_events_sent = True
-                    
-                    for event in events:
-                        # Format as SSE event
-                        event_dict = {
-                            "event": event.event_type,
-                            "data": event.event_data,
-                            "timestamp": event.created_at.isoformat()
-                        }
-                        yield f"data: {json.dumps(event_dict)}\n\n"
-                        last_event_id = event.id
-                    
-                    consecutive_no_events = 0
-                elif not initial_events_sent and last_event_id is None:
-                    # No events found on initial connection
-                    logger.info(f"SSE: No existing events found for document {document_id}")
-                    initial_events_sent = True
-                else:
-                    consecutive_no_events += 1
-                    
-                    # Check if job is still active
-                    job_result = await db.execute(
-                        select(ChunkingJob).where(
-                            ChunkingJob.document_id == doc_uuid,
-                            ChunkingJob.status.in_(["pending", "processing"])
-                        )
-                    )
-                    active_job = job_result.scalar_one_or_none()
-                    
-                    # If no active job and no events for a while, check if chunking is complete
-                    if not active_job and consecutive_no_events >= 10:
-                        # Check chunking result status
-                        chunking_result = await db.execute(
-                            select(ChunkingResult).where(ChunkingResult.document_id == doc_uuid)
-                        )
-                        chunking = chunking_result.scalar_one_or_none()
-                        
-                        if chunking and chunking.metadata_:
-                            status = chunking.metadata_.get("status")
-                            if status in ["completed", "failed", "stopped"]:
-                                # Send completion event and close
-                                yield f"data: {json.dumps({'event': 'stream_end', 'data': {'reason': 'chunking_complete', 'status': status}})}\n\n"
-                                break
-                    
-                    # Close if no events for too long (likely connection issue or job stopped)
-                    if consecutive_no_events >= max_no_events:
-                        logger.warning(f"SSE: No events for {max_no_events * 0.5}s, closing stream for document {document_id}")
-                        yield f"data: {json.dumps({'event': 'stream_end', 'data': {'reason': 'timeout'}})}\n\n"
-                        break
-                
-                # Wait before next poll
-                await asyncio.sleep(0.5)
-                
-            except Exception as e:
-                logger.error(f"Error in SSE stream generator: {e}", exc_info=True)
-                yield f"data: {json.dumps({'event': 'error', 'data': {'message': str(e)}})}\n\n"
-                await asyncio.sleep(1)
-    
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-        }
-    )
-
-
 @app.get("/documents/{document_id}/chunking/events")
 async def get_chunking_events(
     document_id: str,
     db: AsyncSession = Depends(get_db),
     limit: int = 1000,
+    after_id: Optional[str] = None,
 ):
-    """Get existing chunking events for a document. Useful for loading past events when opening Live Updates tab."""
+    """Get chunking events for a document. Worker writes events to PostgreSQL; frontend polls this endpoint.
+    - No after_id: returns the most recent `limit` events (desc order). Frontend should reverse for display.
+    - after_id: returns events after that id (asc order), for polling new events only."""
     from uuid import UUID
     
     try:
@@ -3047,28 +3577,46 @@ async def get_chunking_events(
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     
-    # Query events in chronological order (created_at, then id for deterministic order)
-    query = select(ChunkingEvent).where(
-        ChunkingEvent.document_id == doc_uuid
-    ).order_by(ChunkingEvent.created_at, ChunkingEvent.id).limit(limit)
+    if after_id:
+        try:
+            after_uuid = UUID(after_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid after_id")
+        # Polling: return only new events after this id, in chronological order (asc)
+        query = (
+            select(ChunkingEvent)
+            .where(
+                ChunkingEvent.document_id == doc_uuid,
+                ChunkingEvent.id > after_uuid,
+            )
+            .order_by(ChunkingEvent.created_at, ChunkingEvent.id)
+            .limit(min(limit, 500))
+        )
+    else:
+        # Initial load: return most recent events first (desc) so client gets latest activity
+        query = (
+            select(ChunkingEvent)
+            .where(ChunkingEvent.document_id == doc_uuid)
+            .order_by(ChunkingEvent.created_at.desc(), ChunkingEvent.id.desc())
+            .limit(limit)
+        )
     
     result = await db.execute(query)
     events = result.scalars().all()
     
-    # Format events
     formatted_events = []
     for event in events:
         formatted_events.append({
             "event": event.event_type,
             "data": event.event_data,
             "timestamp": event.created_at.isoformat(),
-            "id": str(event.id)
+            "id": str(event.id),
         })
     
     return {
         "document_id": document_id,
         "events": formatted_events,
-        "count": len(formatted_events)
+        "count": len(formatted_events),
     }
 
 
@@ -3634,7 +4182,7 @@ async def create_record(
                 elif hasattr(col.type, 'python_type') and col.type.python_type == datetime and isinstance(value, str):
                     try:
                         value = datetime.fromisoformat(value.replace('Z', '+00:00'))
-                    except:
+                    except Exception:
                         pass
                 values[col_name] = value
         
@@ -3713,7 +4261,7 @@ async def update_record(
                 elif hasattr(col.type, 'python_type') and col.type.python_type == datetime and isinstance(value, str):
                     try:
                         value = datetime.fromisoformat(value.replace('Z', '+00:00'))
-                    except:
+                    except Exception:
                         pass
                 set_clauses.append(f"{col_name} = :{col_name}")
                 values[col_name] = value

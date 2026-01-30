@@ -18,7 +18,7 @@ async def log_error(
     stage: str = "other",
     paragraph_id: str | None = None,
     error_details: dict | None = None
-) -> ProcessingError:
+) -> ProcessingError | None:
     """
     Log an error to the processing_errors table.
     
@@ -33,15 +33,16 @@ async def log_error(
         error_details: Optional JSONB dict with additional context (stack trace, raw data, etc.)
     
     Returns:
-        The created ProcessingError record
+        The created ProcessingError record, or None if logging failed (invalid document_id, commit error).
+        Never raises; callers can assume control flow continues.
     """
     from uuid import UUID
     
     try:
         doc_uuid = UUID(document_id)
-    except ValueError:
-        logger.error(f"Invalid document_id format: {document_id}")
-        raise ValueError(f"Invalid document_id format: {document_id}")
+    except (ValueError, TypeError) as e:
+        logger.error("Invalid document_id format for log_error: %s (%s)", document_id, e)
+        return None
     
     error = ProcessingError(
         id=uuid.uuid4(),
@@ -77,13 +78,18 @@ async def log_error(
     try:
         await db.commit()
         await db.refresh(error)
-        logger.info(f"Logged {severity} error for document {document_id}: {error_type} - {error_message[:100]}")
+        err_id = str(error.id)
+        para = paragraph_id or "(none)"
+        logger.info(
+            "Logged to processing_errors: id=%s document_id=%s paragraph_id=%s error_type=%s severity=%s stage=%s | "
+            "Refine: query processing_errors by id or (document_id, paragraph_id)",
+            err_id, document_id, para, error_type, severity, stage,
+        )
+        return error
     except Exception as e:
         await db.rollback()
-        logger.error(f"Failed to commit error log: {e}", exc_info=True)
-        raise
-    
-    return error
+        logger.error("Failed to commit error log (rollback done): %s", e, exc_info=True)
+        return None
 
 
 def classify_error(error_type: str, error: Exception, recovered: bool = False) -> tuple[str, str]:

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { approveFactApi, deleteFactApi, patchFactApi, rejectFactApi } from '../../lib/factActions'
 import { getStateLabel } from '../../lib/documentMetadata'
 import './ReviewFactsTab.css'
@@ -69,7 +69,10 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedFact, setSelectedFact] = useState<Fact | null>(null)
   
-  // Filters
+  // Filters (server-side)
+  const [selectedDocuments, setSelectedDocuments] = useState<string[]>([])
+  const [sectionFilter, setSectionFilter] = useState<string>('')
+  const [pageNumberFilter, setPageNumberFilter] = useState<string>('')
   const [selectedPayers, setSelectedPayers] = useState<string[]>([])
   const [selectedStates, setSelectedStates] = useState<string[]>([])
   const [selectedPrograms, setSelectedPrograms] = useState<string[]>([])
@@ -78,7 +81,39 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
   const [isPertinentFilter, setIsPertinentFilter] = useState<'all' | 'yes' | 'no'>('all')
   const [isEligibilityFilter, setIsEligibilityFilter] = useState<'all' | 'yes' | 'no'>('all')
   const [approvalFilter, setApprovalFilter] = useState<'all' | 'pending' | 'approved' | 'rejected'>('all')
-  const [filtersOpen, setFiltersOpen] = useState(false)
+  const [filtersOpen, setFiltersOpen] = useState(true)
+
+  // Pagination
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(100)
+  const [total, setTotal] = useState(0)
+
+  // Filter options from API
+  const [filterOptions, setFilterOptions] = useState<{ payers: string[]; states: string[]; programs: string[]; fact_types: string[] }>({ payers: [], states: [], programs: [], fact_types: [] })
+  const [sections, setSections] = useState<string[]>([])
+  const [documentSearchQuery, setDocumentSearchQuery] = useState('')
+  const [metadataDropdownOpen, setMetadataDropdownOpen] = useState<'payer' | 'state' | 'program' | 'factType' | null>(null)
+  const [statusDropdownOpen, setStatusDropdownOpen] = useState<'pertinent' | 'eligibility' | 'approval' | null>(null)
+
+  const [searchQueryDebounced, setSearchQueryDebounced] = useState('')
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const metadataDropdownRef = useRef<HTMLDivElement | null>(null)
+  const statusDropdownRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    const onDocClick = (e: MouseEvent) => {
+      const target = e.target as Node
+      if (metadataDropdownOpen && metadataDropdownRef.current && !metadataDropdownRef.current.contains(target)) {
+        setMetadataDropdownOpen(null)
+      }
+      if ((statusDropdownOpen || metadataDropdownOpen === 'factType') && statusDropdownRef.current && !statusDropdownRef.current.contains(target)) {
+        setStatusDropdownOpen(null)
+        if (metadataDropdownOpen === 'factType') setMetadataDropdownOpen(null)
+      }
+    }
+    document.addEventListener('click', onDocClick)
+    return () => document.removeEventListener('click', onDocClick)
+  }, [metadataDropdownOpen, statusDropdownOpen])
 
   // Actions dropdown (one card at a time)
   const [actionsOpenFactId, setActionsOpenFactId] = useState<string | null>(null)
@@ -95,7 +130,7 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
 
   const closeActionsMenu = () => setActionsOpenFactId(null)
 
-  /** Shared helper: approve fact via API and update local state. */
+  /** Shared helper: approve fact via API and refresh from server. */
   const handleApprove = async (fact: Fact) => {
     try {
       const res = await approveFactApi(fact.document_id, fact.id, API_BASE)
@@ -139,16 +174,16 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
     }
   }
 
-  /** Shared helper: delete fact via API and update local state. */
+  /** Shared helper: delete fact via API and refresh from server. */
   const handleDelete = async (fact: Fact, e: React.MouseEvent) => {
     e.stopPropagation()
     if (!confirm('Delete this fact? This cannot be undone.')) return
     try {
       const res = await deleteFactApi(fact.document_id, fact.id, API_BASE)
       if (res.ok) {
-        setFacts(prev => prev.filter(f => f.id !== fact.id))
         if (selectedFact?.id === fact.id) setSelectedFact(null)
         if (editingFact?.id === fact.id) setEditingFact(null)
+        await loadFacts()
       } else {
         const err = await res.json().catch(() => ({}))
         alert(err.detail || 'Failed to delete fact')
@@ -180,151 +215,125 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
     }
   }
 
-  /** Fetch GET /documents and return doc list + map by id (string) for merging into facts. */
-  const fetchDocumentsMap = async (): Promise<{ list: DocumentMeta[]; map: Record<string, DocumentMeta> }> => {
-    const res = await fetch(`${API_BASE}/documents`)
-    if (!res.ok) return { list: [], map: {} }
-    const json = await res.json()
-    const raw = Array.isArray(json) ? json : (json.documents || [])
-    const list: DocumentMeta[] = []
-    const map: Record<string, DocumentMeta> = {}
-    for (const d of raw) {
-      const id = d.id ?? d.document_id
-      if (id) {
-        const sid = String(id)
-        const meta: DocumentMeta = {
-          id: sid,
-          filename: d.filename || d.name || 'Unknown Document',
-          display_name: d.display_name ?? null,
-          payer: d.payer ?? null,
-          state: d.state ?? null,
-          program: d.program ?? null,
-          effective_date: d.effective_date ?? null,
-          termination_date: d.termination_date ?? null,
-        }
-        list.push(meta)
-        map[sid] = meta
-      }
+  const buildFactsParams = useCallback(() => {
+    const params = new URLSearchParams()
+    params.set('skip', String((page - 1) * pageSize))
+    params.set('limit', String(pageSize))
+    if (searchQueryDebounced.trim()) params.set('search', searchQueryDebounced.trim())
+    selectedDocuments.forEach(id => params.append('document_id', id))
+    if (sectionFilter.trim()) params.set('section_path', sectionFilter.trim())
+    const pn = parseInt(pageNumberFilter, 10)
+    if (!isNaN(pn) && pn > 0) params.set('page_number', String(pn))
+    selectedPayers.forEach(p => params.append('payer', p))
+    selectedStates.forEach(s => params.append('state', s))
+    selectedPrograms.forEach(p => params.append('program', p))
+    selectedFactTypes.forEach(t => params.append('fact_type', t))
+    if (isPertinentFilter !== 'all') params.set('is_pertinent', isPertinentFilter)
+    if (isEligibilityFilter !== 'all') params.set('is_eligibility', isEligibilityFilter)
+    if (approvalFilter !== 'all') params.set('verification_status', approvalFilter)
+    const catMins = Object.fromEntries(
+      Object.entries(categoryThresholds).filter(([, v]) => v > 0)
+    )
+    if (Object.keys(catMins).length > 0) {
+      params.set('category_min_scores', JSON.stringify(catMins))
     }
-    return { list, map }
-  }
+    return params.toString()
+  }, [page, pageSize, searchQueryDebounced, selectedDocuments, sectionFilter, pageNumberFilter,
+      selectedPayers, selectedStates, selectedPrograms, selectedFactTypes,
+      isPertinentFilter, isEligibilityFilter, approvalFilter, categoryThresholds])
 
-  /** Merge document metadata (GET /documents) into facts so display name, filename, payer/state/program, and dates are up to date. */
-  const mergeDocumentMetadataIntoFacts = (
-    factsList: Fact[],
-    docMap: Record<string, DocumentMeta>
-  ): Fact[] => {
-    return factsList.map((f) => {
-      const meta = docMap[String(f.document_id)]
-      if (!meta) return f
-      const displayName = (meta.display_name && meta.display_name.trim()) ? meta.display_name.trim() : null
-      return {
-        ...f,
-        document_filename: meta.filename || f.document_filename,
-        document_display_name: displayName ?? f.document_display_name ?? null,
-        payer: meta.payer ?? f.payer,
-        state: meta.state ?? f.state,
-        program: meta.program ?? f.program,
-        effective_date: meta.effective_date ?? f.effective_date,
-        termination_date: meta.termination_date ?? f.termination_date,
-      }
-    })
-  }
-
-  const loadFacts = async () => {
+  const loadFacts = useCallback(async () => {
     setLoading(true)
     try {
-      const { list: docList, map: docMap } = await fetchDocumentsMap()
-      setDocuments(docList)
-
-      // 1) Try admin table endpoint first
-      const response = await fetch(`${API_BASE}/admin/db/tables/extracted_facts/records?limit=1000`)
-      if (response.ok) {
-        const data = await response.json()
-        const records = data.records || []
-        if (records.length > 0) {
-          const factsData = records.map((record: any) => ({
-            id: record.id,
-            fact_text: record.fact_text,
-            fact_type: record.fact_type,
-            who_eligible: record.who_eligible,
-            how_verified: record.how_verified,
-            conflict_resolution: record.conflict_resolution,
-            when_applies: record.when_applies,
-            limitations: record.limitations,
-            is_pertinent_to_claims_or_members: record.is_pertinent_to_claims_or_members,
-            is_eligibility_related: record.is_eligibility_related,
-            is_verified: record.is_verified,
-            confidence: record.confidence,
-            category_scores: record.category_scores ?? null,
-            document_id: record.document_id,
-            page_number: record.page_number != null ? Number(record.page_number) : null,
-            verification_status: record.verification_status ?? null,
-            verified_by: record.verified_by ?? null,
-            verified_at: record.verified_at ?? null,
-          }))
-          const factsWithIds = factsData.map((f: Fact) => ({ ...f, document_id: String(f.document_id) }))
-          const enriched = mergeDocumentMetadataIntoFacts(factsWithIds, docMap)
-          setFacts(enriched)
-          return
-        }
+      const qs = buildFactsParams()
+      const response = await fetch(`${API_BASE}/facts?${qs}`)
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}))
+        console.error('Failed to load facts:', err.detail || response.statusText)
+        setFacts([])
+        setTotal(0)
+        return
       }
-
-      // 2) Fallback: load by document (normalized facts from GET /documents/:id/facts)
-      const allFacts: Fact[] = []
-      for (const doc of docList) {
-        const id = doc.id
-        try {
-          const factsResponse = await fetch(`${API_BASE}/documents/${id}/facts`)
-          if (!factsResponse.ok) continue
-          const factsData = await factsResponse.json()
-          const chunks = factsData.chunks || []
-          const displayName = (doc.display_name && doc.display_name.trim()) ? doc.display_name.trim() : null
-          const filename = doc.filename || 'Unknown Document'
-          for (const chunk of chunks) {
-            for (const f of chunk.facts || []) {
-              allFacts.push({
-                id: f.id,
-                fact_text: f.fact_text,
-                fact_type: f.fact_type ?? null,
-                who_eligible: f.who_eligible ?? null,
-                how_verified: f.how_verified ?? null,
-                conflict_resolution: f.conflict_resolution ?? null,
-                when_applies: f.when_applies ?? null,
-                limitations: f.limitations ?? null,
-                is_pertinent_to_claims_or_members: f.is_pertinent_to_claims_or_members ?? null,
-                is_eligibility_related: f.is_eligibility_related ?? null,
-                category_scores: f.category_scores ?? null,
-                document_id: id,
-                document_filename: filename,
-                document_display_name: displayName ?? null,
-                payer: doc.payer ?? undefined,
-                state: doc.state ?? undefined,
-                program: doc.program ?? undefined,
-                effective_date: doc.effective_date ?? undefined,
-                termination_date: doc.termination_date ?? undefined,
-                page_number: f.page_number != null ? Number(f.page_number) : null,
-                verification_status: f.verification_status ?? null,
-                verified_by: f.verified_by ?? null,
-                verified_at: f.verified_at ?? null,
-              })
-            }
-          }
-        } catch (err) {
-          console.error('Failed to load facts for document', id, err)
-        }
-      }
-      setFacts(allFacts)
+      const data = await response.json()
+      const records = data.records || []
+      const docs = data.documents || []
+      const opts = data.filter_options || { payers: [], states: [], programs: [], fact_types: [] }
+      setDocuments(docs.map((d: any) => ({
+        id: String(d.id),
+        filename: d.filename || '',
+        display_name: d.display_name ?? null,
+        payer: d.payer ?? null,
+        state: d.state ?? null,
+        program: d.program ?? null,
+        effective_date: d.effective_date ?? null,
+        termination_date: d.termination_date ?? null,
+      })))
+      setFilterOptions({
+        payers: opts.payers || [],
+        states: opts.states || [],
+        programs: opts.programs || [],
+        fact_types: opts.fact_types || [],
+      })
+      setTotal(data.total ?? 0)
+      setFacts(records.map((r: any) => ({
+        ...r,
+        document_id: String(r.document_id),
+        category_scores: r.category_scores ?? null,
+      })))
     } catch (err) {
       console.error('Failed to load facts:', err)
+      setFacts([])
+      setTotal(0)
     } finally {
       setLoading(false)
     }
-  }
+  }, [buildFactsParams])
+
+  const loadSections = useCallback(async () => {
+    try {
+      const params = new URLSearchParams()
+      selectedDocuments.forEach(id => params.append('document_id', id))
+      const qs = params.toString()
+      const url = qs ? `${API_BASE}/facts/sections?${qs}` : `${API_BASE}/facts/sections`
+      const res = await fetch(url)
+      if (res.ok) {
+        const data = await res.json()
+        setSections(data.sections || [])
+      } else {
+        setSections([])
+      }
+    } catch {
+      setSections([])
+    }
+  }, [selectedDocuments])
 
   useEffect(() => {
     loadFacts()
-  }, [])
+  }, [loadFacts])
+
+  useEffect(() => {
+    loadSections()
+  }, [loadSections])
+
+  // Debounce search input
+  useEffect(() => {
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current)
+    searchDebounceRef.current = setTimeout(() => {
+      setSearchQueryDebounced(searchQuery)
+      setPage(1)
+      searchDebounceRef.current = null
+    }, 300)
+    return () => {
+      if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current)
+    }
+  }, [searchQuery])
+
+  // Reset to page 1 when filters change (except page, pageSize)
+  useEffect(() => {
+    setPage(1)
+  }, [selectedDocuments, sectionFilter, pageNumberFilter, selectedPayers, selectedStates,
+      selectedPrograms, selectedFactTypes, isPertinentFilter, isEligibilityFilter, approvalFilter,
+      categoryThresholds])
 
   useEffect(() => {
     if (!filtersOpen) return
@@ -351,79 +360,17 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
       .map(([category, data]) => ({ category, score: toNum(data?.score) ?? 0, direction: data?.direction ?? null }))
   }
 
-  const filteredFacts = facts.filter(fact => {
-    // Text search
-    if (searchQuery && !fact.fact_text.toLowerCase().includes(searchQuery.toLowerCase())) {
-      return false
-    }
-    
-    // Payer filter
-    if (selectedPayers.length > 0 && (!fact.payer || !selectedPayers.includes(fact.payer))) {
-      return false
-    }
-    
-    // State filter
-    if (selectedStates.length > 0 && (!fact.state || !selectedStates.includes(fact.state))) {
-      return false
-    }
-    
-    // Program filter
-    if (selectedPrograms.length > 0 && (!fact.program || !selectedPrograms.includes(fact.program))) {
-      return false
-    }
-    
-    // Fact type filter
-    if (selectedFactTypes.length > 0 && (!fact.fact_type || !selectedFactTypes.includes(fact.fact_type))) {
-      return false
-    }
-    
-    // Category filter - check if all category thresholds are met (AND logic)
-    // If a category has a threshold set, the fact must have that category with score >= threshold
-    if (Object.keys(categoryThresholds).length > 0) {
-      const allThresholdsMet = Object.entries(categoryThresholds).every(([category, threshold]) => {
-        if (threshold === 0) return true // Threshold of 0 means "show all" for this category
-        if (!fact.category_scores || typeof fact.category_scores !== 'object') return false
-        const categoryData = fact.category_scores[category]
-        if (!categoryData || typeof categoryData !== 'object') return false
-        const score = toNum(categoryData.score)
-        if (score == null) return false
-        return score >= threshold
-      })
-      if (!allThresholdsMet) {
-        return false
-      }
-    }
-    
-    // is_pertinent filter
-    if (isPertinentFilter !== 'all') {
-      const isPertinent = fact.is_pertinent_to_claims_or_members === 'true'
-      if ((isPertinentFilter === 'yes' && !isPertinent) || (isPertinentFilter === 'no' && isPertinent)) {
-        return false
-      }
-    }
-    
-    // is_eligibility_related filter
-    if (isEligibilityFilter !== 'all') {
-      const isEligible = fact.is_eligibility_related === 'true'
-      if ((isEligibilityFilter === 'yes' && !isEligible) || (isEligibilityFilter === 'no' && isEligible)) {
-        return false
-      }
-    }
-
-    // Approval / verification status filter
-    if (approvalFilter !== 'all') {
-      const status = fact.verification_status || 'pending'
-      if (status !== approvalFilter) return false
-    }
-
-    return true
-  })
-
-  // Filter options from document metadata (so dropdowns stay populated after metadata updates)
-  const uniquePayers = Array.from(new Set(documents.map(d => d.payer).filter(Boolean))).sort() as string[]
-  const uniqueStates = Array.from(new Set(documents.map(d => d.state).filter(Boolean))).sort() as string[]
-  const uniquePrograms = Array.from(new Set(documents.map(d => d.program).filter(Boolean))).sort() as string[]
-  const uniqueFactTypes = Array.from(new Set(facts.map(f => f.fact_type).filter(Boolean))) as string[]
+  // Filter options from API; fallback to documents for payer/state/program when empty
+  const uniquePayers = filterOptions.payers.length > 0
+    ? filterOptions.payers
+    : Array.from(new Set(documents.map(d => d.payer).filter(Boolean))).sort() as string[]
+  const uniqueStates = filterOptions.states.length > 0
+    ? filterOptions.states
+    : Array.from(new Set(documents.map(d => d.state).filter(Boolean))).sort() as string[]
+  const uniquePrograms = filterOptions.programs.length > 0
+    ? filterOptions.programs
+    : Array.from(new Set(documents.map(d => d.program).filter(Boolean))).sort() as string[]
+  const uniqueFactTypes = filterOptions.fact_types
 
   const categories = [
     'contacting_marketing_members',
@@ -440,7 +387,10 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
   ]
 
   const activeFiltersCount =
-    (searchQuery.trim() ? 1 : 0) +
+    (searchQueryDebounced.trim() ? 1 : 0) +
+    (selectedDocuments.length || 0) +
+    (sectionFilter.trim() ? 1 : 0) +
+    (pageNumberFilter.trim() ? 1 : 0) +
     (selectedPayers.length || 0) +
     (selectedStates.length || 0) +
     (selectedPrograms.length || 0) +
@@ -451,6 +401,12 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
     (Object.keys(categoryThresholds).filter(k => (categoryThresholds[k] || 0) > 0).length)
 
   const clearFilters = () => {
+    setSelectedDocuments([])
+    setDocumentSearchQuery('')
+    setMetadataDropdownOpen(null)
+    setStatusDropdownOpen(null)
+    setSectionFilter('')
+    setPageNumberFilter('')
     setSelectedPayers([])
     setSelectedStates([])
     setSelectedPrograms([])
@@ -460,7 +416,13 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
     setIsEligibilityFilter('all')
     setApprovalFilter('all')
     setSearchQuery('')
+    setSearchQueryDebounced('')
+    setPage(1)
   }
+
+  const totalPages = Math.max(1, Math.ceil(total / pageSize))
+  const startItem = total === 0 ? 0 : (page - 1) * pageSize + 1
+  const endItem = Math.min(page * pageSize, total)
 
   const openEditModal = (fact: Fact, e: React.MouseEvent) => {
     e.stopPropagation()
@@ -559,215 +521,377 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
 
   return (
     <div className="review-facts-tab">
-      {/* Backdrop: click outside to close filters panel */}
-      {filtersOpen && (
-        <div
-          className="filters-float-backdrop"
-          onClick={() => setFiltersOpen(false)}
-          aria-hidden
-        />
-      )}
-      {/* Floating filters panel (toggle to open) */}
-      <div className={`filters-float ${filtersOpen ? 'filters-float-open' : ''}`}>
-        <div className="filters-float-inner">
-          <div className="filters-header">
-            <h3 className="filters-title">Filters</h3>
-            <div className="filters-header-actions">
+      {/* Full-width main area - Filters + Fact Cards */}
+      <div className="facts-main">
+        {/* Inline expandable filters - full width */}
+        <div className={`filters-inline ${filtersOpen ? 'filters-inline-open' : ''}`}>
+          <div className="filters-inline-header">
+            <h3 className="filters-inline-title">Filters</h3>
+            <div className="filters-inline-actions">
               <button onClick={clearFilters} className="clear-filters-btn">
                 Clear All
               </button>
-              <button type="button" className="filters-close-btn" onClick={() => setFiltersOpen(false)} aria-label="Close filters">
-                ×
+              <button
+                type="button"
+                className="filters-inline-toggle"
+                onClick={() => setFiltersOpen(prev => !prev)}
+                aria-label={filtersOpen ? 'Collapse filters' : 'Expand filters'}
+              >
+                {filtersOpen ? '▲ Collapse' : '▼ Filters'}
               </button>
             </div>
           </div>
 
-          <div className="filters-content">
-            {/* Search is in the header toolbar */}
+          {filtersOpen && (
+            <div className="filters-inline-content">
+              <div className="filters-grid">
+                {/* Categories - most important, first */}
+                <div className="filter-section filter-section-categories">
+                  <h4 className="filter-section-title">Categories (score threshold)</h4>
+                  <div className="category-sliders">
+                    {categories.map((category) => {
+                      const threshold = categoryThresholds[category] || 0
+                      const displayName = category.replace(/_/g, ' ')
+                      return (
+                        <div key={category} className="category-slider-item">
+                          <div className="category-slider-header">
+                            <label className="category-slider-label">{displayName}</label>
+                            <span className="category-slider-value">{threshold.toFixed(2)}</span>
+                          </div>
+                          <input
+                            type="range"
+                            min="0"
+                            max="1"
+                            step="0.01"
+                            value={threshold}
+                            onChange={(e) => {
+                              const newValue = parseFloat(e.target.value)
+                              if (newValue === 0) {
+                                const newThresholds = { ...categoryThresholds }
+                                delete newThresholds[category]
+                                setCategoryThresholds(newThresholds)
+                              } else {
+                                setCategoryThresholds({
+                                  ...categoryThresholds,
+                                  [category]: newValue
+                                })
+                              }
+                            }}
+                            className="category-slider"
+                          />
+                          <div className="category-slider-labels">
+                            <span>0</span>
+                            <span>1</span>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
 
-            {/* Document Metadata Filters (autopopulated from documents) */}
-            <div className="filter-group">
-              <label className="filter-label">Payer</label>
-              <select
-                multiple
-                size={Math.min(6, uniquePayers.length + 1)}
-                value={selectedPayers}
-                onChange={(e) => {
-                  const selected = Array.from(e.target.selectedOptions, (o) => o.value)
-                  setSelectedPayers(selected)
-                }}
-                className="filter-select"
-              >
-                {uniquePayers.map((payer) => (
-                  <option key={payer} value={payer}>{payer}</option>
-                ))}
-              </select>
-              {uniquePayers.length === 0 && (
-                <span className="filter-hint">No payers in document metadata yet.</span>
-              )}
-            </div>
+                {/* Document + Status (Status to the right of Document) */}
+                <div className="filter-section filter-section-document-status">
+                  <div className="document-status-row">
+                    <div className="document-filters">
+                      <h4 className="filter-section-title">Document</h4>
+                      <div className="filter-group">
+                    <label className="filter-label">Document</label>
+                    <div className="document-multiselect">
+                <input
+                  type="text"
+                  placeholder="Search documents..."
+                  value={documentSearchQuery}
+                  onChange={(e) => setDocumentSearchQuery(e.target.value)}
+                  className="document-multiselect-search"
+                  aria-label="Search documents"
+                />
+                <div className="document-multiselect-list">
+                  {(() => {
+                    const q = documentSearchQuery.trim().toLowerCase()
+                    const filtered = q
+                      ? documents.filter(
+                          (d) =>
+                            (d.display_name?.trim() || d.filename || '').toLowerCase().includes(q) ||
+                            (d.filename || '').toLowerCase().includes(q) ||
+                            (d.payer || '').toLowerCase().includes(q) ||
+                            (d.state || '').toLowerCase().includes(q) ||
+                            (d.program || '').toLowerCase().includes(q)
+                        )
+                      : documents
+                    return documents.length === 0 ? (
+                      <span className="filter-hint">No documents yet.</span>
+                    ) : filtered.length === 0 ? (
+                      <span className="filter-hint">No documents match &quot;{documentSearchQuery}&quot;</span>
+                    ) : (
+                      filtered.map((doc) => {
+                        const label = doc.display_name?.trim() || doc.filename || doc.id
+                        const isSelected = selectedDocuments.includes(doc.id)
+                        return (
+                          <label key={doc.id} className={`document-multiselect-item ${isSelected ? 'document-multiselect-item-selected' : ''}`}>
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => {
+                                setSelectedDocuments((prev) =>
+                                  isSelected ? prev.filter((id) => id !== doc.id) : [...prev, doc.id]
+                                )
+                              }}
+                            />
+                            <span
+                              className="document-multiselect-item-label"
+                              title={doc.display_name?.trim() && doc.filename && doc.display_name !== doc.filename ? `${doc.display_name} (${doc.filename})` : doc.filename || label}
+                            >
+                              {label}
+                            </span>
+                          </label>
+                        )
+                      })
+                    )
+                  })()}
+                </div>
+                {selectedDocuments.length > 0 && (
+                  <button
+                    type="button"
+                    className="document-multiselect-clear"
+                    onClick={() => setSelectedDocuments([])}
+                  >
+                    Clear ({selectedDocuments.length} selected)
+                  </button>
+                )}
+                    </div>
+                  </div>
+                  <div className="filter-group">
+                    <label className="filter-label">Section</label>
+                    <select
+                      value={sectionFilter}
+                      onChange={(e) => setSectionFilter(e.target.value)}
+                      className="filter-select"
+                    >
+                      <option value="">All sections</option>
+                      {sections.map((s) => (
+                        <option key={s} value={s}>{s}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="filter-group">
+                    <label className="filter-label">Page number</label>
+                    <input
+                      type="number"
+                      min={1}
+                      placeholder="All pages"
+                      value={pageNumberFilter}
+                      onChange={(e) => setPageNumberFilter(e.target.value)}
+                      className="filter-input"
+                    />
+                  </div>
+                    </div>
 
-            <div className="filter-group">
-              <label className="filter-label">State</label>
-              <select
-                multiple
-                size={Math.min(6, uniqueStates.length + 1)}
-                value={selectedStates}
-                onChange={(e) => {
-                  const selected = Array.from(e.target.selectedOptions, (o) => o.value)
-                  setSelectedStates(selected)
-                }}
-                className="filter-select"
-              >
-                {uniqueStates.map((state) => (
-                  <option key={state} value={state}>{getStateLabel(state) || state}</option>
-                ))}
-              </select>
-              {uniqueStates.length === 0 && (
-                <span className="filter-hint">No states in document metadata yet.</span>
-              )}
-            </div>
-
-            <div className="filter-group">
-              <label className="filter-label">Program</label>
-              <select
-                multiple
-                size={Math.min(6, uniquePrograms.length + 1)}
-                value={selectedPrograms}
-                onChange={(e) => {
-                  const selected = Array.from(e.target.selectedOptions, (o) => o.value)
-                  setSelectedPrograms(selected)
-                }}
-                className="filter-select"
-              >
-                {uniquePrograms.map((program) => (
-                  <option key={program} value={program}>{program}</option>
-                ))}
-              </select>
-              {uniquePrograms.length === 0 && (
-                <span className="filter-hint">No programs in document metadata yet.</span>
-              )}
-            </div>
-
-            {/* Category Filters - Sliders */}
-            <div className="filter-group">
-              <label className="filter-label">Categories (Score Threshold)</label>
-              <div className="category-sliders">
-                {categories.map((category) => {
-                  const threshold = categoryThresholds[category] || 0
-                  const displayName = category.replace(/_/g, ' ')
-                  return (
-                    <div key={category} className="category-slider-item">
-                      <div className="category-slider-header">
-                        <label className="category-slider-label">{displayName}</label>
-                        <span className="category-slider-value">{threshold.toFixed(2)}</span>
+                    {/* Status - to the right of Document */}
+                    <div className="status-filters" ref={statusDropdownRef}>
+                      <h4 className="filter-section-title">Status</h4>
+                      <div className="status-toggles">
+                        <div className="status-toggle">
+                          <label className="filter-label">Pertinent</label>
+                          <div className="status-dropdown-wrap">
+                            <button
+                              type="button"
+                              className={`status-dropdown-trigger ${statusDropdownOpen === 'pertinent' ? 'open' : ''} ${isPertinentFilter !== 'all' ? 'has-selection' : ''}`}
+                              onClick={() => setStatusDropdownOpen(prev => prev === 'pertinent' ? null : 'pertinent')}
+                            >
+                              {isPertinentFilter === 'all' ? 'All' : isPertinentFilter === 'yes' ? 'Yes' : 'No'}
+                            </button>
+                            {statusDropdownOpen === 'pertinent' && (
+                              <div className="status-dropdown-panel" onClick={e => e.stopPropagation()}>
+                                {(['all', 'yes', 'no'] as const).map((v) => (
+                                  <button key={v} type="button" className={`status-dropdown-option ${isPertinentFilter === v ? 'selected' : ''}`} onClick={() => { setIsPertinentFilter(v); setStatusDropdownOpen(null) }}>
+                                    {v === 'all' ? 'All' : v === 'yes' ? 'Yes' : 'No'}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        <div className="status-toggle">
+                          <label className="filter-label">Eligibility</label>
+                          <div className="status-dropdown-wrap">
+                            <button
+                              type="button"
+                              className={`status-dropdown-trigger ${statusDropdownOpen === 'eligibility' ? 'open' : ''} ${isEligibilityFilter !== 'all' ? 'has-selection' : ''}`}
+                              onClick={() => setStatusDropdownOpen(prev => prev === 'eligibility' ? null : 'eligibility')}
+                            >
+                              {isEligibilityFilter === 'all' ? 'All' : isEligibilityFilter === 'yes' ? 'Yes' : 'No'}
+                            </button>
+                            {statusDropdownOpen === 'eligibility' && (
+                              <div className="status-dropdown-panel" onClick={e => e.stopPropagation()}>
+                                {(['all', 'yes', 'no'] as const).map((v) => (
+                                  <button key={v} type="button" className={`status-dropdown-option ${isEligibilityFilter === v ? 'selected' : ''}`} onClick={() => { setIsEligibilityFilter(v); setStatusDropdownOpen(null) }}>
+                                    {v === 'all' ? 'All' : v === 'yes' ? 'Yes' : 'No'}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        <div className="status-toggle">
+                          <label className="filter-label">Approval</label>
+                          <div className="status-dropdown-wrap">
+                            <button
+                              type="button"
+                              className={`status-dropdown-trigger ${statusDropdownOpen === 'approval' ? 'open' : ''} ${approvalFilter !== 'all' ? 'has-selection' : ''}`}
+                              onClick={() => setStatusDropdownOpen(prev => prev === 'approval' ? null : 'approval')}
+                            >
+                              {approvalFilter === 'all' ? 'All' : approvalFilter}
+                            </button>
+                            {statusDropdownOpen === 'approval' && (
+                              <div className="status-dropdown-panel" onClick={e => e.stopPropagation()}>
+                                {(['all', 'pending', 'approved', 'rejected'] as const).map((v) => (
+                                  <button key={v} type="button" className={`status-dropdown-option ${approvalFilter === v ? 'selected' : ''}`} onClick={() => { setApprovalFilter(v); setStatusDropdownOpen(null) }}>
+                                    {v === 'all' ? 'All' : v.charAt(0).toUpperCase() + v.slice(1)}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </div>
                       </div>
-                      <input
-                        type="range"
-                        min="0"
-                        max="1"
-                        step="0.01"
-                        value={threshold}
-                        onChange={(e) => {
-                          const newValue = parseFloat(e.target.value)
-                          if (newValue === 0) {
-                            // Remove from thresholds if set to 0
-                            const newThresholds = { ...categoryThresholds }
-                            delete newThresholds[category]
-                            setCategoryThresholds(newThresholds)
-                          } else {
-                            setCategoryThresholds({
-                              ...categoryThresholds,
-                              [category]: newValue
-                            })
-                          }
-                        }}
-                        className="category-slider"
-                      />
-                      <div className="category-slider-labels">
-                        <span>0</span>
-                        <span>1</span>
+                      <div className="filter-group">
+                        <label className="filter-label">Fact type</label>
+                        <div className="status-dropdown-wrap">
+                          <button
+                            type="button"
+                            className={`metadata-dropdown-trigger ${metadataDropdownOpen === 'factType' ? 'open' : ''} ${selectedFactTypes.length > 0 ? 'has-selection' : ''}`}
+                            onClick={() => setMetadataDropdownOpen(prev => prev === 'factType' ? null : 'factType')}
+                          >
+                            {selectedFactTypes.length === 0 ? 'All types' : `${selectedFactTypes.length} selected`}
+                          </button>
+                          {metadataDropdownOpen === 'factType' && (
+                            <div className="metadata-dropdown-panel" onClick={e => e.stopPropagation()}>
+                              <div className="metadata-dropdown-options">
+                                {uniqueFactTypes.map((type) => (
+                                  <label key={type} className="metadata-dropdown-option">
+                                    <input type="checkbox" checked={selectedFactTypes.includes(type)} onChange={(e) => {
+                                      setSelectedFactTypes(prev => e.target.checked ? [...prev, type] : prev.filter(x => x !== type))
+                                    }} />
+                                    <span>{type}</span>
+                                  </label>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </div>
-                  )
-                })}
+                  </div>
+                </div>
+
+                {/* Metadata: Payer, State, Program - compact dropdown multi-selects */}
+                <div className="filter-section filter-section-metadata" ref={metadataDropdownRef}>
+                  <h4 className="filter-section-title">Metadata</h4>
+                  <div className="metadata-dropdowns">
+                    <div className="metadata-dropdown">
+                      <label className="filter-label">Payer</label>
+                      <div className="metadata-dropdown-trigger-wrap">
+                        <button
+                          type="button"
+                          className={`metadata-dropdown-trigger ${metadataDropdownOpen === 'payer' ? 'open' : ''} ${selectedPayers.length > 0 ? 'has-selection' : ''}`}
+                          onClick={() => setMetadataDropdownOpen(prev => prev === 'payer' ? null : 'payer')}
+                          aria-expanded={metadataDropdownOpen === 'payer'}
+                        >
+                          {selectedPayers.length === 0 ? 'All payers' : `${selectedPayers.length} selected`}
+                        </button>
+                        {metadataDropdownOpen === 'payer' && (
+                          <div className="metadata-dropdown-panel" onClick={e => e.stopPropagation()}>
+                            <div className="metadata-dropdown-options">
+                              {uniquePayers.length === 0 ? (
+                                <span className="filter-hint">No payers yet</span>
+                              ) : (
+                                uniquePayers.map((v) => (
+                                  <label key={v} className="metadata-dropdown-option">
+                                    <input type="checkbox" checked={selectedPayers.includes(v)} onChange={(e) => {
+                                      setSelectedPayers(prev => e.target.checked ? [...prev, v] : prev.filter(x => x !== v))
+                                    }} />
+                                    <span>{v}</span>
+                                  </label>
+                                ))
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    <div className="metadata-dropdown">
+                      <label className="filter-label">State</label>
+                      <div className="metadata-dropdown-trigger-wrap">
+                        <button
+                          type="button"
+                          className={`metadata-dropdown-trigger ${metadataDropdownOpen === 'state' ? 'open' : ''} ${selectedStates.length > 0 ? 'has-selection' : ''}`}
+                          onClick={() => setMetadataDropdownOpen(prev => prev === 'state' ? null : 'state')}
+                          aria-expanded={metadataDropdownOpen === 'state'}
+                        >
+                          {selectedStates.length === 0 ? 'All states' : `${selectedStates.length} selected`}
+                        </button>
+                        {metadataDropdownOpen === 'state' && (
+                          <div className="metadata-dropdown-panel" onClick={e => e.stopPropagation()}>
+                            <div className="metadata-dropdown-options">
+                              {uniqueStates.length === 0 ? (
+                                <span className="filter-hint">No states yet</span>
+                              ) : (
+                                uniqueStates.map((v) => (
+                                  <label key={v} className="metadata-dropdown-option">
+                                    <input type="checkbox" checked={selectedStates.includes(v)} onChange={(e) => {
+                                      setSelectedStates(prev => e.target.checked ? [...prev, v] : prev.filter(x => x !== v))
+                                    }} />
+                                    <span>{getStateLabel(v) || v}</span>
+                                  </label>
+                                ))
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    <div className="metadata-dropdown">
+                      <label className="filter-label">Program</label>
+                      <div className="metadata-dropdown-trigger-wrap">
+                        <button
+                          type="button"
+                          className={`metadata-dropdown-trigger ${metadataDropdownOpen === 'program' ? 'open' : ''} ${selectedPrograms.length > 0 ? 'has-selection' : ''}`}
+                          onClick={() => setMetadataDropdownOpen(prev => prev === 'program' ? null : 'program')}
+                          aria-expanded={metadataDropdownOpen === 'program'}
+                        >
+                          {selectedPrograms.length === 0 ? 'All programs' : `${selectedPrograms.length} selected`}
+                        </button>
+                        {metadataDropdownOpen === 'program' && (
+                          <div className="metadata-dropdown-panel" onClick={e => e.stopPropagation()}>
+                            <div className="metadata-dropdown-options">
+                              {uniquePrograms.length === 0 ? (
+                                <span className="filter-hint">No programs yet</span>
+                              ) : (
+                                uniquePrograms.map((v) => (
+                                  <label key={v} className="metadata-dropdown-option">
+                                    <input type="checkbox" checked={selectedPrograms.includes(v)} onChange={(e) => {
+                                      setSelectedPrograms(prev => e.target.checked ? [...prev, v] : prev.filter(x => x !== v))
+                                    }} />
+                                    <span>{v}</span>
+                                  </label>
+                                ))
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
-
-            {/* Fact Type Filters */}
-            <div className="filter-group">
-              <label className="filter-label">Fact Type</label>
-              <div className="filter-checkboxes">
-                {uniqueFactTypes.map((type) => (
-                  <label key={type} className="filter-checkbox">
-                    <input
-                      type="checkbox"
-                      checked={selectedFactTypes.includes(type)}
-                      onChange={(e) => {
-                        if (e.target.checked) {
-                          setSelectedFactTypes([...selectedFactTypes, type])
-                        } else {
-                          setSelectedFactTypes(selectedFactTypes.filter(t => t !== type))
-                        }
-                      }}
-                    />
-                    <span>{type}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-
-            {/* Boolean Filters */}
-            <div className="filter-group">
-              <label className="filter-label">Pertinent to Claims/Members</label>
-              <select
-                value={isPertinentFilter}
-                onChange={(e) => setIsPertinentFilter(e.target.value as 'all' | 'yes' | 'no')}
-                className="filter-select"
-              >
-                <option value="all">All</option>
-                <option value="yes">Yes</option>
-                <option value="no">No</option>
-              </select>
-            </div>
-
-            <div className="filter-group">
-              <label className="filter-label">Eligibility Related</label>
-              <select
-                value={isEligibilityFilter}
-                onChange={(e) => setIsEligibilityFilter(e.target.value as 'all' | 'yes' | 'no')}
-                className="filter-select"
-              >
-                <option value="all">All</option>
-                <option value="yes">Yes</option>
-                <option value="no">No</option>
-              </select>
-            </div>
-
-            <div className="filter-group">
-              <label className="filter-label">Approval status</label>
-              <select
-                value={approvalFilter}
-                onChange={(e) => setApprovalFilter(e.target.value as 'all' | 'pending' | 'approved' | 'rejected')}
-                className="filter-select"
-              >
-                <option value="all">All</option>
-                <option value="pending">Pending</option>
-                <option value="approved">Approved</option>
-                <option value="rejected">Rejected</option>
-              </select>
-            </div>
-          </div>
+          )}
         </div>
-      </div>
-
-      {/* Full-width main area - Fact Cards */}
-      <div className="facts-main">
         <header className="facts-toolbar">
           <div className="facts-toolbar-left">
             <h2 className="facts-toolbar-title">Facts</h2>
-            <span className="facts-toolbar-count" title={`${filteredFacts.length} of ${facts.length} facts`}>
-              {filteredFacts.length}{facts.length !== filteredFacts.length ? ` / ${facts.length}` : ''}
+            <span className="facts-toolbar-count" title={`Showing ${startItem}-${endItem} of ${total} facts`}>
+              {total === 0 ? '0' : `${startItem}-${endItem} of ${total}`}
             </span>
             {activeFiltersCount > 0 && (
               <span className="facts-toolbar-filters-badge" title={`${activeFiltersCount} filter(s) active`}>
@@ -810,15 +934,15 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
 
           {loading ? (
             <div className="loading-facts">Loading facts...</div>
-          ) : filteredFacts.length === 0 ? (
+          ) : facts.length === 0 ? (
             <div className="no-facts">
-              {facts.length === 0
+              {total === 0
                 ? 'No facts yet. Run chunking on a document (Document Status or Live Updates), then click Refresh.'
                 : 'No facts found matching your filters'}
             </div>
           ) : (
             <div className="facts-grid">
-              {filteredFacts.map((fact) => {
+              {facts.map((fact) => {
                 const topCategories = getTopCategories(fact.category_scores)
                 const isPertinent = fact.is_pertinent_to_claims_or_members === 'true'
                 const isEligible = fact.is_eligibility_related === 'true'
@@ -1036,6 +1160,67 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
                   </div>
                 )
               })}
+            </div>
+          )}
+
+          {/* Pagination */}
+          {total > 0 && (
+            <div className="facts-pagination">
+              <div className="facts-pagination-left">
+                <label className="facts-pagination-label">
+                  Per page:
+                  <select
+                    value={pageSize}
+                    onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1) }}
+                    className="facts-pagination-select"
+                  >
+                    {[25, 50, 100, 250, 500].map((n) => (
+                      <option key={n} value={n}>{n}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <div className="facts-pagination-center">
+                <button
+                  type="button"
+                  className="facts-pagination-btn"
+                  onClick={() => setPage(1)}
+                  disabled={page <= 1}
+                  aria-label="First page"
+                >
+                  «
+                </button>
+                <button
+                  type="button"
+                  className="facts-pagination-btn"
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  disabled={page <= 1}
+                  aria-label="Previous page"
+                >
+                  ‹
+                </button>
+                <span className="facts-pagination-info">
+                  Page {page} of {totalPages}
+                </span>
+                <button
+                  type="button"
+                  className="facts-pagination-btn"
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={page >= totalPages}
+                  aria-label="Next page"
+                >
+                  ›
+                </button>
+                <button
+                  type="button"
+                  className="facts-pagination-btn"
+                  onClick={() => setPage(totalPages)}
+                  disabled={page >= totalPages}
+                  aria-label="Last page"
+                >
+                  »
+                </button>
+              </div>
             </div>
           )}
         </div>

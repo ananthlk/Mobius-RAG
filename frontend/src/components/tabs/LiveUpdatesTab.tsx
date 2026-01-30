@@ -57,12 +57,12 @@ export function LiveUpdatesTab({
   }, [isActive, selectedJobId, activeJobs, onJobSelect])
 
   // Limit output to last 2500 characters to keep it compact
-  // Show a truncation indicator if we're limiting
   const MAX_OUTPUT_LENGTH = 2500
   const isTruncated = streamingOutput.length > MAX_OUTPUT_LENGTH
-  const limitedOutput = isTruncated 
-    ? streamingOutput.slice(-MAX_OUTPUT_LENGTH) 
+  const limitedOutput = isTruncated
+    ? streamingOutput.slice(-MAX_OUTPUT_LENGTH)
     : streamingOutput
+  const logLines = limitedOutput ? limitedOutput.trim().split('\n').filter(Boolean) : []
 
   useEffect(() => {
     if (streamRef.current) {
@@ -91,8 +91,8 @@ export function LiveUpdatesTab({
       <div className="live-updates-table-wrap">
         {activeJobs.length === 0 ? (
           <div className="empty-jobs">
-            <p>No jobs</p>
-            <p className="empty-hint">Start a chunking job from the Document Status tab. Jobs appear here with live output.</p>
+            <p>No documents</p>
+            <p className="empty-hint">Upload a document from Document Input, then select it here to view processing logs.</p>
           </div>
         ) : (
           <table className="live-updates-table">
@@ -150,16 +150,16 @@ export function LiveUpdatesTab({
                         <div className="streaming-cell">
                           <div className="streaming-output" ref={streamRef}>
                             {streamingOutput ? (
-                              <pre className="streaming-pre">
+                              <div className="streaming-log">
                                 {isTruncated && (
-                                  <span className="output-truncated">
-                                    {'... (last 2500 chars) ...\n\n'}
-                                  </span>
+                                  <div className="output-truncated">… earlier lines omitted …</div>
                                 )}
-                                {limitedOutput}
-                              </pre>
+                                {logLines.map((line, i) => (
+                                  <div key={i} className="streaming-log-line">{line}</div>
+                                ))}
+                              </div>
                             ) : (
-                              <span className="streaming-empty">Waiting for output...</span>
+                              <span className="streaming-empty">Waiting for output…</span>
                             )}
                           </div>
                         </div>

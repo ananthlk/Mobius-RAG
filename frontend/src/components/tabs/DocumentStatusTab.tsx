@@ -28,22 +28,21 @@ export interface ChunkingOptions {
   threshold: number
   critiqueEnabled: boolean
   maxRetries: number
+  promptVersions?: Record<string, string>
 }
 
-export interface ChunkingOptionsSetters {
-  setThreshold: (v: number) => void
-  setCritiqueEnabled: (v: boolean) => void
-  setMaxRetries: (v: number) => void
+const DEFAULT_CHUNK_OPTIONS: ChunkingOptions = {
+  threshold: 0.6,
+  critiqueEnabled: true,
+  maxRetries: 2,
 }
 
 interface DocumentStatusTabProps {
-  onStartChunking: (documentId: string) => Promise<void>
+  onStartChunking: (documentId: string, options: ChunkingOptions) => Promise<void>
   onStopChunking: (documentId: string) => Promise<void>
   onViewDocument: (documentId: string) => void
   onDeleteDocument: (documentId: string) => Promise<void>
-  onRestartChunking?: (documentId: string) => Promise<void>
-  chunkingOptions?: ChunkingOptions
-  onChunkingOptionsChange?: ChunkingOptionsSetters
+  onRestartChunking?: (documentId: string, options: ChunkingOptions) => Promise<void>
 }
 
 export function DocumentStatusTab({ 
@@ -52,8 +51,6 @@ export function DocumentStatusTab({
   onViewDocument,
   onDeleteDocument,
   onRestartChunking,
-  chunkingOptions,
-  onChunkingOptionsChange,
 }: DocumentStatusTabProps) {
   const [documents, setDocuments] = useState<Document[]>([])
   const [loading, setLoading] = useState(false)
@@ -67,6 +64,42 @@ export function DocumentStatusTab({
   const [metadataError, setMetadataError] = useState<string | null>(null)
   const [openChunkMenuDocId, setOpenChunkMenuDocId] = useState<string | null>(null)
   const [openActionsMenuDocId, setOpenActionsMenuDocId] = useState<string | null>(null)
+  const [promptsConfig, setPromptsConfig] = useState<{ prompts: Record<string, string[]>; default: Record<string, string> } | null>(null)
+  const [chunkOptionsByDoc, setChunkOptionsByDoc] = useState<Record<string, ChunkingOptions>>({})
+
+  useEffect(() => {
+    if (!openChunkMenuDocId) return
+    const load = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/config/prompts`)
+        if (res.ok) {
+          const data = await res.json()
+          setPromptsConfig({ prompts: data.prompts || {}, default: data.default || {} })
+        }
+      } catch (e) {
+        console.error('Failed to load prompts config:', e)
+      }
+    }
+    load()
+  }, [openChunkMenuDocId])
+
+  const getChunkOptionsForDoc = (docId: string): ChunkingOptions => {
+    const base = chunkOptionsByDoc[docId] ?? { ...DEFAULT_CHUNK_OPTIONS }
+    if (promptsConfig && Object.keys(promptsConfig.prompts).length > 0 && !base.promptVersions) {
+      return {
+        ...base,
+        promptVersions: { ...promptsConfig.default },
+      }
+    }
+    return base
+  }
+
+  const setChunkOptionForDoc = (docId: string, updater: (prev: ChunkingOptions) => ChunkingOptions) => {
+    setChunkOptionsByDoc(prev => ({
+      ...prev,
+      [docId]: updater(prev[docId] ?? { ...DEFAULT_CHUNK_OPTIONS, promptVersions: promptsConfig ? { ...promptsConfig.default } : {} }),
+    }))
+  }
 
   const openMetadataForm = (doc: Document) => {
     setEditingMetadataDocumentId(doc.id)
@@ -165,9 +198,10 @@ export function DocumentStatusTab({
   }
 
   const handleBatchStartChunking = async () => {
+    const options: ChunkingOptions = { ...DEFAULT_CHUNK_OPTIONS }
     for (const docId of selectedDocs) {
       try {
-        await onStartChunking(docId)
+        await onStartChunking(docId, options)
       } catch (err) {
         console.error(`Failed to start chunking for ${docId}:`, err)
       }
@@ -372,18 +406,8 @@ export function DocumentStatusTab({
                                 ⋮
                               </button>
                               {openChunkMenuDocId === doc.id && (
-                                <div className="dropdown-menu" onClick={(e) => e.stopPropagation()}>
-                                  {(doc.chunking_status === 'idle' || doc.chunking_status === null) && (
-                                    <button
-                                      type="button"
-                                      className="dropdown-item"
-                                      disabled={doc.extraction_status !== 'completed'}
-                                      onClick={() => { onStartChunking(doc.id); setOpenChunkMenuDocId(null) }}
-                                    >
-                                      Start chunking
-                                    </button>
-                                  )}
-                                  {doc.chunking_status === 'in_progress' && (
+                                <div className="dropdown-menu dropdown-menu-chunk-options" onClick={(e) => e.stopPropagation()}>
+                                  {doc.chunking_status === 'in_progress' ? (
                                     <button
                                       type="button"
                                       className="dropdown-item dropdown-item-danger"
@@ -391,17 +415,91 @@ export function DocumentStatusTab({
                                     >
                                       Stop chunking
                                     </button>
-                                  )}
-                                  {((doc.chunking_status === 'stopped' || doc.chunking_status === 'failed') && onRestartChunking) && (
-                                    <button
-                                      type="button"
-                                      className="dropdown-item"
-                                      disabled={doc.extraction_status !== 'completed'}
-                                      title="Restart from last completed paragraph"
-                                      onClick={() => { onRestartChunking(doc.id); setOpenChunkMenuDocId(null) }}
-                                    >
-                                      Restart chunking
-                                    </button>
+                                  ) : (
+                                    <>
+                                      {(doc.chunking_status === 'idle' || doc.chunking_status === null || (doc.chunking_status === 'stopped' || doc.chunking_status === 'failed')) && (
+                                        <div className="chunk-options-form">
+                                          <div className="chunk-option-row">
+                                            <label className="chunk-option-checkbox">
+                                              <input
+                                                type="checkbox"
+                                                checked={getChunkOptionsForDoc(doc.id).critiqueEnabled}
+                                                onChange={e => setChunkOptionForDoc(doc.id, p => ({ ...p, critiqueEnabled: e.target.checked }))}
+                                              />
+                                              Run critique
+                                            </label>
+                                          </div>
+                                          <div className="chunk-option-row">
+                                            <label htmlFor={`chunk-retries-${doc.id}`}>Max retries</label>
+                                            <input
+                                              id={`chunk-retries-${doc.id}`}
+                                              type="number"
+                                              min={0}
+                                              max={10}
+                                              value={getChunkOptionsForDoc(doc.id).maxRetries}
+                                              onChange={e => setChunkOptionForDoc(doc.id, p => ({ ...p, maxRetries: parseInt(e.target.value, 10) || 0 }))}
+                                            />
+                                          </div>
+                                          <div className="chunk-option-row">
+                                            <label htmlFor={`chunk-threshold-${doc.id}`}>Threshold (0–1)</label>
+                                            <input
+                                              id={`chunk-threshold-${doc.id}`}
+                                              type="number"
+                                              min={0}
+                                              max={1}
+                                              step={0.1}
+                                              value={getChunkOptionsForDoc(doc.id).threshold}
+                                              onChange={e => setChunkOptionForDoc(doc.id, p => ({ ...p, threshold: parseFloat(e.target.value) || 0.6 }))}
+                                            />
+                                          </div>
+                                          {promptsConfig && Object.keys(promptsConfig.prompts).length > 0 && (
+                                            <>
+                                              {Object.entries(promptsConfig.prompts).map(([name, versions]) => (
+                                                <div key={name} className="chunk-option-row">
+                                                  <label htmlFor={`chunk-prompt-${doc.id}-${name}`}>{name}</label>
+                                                  <select
+                                                    id={`chunk-prompt-${doc.id}-${name}`}
+                                                    value={(getChunkOptionsForDoc(doc.id).promptVersions?.[name]) ?? promptsConfig.default[name] ?? (versions[0] ?? '')}
+                                                    onChange={e => setChunkOptionForDoc(doc.id, p => ({
+                                                      ...p,
+                                                      promptVersions: {
+                                                        ...(p.promptVersions ?? promptsConfig.default),
+                                                        [name]: e.target.value,
+                                                      },
+                                                    }))}
+                                                  >
+                                                    {versions.map(v => (
+                                                      <option key={v} value={v}>{v}</option>
+                                                    ))}
+                                                  </select>
+                                                </div>
+                                              ))}
+                                            </>
+                                          )}
+                                        </div>
+                                      )}
+                                      {(doc.chunking_status === 'idle' || doc.chunking_status === null) && (
+                                        <button
+                                          type="button"
+                                          className="dropdown-item"
+                                          disabled={doc.extraction_status !== 'completed'}
+                                          onClick={() => { onStartChunking(doc.id, getChunkOptionsForDoc(doc.id)); setOpenChunkMenuDocId(null) }}
+                                        >
+                                          Start chunking
+                                        </button>
+                                      )}
+                                      {((doc.chunking_status === 'stopped' || doc.chunking_status === 'failed') && onRestartChunking) && (
+                                        <button
+                                          type="button"
+                                          className="dropdown-item"
+                                          disabled={doc.extraction_status !== 'completed'}
+                                          title="Restart from last completed paragraph"
+                                          onClick={() => { onRestartChunking(doc.id, getChunkOptionsForDoc(doc.id)); setOpenChunkMenuDocId(null) }}
+                                        >
+                                          Restart chunking
+                                        </button>
+                                      )}
+                                    </>
                                   )}
                                 </div>
                               )}

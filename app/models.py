@@ -124,6 +124,22 @@ class ChunkingEvent(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class LlmConfig(Base):
+    """LLM provider configs stored in DB; name matches version/ref used by jobs (e.g. default, production)."""
+    __tablename__ = "llm_configs"
+
+    name = Column(String(100), primary_key=True)  # e.g. default, production, openai
+    provider = Column(String(50), nullable=False)  # ollama, vertex, openai
+    model = Column(String(200), nullable=True)
+    version_label = Column(String(100), nullable=True)  # optional display version
+    options = Column(JSONB, nullable=True, default=dict)  # temperature, num_predict, etc.
+    ollama = Column(JSONB, nullable=True, default=dict)  # base_url, etc.
+    vertex = Column(JSONB, nullable=True, default=dict)  # project_id, location, etc.
+    openai = Column(JSONB, nullable=True, default=dict)  # api_key, base_url, etc.
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
 # Category names for relevance scores (must match extraction prompt)
 CATEGORY_NAMES = (
     "contacting_marketing_members",

@@ -1,5 +1,5 @@
-version: v1
-description: Initial extraction of facts from authoritative documents
+version: v2
+description: Universal RCM Fact Extraction Prompt (All Document Types)
 variables:
 - paragraph_block
 body: "You are extracting explicit, policy-relevant facts from any authoritative healthcare\
@@ -48,24 +48,25 @@ body: "You are extracting explicit, policy-relevant facts from any authoritative
   \ there is a clear, direct connection. Most facts should strongly map to one or\
   \ two categories.\n\nOutput Requirements\n\nReturn ONLY valid JSON\n\nNo markdown\n\
   \nNo explanation or commentary\n\nNo text before or after the JSON\n\nOutput Schema\n\
-  {\n  \"summary\": \"Brief summary of the paragraph\",\n  \"facts\": [\n    {\n \
+  {{\n  \"summary\": \"Brief summary of the paragraph\",\n  \"facts\": [\n    {{\n \
   \     \"fact_text\": \"Exact statement of the fact\",\n      \"source_start\": 0,\n\
   \      \"source_end\": 42,\n      \"who_eligible\": \"Answer or null\",\n      \"\
   how_verified\": \"Answer or null\",\n      \"conflict_resolution\": \"Answer or\
   \ null\",\n      \"when_applies\": \"Answer or null\",\n      \"limitations\": \"\
   Answer or null\",\n      \"is_pertinent_to_claims_or_members\": true,\n      \"\
   fact_type\": \"who_eligible|verification_method|conflict|effective_date|limitation|other\"\
-  ,\n      \"is_verified\": true,\n      \"category_scores\": {\n        \"contacting_marketing_members\"\
-  : { \"score\": 0.0, \"direction\": null },\n        \"member_eligibility_molina\"\
-  : { \"score\": 0.0, \"direction\": null },\n        \"benefit_access_limitations\"\
-  : { \"score\": 0.0, \"direction\": null },\n        \"prior_authorization_required\"\
-  : { \"score\": 0.0, \"direction\": null },\n        \"claims_authorization_submissions\"\
-  : { \"score\": 0.0, \"direction\": null },\n        \"compliant_claim_requirements\"\
-  : { \"score\": 0.0, \"direction\": null },\n        \"claim_disputes\": { \"score\"\
-  : 0.0, \"direction\": null },\n        \"credentialing\": { \"score\": 0.0, \"direction\"\
-  : null },\n        \"claim_submission_important\": { \"score\": 0.0, \"direction\"\
-  : null },\n        \"coordination_of_benefits\": { \"score\": 0.0, \"direction\"\
-  : null },\n        \"other_important\": { \"score\": 0.0, \"direction\": null }\n\
-  \      }\n    }\n  ]\n}\n\nInput\n\nThe following excerpt is from an authoritative\
+  ,\n      \"is_verified\": true,\n      \"category_scores\": {{\n        \"contacting_marketing_members\"\
+  : {{ \"score\": 0.0, \"direction\": null }},\n        \"member_eligibility_molina\"\
+  : {{ \"score\": 0.0, \"direction\": null }},\n        \"benefit_access_limitations\"\
+  : {{ \"score\": 0.0, \"direction\": null }},\n        \"prior_authorization_required\"\
+  : {{ \"score\": 0.0, \"direction\": null }},\n        \"claims_authorization_submissions\"\
+  : {{ \"score\": 0.0, \"direction\": null }},\n        \"compliant_claim_requirements\"\
+  : {{ \"score\": 0.0, \"direction\": null }},\n        \"claim_disputes\": {{ \"score\"\
+  : 0.0, \"direction\": null }},\n        \"credentialing\": {{ \"score\": 0.0, \"direction\"\
+  : null }},\n        \"claim_submission_important\": {{ \"score\": 0.0, \"direction\"\
+  : null }},\n        \"coordination_of_benefits\": {{ \"score\": 0.0, \"direction\"\
+  : null }},\n        \"other_important\": {{ \"score\": 0.0, \"direction\": null }}\n\
+  \      }}\n    }}\n  ]\n}}\n\nInput\n\nThe following excerpt is from an authoritative\
   \ document.\nSection headers (if any) are provided only for context.\nExtract facts\
-  \ from the paragraph body only."
+  \ from the paragraph body only.\n\nExcerpt:\n\n{paragraph_block}\n\nReturn only\
+  \ valid JSON. No markdown. No explanation. No text before or after the JSON."

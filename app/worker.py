@@ -115,6 +115,14 @@ def _classify_and_log_error(db, document_id, paragraph_id, err, context, stage_l
     return error_type, severity, stage
 
 
+async def _safe_log_error(**kwargs):
+    """Call log_error; never raise. Log if log_error fails (defensive)."""
+    try:
+        await log_error(**kwargs)
+    except Exception as e:
+        logger.error("log_error failed (unexpected): %s", e, exc_info=True)
+
+
 async def _create_event_buffer_callback(document_id: str, db: AsyncSession):
     """Create an event callback that writes events to the database."""
     from app.models import ChunkingEvent
@@ -269,7 +277,27 @@ async def _run_chunking_loop(
                                 pass
                         except Exception as e:
                             logger.error(f"Failed to send status_message: {e}", exc_info=True)
-                
+
+                async def _emit(ev: str, data: dict):
+                    if event_callback:
+                        try:
+                            async for _ in event_callback(ev, data):
+                                pass
+                        except Exception as e:
+                            logger.error(f"[{document_id}] Failed to emit {ev}: {e}", exc_info=True)
+
+                completed_before = len(results_paragraphs)
+                progress_pct = (completed_before / total_paragraphs * 100) if total_paragraphs > 0 else 0
+                await _emit("paragraph_start", {
+                    "paragraph_id": para_id,
+                    "paragraph_text": paragraph_text[:2000] if len(paragraph_text) > 2000 else paragraph_text,
+                    "page_number": current_page_number,
+                    "total_pages": total_pages,
+                    "total_paragraphs": total_paragraphs,
+                    "completed_paragraphs": completed_before,
+                    "progress_percent": progress_pct,
+                    "current_paragraph": para_id,
+                })
                 await _send_status(f"Paragraph {para_id} (page {current_page_number}) started...")
                 logger.info(f"[{document_id}] [{para_id}] Starting extraction (text length: {len(paragraph_text)} chars)")
                 
@@ -279,6 +307,9 @@ async def _run_chunking_loop(
                     extraction_result = None
                     extraction_start = _utc_now_naive()
                     try:
+                        await _emit("extraction_start", {"paragraph_id": para_id, "current_paragraph": para_id})
+                        logger.info(f"[{document_id}] [{para_id}] Calling LLM for extraction (prompt ~{len(paragraph_text) + 500} chars)")
+                        first_chunk_logged = False
                         async for chunk in stream_extract_facts(
                             paragraph_text,
                             section_path=section_path,
@@ -287,15 +318,24 @@ async def _run_chunking_loop(
                             llm=llm,
                         ):
                             raw_extraction_output += chunk
+                            if not first_chunk_logged and raw_extraction_output:
+                                first_chunk_logged = True
+                                t = (_utc_now_naive() - extraction_start).total_seconds()
+                                logger.info(f"[{document_id}] [{para_id}] LLM first chunk received (after {t:.2f}s)")
                         
                         extraction_duration = (_utc_now_naive() - extraction_start).total_seconds()
-                        logger.debug(f"[{document_id}] [{para_id}] Extraction completed in {extraction_duration:.2f}s, output length: {len(raw_extraction_output)}")
+                        logger.info(f"[{document_id}] [{para_id}] Extraction done in {extraction_duration:.2f}s, output len={len(raw_extraction_output)}")
                         
                         extraction_result = parse_json_response(raw_extraction_output)
                         if not extraction_result or "summary" not in extraction_result:
                             raise ValueError("Invalid extraction result: missing summary")
                         
                         n_facts = len(extraction_result.get("facts", []))
+                        await _emit("extraction_complete", {
+                            "paragraph_id": para_id,
+                            "summary": extraction_result.get("summary", ""),
+                            "facts": extraction_result.get("facts", []),
+                        })
                         await _send_status(f"{n_facts} fact(s) found.")
                         logger.info(f"[{document_id}] [{para_id}] Extraction successful: {n_facts} facts found, summary: {extraction_result.get('summary', '')[:100]}")
                     except Exception as extract_err:
@@ -304,7 +344,12 @@ async def _run_chunking_loop(
                         if extraction_result is not None:
                             n_facts = len(extraction_result.get("facts", []))
                             logger.warning(f"[{document_id}] [{para_id}] Proceeding with best-effort extraction after parse error: {extract_err}; got {n_facts} fact(s)")
-                            await log_error(
+                            await _emit("extraction_complete", {
+                                "paragraph_id": para_id,
+                                "summary": extraction_result.get("summary", ""),
+                                "facts": extraction_result.get("facts", []),
+                            })
+                            await _safe_log_error(
                                 db=db,
                                 document_id=str(doc_uuid),
                                 paragraph_id=para_id,
@@ -319,7 +364,7 @@ async def _run_chunking_loop(
                             error_type, severity, stage = _classify_and_log_error(
                                 db, doc_uuid, para_id, extract_err, "extraction", "extraction"
                             )
-                            await log_error(
+                            await _safe_log_error(
                                 db=db,
                                 document_id=str(doc_uuid),
                                 paragraph_id=para_id,
@@ -343,7 +388,8 @@ async def _run_chunking_loop(
                     if critique_enabled:
                         critique_start = _utc_now_naive()
                         try:
-                            logger.debug(f"[{document_id}] [{para_id}] Starting critique (threshold: {threshold})")
+                            await _emit("critique_start", {"paragraph_id": para_id})
+                            logger.info(f"[{document_id}] [{para_id}] Calling LLM for critique (threshold: {threshold})")
                             critique_result = await critique_extraction(
                                 paragraph_text,
                                 extraction_result,
@@ -354,18 +400,34 @@ async def _run_chunking_loop(
 
                             if critique_result and critique_result.get("pass"):
                                 score = critique_result.get("score", 0)
+                                await _emit("critique_complete", {
+                                    "paragraph_id": para_id,
+                                    "pass": True,
+                                    "score": score,
+                                    "category_assessment": critique_result.get("category_assessment") or {},
+                                    "feedback": critique_result.get("feedback"),
+                                    "issues": critique_result.get("issues") or [],
+                                })
                                 await _send_status("Critique passed.")
                                 logger.info(f"[{document_id}] [{para_id}] Critique PASSED (score: {score:.3f}, duration: {critique_duration:.2f}s)")
                             else:
                                 score = critique_result.get("score", 0) if critique_result else 0
-                                feedback = critique_result.get("feedback", "")[:100] if critique_result else "No feedback"
+                                feedback = (critique_result.get("feedback") or "")[:100] if critique_result else "No feedback"
+                                await _emit("critique_complete", {
+                                    "paragraph_id": para_id,
+                                    "pass": False,
+                                    "score": score,
+                                    "category_assessment": (critique_result or {}).get("category_assessment") or {},
+                                    "feedback": (critique_result or {}).get("feedback"),
+                                    "issues": (critique_result or {}).get("issues") or [],
+                                })
                                 await _send_status("Critique failed.")
                                 logger.info(f"[{document_id}] [{para_id}] Critique FAILED (score: {score:.3f}, duration: {critique_duration:.2f}s, feedback: {feedback})")
                         except Exception as critique_err:
                             error_type, severity, stage = _classify_and_log_error(
                                 db, doc_uuid, para_id, critique_err, "critique", "critique"
                             )
-                            await log_error(
+                            await _safe_log_error(
                                 db=db,
                                 document_id=str(doc_uuid),
                                 paragraph_id=para_id,
@@ -401,8 +463,13 @@ async def _run_chunking_loop(
                                 llm=llm,
                             )
                             retry_output = ""
+                            retry_first_chunk = False
                             async for chunk in retry_extraction:
                                 retry_output += chunk
+                                if not retry_first_chunk and retry_output:
+                                    retry_first_chunk = True
+                                    t = (_utc_now_naive() - retry_start).total_seconds()
+                                    logger.info(f"[{document_id}] [{para_id}] Retry {retry_count} LLM first chunk (after {t:.2f}s)")
                             
                             retry_duration = (_utc_now_naive() - retry_start).total_seconds()
                             retry_result = parse_json_response(retry_output)
@@ -428,7 +495,7 @@ async def _run_chunking_loop(
                             error_type, severity, stage = _classify_and_log_error(
                                 db, doc_uuid, para_id, retry_err, "retry", "extraction"
                             )
-                            await log_error(
+                            await _safe_log_error(
                                 db=db,
                                 document_id=str(doc_uuid),
                                 paragraph_id=para_id,
@@ -568,7 +635,7 @@ async def _run_chunking_loop(
                             error_type, severity, stage = _classify_and_log_error(
                                 db, doc_uuid, para_id, persist_err, "persistence", "persistence"
                             )
-                            await log_error(
+                            await _safe_log_error(
                                 db=db,
                                 document_id=str(doc_uuid),
                                 paragraph_id=para_id,
@@ -618,7 +685,7 @@ async def _run_chunking_loop(
                     error_type, severity, stage = _classify_and_log_error(
                         db, doc_uuid, para_id, para_err, "other", "other"
                     )
-                    await log_error(
+                    await _safe_log_error(
                         db=db,
                         document_id=str(doc_uuid),
                         paragraph_id=para_id,
@@ -704,7 +771,12 @@ async def process_job(job: ChunkingJob, db: AsyncSession):
         document = doc_result.scalar_one_or_none()
         
         if not document:
-            raise ValueError(f"Document {job.document_id} not found")
+            logger.error("[JOB %s] Document not found: %s", job.id, job.document_id)
+            job.status = "failed"
+            job.error_message = f"Document {job.document_id} not found"
+            job.completed_at = _utc_now_naive()
+            await db.commit()
+            return
         
         logger.info(f"[JOB {job.id}] Document found: {document.filename} (status: {document.status})")
         
@@ -716,45 +788,74 @@ async def process_job(job: ChunkingJob, db: AsyncSession):
         pages = pages_result.scalars().all()
         
         if not pages:
-            raise ValueError(f"No pages found for document {job.document_id}")
+            logger.error("[JOB %s] No pages found for document %s", job.id, job.document_id)
+            job.status = "failed"
+            job.error_message = f"No pages found for document {job.document_id}"
+            job.completed_at = _utc_now_naive()
+            await db.commit()
+            return
         
         logger.info(f"[JOB {job.id}] Found {len(pages)} pages for document")
         
-        # Parse threshold
-        threshold = float(job.threshold)
+        # Parse threshold (do not assume job.threshold exists or is valid)
+        try:
+            threshold = float(job.threshold) if job.threshold is not None else 0.6
+        except (TypeError, ValueError) as e:
+            logger.warning("[JOB %s] Invalid job.threshold %r, using 0.6: %s", job.id, getattr(job, "threshold", None), e)
+            threshold = 0.6
         logger.info(f"[JOB {job.id}] Using critique threshold: {threshold}")
         
         # Create event callback (pass db session so it can write events)
         event_callback = await _create_event_buffer_callback(str(job.document_id), db)
         
-        # Run mode from job (default: critique on, max_retries 2)
-        critique_enabled = job.critique_enabled is None or (str(job.critique_enabled).lower() == "true")
-        max_retries = 2 if job.max_retries is None else max(0, int(job.max_retries))
+        # Run mode from job (default: critique on, max_retries 2). No assumptions.
+        try:
+            critique_enabled = job.critique_enabled is None or (str(job.critique_enabled).lower() == "true")
+        except Exception:
+            critique_enabled = True
+        try:
+            max_retries = 2 if job.max_retries is None else max(0, int(job.max_retries))
+        except (TypeError, ValueError):
+            max_retries = 2
 
-        # Resolve prompt versions and LLM config from job (run-configured)
+        # Resolve prompt versions and LLM config from job (run-configured). No assumptions.
         extraction_prompt_body = None
         retry_extraction_prompt_body = None
         critique_prompt_body = None
         llm = None
         prompt_versions = getattr(job, "prompt_versions", None) or {}
         llm_config_version = getattr(job, "llm_config_version", None)
-        if isinstance(prompt_versions, dict):
-            from app.services.prompt_registry import get_prompt
-            ext_ver = prompt_versions.get("extraction") or "v1"
-            retry_ver = prompt_versions.get("extraction_retry") or "v1"
-            crit_ver = prompt_versions.get("critique") or "v1"
-            extraction_prompt_body = get_prompt("extraction", ext_ver)
-            retry_extraction_prompt_body = get_prompt("extraction_retry", retry_ver)
-            critique_prompt_body = get_prompt("critique", crit_ver)
-        if llm_config_version:
-            from app.services.llm_config import get_llm_config, get_llm_provider_from_config
-            cfg = get_llm_config(llm_config_version)
-            if cfg:
-                llm = get_llm_provider_from_config(cfg)
-                logger.info(f"[JOB {job.id}] Using LLM config: {llm_config_version}")
+        try:
+            if isinstance(prompt_versions, dict):
+                from app.services.prompt_registry import get_prompt
+                ext_ver = prompt_versions.get("extraction") or "v1"
+                retry_ver = prompt_versions.get("extraction_retry") or "v1"
+                crit_ver = prompt_versions.get("critique") or "v1"
+                extraction_prompt_body = get_prompt("extraction", ext_ver)
+                retry_extraction_prompt_body = get_prompt("extraction_retry", retry_ver)
+                critique_prompt_body = get_prompt("critique", crit_ver)
+        except Exception as e:
+            logger.warning("[JOB %s] Prompt resolution failed, using in-code defaults: %s", job.id, e, exc_info=True)
+        try:
+            if llm_config_version:
+                from app.services.llm_config import get_llm_config_resolved, get_llm_provider_from_config
+                cfg = await get_llm_config_resolved(llm_config_version, db)
+                if cfg:
+                    llm = get_llm_provider_from_config(cfg)
+                    logger.info(f"[JOB {job.id}] Using LLM config: {llm_config_version}")
+        except Exception as e:
+            logger.warning("[JOB %s] LLM config %r failed, falling back to default provider: %s", job.id, llm_config_version, e, exc_info=True)
         if not llm:
-            from app.services.llm_provider import get_llm_provider
-            llm = get_llm_provider()
+            try:
+                from app.services.llm_provider import get_llm_provider
+                llm = get_llm_provider()
+            except Exception as e:
+                logger.error("[JOB %s] get_llm_provider failed: %s", job.id, e, exc_info=True)
+                job.status = "failed"
+                job.error_message = f"LLM provider init failed: {e}"
+                job.completed_at = _utc_now_naive()
+                await db.commit()
+                return
 
         # Run chunking loop
         logger.info(f"[JOB {job.id}] Starting chunking loop...")
@@ -792,13 +893,20 @@ async def process_job(job: ChunkingJob, db: AsyncSession):
         
     except Exception as e:
         job_duration = (_utc_now_naive() - job_start_time).total_seconds()
-        logger.error(f"[JOB {job.id}] Error processing job after {job_duration:.2f}s: {e}", exc_info=True)
-        await db.rollback()
-        job.status = "failed"
-        job.error_message = str(e)
-        job.completed_at = _utc_now_naive()
-        await db.commit()
-        logger.error(f"[JOB {job.id}] Job marked as failed with error: {str(e)[:200]}")
+        job_id = getattr(job, "id", None)
+        logger.error("[JOB %s] Error processing job after %.2fs: %s", job_id, job_duration, e, exc_info=True)
+        try:
+            await db.rollback()
+        except Exception as rb_err:
+            logger.error("[JOB %s] Rollback failed: %s", job_id, rb_err, exc_info=True)
+        try:
+            job.status = "failed"
+            job.error_message = str(e)[:2000]
+            job.completed_at = _utc_now_naive()
+            await db.commit()
+            logger.info("[JOB %s] Job marked as failed", job_id)
+        except Exception as commit_err:
+            logger.error("[JOB %s] Failed to persist job failure status: %s", job_id, commit_err, exc_info=True)
 
 
 async def worker_loop():

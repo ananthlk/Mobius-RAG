@@ -123,6 +123,98 @@
   color: var(--text-primary);
 }
 
+/* ---- Fact hover tooltip (modern, compact) ---- */
+.reader-fact-tooltip {
+  position: fixed;
+  transform: translate(-50%, -100%);
+  z-index: 1100;
+  pointer-events: none;
+  animation: reader-tooltip-fade-in 0.15s ease-out;
+}
+
+@keyframes reader-tooltip-fade-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, calc(-100% - 4px));
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -100%);
+  }
+}
+
+.reader-fact-tooltip-arrow {
+  position: absolute;
+  left: 50%;
+  bottom: -6px;
+  transform: translateX(-50%);
+  width: 0;
+  height: 0;
+  border-left: 6px solid transparent;
+  border-right: 6px solid transparent;
+  border-top: 6px solid rgba(255, 255, 255, 0.98);
+  filter: drop-shadow(0 1px 0 rgba(0, 0, 0, 0.06));
+}
+
+.reader-fact-tooltip-inner {
+  background: rgba(255, 255, 255, 0.98);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 10px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.04);
+  padding: 0.5rem 0.75rem;
+  min-width: 200px;
+  max-width: 280px;
+}
+
+.reader-fact-tooltip-pertinent {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  padding-bottom: 0.375rem;
+  margin-bottom: 0.375rem;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.reader-fact-tooltip-pertinent.yes {
+  color: var(--accent-green, #10b981);
+}
+
+.reader-fact-tooltip-pertinent.no {
+  color: var(--text-tertiary, #6b7280);
+  font-weight: 500;
+}
+
+.reader-fact-tooltip-categories {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.reader-fact-tooltip-cat-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+}
+
+.reader-fact-tooltip-cat-label {
+  color: var(--text-secondary, #374151);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reader-fact-tooltip-cat-meta {
+  flex-shrink: 0;
+  font-weight: 600;
+  color: var(--text-primary, #1f2937);
+  font-variant-numeric: tabular-nums;
+}
+
 .document-selector {
   display: flex;
   align-items: center;

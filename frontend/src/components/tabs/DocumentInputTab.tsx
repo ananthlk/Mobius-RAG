@@ -91,10 +91,13 @@ export function DocumentInputTab({ onUpload, uploading, error }: DocumentInputTa
           </div>
           
           {error && (
-            <div className="error-message">
+            <div className="error-message" role="alert">
               {error}
             </div>
           )}
+          <p className="upload-hint">
+            Backend must be running at <code>http://localhost:8000</code>. PDF only. If upload fails, check the error above and ensure GCS bucket and credentials are set in <code>.env</code>.
+          </p>
         </div>
 
         {/* Google Drive Method - Coming Soon */}

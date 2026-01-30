@@ -3,7 +3,7 @@ import './App.css'
 import { Header } from './components/Header'
 import { Tabs, TabList, Tab, TabPanels, TabPanel } from './components/Tabs'
 import { DocumentInputTab } from './components/tabs/DocumentInputTab'
-import { DocumentStatusTab } from './components/tabs/DocumentStatusTab'
+import { DocumentStatusTab, type ChunkingOptions } from './components/tabs/DocumentStatusTab'
 import { LiveUpdatesTab } from './components/tabs/LiveUpdatesTab'
 import { ReadDocumentTab } from './components/tabs/ReadDocumentTab'
 import { ReviewFactsTab } from './components/tabs/ReviewFactsTab'
@@ -97,20 +97,17 @@ function App() {
   const [chunkingComplete, setChunkingComplete] = useState(false)
   const [_totalParagraphs, setTotalParagraphs] = useState<number | null>(null)
   const [paragraphs, setParagraphs] = useState<Map<string, ParagraphState>>(new Map())
-  const [retryThreshold, setRetryThreshold] = useState(0.6)
-  const [critiqueEnabled, setCritiqueEnabled] = useState(true)
-  const [maxRetries, setMaxRetries] = useState(2)
   const [defaultLlmConfigVersion, setDefaultLlmConfigVersion] = useState<string | null>(null)
-  const [defaultPromptVersions, setDefaultPromptVersions] = useState<Record<string, string> | null>(null)
   const [selectedParagraphId, setSelectedParagraphId] = useState<string | null>(null)
   const [processingParagraphId, setProcessingParagraphId] = useState<string | null>(null)
   const [processingStage, setProcessingStage] = useState<'idle' | 'extracting' | 'critiquing' | 'retrying'>('idle')
   const [_processingRetryCount, setProcessingRetryCount] = useState(0)
   const [_chunkingStatus, setChunkingStatus] = useState<'idle' | 'in_progress' | 'completed' | 'stopped' | 'failed'>('idle')
   const streamContainerRef = useRef<HTMLDivElement>(null)
-  const [eventSource, setEventSource] = useState<EventSource | null>(null)
-  const lastEventTimeRef = useRef<number>(Date.now())
-  const closedDueToStreamEndRef = useRef<boolean>(false)
+  const lastEventIdRef = useRef<string | null>(null)
+  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  // No longer used: live updates poll PostgreSQL via GET /chunking/events (worker writes to DB)
+  const eventSource: null = null
   
   // Live updates state
   const [activeJobs, setActiveJobs] = useState<Array<{
@@ -242,17 +239,18 @@ function App() {
     await loadDocuments() // Refresh list
   }
 
-  const restartChunkingForDocument = async (documentId: string) => {
+  const restartChunkingForDocument = async (documentId: string, options?: ChunkingOptions) => {
     try {
+      const opts = options ?? { threshold: 0.6, critiqueEnabled: true, maxRetries: 2 }
       const restartBody: Record<string, unknown> = {
-        threshold: retryThreshold,
-        critique_enabled: critiqueEnabled,
-        max_retries: Math.max(0, maxRetries),
+        threshold: opts.threshold,
+        critique_enabled: opts.critiqueEnabled,
+        max_retries: Math.max(0, opts.maxRetries),
       }
       if (defaultLlmConfigVersion) restartBody.llm_config_version = defaultLlmConfigVersion
-      if (defaultPromptVersions && Object.keys(defaultPromptVersions).length > 0) restartBody.prompt_versions = defaultPromptVersions
+      if (opts.promptVersions && Object.keys(opts.promptVersions).length > 0) restartBody.prompt_versions = opts.promptVersions
       const response = await fetch(
-        `http://localhost:8000/documents/${documentId}/chunking/restart?threshold=${encodeURIComponent(retryThreshold)}&critique_enabled=${critiqueEnabled}&max_retries=${maxRetries}`,
+        `http://localhost:8000/documents/${documentId}/chunking/restart`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -261,22 +259,11 @@ function App() {
       )
       if (response.ok) {
         // Connect to live stream if not already connected
-        if (!eventSource) {
-          closedDueToStreamEndRef.current = false
-          const es = new EventSource(`http://localhost:8000/documents/${documentId}/chunking/live`)
-          setEventSource(es)
-          setStreamingOutput('') // Fresh status log
-          es.onmessage = (event) => {
-            try {
-              const eventData = JSON.parse(event.data)
-              handleStreamEvent(eventData)
-            } catch (err) {
-              console.error('Failed to parse stream event:', err)
-            }
-          }
-        }
         setChunkingActive(true)
-        await loadDocuments() // Refresh list
+        setChunkingComplete(false)
+        setStreamingOutput('')
+        lastEventIdRef.current = null
+        await loadDocuments()
       } else {
         const errorData = await response.json().catch(() => null)
         setError(errorData?.detail || 'Failed to restart chunking')
@@ -305,10 +292,11 @@ function App() {
           setChunkingActive(false)
           setChunkingComplete(false)
           setParagraphs(new Map())
-          if (eventSource) {
-            eventSource.close()
-            setEventSource(null)
+          if (pollIntervalRef.current) {
+            clearInterval(pollIntervalRef.current)
+            pollIntervalRef.current = null
           }
+          lastEventIdRef.current = null
         }
       } else {
         const errorData = await response.json().catch(() => null)
@@ -329,10 +317,11 @@ function App() {
       setChunkingActive(false)
       setChunkingComplete(false)
       setParagraphs(new Map())
-      if (eventSource) {
-        eventSource.close()
-        setEventSource(null)
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current)
+        pollIntervalRef.current = null
       }
+      lastEventIdRef.current = null
       return
     }
 
@@ -361,26 +350,9 @@ function App() {
       console.error('Failed to load extraction status:', err)
     }
     
-    // Close existing event source if any
-    if (eventSource) {
-      eventSource.close()
-      setEventSource(null)
-    }
-    
     // Always try to load chunks from PostgreSQL when selecting a document
-    // loadChunkingResults handles empty results gracefully (returns early if no data)
     await loadChunkingResults(documentId, false)
-    
-    // Connect to live stream only if chunking is actively in progress
-    // The loadChunkingResults function already sets chunkingActive/chunkingComplete flags
-    // based on the status from the DB, but we check documentData.chunking_status here
-    // to determine if we should connect to the live SSE stream
-    if (documentData.chunking_status === 'in_progress') {
-      // Connect to live event stream - this will be the only source of updates
-      connectToChunkingStream(documentId)
-    }
-    // Note: For all other statuses (completed, stopped, failed, null/undefined),
-    // loadChunkingResults has already set the appropriate state flags based on DB data
+    // When user opens Live tab and selects this job, polling will load events from the API
   }
 
 
@@ -667,23 +639,13 @@ function App() {
       case 'chunking_complete':
         setChunkingActive(false)
         setChunkingComplete(true)
-        closedDueToStreamEndRef.current = true
-        if (eventSource) {
-          eventSource.close()
-          setEventSource(null)
-        }
         break
-        
+
       case 'stream_end': {
         const reason = data?.reason
         if (reason === 'chunking_complete') {
           setChunkingActive(false)
           setChunkingComplete(true)
-        }
-        closedDueToStreamEndRef.current = true
-        if (eventSource) {
-          eventSource.close()
-          setEventSource(null)
         }
         break
       }
@@ -719,8 +681,8 @@ function App() {
         setChunkingComplete(false)
       }
       
-      // Determine if we should merge (SSE is active and merge flag is set)
-      const shouldMerge = mergeWithExisting && eventSource
+      // When loading from DB, replace local state (worker writes to PostgreSQL; we poll events)
+      const shouldMerge = false
       
       if (shouldMerge) {
         // Merge: only update paragraphs that don't exist or are complete (not streaming)
@@ -816,69 +778,21 @@ function App() {
     }
   }
 
-  // Helper function to establish SSE connection with proper tracking
-  const connectToChunkingStream = (documentId: string) => {
-    // Close existing connection if any
-    if (eventSource) {
-      eventSource.close()
-      setEventSource(null)
-    }
-    
-    closedDueToStreamEndRef.current = false
-    const es = new EventSource(`http://localhost:8000/documents/${documentId}/chunking/live`)
-    setEventSource(es)
-    setStreamingOutput('') // Fresh status log for this job
-    lastEventTimeRef.current = Date.now()
-    
-    es.onopen = () => {
-      console.log('SSE connection opened for chunking, document:', documentId)
-      lastEventTimeRef.current = Date.now()
-    }
-    
-    es.onmessage = (event) => {
-      try {
-        if (event.data.trim() === ': heartbeat') {
-          lastEventTimeRef.current = Date.now()
-          return
-        }
-        const eventData = JSON.parse(event.data)
-        lastEventTimeRef.current = Date.now()
-        const paraId = eventData.data?.paragraph_id
-        const logLabel = eventData.event === 'stream_end' ? `stream_end (${eventData.data?.reason ?? 'end'})` : `${eventData.event}${paraId ? ` ${paraId}` : ''}`
-        console.log('SSE event received:', logLabel)
-        handleStreamEvent(eventData)
-      } catch (err) {
-        console.error('Failed to parse stream event:', err)
-      }
-    }
-    
-    es.onerror = () => {
-      // If we closed due to stream_end, don't log reconnection noise
-      if (closedDueToStreamEndRef.current) return
-      if (es.readyState === EventSource.CLOSED) {
-        console.log('SSE connection closed for document:', documentId)
-      } else if (es.readyState === EventSource.CONNECTING) {
-        console.log('SSE connection reconnecting for document:', documentId)
-      }
-    }
-    
-    return es
-  }
-
-  const startChunking = async (documentId: string) => {
+  const startChunking = async (documentId: string, options?: ChunkingOptions) => {
     setError(null)
+    const opts = options ?? { threshold: 0.6, critiqueEnabled: true, maxRetries: 2 }
     console.log(`Starting chunking for document ${documentId}...`)
     
     try {
       const body: Record<string, unknown> = {
-        threshold: retryThreshold,
-        critique_enabled: critiqueEnabled,
-        max_retries: Math.max(0, maxRetries),
+        threshold: opts.threshold,
+        critique_enabled: opts.critiqueEnabled,
+        max_retries: Math.max(0, opts.maxRetries),
       }
       if (defaultLlmConfigVersion) body.llm_config_version = defaultLlmConfigVersion
-      if (defaultPromptVersions && Object.keys(defaultPromptVersions).length > 0) body.prompt_versions = defaultPromptVersions
+      if (opts.promptVersions && Object.keys(opts.promptVersions).length > 0) body.prompt_versions = opts.promptVersions
       const response = await fetch(
-        `http://localhost:8000/documents/${documentId}/chunking/start?threshold=${encodeURIComponent(retryThreshold)}&critique_enabled=${critiqueEnabled}&max_retries=${maxRetries}`,
+        `http://localhost:8000/documents/${documentId}/chunking/start?threshold=${encodeURIComponent(opts.threshold)}&critique_enabled=${opts.critiqueEnabled}&max_retries=${opts.maxRetries}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -910,9 +824,7 @@ function App() {
         
         // Load initial state from DB once (full replace, not merge)
         await loadChunkingResults(documentId, false)
-        
-        // Connect to live event stream - this will be the only source of real-time updates
-        connectToChunkingStream(documentId)
+        // Live updates: when user opens Live tab and selects this job, polling will start
       }
     } catch (err) {
       console.error('Start chunking exception:', err)
@@ -927,12 +839,11 @@ function App() {
         { method: 'POST' }
       )
       if (response.ok) {
-        // Close event source
-        if (eventSource) {
-          eventSource.close()
-          setEventSource(null)
+        if (pollIntervalRef.current) {
+          clearInterval(pollIntervalRef.current)
+          pollIntervalRef.current = null
         }
-        // Fetch results once to update state
+        lastEventIdRef.current = null
         await loadChunkingResults(documentId)
       }
     } catch (err) {
@@ -940,33 +851,12 @@ function App() {
     }
   }
 
-  // Load results when chunking section is opened (only if SSE not active)
+  // Load results when chunking section is opened (worker writes to PostgreSQL)
   useEffect(() => {
     if (result?.document_id && (chunkingActive || chunkingComplete)) {
-      // Only load from DB if SSE is not active (SSE handles updates during streaming)
-      if (!eventSource) {
-        loadChunkingResults(result.document_id, false)
-      }
+      loadChunkingResults(result.document_id, false)
     }
-  }, [result?.document_id, eventSource])
-
-  // Close event source when chunking completes
-  useEffect(() => {
-    if (chunkingComplete && eventSource) {
-      eventSource.close()
-      setEventSource(null)
-    }
-  }, [chunkingComplete, eventSource])
-
-  // Clean up event source on unmount
-  useEffect(() => {
-    return () => {
-      if (eventSource) {
-        eventSource.close()
-      }
-    }
-  }, [eventSource])
-
+  }, [result?.document_id, chunkingActive, chunkingComplete])
 
   // Autoscroll for live stream container (when raw_llm_output changes)
   useEffect(() => {
@@ -986,53 +876,6 @@ function App() {
       }
     }
   }, [processingParagraphId, paragraphs])
-
-  // Monitor SSE connection health and reload from DB if stuck
-  useEffect(() => {
-    if (!chunkingActive || !selectedDocumentId || !eventSource) return
-    
-    let lastReloadTime = 0
-    const RELOAD_DEBOUNCE_MS = 3000 // Only reload at most once every 3 seconds
-    
-    const checkInterval = setInterval(() => {
-      const timeSinceLastEvent = Date.now() - lastEventTimeRef.current
-      const connectionState = eventSource.readyState
-      const now = Date.now()
-      
-      // If no events for 10 seconds and connection is open, reload from DB as fallback
-      // Use merge=true to preserve user's current view and selections
-      // Debounce reloads to avoid excessive requests
-      if (timeSinceLastEvent > 10000 && connectionState === EventSource.OPEN && (now - lastReloadTime) > RELOAD_DEBOUNCE_MS) {
-        console.log('SSE appears stuck, reloading from DB as fallback')
-        lastReloadTime = now
-        // Store current selections to preserve them
-        const currentSelectedPage = selectedPage
-        const currentSelectedParagraphId = selectedParagraphId
-        const currentProcessingParagraphId = processingParagraphId
-        
-        loadChunkingResults(selectedDocumentId, true).then(() => {
-          // Restore selections if they were changed (shouldn't happen with merge=true, but safety check)
-          if (currentSelectedPage !== null && selectedPage !== currentSelectedPage) {
-            setSelectedPage(currentSelectedPage)
-          }
-          if (currentSelectedParagraphId !== null && selectedParagraphId !== currentSelectedParagraphId) {
-            setSelectedParagraphId(currentSelectedParagraphId)
-          }
-          if (currentProcessingParagraphId !== null && processingParagraphId !== currentProcessingParagraphId) {
-            setProcessingParagraphId(currentProcessingParagraphId)
-          }
-        })
-      }
-      
-      // If connection is closed, try to reconnect
-      if (connectionState === EventSource.CLOSED) {
-        console.log('SSE connection closed, attempting to reconnect')
-        connectToChunkingStream(selectedDocumentId)
-      }
-    }, 5000) // Check every 5 seconds
-    
-    return () => clearInterval(checkInterval)
-  }, [chunkingActive, selectedDocumentId, eventSource, selectedPage, selectedParagraphId, processingParagraphId])
 
   const paragraphsByPage = useMemo(() => {
     const map = new Map<number, ParagraphState[]>()
@@ -1101,123 +944,57 @@ function App() {
   // Reference unused values so strict noUnusedLocals passes (kept for future use)
   void [_restartExtraction, _startChunkingForDocument, _availablePages, _filteredParagraphsByPage, _completedCount, _closeChunking]
 
-  // Track active/recent jobs for Live Updates tab (in_progress, queued, or completed so user can view events)
+  // Live Updates list: show all documents (processing logs). Filter by job can be added later.
   useEffect(() => {
-    const updateActiveJobs = async () => {
-      const activeDocs = documents.filter(doc =>
-        doc.chunking_status === 'in_progress' ||
-        doc.chunking_status === 'queued' ||
-        doc.chunking_status === 'completed' ||
-        doc.chunking_status === 'failed' ||
-        doc.chunking_status === 'stopped'
-      )
-      
-      const jobs = await Promise.all(
-        activeDocs.map(async (doc) => {
-          // Fetch chunking results to get progress
-          let progress = 0
-          let totalParagraphs = 0
-          let completedParagraphs = 0
-          let currentPage = 0
-          let totalPages = 0
-          
-          try {
-            const resultsResponse = await fetch(
-              `http://localhost:8000/documents/${doc.id}/chunking/results`
-            )
-            
-            if (resultsResponse.ok) {
-              const resultsData = await resultsResponse.json()
-              const metadata = resultsData.metadata || {}
-              totalParagraphs = metadata.total_paragraphs || 0
-              completedParagraphs = metadata.completed_count || 0
-              progress = totalParagraphs > 0 
-                ? Math.round((completedParagraphs / totalParagraphs) * 100) 
-                : 0
-              
-              // Extract current page from processingParagraphId
-              if (processingParagraphId && selectedJobId === doc.id) {
-                const [pageNum] = processingParagraphId.split('_')
-                currentPage = parseInt(pageNum, 10) || 0
-              }
-              
-              // Get total pages from document pages
-              try {
-                const pagesResponse = await fetch(
-                  `http://localhost:8000/documents/${doc.id}/pages`
-                )
-                if (pagesResponse.ok) {
-                  const pagesData = await pagesResponse.json()
-                  totalPages = pagesData.pages?.length || 0
-                }
-              } catch (pagesErr) {
-                // Ignore pages fetch errors
-              }
-            }
-          } catch (err) {
-            // If fetch fails, use defaults (progress = 0)
-            console.error(`Failed to fetch progress for ${doc.id}:`, err)
-          }
-          
-          return {
-            document_id: doc.id,
-            filename: doc.display_name?.trim() || doc.filename,
-            status: doc.chunking_status || 'idle',
-            progress,
-            start_time: doc.created_at,
-            current_page: currentPage || undefined,
-            total_pages: totalPages || undefined,
-            current_paragraph: (selectedJobId === doc.id && processingParagraphId) || undefined,
-            total_paragraphs: totalParagraphs || undefined,
-            completed_paragraphs: completedParagraphs || undefined,
-            processing_stage: (selectedJobId === doc.id ? processingStage : 'idle') as 'extracting' | 'critiquing' | 'retrying' | 'persisting' | 'idle'
-          }
-        })
-      )
-      // Order by entry date (newest first) so the Live Updates list is never jumbled
-      jobs.sort((a, b) => new Date(b.start_time).getTime() - new Date(a.start_time).getTime())
-      // Merge with current state so SSE-driven progress is not overwritten by stale poll
-      setActiveJobs(prev => jobs.map(j => {
-        const existing = prev.find(p => p.document_id === j.document_id)
-        if (existing && (existing.progress > j.progress || (existing.completed_paragraphs != null && j.completed_paragraphs != null && existing.completed_paragraphs > j.completed_paragraphs))) {
-          return { ...j, progress: existing.progress, completed_paragraphs: existing.completed_paragraphs, total_paragraphs: existing.total_paragraphs ?? j.total_paragraphs, current_page: existing.current_page ?? j.current_page, total_pages: existing.total_pages ?? j.total_pages }
-        }
-        return j
-      }))
-    }
-    updateActiveJobs()
-    const interval = setInterval(updateActiveJobs, 2000)
-    return () => clearInterval(interval)
-  }, [documents])
+    const totalParagraphs = (d: { chunking_total_paragraphs?: number }) => d.chunking_total_paragraphs ?? 0
+    const completedParagraphs = (d: { chunking_completed_paragraphs?: number }) => d.chunking_completed_paragraphs ?? 0
+    const jobs = documents.map(doc => {
+      const total = totalParagraphs(doc)
+      const completed = completedParagraphs(doc)
+      const progress = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0
+      return {
+        document_id: doc.id,
+        filename: doc.display_name?.trim() || doc.filename,
+        status: doc.chunking_status || 'idle',
+        progress,
+        start_time: doc.created_at,
+        current_page: doc.chunking_current_page ?? undefined,
+        total_pages: doc.chunking_total_pages ?? undefined,
+        current_paragraph: doc.chunking_current_paragraph ?? (selectedJobId === doc.id ? processingParagraphId ?? undefined : undefined),
+        total_paragraphs: total || undefined,
+        completed_paragraphs: total ? completed : undefined,
+        processing_stage: (doc.chunking_processing_stage ?? (selectedJobId === doc.id ? processingStage : 'idle')) as 'extracting' | 'critiquing' | 'retrying' | 'persisting' | 'idle'
+      }
+    })
+    jobs.sort((a, b) => new Date(b.start_time).getTime() - new Date(a.start_time).getTime())
+    setActiveJobs(jobs)
+  }, [documents, selectedJobId, processingParagraphId, processingStage])
 
-  // Update streaming output for selected job - show current paragraph's output
+  // Only overwrite streamingOutput from paragraph raw_llm_output when chunking is active.
+  // When job is completed/idle, the events effect owns streamingOutput (status_message log).
   useEffect(() => {
-    if (selectedJobId && processingParagraphId) {
+    if (!selectedJobId) {
+      setStreamingOutput('')
+      return
+    }
+    if (!chunkingActive) return // Leave output to events effect (processing log)
+    if (processingParagraphId) {
       const para = paragraphs.get(processingParagraphId)
       if (para?.raw_llm_output) {
         setStreamingOutput(para.raw_llm_output)
-      } else {
-        // If paragraph exists but no output yet, show empty (will be filled by llm_stream events)
-        setStreamingOutput('')
       }
-    } else if (selectedJobId) {
-      // Job selected but no current paragraph - check if we have any paragraphs with output
-      const allOutput: string[] = []
-      paragraphs.forEach((para) => {
-        if (para.raw_llm_output && para.raw_llm_output.length > 0) {
-          allOutput.push(para.raw_llm_output)
-        }
-      })
-      if (allOutput.length > 0) {
-        // Show the most recent paragraph's output (last in array)
-        setStreamingOutput(allOutput[allOutput.length - 1])
-      } else {
-        setStreamingOutput('')
-      }
-    } else {
-      setStreamingOutput('')
+      return
     }
-  }, [selectedJobId, processingParagraphId, paragraphs])
+    const allOutput: string[] = []
+    paragraphs.forEach((para) => {
+      if (para.raw_llm_output && para.raw_llm_output.length > 0) {
+        allOutput.push(para.raw_llm_output)
+      }
+    })
+    if (allOutput.length > 0) {
+      setStreamingOutput(allOutput[allOutput.length - 1])
+    }
+  }, [selectedJobId, chunkingActive, processingParagraphId, paragraphs])
 
   const handleUpload = async (file: File) => {
     setFile(file)
@@ -1235,15 +1012,17 @@ function App() {
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => null)
-        
         if (errorData?.detail?.error === 'duplicate_file') {
           setError(
             `This file has already been uploaded as "${errorData.detail.original_filename}".\n\n${errorData.detail.help}`
           )
-        } else if (errorData?.detail?.message) {
-          setError(errorData.detail.message)
+        } else if (errorData?.detail) {
+          const msg = typeof errorData.detail === 'string'
+            ? errorData.detail
+            : errorData.detail?.message || JSON.stringify(errorData.detail)
+          setError(msg)
         } else {
-          setError(`Upload failed: ${response.statusText}`)
+          setError(`Upload failed: ${response.status} ${response.statusText}`)
         }
         return
       }
@@ -1255,14 +1034,19 @@ function App() {
       // Switch to status tab to see the new document
       setActiveTab('status')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Upload failed. Please try again.')
+      const msg = err instanceof Error ? err.message : 'Upload failed. Please try again.'
+      setError(
+        msg.includes('fetch') || msg.includes('Failed') || msg.includes('NetworkError')
+          ? `${msg} Is the backend running at http://localhost:8000?`
+          : msg
+      )
     } finally {
       setUploading(false)
     }
   }
 
-  const handleStartChunking = async (documentId: string) => {
-    await startChunking(documentId)
+  const handleStartChunking = async (documentId: string, options: ChunkingOptions) => {
+    await startChunking(documentId, options)
     await loadDocuments()
     // Switch to live updates tab
     setActiveTab('live')
@@ -1274,8 +1058,8 @@ function App() {
     await loadDocuments()
   }
 
-  const handleRestartChunking = async (documentId: string) => {
-    await restartChunkingForDocument(documentId)
+  const handleRestartChunking = async (documentId: string, options: ChunkingOptions) => {
+    await restartChunkingForDocument(documentId, options)
     await loadDocuments()
     // Switch to live updates tab to see the restart
     setActiveTab('live')
@@ -1303,73 +1087,102 @@ function App() {
       // Set selectedDocumentId to match selectedJobId so streaming works
       setSelectedDocumentId(documentId)
       await selectDocument(documentId, doc)
-      // Ensure SSE connection is established if job is in progress
-      // This will reconnect and receive all buffered events
-      if (doc.chunking_status === 'in_progress') {
-        // Close existing connection if it's for a different document
-        if (eventSource) {
-          eventSource.close()
-          setEventSource(null)
-        }
-        // Small delay to ensure previous connection is closed
-        setTimeout(() => {
-          connectToChunkingStream(documentId)
-        }, 100)
-      }
+      // When Live tab is active, the effect below will load events and start polling
     }
   }
 
-  // Load existing events and connect to SSE when Live Updates tab becomes active
+  // Load events from PostgreSQL and poll for new events when Live Updates tab is active (worker writes to DB)
   useEffect(() => {
-    if (activeTab === 'live' && selectedJobId) {
-      const doc = documents.find(d => d.id === selectedJobId)
-      if (doc) {
-        // Load existing events from database
-        const loadExistingEvents = async () => {
-          try {
-            const response = await fetch(`http://localhost:8000/documents/${selectedJobId}/chunking/events`)
-            if (response.ok) {
-              const data = await response.json()
-              if (data.events && data.events.length > 0) {
-                console.log(`Loading ${data.events.length} existing events for document ${selectedJobId}`)
-                // Process existing events in order - only show status messages in output
-                let output = ''
-                for (const event of data.events) {
-                  if (event.event === 'status_message' && event.data?.message) {
-                    const msg = String(event.data.message).trim()
-                    if (msg) {
-                      output += msg + '\n'
-                    }
-                  }
-                  // Note: We don't call handleStreamEvent for historical events to avoid
-                  // triggering state updates that are meant for live events
-                }
-                if (output) {
-                  setStreamingOutput(output) // Replace, not append, since these are historical
-                }
-              }
-            }
-          } catch (err) {
-            console.error('Failed to load existing events:', err)
-          }
+    if (activeTab !== 'live' || !selectedJobId) {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current)
+        pollIntervalRef.current = null
+      }
+      lastEventIdRef.current = null
+      return
+    }
+
+    const doc = documents.find(d => d.id === selectedJobId)
+    if (!doc) return
+
+    const jobId = selectedJobId
+    const apiBase = 'http://localhost:8000'
+
+    // Initial load: get most recent events (API returns desc order); reverse for chronological display
+    const loadInitialEvents = async () => {
+      try {
+        const res = await fetch(`${apiBase}/documents/${jobId}/chunking/events?limit=1000`)
+        if (!res.ok) return
+        const data = await res.json()
+        const events = data.events || []
+        if (events.length === 0) {
+          setStreamingOutput('')
+          lastEventIdRef.current = null
+          return
         }
-        
-        loadExistingEvents()
-        
-        // Connect to SSE stream for new events (if job is in progress or we want to see new events)
-        if (doc.chunking_status === 'in_progress' || doc.chunking_status === 'pending') {
-          // Check if we already have an active connection for this document
-          if (!eventSource || (eventSource && eventSource.readyState !== EventSource.OPEN)) {
-            // Reconnect to get new events
-            if (eventSource) {
-              eventSource.close()
-              setEventSource(null)
-            }
-            setTimeout(() => {
-              connectToChunkingStream(selectedJobId)
-            }, 100)
+        // API returns newest first (desc); reverse for chronological order
+        const chronological = [...events].reverse()
+        const lines: string[] = []
+        for (const ev of chronological) {
+          if (ev.event === 'status_message' && ev.data?.message) {
+            const msg = String(ev.data.message).trim()
+            if (msg) lines.push(msg)
+          } else if (ev.event === 'paragraph_start' && ev.data?.paragraph_id) {
+            const page = ev.data.page_number ?? ev.data.paragraph_id?.split('_')[0]
+            lines.push(`Processing paragraph ${ev.data.paragraph_id} (page ${page})`)
+          } else if (ev.event === 'chunking_complete') {
+            lines.push('Chunking complete.')
+          } else if (ev.event === 'stream_end' && ev.data?.reason) {
+            lines.push(`Stream ended: ${ev.data.reason}`)
           }
+          handleStreamEvent({ event: ev.event, data: ev.data })
         }
+        setStreamingOutput(lines.length ? lines.join('\n') + '\n' : '')
+        // Newest event id (first in API response) for subsequent polling
+        lastEventIdRef.current = events[0].id ?? null
+      } catch (err) {
+        console.error('Failed to load chunking events:', err)
+      }
+    }
+
+    loadInitialEvents()
+
+    // Poll for new events when job is in progress
+    const isInProgress = doc.chunking_status === 'in_progress' || doc.chunking_status === 'pending'
+    if (isInProgress) {
+      let tick = 0
+      const POLL_MS = 1500
+      pollIntervalRef.current = setInterval(async () => {
+        const afterId = lastEventIdRef.current
+        try {
+          const url = afterId
+            ? `${apiBase}/documents/${jobId}/chunking/events?after_id=${encodeURIComponent(afterId)}&limit=500`
+            : `${apiBase}/documents/${jobId}/chunking/events?limit=500`
+          const res = await fetch(url)
+          if (!res.ok) return
+          const data = await res.json()
+          const newEvents = data.events || []
+          for (const ev of newEvents) {
+            if (ev.event === 'status_message' && ev.data?.message) {
+              const msg = String(ev.data.message).trim()
+              if (msg) setStreamingOutput(prev => prev + msg + '\n')
+            }
+            handleStreamEvent({ event: ev.event, data: ev.data })
+            if (ev.id) lastEventIdRef.current = ev.id
+          }
+          // Every ~3s refresh chunking results to detect completion
+          tick += 1
+          if (tick % 2 === 0) loadChunkingResults(jobId, false)
+        } catch (err) {
+          console.error('Poll chunking events error:', err)
+        }
+      }, POLL_MS)
+    }
+
+    return () => {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current)
+        pollIntervalRef.current = null
       }
     }
   }, [activeTab, selectedJobId, documents])
@@ -1377,20 +1190,8 @@ function App() {
   return (
     <div className="app">
       <Header
-        chunkingOptions={{
-          threshold: retryThreshold,
-          critiqueEnabled,
-          maxRetries,
-        }}
-        onChunkingOptionsChange={{
-          setThreshold: setRetryThreshold,
-          setCritiqueEnabled,
-          setMaxRetries,
-        }}
         defaultLlmConfigVersion={defaultLlmConfigVersion}
         onDefaultLlmConfigVersionChange={setDefaultLlmConfigVersion}
-        defaultPromptVersions={defaultPromptVersions}
-        onDefaultPromptVersionsChange={setDefaultPromptVersions}
       />
       
       <Tabs
@@ -1437,16 +1238,6 @@ function App() {
               onViewDocument={handleViewDocument}
               onDeleteDocument={deleteDocument}
               onRestartChunking={handleRestartChunking}
-              chunkingOptions={{
-                threshold: retryThreshold,
-                critiqueEnabled,
-                maxRetries,
-              }}
-              onChunkingOptionsChange={{
-                setThreshold: setRetryThreshold,
-                setCritiqueEnabled,
-                setMaxRetries,
-              }}
             />
           </TabPanel>
 

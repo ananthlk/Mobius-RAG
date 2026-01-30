@@ -1,0 +1,11 @@
+# Example LLM config for OpenAI (optional).
+# Copy to openai.yaml and set openai.api_key or use env OPENAI_API_KEY.
+# Requires: pip install openai
+version: "openai"
+provider: "openai"
+model: "gpt-4o-mini"
+options:
+  temperature: 0.1
+openai:
+  api_key: null   # set via OPENAI_API_KEY env or override here
+  base_url: null  # optional; for Azure or other OpenAI-compatible endpoints

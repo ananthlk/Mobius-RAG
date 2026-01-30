@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, type ReactNode } from 'react'
+import { useState, useEffect, useCallback, useRef, type ReactNode } from 'react'
 import { approveFactApi, deleteFactApi, patchFactApi, rejectFactApi } from '../../lib/factActions'
 import './ReadDocumentTab.css'
 
@@ -113,22 +113,86 @@ export interface HighlightRange {
   verificationStatus?: string | null
 }
 
-function buildTooltip(r: HighlightRange): string {
-  const parts: string[] = []
-  if (r.isPertinent) parts.push('Pertinent to claims/members.')
+/** Short labels for compact tooltip display */
+const CATEGORY_SHORT: Record<string, string> = {
+  contacting_marketing_members: 'Contacting members',
+  member_eligibility_molina: 'Eligibility',
+  benefit_access_limitations: 'Benefits / access',
+  prior_authorization_required: 'Prior auth',
+  claims_authorization_submissions: 'Claims / auth',
+  compliant_claim_requirements: 'Compliant claims',
+  claim_disputes: 'Disputes',
+  credentialing: 'Credentialing',
+  claim_submission_important: 'Claim submission',
+  coordination_of_benefits: 'COB',
+  other_important: 'Other',
+}
+
+export type TooltipData = {
+  pertinent: boolean
+  topCategories: Array<{ key: string; label: string; score: number; direction: number | null }>
+}
+
+function getTooltipData(r: HighlightRange): TooltipData | null {
+  const pertinent = r.isPertinent === true
+  let topCategories: TooltipData['topCategories'] = []
   if (r.categoryScores && typeof r.categoryScores === 'object') {
-    const entries = Object.entries(r.categoryScores)
+    topCategories = Object.entries(r.categoryScores)
       .filter(([, v]) => v && typeof v.score === 'number' && v.score > 0)
       .sort(([, a], [, b]) => (b?.score ?? 0) - (a?.score ?? 0))
-      .slice(0, 3)
-    if (entries.length) {
-      const labels = entries.map(([k]) => k.replace(/_/g, ' '))
-      const scores = entries.map(([, v]) => (v?.score ?? 0).toFixed(1))
-      parts.push(`Top categories: ${labels.map((l, i) => `${l} (${scores[i]})`).join(', ')}`)
-    }
+      .slice(0, 2)
+      .map(([k, v]) => ({
+        key: k,
+        label: CATEGORY_SHORT[k] ?? k.replace(/_/g, ' '),
+        score: v?.score ?? 0,
+        direction: v?.direction ?? null,
+      }))
   }
-  if (r.factText) parts.push(r.factText.length > 120 ? r.factText.slice(0, 120) + '…' : r.factText)
-  return parts.join(' ')
+  return { pertinent, topCategories }
+}
+
+function dirSymbol(d: number | null): string {
+  if (d === 1) return '↑'
+  if (d === 0) return '↓'
+  return '→'
+}
+
+/** Modern fact tooltip: pertinent status + top 2 categories. Renders above the anchor. */
+function FactTooltip({
+  data,
+  anchorRect,
+}: {
+  data: TooltipData
+  anchorRect: DOMRect
+}) {
+  return (
+    <div
+      className="reader-fact-tooltip"
+      style={{
+        left: anchorRect.left + anchorRect.width / 2,
+        top: anchorRect.top - 8,
+      }}
+    >
+      <div className="reader-fact-tooltip-arrow" />
+      <div className="reader-fact-tooltip-inner">
+        <div className={`reader-fact-tooltip-pertinent ${data.pertinent ? 'yes' : 'no'}`}>
+          {data.pertinent ? '✓' : '○'} {data.pertinent ? 'Pertinent' : 'Not pertinent'} to claims & members
+        </div>
+        {data.topCategories.length > 0 && (
+          <div className="reader-fact-tooltip-categories">
+            {data.topCategories.map(({ key, label, score, direction }) => (
+              <div key={key} className="reader-fact-tooltip-cat-row">
+                <span className="reader-fact-tooltip-cat-label">{label}</span>
+                <span className="reader-fact-tooltip-cat-meta">
+                  {(score * 100).toFixed(0)}% {dirSymbol(direction)}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
 }
 
 /** Render one segment (paragraph) of text with highlighted ranges. segStart/segEnd are offsets in full text; ranges are clipped to this segment and rendered with segment-relative offsets. */
@@ -138,12 +202,16 @@ function SegmentWithHighlights({
   segEnd,
   ranges,
   normalizedLen: _normalizedLen,
+  onHighlightHover,
+  onHighlightLeave,
 }: {
   segmentText: string
   segStart: number
   segEnd: number
   ranges: Array<{ start: number; end: number; source: HighlightSource; factId?: string; factText?: string; categoryScores?: Record<string, { score: number | null; direction: number | null }>; isPertinent?: boolean; verificationStatus?: string | null }>
   normalizedLen: number
+  onHighlightHover?: (r: HighlightRange, rect: DOMRect) => void
+  onHighlightLeave?: () => void
 }) {
   const nodes: ReactNode[] = []
   let pos = 0
@@ -161,14 +229,22 @@ function SegmentWithHighlights({
     let baseClass = r.source === 'user' ? 'reader-fact-highlight' : 'reader-llm-fact-highlight'
     if (r.source === 'llm' && r.isPertinent === false) baseClass += ' reader-llm-fact-highlight-non-pertinent'
     const className = approved ? `${baseClass} reader-fact-highlight-approved` : baseClass
-    const tooltip = buildTooltip(r)
+    const fallbackTitle = [r.isPertinent ? '✓ Pertinent' : '○ Not pertinent'].concat(
+      r.categoryScores && Object.keys(r.categoryScores).length
+        ? ['Hover for details']
+        : []
+    ).join(' · ')
     nodes.push(
       <span
         key={r.factId ? `${r.factId}-hl` : `${relStart}-${r.source}-hl`}
         className={className}
-        title={tooltip || undefined}
+        title={fallbackTitle}
         data-fact-id={r.factId || undefined}
         data-source={r.source}
+        onMouseEnter={(e) => {
+          onHighlightHover?.(r, e.currentTarget.getBoundingClientRect())
+        }}
+        onMouseLeave={() => onHighlightLeave?.()}
       >
         {segmentText.slice(relStart, relEnd)}
       </span>
@@ -324,11 +400,15 @@ function PageTextWithHighlights({
   userRanges,
   llmRanges,
   isMarkdown = false,
+  onHighlightHover,
+  onHighlightLeave,
 }: {
   text: string
   userRanges: HighlightRange[]
   llmRanges: HighlightRange[]
   isMarkdown?: boolean
+  onHighlightHover?: (r: HighlightRange, rect: DOMRect) => void
+  onHighlightLeave?: () => void
 }) {
   const withSource: Array<HighlightRange & { source: HighlightSource }> = [
     ...userRanges.map(r => ({ ...r, source: 'user' as HighlightSource })),
@@ -404,6 +484,8 @@ function PageTextWithHighlights({
               segEnd={seg.end}
               ranges={rangesClipped}
               normalizedLen={len}
+              onHighlightHover={onHighlightHover}
+              onHighlightLeave={onHighlightLeave}
             />
           </p>
         </div>
@@ -446,6 +528,37 @@ export function ReadDocumentTab({ documents, selectedDocumentId: selectedDocumen
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
   const [sectionsSidebarOpen, setSectionsSidebarOpen] = useState(true)
   const [toolbarExpanded, setToolbarExpanded] = useState(true)
+  const [factTooltip, setFactTooltip] = useState<{ data: TooltipData; rect: DOMRect } | null>(null)
+  const tooltipShowRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const tooltipHideRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pageScrollRef = useRef<HTMLDivElement | null>(null)
+
+  const handleHighlightHover = useCallback((r: HighlightRange, rect: DOMRect) => {
+    if (tooltipHideRef.current) {
+      clearTimeout(tooltipHideRef.current)
+      tooltipHideRef.current = null
+    }
+    const data = getTooltipData(r)
+    if (!data) {
+      setFactTooltip(null)
+      return
+    }
+    tooltipShowRef.current = setTimeout(() => {
+      setFactTooltip({ data, rect })
+      tooltipShowRef.current = null
+    }, 120)
+  }, [])
+
+  const handleHighlightLeave = useCallback(() => {
+    if (tooltipShowRef.current) {
+      clearTimeout(tooltipShowRef.current)
+      tooltipShowRef.current = null
+    }
+    tooltipHideRef.current = setTimeout(() => {
+      setFactTooltip(null)
+      tooltipHideRef.current = null
+    }, 80)
+  }, [])
 
   const fetchPages = useCallback(async (documentId: string) => {
     setLoading(true)
@@ -971,6 +1084,20 @@ export function ReadDocumentTab({ documents, selectedDocumentId: selectedDocumen
     return () => document.removeEventListener('click', hideContextMenu)
   }, [])
 
+  useEffect(() => {
+    const el = pageScrollRef.current
+    if (!el) return
+    const onScroll = () => {
+      if (tooltipShowRef.current) {
+        clearTimeout(tooltipShowRef.current)
+        tooltipShowRef.current = null
+      }
+      setFactTooltip(null)
+    }
+    el.addEventListener('scroll', onScroll, { passive: true })
+    return () => el.removeEventListener('scroll', onScroll)
+  }, [selectedPage])
+
   const currentPage = pages.find(p => p.page_number === selectedPage)
   const totalPages = pages.length
   const userHighlightsForPage = selectedPage != null ? userHighlightedRangesByPage[selectedPage] || [] : []
@@ -1099,7 +1226,7 @@ export function ReadDocumentTab({ documents, selectedDocumentId: selectedDocumen
                   >
                     ‹
                   </button>
-                  <div className="page-content-wrapper" style={{ zoom: pageZoom }}>
+                  <div ref={pageScrollRef} className="page-content-wrapper" style={{ zoom: pageZoom }}>
                     <div className="book-page">
                     <h4>
                       {(() => {
@@ -1127,6 +1254,8 @@ export function ReadDocumentTab({ documents, selectedDocumentId: selectedDocumen
                           userRanges={userHighlightsForPage}
                           llmRanges={llmHighlightsForPage}
                           isMarkdown={!!currentPage.text_markdown}
+                          onHighlightHover={handleHighlightHover}
+                          onHighlightLeave={handleHighlightLeave}
                         />
                       ) : currentPage.text_markdown ? (
                         <SimpleMarkdown content={currentPage.text_markdown} />
@@ -1136,6 +1265,8 @@ export function ReadDocumentTab({ documents, selectedDocumentId: selectedDocumen
                           userRanges={[]}
                           llmRanges={[]}
                           isMarkdown={false}
+                          onHighlightHover={handleHighlightHover}
+                          onHighlightLeave={handleHighlightLeave}
                         />
                       )}
                     </div>
@@ -1152,6 +1283,11 @@ export function ReadDocumentTab({ documents, selectedDocumentId: selectedDocumen
                     ›
                   </button>
                 </div>
+
+                {/* Fact hover tooltip */}
+                {factTooltip && (
+                  <FactTooltip data={factTooltip.data} anchorRect={factTooltip.rect} />
+                )}
 
                 {/* Context menu */}
                 {contextMenu && (

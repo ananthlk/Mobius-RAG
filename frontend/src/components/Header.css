@@ -189,7 +189,8 @@
   height: 1rem;
 }
 
-.settings-reset-prompts {
+.settings-reset-prompts,
+.settings-configure-llm {
   margin-top: 0.75rem;
   padding: 0.5rem 0.75rem;
   font-size: 0.8125rem;
@@ -200,7 +201,8 @@
   cursor: pointer;
 }
 
-.settings-reset-prompts:hover {
+.settings-reset-prompts:hover,
+.settings-configure-llm:hover {
   background: #f9fafb;
   color: #374151;
 }

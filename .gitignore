@@ -2,6 +2,9 @@
 .env
 .venv/
 venv/
+
+# GCP service account key (do not commit)
+mobiusos-new-090a058b63d9.json
 __pycache__/
 
 # IDE
