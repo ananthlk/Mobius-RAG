@@ -16,6 +16,7 @@ dependencies = [
     "aiohttp",
     "json-repair",
     "pyyaml",
+    "pgvector",
 ]
 
 [project.optional-dependencies]
@@ -29,6 +30,9 @@ openai = [
 ]
 vertex = [
     "google-cloud-aiplatform>=1.38",
+]
+chroma = [
+    "chromadb>=0.4.0",
 ]
 
 [build-system]

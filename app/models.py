@@ -1,5 +1,6 @@
 from sqlalchemy import Column, String, DateTime, Integer, Text, ForeignKey, Float
 from sqlalchemy.dialects.postgresql import UUID, JSONB
+from pgvector.sqlalchemy import Vector
 from datetime import datetime
 import uuid
 from app.database import Base
@@ -138,6 +139,35 @@ class LlmConfig(Base):
     openai = Column(JSONB, nullable=True, default=dict)  # api_key, base_url, etc.
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class EmbeddingJob(Base):
+    """Job queue for embedding tasks - processed by embedding worker after chunking completes."""
+    __tablename__ = "embedding_jobs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False)
+    status = Column(String(20), default="pending", nullable=False)  # pending, processing, completed, failed
+    worker_id = Column(String(100), nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    error_message = Column(Text, nullable=True)
+    embedding_config_version = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class ChunkEmbedding(Base):
+    """Embeddings for hierarchical chunks and facts. No text column; link back via source_type + source_id."""
+    __tablename__ = "chunk_embeddings"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False)
+    source_type = Column(String(20), nullable=False)  # 'hierarchical' | 'fact'
+    source_id = Column(UUID(as_uuid=True), nullable=False)  # hierarchical_chunks.id or extracted_facts.id
+    embedding = Column(Vector(1536), nullable=False)
+    model = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 # Category names for relevance scores (must match extraction prompt)

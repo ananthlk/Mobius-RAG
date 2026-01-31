@@ -53,7 +53,28 @@ Or run **`./mragm`** (after `./setup-mrag-cli.sh`): creates DB if missing, then 
    `initdb -D /opt/homebrew/var/postgresql@14 --locale=C -E UTF8`  
    Then `brew services start postgresql@14` or `pg_ctl` as above.
 
-### 3. Ollama setup (for chunking & extraction)
+### 3. Embedding worker (optional, after chunking)
+
+The embedding worker runs after chunking completes and stores vectors for top-k search.
+
+1. **Install pgvector** in PostgreSQL (required for embedding storage):
+   - macOS: `brew install pgvector`
+   - See: https://github.com/pgvector/pgvector#installation
+
+2. **Run migration**:  
+   `python -m app.migrations.add_embedding_tables`
+
+3. **Configure embedding provider** (in `.env`):
+   - OpenAI: `EMBEDDING_PROVIDER=openai`, `OPENAI_API_KEY=...`, `EMBEDDING_MODEL=text-embedding-3-small`
+   - Vertex: `EMBEDDING_PROVIDER=vertex`, `VERTEX_PROJECT_ID=...`, `GOOGLE_APPLICATION_CREDENTIALS=...`
+
+4. **Start embedding worker**:  
+   `./mrage` (or `python -m app.embedding_worker`)
+
+5. **Optional – Chroma** (vector DB for top-k across documents):  
+   Set `CHROMA_HOST` and `CHROMA_PORT` to point at a Chroma server, or `CHROMA_PERSIST_DIR` for local persistence.
+
+### 4. Ollama setup (for chunking & extraction)
 
 Chunking and fact extraction use a local Ollama model by default.
 
@@ -65,7 +86,7 @@ Chunking and fact extraction use a local Ollama model by default.
    `OLLAMA_NUM_PREDICT=8192`  
    Use a model name that matches what you pulled.
 
-### 4. Verify Installation
+### 5. Verify Installation
 
 ```bash
 # Check imports work

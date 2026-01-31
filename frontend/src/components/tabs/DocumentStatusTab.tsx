@@ -10,6 +10,7 @@ interface Document {
   display_name?: string | null
   extraction_status: string
   chunking_status: string | null
+  embedding_status?: string | null
   created_at: string
   gcs_path: string
   has_errors?: string  // 'true' or 'false'
@@ -43,6 +44,8 @@ interface DocumentStatusTabProps {
   onViewDocument: (documentId: string) => void
   onDeleteDocument: (documentId: string) => Promise<void>
   onRestartChunking?: (documentId: string, options: ChunkingOptions) => Promise<void>
+  onStartEmbedding?: (documentId: string) => Promise<void>
+  onResetEmbedding?: (documentId: string) => Promise<void>
 }
 
 export function DocumentStatusTab({ 
@@ -51,6 +54,8 @@ export function DocumentStatusTab({
   onViewDocument,
   onDeleteDocument,
   onRestartChunking,
+  onStartEmbedding,
+  onResetEmbedding,
 }: DocumentStatusTabProps) {
   const [documents, setDocuments] = useState<Document[]>([])
   const [loading, setLoading] = useState(false)
@@ -63,6 +68,7 @@ export function DocumentStatusTab({
   const [metadataSaving, setMetadataSaving] = useState(false)
   const [metadataError, setMetadataError] = useState<string | null>(null)
   const [openChunkMenuDocId, setOpenChunkMenuDocId] = useState<string | null>(null)
+  const [openEmbeddingMenuDocId, setOpenEmbeddingMenuDocId] = useState<string | null>(null)
   const [openActionsMenuDocId, setOpenActionsMenuDocId] = useState<string | null>(null)
   const [promptsConfig, setPromptsConfig] = useState<{ prompts: Record<string, string[]>; default: Record<string, string> } | null>(null)
   const [chunkOptionsByDoc, setChunkOptionsByDoc] = useState<Record<string, ChunkingOptions>>({})
@@ -150,9 +156,10 @@ export function DocumentStatusTab({
   }, [])
 
   useEffect(() => {
-    if (!openChunkMenuDocId && !openActionsMenuDocId) return
+    if (!openChunkMenuDocId && !openEmbeddingMenuDocId && !openActionsMenuDocId) return
     const closeMenus = () => {
       setOpenChunkMenuDocId(null)
+      setOpenEmbeddingMenuDocId(null)
       setOpenActionsMenuDocId(null)
     }
     const onKeyDown = (e: KeyboardEvent) => {
@@ -160,13 +167,13 @@ export function DocumentStatusTab({
     }
     const onDocClick = () => closeMenus()
     const t = setTimeout(() => document.addEventListener('click', onDocClick), 0)
-    document.addEventListener('keydown', onKeyDown)
+      document.addEventListener('keydown', onKeyDown)
     return () => {
       clearTimeout(t)
       document.removeEventListener('click', onDocClick)
       document.removeEventListener('keydown', onKeyDown)
     }
-  }, [openChunkMenuDocId, openActionsMenuDocId])
+  }, [openChunkMenuDocId, openEmbeddingMenuDocId, openActionsMenuDocId])
 
   const handleSelectDoc = (docId: string) => {
     setSelectedDocs(prev => {
@@ -337,6 +344,7 @@ export function DocumentStatusTab({
                 Store / MD
               </th>
               <th className="col-status">Chunk</th>
+              <th className="col-status">Embedding</th>
               <th className="col-errors">Errors</th>
               <th 
                 className="col-date sortable"
@@ -353,7 +361,7 @@ export function DocumentStatusTab({
           <tbody>
             {sortedDocuments.length === 0 ? (
               <tr>
-                <td colSpan={7} className="empty-state">
+                <td colSpan={8} className="empty-state">
                   {loading ? 'Loading documents...' : 'No documents found'}
                 </td>
               </tr>
@@ -508,6 +516,55 @@ export function DocumentStatusTab({
                         })()}
                       </div>
                     </td>
+                    <td className="col-status col-embedding-with-menu">
+                      <div className="embedding-cell">
+                        {getStatusBadge(doc.embedding_status ?? null, 'chunking')}
+                        {(() => {
+                          const hasEmbeddingActions =
+                            (doc.chunking_status === 'completed' && (doc.embedding_status === 'idle' || doc.embedding_status === null || doc.embedding_status === 'failed') && onStartEmbedding) ||
+                            ((doc.embedding_status === 'pending' || doc.embedding_status === 'processing') && onResetEmbedding)
+                          if (!hasEmbeddingActions) return null
+                          return (
+                            <div className="dropdown-wrap">
+                              <button
+                                type="button"
+                                className="btn-icon btn-kebab"
+                                onClick={(e) => { e.stopPropagation(); setOpenEmbeddingMenuDocId(prev => prev === doc.id ? null : doc.id) }}
+                                title="Embedding actions"
+                                aria-haspopup="true"
+                                aria-expanded={openEmbeddingMenuDocId === doc.id}
+                              >
+                                ⋮
+                              </button>
+                              {openEmbeddingMenuDocId === doc.id && (
+                                <div className="dropdown-menu" onClick={(e) => e.stopPropagation()}>
+                                  {doc.chunking_status === 'completed' && (doc.embedding_status === 'idle' || doc.embedding_status === null || doc.embedding_status === 'failed') && onStartEmbedding && (
+                                    <button
+                                      type="button"
+                                      className="dropdown-item"
+                                      title="Queue embedding job for embedding worker"
+                                      onClick={() => { onStartEmbedding(doc.id); setOpenEmbeddingMenuDocId(null) }}
+                                    >
+                                      Start embedding
+                                    </button>
+                                  )}
+                                  {(doc.embedding_status === 'pending' || doc.embedding_status === 'processing') && onResetEmbedding && (
+                                    <button
+                                      type="button"
+                                      className="dropdown-item dropdown-item-danger"
+                                      title="Reset stuck embedding job (use when worker was killed)"
+                                      onClick={() => { onResetEmbedding(doc.id); setOpenEmbeddingMenuDocId(null) }}
+                                    >
+                                      Reset embedding
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          )
+                        })()}
+                      </div>
+                    </td>
                     <td className="col-errors">
                       {doc.has_errors === 'true' || (doc.error_count && doc.error_count > 0) ? (
                         <span className="error-indicator" title={`${doc.error_count || 0} errors (${doc.critical_error_count || 0} critical)`}>
@@ -574,7 +631,7 @@ export function DocumentStatusTab({
                   </tr>
                   {editingMetadataDocumentId === doc.id && (
                     <tr key={`${doc.id}-meta`}>
-                      <td colSpan={7} className="metadata-form-cell">
+                      <td colSpan={8} className="metadata-form-cell">
                         <div className="metadata-form-panel">
                           <div className="metadata-form-grid">
                             <div className="metadata-form-field metadata-form-field-full">

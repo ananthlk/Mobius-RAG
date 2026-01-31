@@ -34,3 +34,10 @@ VERTEX_MODEL = os.getenv("VERTEX_MODEL", "gemini-1.5-pro")
 
 # Critique retry: retry extraction when score < threshold (0.0–1.0). User can override via ?threshold=.
 CRITIQUE_RETRY_THRESHOLD = float(os.getenv("CRITIQUE_RETRY_THRESHOLD", "0.6"))
+
+# Embedding provider (openai | vertex) – defaults to vertex when VERTEX_PROJECT_ID is set
+EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER") or ("vertex" if os.getenv("VERTEX_PROJECT_ID") else "openai")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL") or (
+    "gemini-embedding-001" if EMBEDDING_PROVIDER == "vertex" else "text-embedding-3-small"
+)
+EMBEDDING_DIMENSIONS = int(os.getenv("EMBEDDING_DIMENSIONS", "1536"))

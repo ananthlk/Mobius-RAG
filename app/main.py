@@ -15,7 +15,7 @@ from asyncio import Lock
 import asyncio
 from app.config import GCS_BUCKET, ENV, CRITIQUE_RETRY_THRESHOLD
 from app.database import get_db, Base
-from app.models import Document, DocumentPage, ChunkingResult, HierarchicalChunk, ExtractedFact, ProcessingError, ChunkingJob, ChunkingEvent, LlmConfig, fact_to_category_scores_dict
+from app.models import Document, DocumentPage, ChunkingResult, HierarchicalChunk, ExtractedFact, ProcessingError, ChunkingJob, ChunkingEvent, LlmConfig, EmbeddingJob, ChunkEmbedding, fact_to_category_scores_dict
 from app.services.error_tracker import log_error, classify_error
 from app.services.extract_text import extract_text_from_gcs
 from app.services.chunking import split_paragraphs, split_paragraphs_from_markdown
@@ -432,8 +432,11 @@ async def create_database_endpoint():
         return {"status": "error", "message": str(e)}
 
 
-def _chunking_status_from_latest_event(event_type: str, event_data: dict) -> tuple[str, str | None]:
-    """Derive chunking_status and processing_stage from latest chunking event. Returns (chunking_status, processing_stage)."""
+def _chunking_status_from_latest_event(event_type: str, event_data: dict) -> tuple[str | None, str | None]:
+    """Derive chunking_status and processing_stage from latest chunking event. Returns (chunking_status, processing_stage).
+    Returns (None, None) for embedding events so caller falls back to ChunkingJob/ChunkingResult."""
+    if event_type and event_type.startswith("embedding_"):
+        return (None, None)
     if event_type == "chunking_complete":
         return ("completed", None)
     if event_type in (
@@ -486,6 +489,21 @@ async def list_documents(
         latest_events = {str(row.document_id): {"event_type": row.event_type, "event_data": row.event_data or {}} for row in latest_events_result}
     else:
         latest_events = {}
+
+    # Latest embedding job per document – for embedding_status
+    if doc_ids:
+        latest_emb_result = await db.execute(
+            text("""
+                SELECT DISTINCT ON (document_id) document_id, status
+                FROM embedding_jobs
+                WHERE document_id IN :doc_ids
+                ORDER BY document_id, created_at DESC, id DESC
+            """).bindparams(bindparam("doc_ids", expanding=True)),
+            {"doc_ids": doc_ids},
+        )
+        latest_embedding = {str(row.document_id): row.status for row in latest_emb_result}
+    else:
+        latest_embedding = {}
 
     document_list = []
     for doc in documents:
@@ -540,12 +558,16 @@ async def list_documents(
             job_critique_enabled = (active_job.critique_enabled is None or str(active_job.critique_enabled).lower() == "true") if active_job else None
             job_max_retries = (active_job.max_retries if active_job.max_retries is not None else 2) if active_job else None
 
+        emb_status = latest_embedding.get(doc_id_str)
+        embedding_status = emb_status if emb_status else "idle"
+
         doc_item = {
             "id": doc_id_str,
             "filename": doc.filename,
             "display_name": getattr(doc, "display_name", None),
             "extraction_status": doc.status,
             "chunking_status": chunking_status,
+            "embedding_status": embedding_status,
             "created_at": doc.created_at.isoformat(),
             "gcs_path": doc.file_path,
             "has_errors": doc.has_errors or "false",
@@ -918,12 +940,19 @@ async def update_document_metadata(
             cr_result = await db.execute(select(ChunkingResult).where(ChunkingResult.document_id == doc.id))
             chunking_row = cr_result.scalar_one_or_none()
             chunking_status = chunking_row.metadata_.get("status", "idle") if (chunking_row and chunking_row.metadata_) else "idle"
+    # embedding_status from latest EmbeddingJob
+    emb_job = await db.execute(
+        select(EmbeddingJob).where(EmbeddingJob.document_id == doc.id).order_by(EmbeddingJob.created_at.desc()).limit(1)
+    )
+    emb_row = emb_job.scalar_one_or_none()
+    embedding_status = emb_row.status if emb_row else "idle"
     out = {
         "id": str(doc.id),
         "filename": doc.filename,
         "display_name": getattr(doc, "display_name", None),
         "extraction_status": doc.status,
         "chunking_status": chunking_status,
+        "embedding_status": embedding_status,
         "created_at": doc.created_at.isoformat(),
         "gcs_path": doc.file_path,
         "has_errors": doc.has_errors or "false",
@@ -3502,6 +3531,82 @@ async def restart_chunking(
     asyncio.create_task(background_task())
     
     return {"status": "restarted", "document_id": document_id}
+
+
+@app.post("/documents/{document_id}/embedding/start")
+async def start_embedding(
+    document_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Queue an embedding job for a document. Embedding worker will pick it up. Use after chunking completes or to re-embed."""
+    from uuid import UUID
+
+    try:
+        doc_uuid = UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID")
+
+    result = await db.execute(select(Document).where(Document.id == doc_uuid))
+    if not result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    existing = await db.execute(
+        select(EmbeddingJob).where(
+            EmbeddingJob.document_id == doc_uuid,
+            EmbeddingJob.status == "pending",
+        ).limit(1)
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="Embedding job already queued for this document")
+
+    job = EmbeddingJob(document_id=doc_uuid, status="pending")
+    db.add(job)
+    await db.commit()
+
+    return {"status": "queued", "document_id": document_id, "job_id": str(job.id)}
+
+
+@app.post("/documents/{document_id}/embedding/reset")
+async def reset_embedding(
+    document_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Reset stuck embedding jobs (pending/processing). Clears partial embeddings and sets job to pending so worker can retry. Use when worker was killed mid-run."""
+    from uuid import UUID
+    from app.services.vector_store import get_vector_store
+
+    try:
+        doc_uuid = UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID")
+
+    result = await db.execute(select(Document).where(Document.id == doc_uuid))
+    if not result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    jobs_result = await db.execute(
+        select(EmbeddingJob).where(
+            EmbeddingJob.document_id == doc_uuid,
+            EmbeddingJob.status.in_(["pending", "processing"]),
+        ).order_by(EmbeddingJob.created_at.desc())
+    )
+    jobs = jobs_result.scalars().all()
+    if not jobs:
+        raise HTTPException(status_code=404, detail="No pending or processing embedding job found for this document")
+
+    await db.execute(delete(ChunkEmbedding).where(ChunkEmbedding.document_id == doc_uuid))
+    vector_store = get_vector_store()
+    vector_store.delete_by_document(document_id)
+
+    for job in jobs:
+        job.status = "pending"
+        job.worker_id = None
+        job.started_at = None
+        job.completed_at = None
+        job.error_message = None
+
+    await db.commit()
+    return {"status": "reset", "document_id": document_id, "jobs_reset": len(jobs)}
 
 
 @app.get("/documents/{document_id}/chunking/stream")

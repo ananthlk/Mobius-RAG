@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
-from app.models import Document, DocumentPage, ChunkingJob, ChunkingResult, ChunkingEvent
+from app.models import Document, DocumentPage, ChunkingJob, ChunkingResult, ChunkingEvent, EmbeddingJob
 from app.services.chunking import split_paragraphs_from_markdown
 from app.services.extraction import stream_extract_facts
 from app.services.critique import stream_critique, critique_extraction, normalize_critique_result
@@ -883,6 +883,20 @@ async def process_job(job: ChunkingJob, db: AsyncSession):
             job.status = "completed"
             job.completed_at = _utc_now_naive()
             logger.info(f"[JOB {job.id}] Job completed successfully in {job_duration:.2f}s")
+            # Enqueue embedding job for this document (if not already pending)
+            try:
+                existing = await db.execute(
+                    select(EmbeddingJob).where(
+                        EmbeddingJob.document_id == job.document_id,
+                        EmbeddingJob.status == "pending",
+                    ).limit(1)
+                )
+                if existing.scalar_one_or_none() is None:
+                    embedding_job = EmbeddingJob(document_id=job.document_id, status="pending")
+                    db.add(embedding_job)
+                    logger.info(f"[JOB {job.id}] Enqueued embedding job for document {job.document_id}")
+            except Exception as enq_err:
+                logger.warning(f"[JOB {job.id}] Failed to enqueue embedding job: {enq_err}", exc_info=True)
         else:
             job.status = "failed"
             job.error_message = "Chunking loop returned False"

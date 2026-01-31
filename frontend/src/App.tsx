@@ -641,6 +641,33 @@ function App() {
         setChunkingComplete(true)
         break
 
+      case 'embedding_start':
+      case 'embedding_progress':
+        if (data?.completed_items != null && data?.total_items != null && selectedJobId) {
+          setActiveJobs(prev => prev.map(job =>
+            job.document_id === selectedJobId
+              ? {
+                  ...job,
+                  total_paragraphs: data.total_items,
+                  completed_paragraphs: data.completed_items,
+                  progress: data.total_items > 0 ? Math.round((data.completed_items / data.total_items) * 100) : 0,
+                }
+              : job
+          ))
+        }
+        break
+
+      case 'embedding_complete':
+      case 'embedding_error':
+        if (selectedJobId) {
+          setActiveJobs(prev => prev.map(job =>
+            job.document_id === selectedJobId
+              ? { ...job, status: event === 'embedding_complete' ? 'completed' : 'failed' }
+              : job
+          ))
+        }
+        break
+
       case 'stream_end': {
         const reason = data?.reason
         if (reason === 'chunking_complete') {
@@ -952,10 +979,13 @@ function App() {
       const total = totalParagraphs(doc)
       const completed = completedParagraphs(doc)
       const progress = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0
+      const status = (doc.embedding_status === 'processing' || doc.embedding_status === 'pending')
+        ? doc.embedding_status
+        : (doc.chunking_status || 'idle')
       return {
         document_id: doc.id,
         filename: doc.display_name?.trim() || doc.filename,
-        status: doc.chunking_status || 'idle',
+        status,
         progress,
         start_time: doc.created_at,
         current_page: doc.chunking_current_page ?? undefined,
@@ -1066,6 +1096,36 @@ function App() {
     setSelectedJobId(documentId)
   }
 
+  const handleStartEmbedding = async (documentId: string) => {
+    try {
+      const res = await fetch(`http://localhost:8000/documents/${documentId}/embedding/start`, { method: 'POST' })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        setError(data?.detail || `Failed to start embedding (${res.status})`)
+        return
+      }
+      setError(null)
+      await loadDocuments()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to start embedding')
+    }
+  }
+
+  const handleResetEmbedding = async (documentId: string) => {
+    try {
+      const res = await fetch(`http://localhost:8000/documents/${documentId}/embedding/reset`, { method: 'POST' })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        setError(data?.detail || `Failed to reset embedding (${res.status})`)
+        return
+      }
+      setError(null)
+      await loadDocuments()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to reset embedding')
+    }
+  }
+
   const handleViewDocument = (documentId: string, options?: { pageNumber?: number; factId?: string }) => {
     setSelectedDocumentId(documentId)
     setNavigateToRead({
@@ -1134,6 +1194,14 @@ function App() {
             lines.push('Chunking complete.')
           } else if (ev.event === 'stream_end' && ev.data?.reason) {
             lines.push(`Stream ended: ${ev.data.reason}`)
+          } else if (ev.event === 'embedding_start' && ev.data?.message) {
+            lines.push(String(ev.data.message))
+          } else if (ev.event === 'embedding_progress' && ev.data?.message) {
+            lines.push(String(ev.data.message))
+          } else if (ev.event === 'embedding_complete' && ev.data?.message) {
+            lines.push(String(ev.data.message))
+          } else if (ev.event === 'embedding_error' && ev.data?.message) {
+            lines.push(`Error: ${ev.data.message}`)
           }
           handleStreamEvent({ event: ev.event, data: ev.data })
         }
@@ -1148,7 +1216,9 @@ function App() {
     loadInitialEvents()
 
     // Poll for new events when job is in progress
-    const isInProgress = doc.chunking_status === 'in_progress' || doc.chunking_status === 'pending'
+    const isInProgress =
+      doc.chunking_status === 'in_progress' || doc.chunking_status === 'pending' ||
+      doc.embedding_status === 'processing' || doc.embedding_status === 'pending'
     if (isInProgress) {
       let tick = 0
       const POLL_MS = 1500
@@ -1166,6 +1236,14 @@ function App() {
             if (ev.event === 'status_message' && ev.data?.message) {
               const msg = String(ev.data.message).trim()
               if (msg) setStreamingOutput(prev => prev + msg + '\n')
+            } else if (ev.event === 'embedding_start' && ev.data?.message) {
+              setStreamingOutput(prev => prev + String(ev.data.message) + '\n')
+            } else if (ev.event === 'embedding_progress' && ev.data?.message) {
+              setStreamingOutput(prev => prev + String(ev.data.message) + '\n')
+            } else if (ev.event === 'embedding_complete' && ev.data?.message) {
+              setStreamingOutput(prev => prev + String(ev.data.message) + '\n')
+            } else if (ev.event === 'embedding_error' && ev.data?.message) {
+              setStreamingOutput(prev => prev + `Error: ${ev.data.message}\n`)
             }
             handleStreamEvent({ event: ev.event, data: ev.data })
             if (ev.id) lastEventIdRef.current = ev.id
@@ -1238,6 +1316,8 @@ function App() {
               onViewDocument={handleViewDocument}
               onDeleteDocument={deleteDocument}
               onRestartChunking={handleRestartChunking}
+              onStartEmbedding={handleStartEmbedding}
+              onResetEmbedding={handleResetEmbedding}
             />
           </TabPanel>
 

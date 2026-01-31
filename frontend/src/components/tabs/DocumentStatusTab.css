@@ -207,6 +207,21 @@
   min-width: 165px;
 }
 
+.col-embedding-with-menu {
+  min-width: 165px;
+}
+
+.embedding-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: nowrap;
+}
+
+.col-embedding-with-menu .dropdown-menu {
+  left: 0;
+}
+
 .chunk-cell {
   display: flex;
   align-items: center;

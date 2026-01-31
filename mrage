@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Start Mobius RAG embedding worker. Run from any directory.
+
+SCRIPT="$0"
+while [ -L "$SCRIPT" ]; do
+  TARGET="$(readlink "$SCRIPT")"
+  if [[ "$TARGET" == /* ]]; then
+    SCRIPT="$TARGET"
+  else
+    SCRIPT="$(dirname "$SCRIPT")/$TARGET"
+  fi
+done
+ROOT="$(cd "$(dirname "$SCRIPT")" && pwd)"
+cd "$ROOT" || exit 1
+source .venv/bin/activate
+echo "Mobius RAG embedding worker"
+echo "Press Ctrl+C to stop"
+echo ""
+exec python -m app.embedding_worker
