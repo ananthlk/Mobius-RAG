@@ -1,0 +1,14 @@
+[Unit]
+Description=Cloud SQL Auth Proxy for Mobius Platform
+After=network.target
+
+[Service]
+Type=simple
+User=mobius
+WorkingDirectory=/opt/mobius-platform
+ExecStart=/opt/mobius-platform/cloud-sql-proxy mobiusos-new:us-central1:mobius-platform-db --port=5432 --address=127.0.0.1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

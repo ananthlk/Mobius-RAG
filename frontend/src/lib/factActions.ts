@@ -3,12 +3,12 @@
  * Used by ReviewFactsTab and ReadDocumentTab for consistent behavior.
  */
 
-const DEFAULT_BASE = 'http://localhost:8000'
+import { API_BASE } from '../config'
 
 export async function approveFactApi(
   documentId: string,
   factId: string,
-  baseUrl: string = DEFAULT_BASE
+  baseUrl: string = API_BASE
 ): Promise<Response> {
   return fetch(`${baseUrl}/documents/${documentId}/facts/${factId}`, {
     method: 'PATCH',
@@ -20,7 +20,7 @@ export async function approveFactApi(
 export async function rejectFactApi(
   documentId: string,
   factId: string,
-  baseUrl: string = DEFAULT_BASE
+  baseUrl: string = API_BASE
 ): Promise<Response> {
   return fetch(`${baseUrl}/documents/${documentId}/facts/${factId}`, {
     method: 'PATCH',
@@ -32,7 +32,7 @@ export async function rejectFactApi(
 export async function deleteFactApi(
   documentId: string,
   factId: string,
-  baseUrl: string = DEFAULT_BASE
+  baseUrl: string = API_BASE
 ): Promise<Response> {
   return fetch(`${baseUrl}/documents/${documentId}/facts/${factId}`, {
     method: 'DELETE',
@@ -43,7 +43,7 @@ export async function patchFactApi(
   documentId: string,
   factId: string,
   body: { fact_text?: string; verification_status?: string; [key: string]: unknown },
-  baseUrl: string = DEFAULT_BASE
+  baseUrl: string = API_BASE
 ): Promise<Response> {
   return fetch(`${baseUrl}/documents/${documentId}/facts/${factId}`, {
     method: 'PATCH',

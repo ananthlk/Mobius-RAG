@@ -1,5 +1,6 @@
 import hashlib
 import logging
+from pathlib import Path
 from typing import Optional, List
 from fastapi import FastAPI, UploadFile, HTTPException, Depends, Body, Query
 from pydantic import BaseModel
@@ -15,13 +16,14 @@ from asyncio import Lock
 import asyncio
 from app.config import GCS_BUCKET, ENV, CRITIQUE_RETRY_THRESHOLD
 from app.database import get_db, Base
-from app.models import Document, DocumentPage, ChunkingResult, HierarchicalChunk, ExtractedFact, ProcessingError, ChunkingJob, ChunkingEvent, LlmConfig, EmbeddingJob, ChunkEmbedding, fact_to_category_scores_dict
+from app.models import Document, DocumentPage, ChunkingResult, HierarchicalChunk, ExtractedFact, ProcessingError, ChunkingJob, ChunkingEvent, LlmConfig, EmbeddingJob, ChunkEmbedding, PublishEvent, RagPublishedEmbedding, fact_to_category_scores_dict
 from app.services.error_tracker import log_error, classify_error
 from app.services.extract_text import extract_text_from_gcs
 from app.services.chunking import split_paragraphs, split_paragraphs_from_markdown
 from app.services.extraction import stream_extract_facts
 from app.services.critique import stream_critique, critique_extraction, normalize_critique_result
 from app.services.utils import parse_json_response
+from app.services.publish import publish_document, PublishResult
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -233,6 +235,16 @@ async def run_startup_migrations():
                 await migrate_document_display_name()
             except Exception as migrate_err:
                 logger.warning(f"Startup migration (document display_name) skipped: {migrate_err}")
+            try:
+                from app.migrations.add_publish_tables import migrate as migrate_publish_tables
+                await migrate_publish_tables()
+            except Exception as migrate_err:
+                logger.warning(f"Startup migration (publish tables) skipped: {migrate_err}")
+            try:
+                from app.migrations.add_publish_verification_columns import migrate as migrate_publish_verification
+                await migrate_publish_verification()
+            except Exception as migrate_err:
+                logger.warning(f"Startup migration (publish verification columns) skipped: {migrate_err}")
 
             logger.info("✓ Startup migrations completed successfully")
         except Exception as e:
@@ -505,6 +517,41 @@ async def list_documents(
     else:
         latest_embedding = {}
 
+    # Latest publish_event per document – for publish_status (incl. verification)
+    if doc_ids:
+        latest_pub_result = await db.execute(
+            text("""
+                SELECT DISTINCT ON (document_id) document_id, published_at, rows_written,
+                       verification_passed, verification_message
+                FROM publish_events
+                WHERE document_id IN :doc_ids
+                ORDER BY document_id, published_at DESC, id DESC
+            """).bindparams(bindparam("doc_ids", expanding=True)),
+            {"doc_ids": doc_ids},
+        )
+        latest_publish = {}
+        for row in latest_pub_result:
+            latest_publish[str(row.document_id)] = {
+                "published_at": row.published_at,
+                "rows_written": row.rows_written,
+                "verification_passed": getattr(row, "verification_passed", None),
+                "verification_message": getattr(row, "verification_message", None),
+            }
+        # Publish count per document (1 = Published, 2+ = Republished)
+        count_pub_result = await db.execute(
+            text("""
+                SELECT document_id, COUNT(*) AS publish_count
+                FROM publish_events
+                WHERE document_id IN :doc_ids
+                GROUP BY document_id
+            """).bindparams(bindparam("doc_ids", expanding=True)),
+            {"doc_ids": doc_ids},
+        )
+        publish_count_by_doc = {str(row.document_id): (row.publish_count or 0) for row in count_pub_result}
+    else:
+        latest_publish = {}
+        publish_count_by_doc = {}
+
     document_list = []
     for doc in documents:
         doc_id_str = str(doc.id)
@@ -607,6 +654,21 @@ async def list_documents(
                 doc_item["chunking_total_paragraphs"] = chunking_meta["total_paragraphs"]
             if chunking_meta.get("completed_count") is not None:
                 doc_item["chunking_completed_paragraphs"] = chunking_meta["completed_count"]
+        # Publish status for list (Store / Chunk / Embed / Publish / Errors)
+        pub = latest_publish.get(doc_id_str)
+        publish_count = publish_count_by_doc.get(doc_id_str, 0)
+        if pub:
+            doc_item["published_at"] = pub["published_at"].isoformat()
+            doc_item["published_rows"] = pub["rows_written"]
+            doc_item["publish_verification_passed"] = pub.get("verification_passed")
+            doc_item["publish_verification_message"] = pub.get("verification_message")
+            doc_item["publish_count"] = publish_count
+        else:
+            doc_item["published_at"] = None
+            doc_item["published_rows"] = None
+            doc_item["publish_verification_passed"] = None
+            doc_item["publish_verification_message"] = None
+            doc_item["publish_count"] = 0
         document_list.append(doc_item)
 
     return {
@@ -3609,6 +3671,326 @@ async def reset_embedding(
     return {"status": "reset", "document_id": document_id, "jobs_reset": len(jobs)}
 
 
+class PublishBody(BaseModel):
+    """Optional body for POST /documents/{id}/publish (audit)."""
+    published_by: Optional[str] = None
+
+
+@app.post("/documents/{document_id}/publish")
+async def publish_document_endpoint(
+    document_id: str,
+    body: Optional[PublishBody] = Body(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Publish entire document to rag_published_embeddings (dbt contract). Writes all embeddings for this document; replaces any existing published rows for this document."""
+    from uuid import UUID
+
+    try:
+        doc_uuid = UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID")
+
+    try:
+        result = await publish_document(doc_uuid, db)
+    except ValueError as e:
+        msg = str(e)
+        if "not found" in msg.lower():
+            raise HTTPException(status_code=404, detail=msg)
+        if "no chunk embeddings" in msg.lower():
+            raise HTTPException(status_code=400, detail=msg)
+        raise HTTPException(status_code=400, detail=msg)
+
+    assert isinstance(result, PublishResult)
+    event = PublishEvent(
+        document_id=doc_uuid,
+        published_by=(body.published_by if body else None) or None,
+        rows_written=result.rows_written,
+        verification_passed=result.verification_passed,
+        verification_message=result.verification_message,
+    )
+    db.add(event)
+    await db.commit()
+
+    return {
+        "status": "ok",
+        "document_id": document_id,
+        "rows_written": result.rows_written,
+        "verification_passed": result.verification_passed,
+        "verification_message": result.verification_message,
+    }
+
+
+@app.get("/documents/{document_id}/publish-status")
+async def get_publish_status(
+    document_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Return whether this document has been published (latest publish_events row) and when."""
+    from uuid import UUID
+
+    try:
+        doc_uuid = UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID")
+
+    result = await db.execute(
+        select(PublishEvent)
+        .where(PublishEvent.document_id == doc_uuid)
+        .order_by(PublishEvent.published_at.desc())
+        .limit(1)
+    )
+    event = result.scalar_one_or_none()
+    if not event:
+        return {"published": False, "document_id": document_id}
+    return {
+        "published": True,
+        "document_id": document_id,
+        "published_at": event.published_at.isoformat(),
+        "published_by": event.published_by,
+        "rows_written": event.rows_written,
+        "verification_passed": getattr(event, "verification_passed", None),
+        "verification_message": getattr(event, "verification_message", None),
+    }
+
+
+@app.get("/documents/{document_id}/detail")
+async def get_document_detail(
+    document_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Aggregated detail for document detail / publish-readiness page: metadata, errors, fact counts, chunking/embedding status, last publish."""
+    from uuid import UUID
+
+    try:
+        doc_uuid = UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID")
+
+    doc_result = await db.execute(select(Document).where(Document.id == doc_uuid))
+    doc = doc_result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Chunking status: latest event or fallback to ChunkingJob/ChunkingResult
+    latest_ev = await db.execute(
+        text("""
+            SELECT event_type, event_data FROM chunking_events
+            WHERE document_id = :doc_id
+            ORDER BY created_at DESC, id DESC LIMIT 1
+        """),
+        {"doc_id": doc_uuid},
+    )
+    row = latest_ev.first()
+    if row:
+        chunking_status, _ = _chunking_status_from_latest_event(row[0], row[1] or {})
+    else:
+        job_result = await db.execute(
+            select(ChunkingJob).where(ChunkingJob.document_id == doc_uuid).order_by(ChunkingJob.created_at.desc()).limit(1)
+        )
+        job = job_result.scalar_one_or_none()
+        if job and job.status in ("pending", "processing"):
+            chunking_status = "in_progress" if job.status == "processing" else "pending"
+        else:
+            cr_result = await db.execute(select(ChunkingResult).where(ChunkingResult.document_id == doc_uuid))
+            cr = cr_result.scalar_one_or_none()
+            chunking_status = (cr.metadata_ or {}).get("status", "idle") if cr and cr.metadata_ else "idle"
+
+    # Embedding status: latest EmbeddingJob
+    emb_result = await db.execute(
+        select(EmbeddingJob).where(EmbeddingJob.document_id == doc_uuid).order_by(EmbeddingJob.created_at.desc()).limit(1)
+    )
+    emb_job = emb_result.scalar_one_or_none()
+    embedding_status = emb_job.status if emb_job else "idle"
+
+    # Error counts
+    err_total = await db.execute(select(func.count(ProcessingError.id)).where(ProcessingError.document_id == doc_uuid))
+    err_critical = await db.execute(
+        select(func.count(ProcessingError.id)).where(
+            ProcessingError.document_id == doc_uuid,
+            ProcessingError.severity == "critical",
+        )
+    )
+    err_unresolved = await db.execute(
+        select(func.count(ProcessingError.id)).where(
+            ProcessingError.document_id == doc_uuid,
+            ProcessingError.resolved == "false",
+        )
+    )
+    errors_total = err_total.scalar() or 0
+    errors_critical = err_critical.scalar() or 0
+    errors_unresolved = err_unresolved.scalar() or 0
+
+    # Fact counts by verification_status
+    fact_total = await db.execute(select(func.count(ExtractedFact.id)).where(ExtractedFact.document_id == doc_uuid))
+    fact_approved = await db.execute(
+        select(func.count(ExtractedFact.id)).where(
+            ExtractedFact.document_id == doc_uuid,
+            ExtractedFact.verification_status == "approved",
+        )
+    )
+    fact_pending = await db.execute(
+        select(func.count(ExtractedFact.id)).where(
+            ExtractedFact.document_id == doc_uuid,
+            or_(ExtractedFact.verification_status.is_(None), ExtractedFact.verification_status == "pending"),
+        )
+    )
+    fact_rejected = await db.execute(
+        select(func.count(ExtractedFact.id)).where(
+            ExtractedFact.document_id == doc_uuid,
+            ExtractedFact.verification_status == "rejected",
+        )
+    )
+    facts_total = fact_total.scalar() or 0
+    facts_approved = fact_approved.scalar() or 0
+    facts_pending = fact_pending.scalar() or 0
+    facts_rejected = fact_rejected.scalar() or 0
+
+    # Last publish
+    pub_result = await db.execute(
+        select(PublishEvent).where(PublishEvent.document_id == doc_uuid).order_by(PublishEvent.published_at.desc()).limit(1)
+    )
+    pub_ev = pub_result.scalar_one_or_none()
+
+    return {
+        "document": {
+            "id": str(doc.id),
+            "filename": doc.filename,
+            "display_name": doc.display_name or "",
+            "payer": doc.payer or "",
+            "state": doc.state or "",
+            "program": doc.program or "",
+            "authority_level": getattr(doc, "authority_level", None) or "",
+            "effective_date": getattr(doc, "effective_date", None) or "",
+            "termination_date": getattr(doc, "termination_date", None) or "",
+            "status": doc.status,
+            "review_status": doc.review_status,
+            "created_at": doc.created_at.isoformat(),
+            "has_errors": doc.has_errors or "false",
+            "error_count": doc.error_count or 0,
+            "critical_error_count": doc.critical_error_count or 0,
+        },
+        "chunking_status": chunking_status,
+        "embedding_status": embedding_status,
+        "errors": {"total": errors_total, "critical": errors_critical, "unresolved": errors_unresolved},
+        "facts": {"total": facts_total, "approved": facts_approved, "pending": facts_pending, "rejected": facts_rejected},
+        "last_publish": {
+            "published_at": pub_ev.published_at.isoformat(),
+            "published_by": pub_ev.published_by,
+            "rows_written": pub_ev.rows_written,
+            "verification_passed": getattr(pub_ev, "verification_passed", None),
+            "verification_message": getattr(pub_ev, "verification_message", None),
+        } if pub_ev else None,
+        "readiness": {
+            "chunking_done": chunking_status in ("idle", "completed"),
+            "embedding_done": embedding_status == "completed",
+            "no_critical_errors": (doc.critical_error_count or 0) == 0,
+            "ready": (
+                chunking_status in ("idle", "completed")
+                and embedding_status == "completed"
+                and (doc.critical_error_count or 0) == 0
+            ),
+        },
+    }
+
+
+class QueryRequest(BaseModel):
+    """Request body for semantic query (embed + search + resolve)."""
+    query: str
+    k: int = 10
+
+
+class ChunkOut(BaseModel):
+    """One retrieved chunk with text and citation info."""
+    text: str
+    source_type: str  # 'hierarchical' | 'fact'
+    source_id: str
+    document_id: str
+    document_name: Optional[str] = None
+    page_number: Optional[int] = None
+
+
+class QueryResponse(BaseModel):
+    """Response: top-k chunks with text for RAG context."""
+    chunks: List[ChunkOut]
+
+
+@app.post("/api/query", response_model=QueryResponse)
+async def query_rag(
+    body: QueryRequest = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Embed query, search vector store (top k), resolve source_id to text. Returns chunks for RAG context (no fact/chunk differentiation)."""
+    from uuid import UUID
+    from app.services.embedding_provider import get_embedding_provider, embed_async
+    from app.services.vector_store import get_vector_store
+
+    if not (body.query and body.query.strip()):
+        raise HTTPException(status_code=400, detail="query is required")
+    k = max(1, min(100, body.k))
+
+    # 1. Embed query
+    provider = get_embedding_provider()
+    query_embeddings = await embed_async([body.query.strip()], provider)
+    if not query_embeddings:
+        return QueryResponse(chunks=[])
+    query_embedding = query_embeddings[0]
+
+    # 2. Search vector store (Chroma returns id + metadata: document_id, source_type, source_id)
+    vector_store = get_vector_store()
+    results = vector_store.search(query_embedding, k=k)
+    if not results:
+        return QueryResponse(chunks=[])
+
+    # 3. Resolve each result to text (hierarchical chunk or fact)
+    chunks_out: List[ChunkOut] = []
+    for r in results:
+        doc_id = r.get("document_id")
+        source_type = r.get("source_type") or "hierarchical"
+        source_id_raw = r.get("source_id")
+        if not source_id_raw:
+            continue
+        try:
+            source_uuid = UUID(str(source_id_raw))
+        except ValueError:
+            continue
+        text = None
+        page_number = None
+        document_name = None
+        if source_type == "hierarchical":
+            chunk_result = await db.execute(select(HierarchicalChunk).where(HierarchicalChunk.id == source_uuid))
+            chunk = chunk_result.scalar_one_or_none()
+            if chunk:
+                text = chunk.text
+                page_number = chunk.page_number
+        elif source_type == "fact":
+            fact_result = await db.execute(select(ExtractedFact).where(ExtractedFact.id == source_uuid))
+            fact = fact_result.scalar_one_or_none()
+            if fact:
+                text = fact.fact_text
+                page_number = getattr(fact, "page_number", None)
+                if page_number is None and fact.hierarchical_chunk_id:
+                    ch_result = await db.execute(select(HierarchicalChunk).where(HierarchicalChunk.id == fact.hierarchical_chunk_id))
+                    ch = ch_result.scalar_one_or_none()
+                    if ch:
+                        page_number = ch.page_number
+        if not text:
+            continue
+        if doc_id:
+            doc_result = await db.execute(select(Document).where(Document.id == UUID(str(doc_id))))
+            doc = doc_result.scalar_one_or_none()
+            if doc:
+                document_name = doc.display_name or doc.filename
+        chunks_out.append(ChunkOut(
+            text=text,
+            source_type=source_type,
+            source_id=str(source_uuid),
+            document_id=str(doc_id) if doc_id else "",
+            document_name=document_name,
+            page_number=page_number,
+        ))
+    return QueryResponse(chunks=chunks_out)
+
+
 @app.get("/documents/{document_id}/chunking/stream")
 async def stream_chunking_process(
     document_id: str,
@@ -4604,3 +4986,11 @@ async def delete_document_cascade(
         await db.rollback()
         logger.error(f"Error deleting document cascade: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# Serve frontend static files (for Cloud Run / single-container deployment)
+# Must be last so API routes take precedence
+_frontend_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+if _frontend_dist.exists():
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/", StaticFiles(directory=str(_frontend_dist), html=True), name="static")

@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, type ReactNode } from 'react'
 import { approveFactApi, deleteFactApi, patchFactApi, rejectFactApi } from '../../lib/factActions'
 import './ReadDocumentTab.css'
 
-const API_BASE = 'http://localhost:8000'
+import { API_BASE } from '../../config'
 
 // Category keys and labels (match backend CATEGORY_NAMES)
 const CATEGORIES: { key: string; label: string }[] = [

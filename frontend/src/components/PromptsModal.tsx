@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import './PromptsModal.css'
 
-const API_BASE = 'http://localhost:8000'
+import { API_BASE } from '../config'
 
 function formatApiError(detail: unknown): string {
   if (detail == null) return 'Unknown error'

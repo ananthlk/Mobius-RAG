@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { STATE_OPTIONS, AUTHORITY_LEVEL_OPTIONS } from '../../lib/documentMetadata'
 import './DocumentStatusTab.css'
 
-const API_BASE = 'http://localhost:8000'
+import { API_BASE } from '../../config'
 
 interface Document {
   id: string
@@ -23,6 +23,11 @@ interface Document {
   authority_level?: string | null
   effective_date?: string | null
   termination_date?: string | null
+  published_at?: string | null
+  published_rows?: number | null
+  publish_verification_passed?: boolean | null
+  publish_verification_message?: string | null
+  publish_count?: number
 }
 
 export interface ChunkingOptions {
@@ -42,6 +47,7 @@ interface DocumentStatusTabProps {
   onStartChunking: (documentId: string, options: ChunkingOptions) => Promise<void>
   onStopChunking: (documentId: string) => Promise<void>
   onViewDocument: (documentId: string) => void
+  onViewDocumentDetail?: (documentId: string) => void
   onDeleteDocument: (documentId: string) => Promise<void>
   onRestartChunking?: (documentId: string, options: ChunkingOptions) => Promise<void>
   onStartEmbedding?: (documentId: string) => Promise<void>
@@ -52,6 +58,7 @@ export function DocumentStatusTab({
   onStartChunking, 
   onStopChunking,
   onViewDocument,
+  onViewDocumentDetail,
   onDeleteDocument,
   onRestartChunking,
   onStartEmbedding,
@@ -69,7 +76,10 @@ export function DocumentStatusTab({
   const [metadataError, setMetadataError] = useState<string | null>(null)
   const [openChunkMenuDocId, setOpenChunkMenuDocId] = useState<string | null>(null)
   const [openEmbeddingMenuDocId, setOpenEmbeddingMenuDocId] = useState<string | null>(null)
+  const [openPublishMenuDocId, setOpenPublishMenuDocId] = useState<string | null>(null)
   const [openActionsMenuDocId, setOpenActionsMenuDocId] = useState<string | null>(null)
+  const [publishLoadingDocId, setPublishLoadingDocId] = useState<string | null>(null)
+  const [publishMessage, setPublishMessage] = useState<{ docId: string; text: string } | null>(null)
   const [promptsConfig, setPromptsConfig] = useState<{ prompts: Record<string, string[]>; default: Record<string, string> } | null>(null)
   const [chunkOptionsByDoc, setChunkOptionsByDoc] = useState<Record<string, ChunkingOptions>>({})
 
@@ -156,10 +166,11 @@ export function DocumentStatusTab({
   }, [])
 
   useEffect(() => {
-    if (!openChunkMenuDocId && !openEmbeddingMenuDocId && !openActionsMenuDocId) return
+    if (!openChunkMenuDocId && !openEmbeddingMenuDocId && !openPublishMenuDocId && !openActionsMenuDocId) return
     const closeMenus = () => {
       setOpenChunkMenuDocId(null)
       setOpenEmbeddingMenuDocId(null)
+      setOpenPublishMenuDocId(null)
       setOpenActionsMenuDocId(null)
     }
     const onKeyDown = (e: KeyboardEvent) => {
@@ -173,7 +184,7 @@ export function DocumentStatusTab({
       document.removeEventListener('click', onDocClick)
       document.removeEventListener('keydown', onKeyDown)
     }
-  }, [openChunkMenuDocId, openEmbeddingMenuDocId, openActionsMenuDocId])
+  }, [openChunkMenuDocId, openEmbeddingMenuDocId, openPublishMenuDocId, openActionsMenuDocId])
 
   const handleSelectDoc = (docId: string) => {
     setSelectedDocs(prev => {
@@ -253,6 +264,39 @@ export function DocumentStatusTab({
       await loadDocuments()
     } catch (err) {
       console.error(`Failed to delete document ${docId}:`, err)
+    }
+  }
+
+  const handlePublish = async (docId: string) => {
+    setPublishMessage(null)
+    setPublishLoadingDocId(docId)
+    try {
+      const res = await fetch(`${API_BASE}/documents/${docId}/publish`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (res.ok) {
+        const n = data.rows_written ?? 0
+        const verified = data.verification_passed === true
+        const msg = verified
+          ? `Published ${n} rows. ✓ Verified.`
+          : data.verification_passed === false
+            ? `Published ${n} rows. Verification failed: ${data.verification_message ?? 'unknown'}.`
+            : `Published ${n} rows.`
+        setPublishMessage({ docId, text: msg })
+        await loadDocuments()
+      } else {
+        const msg = res.status === 404
+          ? 'Publish not available yet (backend not connected).'
+          : (data.detail || (typeof data.detail === 'string' ? data.detail : `Publish failed (${res.status})`))
+        setPublishMessage({ docId, text: String(msg) })
+      }
+    } catch (err) {
+      setPublishMessage({ docId, text: err instanceof Error ? err.message : 'Publish request failed.' })
+    } finally {
+      setPublishLoadingDocId(null)
     }
   }
 
@@ -345,6 +389,8 @@ export function DocumentStatusTab({
               </th>
               <th className="col-status">Chunk</th>
               <th className="col-status">Embedding</th>
+              <th className="col-status">Publish</th>
+              <th className="col-status" title="First publish vs subsequent republish">Last</th>
               <th className="col-errors">Errors</th>
               <th 
                 className="col-date sortable"
@@ -361,7 +407,7 @@ export function DocumentStatusTab({
           <tbody>
             {sortedDocuments.length === 0 ? (
               <tr>
-                <td colSpan={8} className="empty-state">
+                <td colSpan={10} className="empty-state">
                   {loading ? 'Loading documents...' : 'No documents found'}
                 </td>
               </tr>
@@ -565,6 +611,74 @@ export function DocumentStatusTab({
                         })()}
                       </div>
                     </td>
+                    <td className="col-status col-publish-with-menu">
+                      <div className="publish-cell">
+                        {doc.published_at ? (
+                          <>
+                            <span
+                              className={`status-badge publish-badge ${doc.publish_verification_passed === false ? 'status-failed' : 'status-completed'}`}
+                              title={
+                                doc.publish_verification_passed === false && doc.publish_verification_message
+                                  ? `${doc.published_rows ?? 0} rows. Verification failed: ${doc.publish_verification_message}`
+                                  : doc.publish_verification_passed === true
+                                    ? `${doc.published_rows ?? 0} rows at ${doc.published_at}. Integrity check passed.`
+                                    : `${doc.published_rows ?? 0} rows at ${doc.published_at}`
+                              }
+                            >
+                              Complete
+                              {doc.publish_verification_passed === true && ' ✓'}
+                              {doc.publish_verification_passed === false && ' ⚠'}
+                            </span>
+                          </>
+                        ) : (
+                          <span className="no-publish">—</span>
+                        )}
+                        <div className="dropdown-wrap">
+                          <button
+                            type="button"
+                            className="btn-icon btn-kebab"
+                            onClick={(e) => { e.stopPropagation(); setOpenPublishMenuDocId(prev => prev === doc.id ? null : doc.id) }}
+                            title="Publish options"
+                            aria-haspopup="true"
+                            aria-expanded={openPublishMenuDocId === doc.id}
+                          >
+                            ⋮
+                          </button>
+                          {openPublishMenuDocId === doc.id && (
+                            <div className="dropdown-menu dropdown-menu-publish" onClick={(e) => e.stopPropagation()}>
+                              {onViewDocumentDetail && (
+                                <button
+                                  type="button"
+                                  className="dropdown-item"
+                                  onClick={() => { onViewDocumentDetail(doc.id); setOpenPublishMenuDocId(null) }}
+                                  title="Open document detail (metadata, errors, facts, publish)"
+                                >
+                                  Details
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                className="dropdown-item"
+                                disabled={publishLoadingDocId === doc.id || (doc.chunking_status !== 'idle' && doc.chunking_status !== 'completed') || doc.embedding_status !== 'completed'}
+                                title={doc.publish_count && doc.publish_count > 0 ? 'Replace published data with current embeddings' : 'Publish entire document to dbt-consumed table'}
+                                onClick={() => { handlePublish(doc.id); setOpenPublishMenuDocId(null) }}
+                              >
+                                {publishLoadingDocId === doc.id ? 'Publishing…' : (doc.publish_count && doc.publish_count > 0 ? 'Republish' : 'Publish')}
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </td>
+                    <td className="col-status col-publish-last">
+                      {doc.publish_count === 0 ? (
+                        <span className="no-publish">—</span>
+                      ) : doc.publish_count === 1 ? (
+                        <span className="status-badge status-completed" title="First publish">Published</span>
+                      ) : (
+                        <span className="status-badge status-completed" title={`Republished ${doc.publish_count} times`}>Republished</span>
+                      )}
+                    </td>
                     <td className="col-errors">
                       {doc.has_errors === 'true' || (doc.error_count && doc.error_count > 0) ? (
                         <span className="error-indicator" title={`${doc.error_count || 0} errors (${doc.critical_error_count || 0} critical)`}>
@@ -626,12 +740,17 @@ export function DocumentStatusTab({
                             </div>
                           )}
                         </div>
+                        {publishMessage?.docId === doc.id && (
+                          <span className="publish-result-message" title={publishMessage.text}>
+                            {publishMessage.text}
+                          </span>
+                        )}
                       </div>
                     </td>
                   </tr>
                   {editingMetadataDocumentId === doc.id && (
                     <tr key={`${doc.id}-meta`}>
-                      <td colSpan={8} className="metadata-form-cell">
+                      <td colSpan={10} className="metadata-form-cell">
                         <div className="metadata-form-panel">
                           <div className="metadata-form-grid">
                             <div className="metadata-form-field metadata-form-field-full">

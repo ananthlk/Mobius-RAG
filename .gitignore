@@ -5,6 +5,12 @@ venv/
 
 # GCP service account key (do not commit)
 mobiusos-new-090a058b63d9.json
+mobius-platform-sa.json
+
+# Migration artifacts
+mobius_rag_migration_*.sql
+mobius_rag_clean.sql
+cloud-sql-proxy
 __pycache__/
 
 # IDE

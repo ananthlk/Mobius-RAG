@@ -1,0 +1,15 @@
+[Unit]
+Description=Mobius RAG Embedding Worker
+After=network.target
+
+[Service]
+Type=simple
+User=mobius
+WorkingDirectory=/opt/mobius-platform/mobius-rag
+EnvironmentFile=/opt/mobius-platform/mobius-rag/.env
+ExecStart=/opt/mobius-platform/mobius-rag/.venv/bin/python -m app.embedding_worker
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, DateTime, Integer, Text, ForeignKey, Float
+from sqlalchemy import Boolean, Column, String, DateTime, Integer, Text, ForeignKey, Float
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from pgvector.sqlalchemy import Vector
 from datetime import datetime
@@ -168,6 +168,55 @@ class ChunkEmbedding(Base):
     embedding = Column(Vector(1536), nullable=False)
     model = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class PublishEvent(Base):
+    """Audit log: one row per Publish action (who published what when)."""
+    __tablename__ = "publish_events"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False)
+    published_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    published_by = Column(String(255), nullable=True)
+    rows_written = Column(Integer, default=0, nullable=False)
+    notes = Column(Text, nullable=True)
+    verification_passed = Column(Boolean, nullable=True)  # True/False after integrity check; None for legacy rows
+    verification_message = Column(Text, nullable=True)  # Error message if verification failed
+
+
+class RagPublishedEmbedding(Base):
+    """dbt contract table: one row per published embedding (written on user Publish)."""
+    __tablename__ = "rag_published_embeddings"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    document_id = Column(UUID(as_uuid=True), nullable=False)
+    source_type = Column(String(20), nullable=False)
+    source_id = Column(UUID(as_uuid=True), nullable=False)
+    embedding = Column(Vector(1536), nullable=False)
+    model = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    text = Column(Text, default="", nullable=False)
+    page_number = Column(Integer, default=0, nullable=False)
+    paragraph_index = Column(Integer, default=0, nullable=False)
+    section_path = Column(String(500), default="", nullable=False)
+    chapter_path = Column(String(500), default="", nullable=False)
+    summary = Column(Text, default="", nullable=False)
+    document_filename = Column(String(255), default="", nullable=False)
+    document_display_name = Column(String(255), default="", nullable=False)
+    document_authority_level = Column(String(100), default="", nullable=False)
+    document_effective_date = Column(String(20), default="", nullable=False)
+    document_termination_date = Column(String(20), default="", nullable=False)
+    document_payer = Column(String(100), default="", nullable=False)
+    document_state = Column(String(2), default="", nullable=False)
+    document_program = Column(String(100), default="", nullable=False)
+    document_status = Column(String(20), default="", nullable=False)
+    document_created_at = Column(DateTime, nullable=True)
+    document_review_status = Column(String(20), default="", nullable=False)
+    document_reviewed_at = Column(DateTime, nullable=True)
+    document_reviewed_by = Column(String(255), nullable=True)
+    content_sha = Column(String(64), default="", nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    source_verification_status = Column(String(20), default="", nullable=False)
 
 
 # Category names for relevance scores (must match extraction prompt)

@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { API_BASE } from '../../config'
 import './ErrorReviewTab.css'
 
 interface ProcessingError {
@@ -51,7 +52,7 @@ export function ErrorReviewTab() {
       else if (filterResolved === 'unresolved') params.append('resolved', 'false')
       if (filterDocument !== 'all') params.append('document_id', filterDocument)
       
-      const response = await fetch(`http://localhost:8000/errors?${params.toString()}`)
+      const response = await fetch(`${API_BASE}/errors?${params.toString()}`)
       if (response.ok) {
         const data = await response.json()
         setErrors(data.errors || [])
@@ -65,7 +66,7 @@ export function ErrorReviewTab() {
 
   const loadDocumentsWithErrors = async () => {
     try {
-      const response = await fetch('http://localhost:8000/documents')
+      const response = await fetch(`${API_BASE}/documents`)
       if (response.ok) {
         const data = await response.json()
         // Filter to only documents with errors
@@ -92,7 +93,7 @@ export function ErrorReviewTab() {
 
   const handleResolve = async (errorId: string, resolution: 'approved' | 'rejected' | 'reprocess', notes: string = '') => {
     try {
-      const response = await fetch(`http://localhost:8000/errors/${errorId}/resolve`, {
+      const response = await fetch(`${API_BASE}/errors/${errorId}/resolve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -118,7 +119,7 @@ export function ErrorReviewTab() {
     if (!confirm(`Resolve all unresolved errors for this document as "${resolution}"?`)) return
     
     try {
-      const response = await fetch(`http://localhost:8000/documents/${documentId}/errors/resolve-all`, {
+      const response = await fetch(`${API_BASE}/documents/${documentId}/errors/resolve-all`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

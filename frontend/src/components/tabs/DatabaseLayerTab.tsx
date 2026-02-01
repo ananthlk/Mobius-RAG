@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { API_BASE } from '../../config'
 import './DatabaseLayerTab.css'
 
 interface DatabaseLayerTabProps {
@@ -20,7 +21,7 @@ export function DatabaseLayerTab({ isActive = true }: DatabaseLayerTabProps) {
 
   const loadDbTables = async () => {
     try {
-      const response = await fetch('http://localhost:8000/admin/db/tables')
+      const response = await fetch(`${API_BASE}/admin/db/tables`)
       if (response.ok) {
         const data = await response.json()
         setDbTables(data.tables || [])
@@ -37,7 +38,7 @@ export function DatabaseLayerTab({ isActive = true }: DatabaseLayerTabProps) {
     setViewingRecord(null)
     
     try {
-      const schemaResponse = await fetch(`http://localhost:8000/admin/db/tables/${tableName}/schema`)
+      const schemaResponse = await fetch(`${API_BASE}/admin/db/tables/${tableName}/schema`)
       if (schemaResponse.ok) {
         const schemaData = await schemaResponse.json()
         setTableSchema(schemaData)
@@ -52,7 +53,7 @@ export function DatabaseLayerTab({ isActive = true }: DatabaseLayerTabProps) {
   const loadTableRecords = async (tableName: string) => {
     try {
       const response = await fetch(
-        `http://localhost:8000/admin/db/tables/${tableName}/records?limit=100&offset=${tablePage * 100}`
+        `${API_BASE}/admin/db/tables/${tableName}/records?limit=100&offset=${tablePage * 100}`
       )
       if (response.ok) {
         const data = await response.json()
@@ -85,7 +86,7 @@ export function DatabaseLayerTab({ isActive = true }: DatabaseLayerTabProps) {
     try {
       if (editingRecord.id) {
         const response = await fetch(
-          `http://localhost:8000/admin/db/tables/${selectedTable}/records/${editingRecord.id}`,
+          `${API_BASE}/admin/db/tables/${selectedTable}/records/${editingRecord.id}`,
           {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
@@ -95,7 +96,7 @@ export function DatabaseLayerTab({ isActive = true }: DatabaseLayerTabProps) {
         if (!response.ok) throw new Error(await response.text())
       } else {
         const response = await fetch(
-          `http://localhost:8000/admin/db/tables/${selectedTable}/records`,
+          `${API_BASE}/admin/db/tables/${selectedTable}/records`,
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -119,7 +120,7 @@ export function DatabaseLayerTab({ isActive = true }: DatabaseLayerTabProps) {
     try {
       if (selectedTable === 'documents') {
         const response = await fetch(
-          `http://localhost:8000/admin/db/documents/${recordId}/delete-cascade`,
+          `${API_BASE}/admin/db/documents/${recordId}/delete-cascade`,
           { method: 'POST' }
         )
         if (!response.ok) {
@@ -128,7 +129,7 @@ export function DatabaseLayerTab({ isActive = true }: DatabaseLayerTabProps) {
         }
       } else {
         const response = await fetch(
-          `http://localhost:8000/admin/db/tables/${selectedTable}/records/${recordId}`,
+          `${API_BASE}/admin/db/tables/${selectedTable}/records/${recordId}`,
           { method: 'DELETE' }
         )
         if (!response.ok) {
@@ -342,7 +343,7 @@ export function DatabaseLayerTab({ isActive = true }: DatabaseLayerTabProps) {
             <button
               onClick={async () => {
                 try {
-                  const response = await fetch('http://localhost:8000/admin/db/execute', {
+                  const response = await fetch(`${API_BASE}/admin/db/execute`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ sql: sqlQuery })

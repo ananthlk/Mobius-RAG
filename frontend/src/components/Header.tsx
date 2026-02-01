@@ -3,7 +3,7 @@ import './Header.css'
 import { LLMConfigModal } from './LLMConfigModal'
 import { PromptsModal } from './PromptsModal'
 
-const API_BASE = 'http://localhost:8000'
+import { API_BASE } from '../config'
 
 interface HeaderProps {
   defaultLlmConfigVersion?: string | null

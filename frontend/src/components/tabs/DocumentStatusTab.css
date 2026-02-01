@@ -4,6 +4,51 @@
   margin: 0 auto;
 }
 
+.col-publish-with-menu {
+  min-width: 165px;
+}
+
+.publish-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: nowrap;
+}
+
+.col-publish-with-menu .dropdown-menu {
+  left: 0;
+}
+
+.publish-badge {
+  white-space: nowrap;
+}
+
+.no-publish {
+  color: var(--text-tertiary);
+  font-size: 0.875rem;
+}
+
+.col-publish-last {
+  width: 6rem;
+  text-align: center;
+}
+
+/* Success/result message after Publish – full text, readable */
+.publish-result-message {
+  display: inline-block;
+  font-size: 0.8125rem;
+  margin-left: 0.5rem;
+  padding: 0.35rem 0.6rem;
+  background: var(--success-bg, #dcfce7);
+  color: var(--success-fg, #166534);
+  border-radius: 6px;
+  border: 1px solid rgba(22, 101, 52, 0.2);
+  max-width: 20rem;
+  white-space: normal;
+  line-height: 1.35;
+  vertical-align: middle;
+}
+
 .chunking-options-panel {
   background: var(--bg-card);
   border: 1px solid var(--border-light);

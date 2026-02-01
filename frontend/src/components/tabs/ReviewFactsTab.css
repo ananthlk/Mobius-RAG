@@ -4,6 +4,20 @@
   position: relative;
 }
 
+.publish-readiness-banner {
+  padding: 0.5rem 1rem;
+  margin: 0 1rem 0.75rem;
+  background: var(--bg-hover, #f3f4f6);
+  border: 1px solid var(--border-light, #e5e7eb);
+  border-radius: 8px;
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+}
+
+.publish-readiness-text strong {
+  color: var(--text-primary);
+}
+
 /* Full-width main area (no fixed sidebar) */
 .facts-main {
   width: 100%;

@@ -1,0 +1,15 @@
+[Unit]
+Description=Mobius RAG Chunking Worker
+After=network.target
+
+[Service]
+Type=simple
+User=mobius
+WorkingDirectory=/opt/mobius-platform/mobius-rag
+EnvironmentFile=/opt/mobius-platform/mobius-rag/.env
+ExecStart=/opt/mobius-platform/mobius-rag/.venv/bin/python -m app.worker
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

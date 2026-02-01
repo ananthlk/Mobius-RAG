@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { approveFactApi, deleteFactApi, patchFactApi, rejectFactApi } from '../../lib/factActions'
 import { getStateLabel } from '../../lib/documentMetadata'
+import { API_BASE } from '../../config'
 import './ReviewFactsTab.css'
 
 // Category keys and labels (match backend CATEGORY_NAMES) for edit modal importance
@@ -125,8 +126,6 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
   const [editCategoryScores, setEditCategoryScores] = useState<Record<string, { score: number; direction: number }>>({})
   const [editSaving, setEditSaving] = useState(false)
   const [editError, setEditError] = useState<string | null>(null)
-
-  const API_BASE = 'http://localhost:8000'
 
   const closeActionsMenu = () => setActionsOpenFactId(null)
 
@@ -521,6 +520,12 @@ export function ReviewFactsTab({ onViewDocument }: ReviewFactsTabProps) {
 
   return (
     <div className="review-facts-tab">
+      {/* Publish readiness: user reviews facts here; publish action is in Document Status tab */}
+      <div className="publish-readiness-banner">
+        <span className="publish-readiness-text">
+          Review facts below (verification status, page, link to source). When ready to publish, go to <strong>Document Status</strong> and click <strong>Publish</strong> for the document (entire document only).
+        </span>
+      </div>
       {/* Full-width main area - Filters + Fact Cards */}
       <div className="facts-main">
         {/* Inline expandable filters - full width */}

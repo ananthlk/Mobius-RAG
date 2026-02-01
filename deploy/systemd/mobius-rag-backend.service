@@ -1,0 +1,15 @@
+[Unit]
+Description=Mobius RAG Backend (FastAPI)
+After=network.target
+
+[Service]
+Type=simple
+User=mobius
+WorkingDirectory=/opt/mobius-platform/mobius-rag
+EnvironmentFile=/opt/mobius-platform/mobius-rag/.env
+ExecStart=/opt/mobius-platform/mobius-rag/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

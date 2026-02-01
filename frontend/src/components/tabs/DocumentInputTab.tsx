@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { API_BASE } from '../../config'
 import './DocumentInputTab.css'
 
 interface DocumentInputTabProps {
@@ -96,7 +97,7 @@ export function DocumentInputTab({ onUpload, uploading, error }: DocumentInputTa
             </div>
           )}
           <p className="upload-hint">
-            Backend must be running at <code>http://localhost:8000</code>. PDF only. If upload fails, check the error above and ensure GCS bucket and credentials are set in <code>.env</code>.
+            Backend must be running at <code>{API_BASE}</code>. PDF only. If upload fails, check the error above and ensure GCS bucket and credentials are set in <code>.env</code>.
           </p>
         </div>
 

@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
+import { API_BASE } from './config'
 import './App.css'
 import { Header } from './components/Header'
 import { Tabs, TabList, Tab, TabPanels, TabPanel } from './components/Tabs'
@@ -9,6 +10,7 @@ import { ReadDocumentTab } from './components/tabs/ReadDocumentTab'
 import { ReviewFactsTab } from './components/tabs/ReviewFactsTab'
 import { DatabaseLayerTab } from './components/tabs/DatabaseLayerTab'
 import { ErrorReviewTab } from './components/tabs/ErrorReviewTab'
+import { DocumentDetailTab } from './components/tabs/DocumentDetailTab'
 
 interface UploadResponse {
   filename: string
@@ -71,7 +73,8 @@ interface ParagraphState {
 
 function App() {
   // Tab state
-  const [activeTab, setActiveTab] = useState<'input' | 'status' | 'live' | 'read' | 'review' | 'database' | 'errors'>('input')
+  const [activeTab, setActiveTab] = useState<'input' | 'status' | 'live' | 'read' | 'review' | 'detail' | 'database' | 'errors'>('input')
+  const [detailDocumentId, setDetailDocumentId] = useState<string | null>(null)
   
   // Upload state
   const [_file, setFile] = useState<File | null>(null)
@@ -82,7 +85,6 @@ function App() {
   
   // Document viewing state
   const [_pages, _setPages] = useState<any[]>([])
-  const [selectedPage, setSelectedPage] = useState<number | null>(null)
   const [_pageZoom, _setPageZoom] = useState(1.0)
   
   // Document list state
@@ -106,9 +108,8 @@ function App() {
   const streamContainerRef = useRef<HTMLDivElement>(null)
   const lastEventIdRef = useRef<string | null>(null)
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  // No longer used: live updates poll PostgreSQL via GET /chunking/events (worker writes to DB)
-  const eventSource: null = null
-  
+  // Live updates poll PostgreSQL via GET /chunking/events (worker writes to DB)
+
   // Live updates state
   const [activeJobs, setActiveJobs] = useState<Array<{
     document_id: string
@@ -138,7 +139,7 @@ function App() {
     
     const pollStatus = async () => {
       try {
-        const response = await fetch(`http://localhost:8000/documents/${result.document_id}/status`)
+        const response = await fetch(`${API_BASE}/documents/${result.document_id}/status`)
         if (response.ok) {
           const statusData: StatusResponse = await response.json()
           setStatus(statusData)
@@ -187,7 +188,7 @@ function App() {
   const loadDocuments = async () => {
     setLoadingDocuments(true)
     try {
-      const response = await fetch('http://localhost:8000/documents')
+      const response = await fetch(`${API_BASE}/documents`)
       if (response.ok) {
         const data = await response.json()
         setDocuments(data.documents || [])
@@ -213,7 +214,7 @@ function App() {
 
   const _restartExtraction = async (documentId: string) => {
     try {
-      const response = await fetch(`http://localhost:8000/documents/${documentId}/extract/restart`, {
+      const response = await fetch(`${API_BASE}/documents/${documentId}/extract/restart`, {
         method: 'POST'
       })
       if (response.ok) {
@@ -250,7 +251,7 @@ function App() {
       if (defaultLlmConfigVersion) restartBody.llm_config_version = defaultLlmConfigVersion
       if (opts.promptVersions && Object.keys(opts.promptVersions).length > 0) restartBody.prompt_versions = opts.promptVersions
       const response = await fetch(
-        `http://localhost:8000/documents/${documentId}/chunking/restart`,
+        `${API_BASE}/documents/${documentId}/chunking/restart`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -278,7 +279,7 @@ function App() {
       return
     }
     try {
-      const response = await fetch(`http://localhost:8000/admin/db/documents/${documentId}/delete-cascade`, {
+      const response = await fetch(`${API_BASE}/admin/db/documents/${documentId}/delete-cascade`, {
         method: 'POST'
       })
       if (response.ok) {
@@ -341,7 +342,7 @@ function App() {
     
     // Load extraction status
     try {
-      const statusResponse = await fetch(`http://localhost:8000/documents/${documentId}/status`)
+      const statusResponse = await fetch(`${API_BASE}/documents/${documentId}/status`)
       if (statusResponse.ok) {
         const statusData: StatusResponse = await statusResponse.json()
         setStatus(statusData)
@@ -680,9 +681,9 @@ function App() {
   }
 
   // Load chunking results from DB and update state
-  const loadChunkingResults = async (documentId: string, mergeWithExisting: boolean = false) => {
+  const loadChunkingResults = async (documentId: string, _mergeWithExisting: boolean = false) => {
     try {
-      const response = await fetch(`http://localhost:8000/documents/${documentId}/chunking/results`)
+      const response = await fetch(`${API_BASE}/documents/${documentId}/chunking/results`)
       if (!response.ok) {
         return
       }
@@ -819,7 +820,7 @@ function App() {
       if (defaultLlmConfigVersion) body.llm_config_version = defaultLlmConfigVersion
       if (opts.promptVersions && Object.keys(opts.promptVersions).length > 0) body.prompt_versions = opts.promptVersions
       const response = await fetch(
-        `http://localhost:8000/documents/${documentId}/chunking/start?threshold=${encodeURIComponent(opts.threshold)}&critique_enabled=${opts.critiqueEnabled}&max_retries=${opts.maxRetries}`,
+        `${API_BASE}/documents/${documentId}/chunking/start?threshold=${encodeURIComponent(opts.threshold)}&critique_enabled=${opts.critiqueEnabled}&max_retries=${opts.maxRetries}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -862,7 +863,7 @@ function App() {
   const stopChunking = async (documentId: string) => {
     try {
       const response = await fetch(
-        `http://localhost:8000/documents/${documentId}/chunking/stop`,
+        `${API_BASE}/documents/${documentId}/chunking/stop`,
         { method: 'POST' }
       )
       if (response.ok) {
@@ -1035,7 +1036,7 @@ function App() {
     formData.append('file', file)
 
     try {
-      const response = await fetch('http://localhost:8000/upload', {
+      const response = await fetch(`${API_BASE}/upload`, {
         method: 'POST',
         body: formData
       })
@@ -1067,7 +1068,7 @@ function App() {
       const msg = err instanceof Error ? err.message : 'Upload failed. Please try again.'
       setError(
         msg.includes('fetch') || msg.includes('Failed') || msg.includes('NetworkError')
-          ? `${msg} Is the backend running at http://localhost:8000?`
+          ? `${msg} Is the backend running at ${API_BASE}?`
           : msg
       )
     } finally {
@@ -1098,7 +1099,7 @@ function App() {
 
   const handleStartEmbedding = async (documentId: string) => {
     try {
-      const res = await fetch(`http://localhost:8000/documents/${documentId}/embedding/start`, { method: 'POST' })
+      const res = await fetch(`${API_BASE}/documents/${documentId}/embedding/start`, { method: 'POST' })
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
         setError(data?.detail || `Failed to start embedding (${res.status})`)
@@ -1113,7 +1114,7 @@ function App() {
 
   const handleResetEmbedding = async (documentId: string) => {
     try {
-      const res = await fetch(`http://localhost:8000/documents/${documentId}/embedding/reset`, { method: 'POST' })
+      const res = await fetch(`${API_BASE}/documents/${documentId}/embedding/reset`, { method: 'POST' })
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
         setError(data?.detail || `Failed to reset embedding (${res.status})`)
@@ -1138,6 +1139,11 @@ function App() {
     if (doc) {
       selectDocument(documentId, doc)
     }
+  }
+
+  const handleViewDocumentDetail = (documentId: string) => {
+    setDetailDocumentId(documentId)
+    setActiveTab('detail')
   }
 
   const handleJobSelect = async (documentId: string) => {
@@ -1166,7 +1172,7 @@ function App() {
     if (!doc) return
 
     const jobId = selectedJobId
-    const apiBase = 'http://localhost:8000'
+    const apiBase = API_BASE
 
     // Initial load: get most recent events (API returns desc order); reverse for chronological display
     const loadInitialEvents = async () => {
@@ -1292,6 +1298,9 @@ function App() {
           <Tab id="review" isActive={activeTab === 'review'} onClick={() => setActiveTab('review')}>
             Review Facts
           </Tab>
+          <Tab id="detail" isActive={activeTab === 'detail'} onClick={() => setActiveTab('detail')}>
+            Document detail
+          </Tab>
           <Tab id="database" isActive={activeTab === 'database'} onClick={() => setActiveTab('database')}>
             Database Layer
           </Tab>
@@ -1314,6 +1323,7 @@ function App() {
               onStartChunking={handleStartChunking}
               onStopChunking={handleStopChunking}
               onViewDocument={handleViewDocument}
+              onViewDocumentDetail={handleViewDocumentDetail}
               onDeleteDocument={deleteDocument}
               onRestartChunking={handleRestartChunking}
               onStartEmbedding={handleStartEmbedding}
@@ -1349,6 +1359,16 @@ function App() {
           <TabPanel id="review" isActive={activeTab === 'review'}>
             <ReviewFactsTab
               onViewDocument={handleViewDocument}
+            />
+          </TabPanel>
+
+          <TabPanel id="detail" isActive={activeTab === 'detail'}>
+            <DocumentDetailTab
+              documentId={detailDocumentId}
+              onViewDocument={handleViewDocument}
+              onViewErrors={() => setActiveTab('errors')}
+              onViewFacts={(id) => { setDetailDocumentId(id); setActiveTab('review') }}
+              onPublishSuccess={() => loadDocuments()}
             />
           </TabPanel>
 
