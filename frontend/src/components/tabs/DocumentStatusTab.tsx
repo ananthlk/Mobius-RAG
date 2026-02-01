@@ -80,6 +80,8 @@ export function DocumentStatusTab({
   const [openActionsMenuDocId, setOpenActionsMenuDocId] = useState<string | null>(null)
   const [publishLoadingDocId, setPublishLoadingDocId] = useState<string | null>(null)
   const [publishMessage, setPublishMessage] = useState<{ docId: string; text: string } | null>(null)
+  const [chunkStatusLoadingDocId, setChunkStatusLoadingDocId] = useState<string | null>(null)
+  const [chunkStatusMessage, setChunkStatusMessage] = useState<{ docId: string; text: string } | null>(null)
   const [promptsConfig, setPromptsConfig] = useState<{ prompts: Record<string, string[]>; default: Record<string, string> } | null>(null)
   const [chunkOptionsByDoc, setChunkOptionsByDoc] = useState<Record<string, ChunkingOptions>>({})
 
@@ -300,6 +302,31 @@ export function DocumentStatusTab({
     }
   }
 
+  const handleMarkChunkingComplete = async (docId: string) => {
+    setChunkStatusMessage(null)
+    setChunkStatusLoadingDocId(docId)
+    try {
+      const res = await fetch(`${API_BASE}/documents/${docId}/chunking/status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'completed' }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (res.ok) {
+        setChunkStatusMessage({ docId, text: 'Chunking status set to complete.' })
+        setOpenChunkMenuDocId(null)
+        await loadDocuments()
+      } else {
+        const msg = (data.detail && (typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail))) || `Failed (${res.status})`
+        setChunkStatusMessage({ docId, text: msg })
+      }
+    } catch (err) {
+      setChunkStatusMessage({ docId, text: err instanceof Error ? err.message : 'Request failed.' })
+    } finally {
+      setChunkStatusLoadingDocId(null)
+    }
+  }
+
   const getStatusBadge = (status: string | null, _type: 'extraction' | 'chunking') => {
     if (!status) return <span className="status-badge status-idle">—</span>
     
@@ -444,7 +471,7 @@ export function DocumentStatusTab({
                         {(() => {
                           const hasChunkActions =
                             doc.chunking_status === 'idle' || doc.chunking_status === null ||
-                            doc.chunking_status === 'in_progress' ||
+                            doc.chunking_status === 'in_progress' || doc.chunking_status === 'queued' ||
                             ((doc.chunking_status === 'stopped' || doc.chunking_status === 'failed') && onRestartChunking)
                           if (!hasChunkActions) return null
                           return (
@@ -462,12 +489,33 @@ export function DocumentStatusTab({
                               {openChunkMenuDocId === doc.id && (
                                 <div className="dropdown-menu dropdown-menu-chunk-options" onClick={(e) => e.stopPropagation()}>
                                   {doc.chunking_status === 'in_progress' ? (
+                                    <>
+                                      <button
+                                        type="button"
+                                        className="dropdown-item dropdown-item-danger"
+                                        onClick={() => { onStopChunking(doc.id); setOpenChunkMenuDocId(null) }}
+                                      >
+                                        Stop chunking
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="dropdown-item"
+                                        disabled={chunkStatusLoadingDocId === doc.id}
+                                        title="Set chunking status to complete (use when stuck in progress)"
+                                        onClick={() => { handleMarkChunkingComplete(doc.id) }}
+                                      >
+                                        {chunkStatusLoadingDocId === doc.id ? 'Updating…' : 'Mark chunking complete'}
+                                      </button>
+                                    </>
+                                  ) : doc.chunking_status === 'queued' ? (
                                     <button
                                       type="button"
-                                      className="dropdown-item dropdown-item-danger"
-                                      onClick={() => { onStopChunking(doc.id); setOpenChunkMenuDocId(null) }}
+                                      className="dropdown-item"
+                                      disabled={chunkStatusLoadingDocId === doc.id}
+                                      title="Set chunking status to complete"
+                                      onClick={() => { handleMarkChunkingComplete(doc.id) }}
                                     >
-                                      Stop chunking
+                                      {chunkStatusLoadingDocId === doc.id ? 'Updating…' : 'Mark chunking complete'}
                                     </button>
                                   ) : (
                                     <>
@@ -743,6 +791,11 @@ export function DocumentStatusTab({
                         {publishMessage?.docId === doc.id && (
                           <span className="publish-result-message" title={publishMessage.text}>
                             {publishMessage.text}
+                          </span>
+                        )}
+                        {chunkStatusMessage?.docId === doc.id && (
+                          <span className="publish-result-message" title={chunkStatusMessage.text}>
+                            {chunkStatusMessage.text}
                           </span>
                         )}
                       </div>

@@ -3,7 +3,11 @@
 # Requires: gcloud, Docker, frontend built (VITE_API_BASE= npm run build).
 #
 # Usage:
-#   DATABASE_PASSWORD=xxx ./deploy/deploy_cloudrun.sh
+#   DATABASE_PASSWORD='your_password' ./deploy/deploy_cloudrun.sh
+#
+# The password must match the Cloud SQL postgres user. If you don't have it, set/reset it:
+#   gcloud sql users set-password postgres --instance=mobius-platform-db --password=YOUR_PASSWORD --project=mobiusos-new
+# See docs/GCP_DEPLOYMENT.md for details.
 #
 set -e
 
@@ -15,7 +19,8 @@ CLOUD_SQL_INSTANCE="mobius-platform-db"
 CLOUD_SQL_CONNECTION="${PROJECT_ID}:${REGION}:${CLOUD_SQL_INSTANCE}"
 
 if [[ -z "$DATABASE_PASSWORD" ]]; then
-  echo "Set DATABASE_PASSWORD"
+  echo "Set DATABASE_PASSWORD (must match Cloud SQL postgres user)."
+  echo "To set/reset on Cloud SQL: gcloud sql users set-password postgres --instance=mobius-platform-db --password=YOUR_PASSWORD --project=mobiusos-new"
   exit 1
 fi
 

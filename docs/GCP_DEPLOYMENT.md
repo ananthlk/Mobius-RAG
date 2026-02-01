@@ -257,11 +257,35 @@ All VMs in the same VPC can reach Cloud SQL via its private IP. No proxy needed 
 
 Deploy Mobius RAG to Cloud Run for a GCP-managed URL like `https://mobius-rag-xxx.run.app` (similar to Mobius OS New).
 
+### Cloud SQL password (required)
+
+The app connects to Cloud SQL as user `postgres`. You must use the **same password** that is set on the Cloud SQL instance.
+
+- **If you don’t know or don’t have the password:** set or reset it in GCP, then use that value when deploying.
+
+**Set or reset the `postgres` password on Cloud SQL:**
+
+```bash
+# Replace YOUR_NEW_SECURE_PASSWORD with a strong password you choose
+gcloud sql users set-password postgres \
+  --instance=mobius-platform-db \
+  --password=YOUR_NEW_SECURE_PASSWORD \
+  --project=mobiusos-new
+```
+
+Then deploy using that same password:
+
+```bash
+DATABASE_PASSWORD='YOUR_NEW_SECURE_PASSWORD' ./deploy/deploy_cloudrun.sh
+```
+
+Use single quotes so the shell doesn’t interpret special characters in the password.
+
 ### Deploy to Cloud Run
 
 ```bash
-# From project root
-DATABASE_PASSWORD=YOUR_PASSWORD ./deploy/deploy_cloudrun.sh
+# From project root (password must match Cloud SQL postgres user)
+DATABASE_PASSWORD='YOUR_PASSWORD' ./deploy/deploy_cloudrun.sh
 ```
 
 This will:
@@ -286,6 +310,18 @@ Cloud Run is request-based. The chunking and embedding workers are long-running 
 - Cloud SQL instance `mobius-platform-db` with `mobius_rag` database
 - GCS bucket `mobius-uploads-mobiusos-new`
 - Cloud Build API and Cloud Run API enabled
+
+### Troubleshooting: "Database layer" empty / password authentication failed
+
+If the app deploys but the Database layer tab is empty and logs show `password authentication failed for user "postgres"`:
+
+1. The `DATABASE_PASSWORD` used at deploy time does not match the password for the `postgres` user on Cloud SQL.
+2. **Fix:** Set the password on Cloud SQL (if unknown or lost), then redeploy with that same password:
+   ```bash
+   gcloud sql users set-password postgres --instance=mobius-platform-db --password=YOUR_CHOSEN_PASSWORD --project=mobiusos-new
+   DATABASE_PASSWORD='YOUR_CHOSEN_PASSWORD' ./deploy/deploy_cloudrun.sh
+   ```
+   After redeploy, Cloud Run will use the new env var and connect successfully.
 
 ---
 

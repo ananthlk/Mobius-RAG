@@ -45,7 +45,12 @@ app = FastAPI(title="Mobius RAG", version="0.1.0")
 
 @app.on_event("startup")
 async def run_startup_migrations():
-    """Run database migrations on startup to ensure schema is up to date."""
+    """Schedule migrations in background so the server binds to PORT immediately (Cloud Run)."""
+    asyncio.create_task(_run_startup_migrations_background())
+
+
+async def _run_startup_migrations_background():
+    """Run database migrations in background after server has bound to PORT."""
     from sqlalchemy import text
     from app.database import AsyncSessionLocal, engine
 
@@ -605,6 +610,20 @@ async def list_documents(
             job_critique_enabled = (active_job.critique_enabled is None or str(active_job.critique_enabled).lower() == "true") if active_job else None
             job_max_retries = (active_job.max_retries if active_job.max_retries is not None else 2) if active_job else None
 
+        # Prefer job/result when they say "completed" (e.g. chunking_complete event was never written)
+        if chunking_status in ("in_progress", "queued"):
+            latest_job_result = await db.execute(
+                select(ChunkingJob).where(ChunkingJob.document_id == doc.id).order_by(ChunkingJob.created_at.desc()).limit(1)
+            )
+            latest_job = latest_job_result.scalar_one_or_none()
+            if latest_job and latest_job.status == "completed":
+                chunking_status = "completed"
+            else:
+                cr_check = await db.execute(select(ChunkingResult).where(ChunkingResult.document_id == doc.id))
+                cr_row = cr_check.scalar_one_or_none()
+                if cr_row and (cr_row.metadata_ or {}).get("status") == "completed":
+                    chunking_status = "completed"
+
         emb_status = latest_embedding.get(doc_id_str)
         embedding_status = emb_status if emb_status else "idle"
 
@@ -989,6 +1008,9 @@ async def update_document_metadata(
         )
     else:
         processing_stage = None
+        chunking_status = None
+    # Fallback when no events or when latest event yields None (e.g. embedding_complete)
+    if chunking_status is None:
         job_result = await db.execute(
             select(ChunkingJob).where(
                 ChunkingJob.document_id == doc.id,
@@ -3493,6 +3515,11 @@ class ChunkingRestartBody(BaseModel):
     max_retries: Optional[int] = None
 
 
+class ChunkingStatusUpdateBody(BaseModel):
+    """Body for PATCH chunking status (e.g. mark stuck in_progress as completed)."""
+    status: str  # "completed", "idle", "in_progress"
+
+
 @app.post("/documents/{document_id}/chunking/restart")
 async def restart_chunking(
     document_id: str,
@@ -3593,6 +3620,52 @@ async def restart_chunking(
     asyncio.create_task(background_task())
     
     return {"status": "restarted", "document_id": document_id}
+
+
+@app.patch("/documents/{document_id}/chunking/status")
+async def update_chunking_status(
+    document_id: str,
+    body: ChunkingStatusUpdateBody,
+    db: AsyncSession = Depends(get_db),
+):
+    """Set chunking status for a document (e.g. mark stuck in_progress as completed so publish is allowed)."""
+    from uuid import UUID
+
+    try:
+        doc_uuid = UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID")
+
+    status = (body.status or "").strip().lower()
+    if status not in ("completed", "idle", "in_progress"):
+        raise HTTPException(status_code=400, detail="status must be one of: completed, idle, in_progress")
+
+    doc_result = await db.execute(select(Document).where(Document.id == doc_uuid))
+    if not doc_result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    cr_result = await db.execute(select(ChunkingResult).where(ChunkingResult.document_id == doc_uuid))
+    chunking_result = cr_result.scalar_one_or_none()
+    if not chunking_result:
+        chunking_result = ChunkingResult(document_id=doc_uuid, metadata_={"status": status}, results={})
+        db.add(chunking_result)
+    else:
+        meta = chunking_result.metadata_ or {}
+        meta["status"] = status
+        chunking_result.metadata_ = meta
+        chunking_result.updated_at = datetime.utcnow()
+
+    if status == "completed":
+        latest_job_result = await db.execute(
+            select(ChunkingJob).where(ChunkingJob.document_id == doc_uuid).order_by(ChunkingJob.created_at.desc()).limit(1)
+        )
+        latest_job = latest_job_result.scalar_one_or_none()
+        if latest_job and latest_job.status == "processing":
+            latest_job.status = "completed"
+            latest_job.completed_at = datetime.utcnow()
+
+    await db.commit()
+    return {"document_id": document_id, "chunking_status": status}
 
 
 @app.post("/documents/{document_id}/embedding/start")
@@ -3784,6 +3857,9 @@ async def get_document_detail(
     if row:
         chunking_status, _ = _chunking_status_from_latest_event(row[0], row[1] or {})
     else:
+        chunking_status = None
+    # Fallback when no events or when latest event yields None (e.g. embedding_complete)
+    if chunking_status is None:
         job_result = await db.execute(
             select(ChunkingJob).where(ChunkingJob.document_id == doc_uuid).order_by(ChunkingJob.created_at.desc()).limit(1)
         )

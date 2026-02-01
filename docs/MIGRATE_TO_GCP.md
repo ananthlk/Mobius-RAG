@@ -2,6 +2,22 @@
 
 Steps to migrate your local database (documents, chunks, facts, chunking events, etc.) to GCP Cloud SQL.
 
+## Why are there no documents in production?
+
+**Production (Cloud Run)** uses **Cloud SQL**: instance `mobius-platform-db`, database `mobius_rag`. That database is **separate** from:
+
+- Your **local PostgreSQL** (e.g. `localhost:5432/mobius_rag`) where you may have uploaded documents
+- Any **other** Cloud SQL instance or database
+
+If you see empty document list in production, it usually means:
+
+1. **Data was never migrated** – Documents exist only in local (or another DB). The app creates **schema** on first run (migrations), but **data** is not copied unless you run the migration below.
+2. **Wrong database** – Production might be pointing at a different Cloud SQL instance/database than the one you loaded data into.
+
+**Fix:** Run the migration steps below to copy data from your local (or a backup) into the **same** Cloud SQL database that production uses (`mobius-platform-db` / `mobius_rag`).
+
+---
+
 ## Prerequisites
 
 - Cloud SQL instance `mobius-platform-db` created
