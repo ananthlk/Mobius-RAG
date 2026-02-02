@@ -6,6 +6,8 @@ venv/
 # GCP service account key (do not commit)
 mobiusos-new-090a058b63d9.json
 mobius-platform-sa.json
+credentials/*.json
+credentials/*.pem
 
 # Migration artifacts
 mobius_rag_migration_*.sql

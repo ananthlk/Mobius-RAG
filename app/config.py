@@ -1,7 +1,29 @@
 import os
-from dotenv import load_dotenv
+import sys
+from pathlib import Path
 
-load_dotenv()
+# Load env: module .env first, then global mobius-config/.env (same helper as mobius-chat)
+_repo_root = Path(__file__).resolve().parent.parent
+_config_dir = _repo_root.parent / "mobius-config"
+if _config_dir.exists() and str(_config_dir) not in sys.path:
+    sys.path.insert(0, str(_config_dir))
+try:
+    from env_helper import load_env
+    load_env(_repo_root)
+except ImportError:
+    from dotenv import load_dotenv
+    load_dotenv(_repo_root / ".env", override=True)
+
+# Resolve relative GOOGLE_APPLICATION_CREDENTIALS to absolute (repo root = parent of app/)
+# Skip placeholders (e.g. /path/to/your-service-account.json) — env_helper already cleared those
+_creds = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+if _creds and "/path/to/" not in _creds and "your-service-account" not in _creds:
+    if not Path(_creds).is_absolute():
+        _abs = (_repo_root / _creds).resolve()
+        if _abs.exists():
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(_abs)
+    elif not Path(_creds).expanduser().is_file():
+        os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
 
 # Environment
 ENV = os.getenv("ENV", "dev")  # dev or prod
