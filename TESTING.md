@@ -4,7 +4,7 @@
 
 1. **Install Python deps** (when network is available):
    ```bash
-   cd "/Users/ananth/Mobius RAG"
+   cd "/Users/ananth/Mobius/mobius-rag"
    source .venv/bin/activate
    pip install pymupdf
    # For unit tests:
@@ -14,7 +14,7 @@
 2. **Migrations (create DB + tables)**:
    ```bash
    brew services start postgresql   # if needed
-   cd "/Users/ananth/Mobius RAG"
+   cd "/Users/ananth/Mobius/mobius-rag"
    ./mragm
    ```
    Or: `createdb mobius_rag` then `python -m app.init_db`.
@@ -29,7 +29,7 @@
 ### 1. Start the Backend Server
 
 ```bash
-cd "/Users/ananth/Mobius RAG"
+cd "/Users/ananth/Mobius/mobius-rag"
 source .venv/bin/activate
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
@@ -37,7 +37,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ### 2. Start the Frontend (in another terminal)
 
 ```bash
-cd "/Users/ananth/Mobius RAG/frontend"
+cd "/Users/ananth/Mobius/mobius-rag/frontend"
 npm run dev
 ```
 

@@ -36,7 +36,7 @@ The following cannot be completed due to network connectivity problems:
 
 **Command to run (when network available):**
 ```bash
-cd "/Users/ananth/Mobius RAG"
+cd "/Users/ananth/Mobius/mobius-rag"
 source .venv/bin/activate
 pip install sqlalchemy asyncpg python-dotenv pymupdf
 ```

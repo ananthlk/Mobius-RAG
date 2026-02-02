@@ -9,7 +9,7 @@
 ### 1. Install Python Dependencies
 
 ```bash
-cd "/Users/ananth/Mobius RAG"
+cd "/Users/ananth/Mobius/mobius-rag"
 source .venv/bin/activate
 
 # Install all required packages
@@ -101,7 +101,7 @@ ollama run llama3.1:8b "Hi"  # optional quick sanity check
 ## Quick: Migrations, build & test
 
 ```bash
-cd "/Users/ananth/Mobius RAG"
+cd "/Users/ananth/Mobius/mobius-rag"
 
 # 1. Migrations (Postgres must be running)
 ./mragm
@@ -128,7 +128,7 @@ From any directory you can run:
 **One-time setup** (so these are on your PATH):
 
 ```bash
-cd "/Users/ananth/Mobius RAG"
+cd "/Users/ananth/Mobius/mobius-rag"
 ./setup-mrag-cli.sh
 ```
 
@@ -149,7 +149,7 @@ mragb
 Or manually:
 
 ```bash
-cd "/Users/ananth/Mobius RAG"
+cd "/Users/ananth/Mobius/mobius-rag"
 source .venv/bin/activate
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
@@ -163,7 +163,7 @@ mragf
 Or manually:
 
 ```bash
-cd "/Users/ananth/Mobius RAG/frontend"
+cd "/Users/ananth/Mobius/mobius-rag/frontend"
 npm run dev
 ```
 

@@ -1024,6 +1024,19 @@ async def update_document_metadata(
             cr_result = await db.execute(select(ChunkingResult).where(ChunkingResult.document_id == doc.id))
             chunking_row = cr_result.scalar_one_or_none()
             chunking_status = chunking_row.metadata_.get("status", "idle") if (chunking_row and chunking_row.metadata_) else "idle"
+    # Prefer job/result when they say "completed" (same as list_documents / get_document_detail)
+    if chunking_status in ("in_progress", "queued"):
+        latest_job_res = await db.execute(
+            select(ChunkingJob).where(ChunkingJob.document_id == doc.id).order_by(ChunkingJob.created_at.desc()).limit(1)
+        )
+        latest_job = latest_job_res.scalar_one_or_none()
+        if latest_job and latest_job.status == "completed":
+            chunking_status = "completed"
+        else:
+            cr_check = await db.execute(select(ChunkingResult).where(ChunkingResult.document_id == doc.id))
+            cr_row = cr_check.scalar_one_or_none()
+            if cr_row and (cr_row.metadata_ or {}).get("status") == "completed":
+                chunking_status = "completed"
     # embedding_status from latest EmbeddingJob
     emb_job = await db.execute(
         select(EmbeddingJob).where(EmbeddingJob.document_id == doc.id).order_by(EmbeddingJob.created_at.desc()).limit(1)
@@ -3870,6 +3883,20 @@ async def get_document_detail(
             cr_result = await db.execute(select(ChunkingResult).where(ChunkingResult.document_id == doc_uuid))
             cr = cr_result.scalar_one_or_none()
             chunking_status = (cr.metadata_ or {}).get("status", "idle") if cr and cr.metadata_ else "idle"
+
+    # Prefer job/result when they say "completed" (same as list_documents)
+    if chunking_status in ("in_progress", "queued"):
+        latest_job_result = await db.execute(
+            select(ChunkingJob).where(ChunkingJob.document_id == doc_uuid).order_by(ChunkingJob.created_at.desc()).limit(1)
+        )
+        latest_job = latest_job_result.scalar_one_or_none()
+        if latest_job and latest_job.status == "completed":
+            chunking_status = "completed"
+        else:
+            cr_check = await db.execute(select(ChunkingResult).where(ChunkingResult.document_id == doc_uuid))
+            cr_row = cr_check.scalar_one_or_none()
+            if cr_row and (cr_row.metadata_ or {}).get("status") == "completed":
+                chunking_status = "completed"
 
     # Embedding status: latest EmbeddingJob
     emb_result = await db.execute(
