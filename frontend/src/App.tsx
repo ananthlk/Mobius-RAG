@@ -205,6 +205,20 @@ function App() {
     loadDocuments()
   }, [])
 
+  // Deep link: open Read tab at document + page when URL has ?tab=read&documentId=...&pageNumber=... (e.g. from chat "Open in new tab")
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const tab = params.get('tab')
+    const documentId = params.get('documentId')?.trim()
+    if (tab !== 'read' || !documentId) return
+    const pageNumberRaw = params.get('pageNumber')
+    const pageNumber = pageNumberRaw != null ? parseInt(pageNumberRaw, 10) : undefined
+    const factId = params.get('factId')?.trim() || undefined
+    setActiveTab('read')
+    setSelectedDocumentId(documentId)
+    setNavigateToRead({ documentId, pageNumber: Number.isFinite(pageNumber) ? pageNumber : undefined, factId })
+  }, [])
+
   // Refresh documents when chunking is active or Live tab is visible so status and progress stay correct
   useEffect(() => {
     if (!chunkingActive && activeTab !== 'live') return
