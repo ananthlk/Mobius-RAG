@@ -39,7 +39,10 @@ export function Header({
     <header className="app-header">
       <div className="app-header-inner">
         <div className="app-header-left">
-          <h1>Mobius RAG</h1>
+          <div className="app-header-brand">
+            <img src="/logo.svg" alt="Mobius" className="app-header-logo" width={32} height={32} />
+            <h1>Mobius RAG</h1>
+          </div>
           <p className="subtitle">Document Processing & Fact Extraction</p>
         </div>
         <div className="app-header-right">

@@ -12,9 +12,13 @@ async def extract_text_from_gcs(gcs_path: str) -> list[dict]:
     client = storage.Client()
     bucket = client.bucket(GCS_BUCKET)
     
-    # Extract filename from gcs_path (gs://bucket/filename)
-    filename = gcs_path.split("/")[-1]
-    blob = bucket.blob(filename)
+    # Extract blob path from gcs_path (gs://bucket/path or gs://bucket/path/to/file.pdf)
+    prefix = f"gs://{GCS_BUCKET}/"
+    if gcs_path.startswith(prefix):
+        blob_path = gcs_path[len(prefix):].lstrip("/")
+    else:
+        blob_path = gcs_path.split("/")[-1]
+    blob = bucket.blob(blob_path)
     
     # Download to memory
     pdf_bytes = blob.download_as_bytes()

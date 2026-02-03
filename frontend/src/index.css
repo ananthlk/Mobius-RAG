@@ -1,32 +1,34 @@
+@import './mobius-tokens.css';
+
 :root {
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-family: var(--mobius-font-system);
   line-height: 1.5;
   font-weight: 400;
-  color: #1f2937;
-  background: #f7f7f8;
+  color: var(--mobius-text-primary);
+  background: var(--mobius-bg-primary);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  
-  /* Modern Grey & White Color Scheme (ChatGPT style) */
-  --bg-primary: #f7f7f8;
-  --bg-secondary: #fafafa;
-  --bg-card: #ffffff;
-  --bg-hover: #f9fafb;
-  
-  --border-light: #e5e7eb;
-  --border-medium: #d1d5db;
-  
-  --text-primary: #1f2937;
-  --text-secondary: #374151;
-  --text-tertiary: #6b7280;
-  
-  --accent-blue: #3b82f6;
-  --accent-green: #10b981;
-  --accent-red: #ef4444;
-  --accent-amber: #f59e0b;
-  
+
+  /* Aliases from mobius-design tokens */
+  --bg-primary: var(--mobius-bg-primary);
+  --bg-secondary: var(--mobius-bg-secondary);
+  --bg-card: var(--mobius-bg-card);
+  --bg-hover: var(--mobius-bg-hover);
+
+  --border-light: var(--mobius-border-light);
+  --border-medium: var(--mobius-border-medium);
+
+  --text-primary: var(--mobius-text-primary);
+  --text-secondary: var(--mobius-text-secondary);
+  --text-tertiary: var(--mobius-text-tertiary);
+
+  --accent-blue: var(--mobius-accent);
+  --accent-green: var(--mobius-success);
+  --accent-red: var(--mobius-error);
+  --accent-amber: var(--mobius-warning);
+
   --shadow-sm: rgba(0, 0, 0, 0.05);
   --shadow-md: rgba(0, 0, 0, 0.1);
 }

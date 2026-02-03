@@ -54,6 +54,13 @@ async def _run_startup_migrations_background():
     from sqlalchemy import text
     from app.database import AsyncSessionLocal, engine
 
+    # pgvector extension must exist before create_all (chunk_embeddings uses vector type)
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        except Exception as ext_err:
+            logger.warning("Could not enable pgvector extension: %s. Install pgvector: https://github.com/pgvector/pgvector", ext_err)
+
     # Ensure all ORM tables exist first (documents, document_pages, processing_errors, etc.)
     # so raw SQL below that references them does not fail on a fresh database.
     async with engine.begin() as conn:
@@ -329,11 +336,12 @@ async def _create_event_buffer_callback(document_id: str, db: Optional[AsyncSess
     
     return event_callback
 
-# CORS - allow frontend in dev
-cors_origins = ["http://localhost:5173"] if ENV == "dev" else []
+# CORS - in dev allow any origin so Vite (any port) and localhost/127.0.0.1 all work
+cors_origins = ["*"] if ENV == "dev" else []
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
+    allow_credentials=False,  # must be False when allow_origins=["*"]
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -1595,6 +1603,104 @@ async def upload_file(
         await db.rollback()
         logger.error(f"Upload error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+
+class ImportFromGcsRequest(BaseModel):
+    """Request to import a document from GCS (e.g. from web scraper)."""
+    gcs_path: str
+    filename: Optional[str] = None
+
+
+@app.post("/documents/import-from-gcs")
+async def import_document_from_gcs(
+    body: ImportFromGcsRequest = Body(...),
+    payer: str = None,
+    state: str = None,
+    program: str = None,
+    db: AsyncSession = Depends(get_db)
+):
+    """Import a document from GCS path (e.g. from web scraper). PDF only for extraction."""
+    gcs_path = body.gcs_path.strip()
+    if not gcs_path.startswith("gs://"):
+        raise HTTPException(status_code=400, detail="gcs_path must start with gs://")
+    filename = body.filename or gcs_path.split("/")[-1]
+    if not filename:
+        raise HTTPException(status_code=400, detail="Could not derive filename from gcs_path")
+
+    try:
+        # Compute hash from GCS object
+        client = storage.Client()
+        bucket = client.bucket(GCS_BUCKET)
+        prefix = f"gs://{GCS_BUCKET}/"
+        blob_path = gcs_path[len(prefix):].lstrip("/") if gcs_path.startswith(prefix) else gcs_path.split("/")[-1]
+        blob = bucket.blob(blob_path)
+        if not blob.exists():
+            raise HTTPException(status_code=404, detail=f"Object not found in GCS: {gcs_path}")
+        content = blob.download_as_bytes()
+        file_hash = hashlib.sha256(content).hexdigest()
+
+        result = await db.execute(select(Document).where(Document.file_hash == file_hash))
+        existing_doc = result.scalar_one_or_none()
+        if existing_doc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "duplicate_file",
+                    "message": "This file has already been imported.",
+                    "original_filename": existing_doc.filename,
+                    "document_id": str(existing_doc.id),
+                }
+            )
+
+        document = Document(
+            filename=filename,
+            file_hash=file_hash,
+            file_path=gcs_path,
+            payer=payer,
+            state=state,
+            program=program,
+            status="uploaded",
+        )
+        db.add(document)
+        await db.commit()
+        await db.refresh(document)
+
+        try:
+            document.status = "extracting"
+            await db.commit()
+            from app.services.page_to_markdown import raw_page_to_markdown
+            pages = await extract_text_from_gcs(gcs_path)
+            for page_data in pages:
+                raw_text = page_data.get("text") or ""
+                page = DocumentPage(
+                    document_id=document.id,
+                    page_number=page_data["page_number"],
+                    text=raw_text,
+                    text_markdown=raw_page_to_markdown(raw_text) if raw_text else None,
+                    extraction_status=page_data.get("extraction_status", "failed"),
+                    extraction_error=page_data.get("extraction_error"),
+                    text_length=page_data.get("text_length", 0),
+                )
+                db.add(page)
+            document.status = "completed"
+            await db.commit()
+        except Exception as e:
+            document.status = "failed"
+            await db.commit()
+            logger.warning("Extraction failed for import-from-gcs %s: %s", gcs_path, e)
+
+        return {
+            "filename": filename,
+            "gcs_path": gcs_path,
+            "document_id": str(document.id),
+            "status": document.status,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"Import from GCS error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 def _critique_score(c: dict) -> float:

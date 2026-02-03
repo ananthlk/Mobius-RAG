@@ -192,9 +192,13 @@ function App() {
       if (response.ok) {
         const data = await response.json()
         setDocuments(data.documents || [])
+        setError(null)
+      } else {
+        setError(`RAG backend at ${API_BASE} returned ${response.status}. Is the RAG backend running on port 8001?`)
       }
     } catch (err) {
-      setError('Failed to load documents')
+      const msg = err instanceof Error ? err.message : 'Network error'
+      setError(`Cannot reach RAG backend at ${API_BASE}. Failed to load documents (${msg}). Start from Module Hub (mstart) or run: cd mobius-rag && .venv/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8001`)
     } finally {
       setLoadingDocuments(false)
     }
@@ -1329,6 +1333,7 @@ function App() {
               onUpload={handleUpload}
               uploading={uploading}
               error={error}
+              onDocumentAdded={loadDocuments}
             />
           </TabPanel>
 
