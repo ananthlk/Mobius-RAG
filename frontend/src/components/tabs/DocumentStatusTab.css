@@ -234,6 +234,18 @@
   width: 150px;
 }
 
+.col-extraction-with-action {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.scrape-mark-ready {
+  white-space: nowrap;
+  font-size: 0.75rem;
+}
+
 .col-date {
   width: 180px;
   color: var(--text-tertiary);

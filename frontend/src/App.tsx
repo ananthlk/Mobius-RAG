@@ -260,11 +260,12 @@ function App() {
 
   const restartChunkingForDocument = async (documentId: string, options?: ChunkingOptions) => {
     try {
-      const opts = options ?? { threshold: 0.6, critiqueEnabled: true, maxRetries: 2 }
+      const opts = options ?? { threshold: 0.6, critiqueEnabled: true, maxRetries: 2, extractionEnabled: true }
       const restartBody: Record<string, unknown> = {
         threshold: opts.threshold,
         critique_enabled: opts.critiqueEnabled,
         max_retries: Math.max(0, opts.maxRetries),
+        extraction_enabled: opts.extractionEnabled,
       }
       if (defaultLlmConfigVersion) restartBody.llm_config_version = defaultLlmConfigVersion
       if (opts.promptVersions && Object.keys(opts.promptVersions).length > 0) restartBody.prompt_versions = opts.promptVersions
@@ -289,6 +290,24 @@ function App() {
       }
     } catch (err) {
       setError('Failed to restart chunking')
+    }
+  }
+
+  const handleMarkReadyForChunking = async (documentId: string) => {
+    try {
+      const response = await fetch(`${API_BASE}/documents/${documentId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'completed' }),
+      })
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => null)
+        setError(errorData?.detail || 'Failed to mark document ready for chunking')
+        return
+      }
+      await loadDocuments()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to mark ready for chunking')
     }
   }
 
@@ -826,7 +845,7 @@ function App() {
 
   const startChunking = async (documentId: string, options?: ChunkingOptions) => {
     setError(null)
-    const opts = options ?? { threshold: 0.6, critiqueEnabled: true, maxRetries: 2 }
+    const opts = options ?? { threshold: 0.6, critiqueEnabled: true, maxRetries: 2, extractionEnabled: true }
     console.log(`Starting chunking for document ${documentId}...`)
     
     try {
@@ -834,11 +853,12 @@ function App() {
         threshold: opts.threshold,
         critique_enabled: opts.critiqueEnabled,
         max_retries: Math.max(0, opts.maxRetries),
+        extraction_enabled: opts.extractionEnabled,
       }
       if (defaultLlmConfigVersion) body.llm_config_version = defaultLlmConfigVersion
       if (opts.promptVersions && Object.keys(opts.promptVersions).length > 0) body.prompt_versions = opts.promptVersions
       const response = await fetch(
-        `${API_BASE}/documents/${documentId}/chunking/start?threshold=${encodeURIComponent(opts.threshold)}&critique_enabled=${opts.critiqueEnabled}&max_retries=${opts.maxRetries}`,
+        `${API_BASE}/documents/${documentId}/chunking/start?threshold=${encodeURIComponent(opts.threshold)}&critique_enabled=${opts.critiqueEnabled}&max_retries=${opts.maxRetries}&extraction_enabled=${opts.extractionEnabled}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1347,6 +1367,7 @@ function App() {
               onRestartChunking={handleRestartChunking}
               onStartEmbedding={handleStartEmbedding}
               onResetEmbedding={handleResetEmbedding}
+              onMarkReadyForChunking={handleMarkReadyForChunking}
             />
           </TabPanel>
 

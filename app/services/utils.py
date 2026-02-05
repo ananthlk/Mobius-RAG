@@ -2,8 +2,15 @@
 import json
 import logging
 import re
+from datetime import date, timedelta
 
 logger = logging.getLogger(__name__)
+
+
+def default_termination_date() -> str:
+    """Return ISO date string 6 months from today. Used when creating documents without explicit expiry."""
+    d = date.today() + timedelta(days=182)  # ~6 months
+    return d.isoformat()
 
 
 def normalize_page_text(text: str) -> str:

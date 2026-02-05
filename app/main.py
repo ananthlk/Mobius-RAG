@@ -18,11 +18,11 @@ from app.config import GCS_BUCKET, ENV, CRITIQUE_RETRY_THRESHOLD
 from app.database import get_db, Base
 from app.models import Document, DocumentPage, ChunkingResult, HierarchicalChunk, ExtractedFact, ProcessingError, ChunkingJob, ChunkingEvent, LlmConfig, EmbeddingJob, ChunkEmbedding, PublishEvent, RagPublishedEmbedding, fact_to_category_scores_dict
 from app.services.error_tracker import log_error, classify_error
-from app.services.extract_text import extract_text_from_gcs
+from app.services.extract_text import extract_text_from_gcs, html_to_plain_text
 from app.services.chunking import split_paragraphs, split_paragraphs_from_markdown
 from app.services.extraction import stream_extract_facts
 from app.services.critique import stream_critique, critique_extraction, normalize_critique_result
-from app.services.utils import parse_json_response
+from app.services.utils import parse_json_response, default_termination_date
 from app.services.publish import publish_document, PublishResult
 
 # Set up logging
@@ -257,6 +257,21 @@ async def _run_startup_migrations_background():
                 await migrate_publish_verification()
             except Exception as migrate_err:
                 logger.warning(f"Startup migration (publish verification columns) skipped: {migrate_err}")
+            try:
+                from app.migrations.add_document_source_metadata import migrate as migrate_document_source_metadata
+                await migrate_document_source_metadata()
+            except Exception as migrate_err:
+                logger.warning(f"Startup migration (document source_metadata) skipped: {migrate_err}")
+            try:
+                from app.migrations.add_document_page_source_url import migrate as migrate_document_page_source_url
+                await migrate_document_page_source_url()
+            except Exception as migrate_err:
+                logger.warning(f"Startup migration (document_pages source_url) skipped: {migrate_err}")
+            try:
+                from app.migrations.add_chunking_job_extraction_enabled import migrate as migrate_chunking_job_extraction_enabled
+                await migrate_chunking_job_extraction_enabled()
+            except Exception as migrate_err:
+                logger.warning(f"Startup migration (chunking_job extraction_enabled) skipped: {migrate_err}")
 
             logger.info("✓ Startup migrations completed successfully")
         except Exception as e:
@@ -984,7 +999,7 @@ async def update_document_metadata(
     body: dict = Body(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """Update document metadata (display_name, payer, state, program, authority_level, effective_date, termination_date)."""
+    """Update document metadata (display_name, payer, state, program, authority_level, effective_date, termination_date, status)."""
     from uuid import UUID
     try:
         doc_uuid = UUID(document_id)
@@ -1001,6 +1016,12 @@ async def update_document_metadata(
                 setattr(doc, key, None)
             else:
                 setattr(doc, key, val if isinstance(val, str) else str(val))
+    # Allow setting status to "completed" for uploaded docs (e.g. scraped pages) so chunking can start
+    if body.get("status") == "completed" and doc.status == "uploaded":
+        pages_result = await db.execute(select(DocumentPage).where(DocumentPage.document_id == doc_uuid))
+        if pages_result.scalars().first() is not None:
+            doc.status = "completed"
+        # else: leave status as uploaded if no pages
     await db.commit()
     await db.refresh(doc)
     # Build same shape as list_documents: derive chunking_status from latest chunking_event when present
@@ -1542,6 +1563,7 @@ async def upload_file(
             payer=payer,
             state=state,
             program=program,
+            termination_date=default_termination_date(),
             status="uploaded",
         )
         db.add(document)
@@ -1659,6 +1681,7 @@ async def import_document_from_gcs(
             payer=payer,
             state=state,
             program=program,
+            termination_date=default_termination_date(),
             status="uploaded",
         )
         db.add(document)
@@ -1701,6 +1724,152 @@ async def import_document_from_gcs(
         await db.rollback()
         logger.error(f"Import from GCS error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _scraped_url_to_display_name(url: str) -> str:
+    """Derive a short display name from a scraped page URL: drop scheme and trailing .html / index.html."""
+    if not url or not url.strip():
+        return "scraped"
+    s = url.strip()
+    for prefix in ("https://", "http://"):
+        if s.lower().startswith(prefix):
+            s = s[len(prefix) :].lstrip("/")
+            break
+    s = s.rstrip("/")
+    for suffix in ("/index.html", "/index.htm", ".html", ".htm"):
+        if s.lower().endswith(suffix):
+            s = s[: -len(suffix)].rstrip("/")
+            break
+    if len(s) > 80:
+        s = s[:77] + "..."
+    return s or "scraped"
+
+
+class ScrapedPageItem(BaseModel):
+    """Single page from scraper: url and optional text/html."""
+    url: str
+    text: Optional[str] = None
+    html: Optional[str] = None
+
+
+class ImportScrapedPagesRequest(BaseModel):
+    """Request to import scraped pages as one RAG document."""
+    pages: List[ScrapedPageItem]
+    display_name: Optional[str] = None
+    authority_level: Optional[str] = None
+    effective_date: Optional[str] = None
+    termination_date: Optional[str] = None
+    payer: Optional[str] = None
+    state: Optional[str] = None
+    program: Optional[str] = None
+
+
+@app.post("/documents/import-scraped-pages")
+async def import_scraped_pages(
+    body: ImportScrapedPagesRequest = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Import scraped HTML/text pages as one RAG document. Dedup by content identity; 409 if duplicate."""
+    if not body.pages:
+        raise HTTPException(status_code=400, detail="pages must not be empty")
+
+    from app.services.page_to_markdown import raw_page_to_markdown
+
+    # Build text per page: use text if present else derive from html
+    page_texts: List[tuple[str, str]] = []  # (url, plain_text)
+    for p in body.pages:
+        if p.text and p.text.strip():
+            text = p.text.strip()
+        elif p.html and p.html.strip():
+            text = html_to_plain_text(p.html)
+        else:
+            text = ""
+        page_texts.append((p.url, text))
+
+    # Reject if no page has content so we don't create empty docs that won't chunk
+    if not any(t for _, t in page_texts):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "no_content",
+                "message": "No text or HTML content was provided for any of the selected pages. "
+                "Ensure the scraper captured page content (e.g. wait for scrape to finish and use 'Add to RAG' again, or use content mode Text or Both).",
+            },
+        )
+
+    # Synthetic identity for dedup: hash of first URL + sorted page URLs
+    urls = [p.url for p in body.pages]
+    first_url = urls[0] if urls else ""
+    identity_str = first_url + "\n" + "\n".join(sorted(urls))
+    file_hash = hashlib.sha256(identity_str.encode()).hexdigest()
+
+    result = await db.execute(select(Document).where(Document.file_hash == file_hash))
+    existing_doc = result.scalar_one_or_none()
+    if existing_doc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "duplicate_scraped",
+                "message": "A document with the same scraped pages already exists.",
+                "document_id": str(existing_doc.id),
+            },
+        )
+
+    file_path = ("scraped:" + first_url)[:500]
+    # Auto-derive display name: drop https:// and trailing .html / index.html when user didn't set one
+    _derived_display = _scraped_url_to_display_name(first_url)
+    seed_display = body.display_name or _derived_display
+    filename = seed_display.replace("/", "_").replace("?", "_")[:255] or "scraped"
+
+    source_metadata = {
+        "source_type": "scraped",
+        "scraped_seed_url": first_url,
+        "scraped_page_count": len(body.pages),
+        "scraped_page_urls": urls,
+    }
+    term_date = body.termination_date if body.termination_date else default_termination_date()
+
+    # Scraped pages already have text/text_markdown per page — no separate extraction job. Use "completed" so chunking can start.
+    document = Document(
+        filename=filename,
+        file_hash=file_hash,
+        file_path=file_path,
+        display_name=body.display_name or _derived_display,
+        payer=body.payer,
+        state=body.state,
+        program=body.program,
+        authority_level=body.authority_level,
+        effective_date=body.effective_date,
+        termination_date=term_date,
+        source_metadata=source_metadata,
+        status="completed",
+    )
+    db.add(document)
+    await db.commit()
+    await db.refresh(document)
+
+    for i, (url, text) in enumerate(page_texts):
+        text_markdown = raw_page_to_markdown(text) if text else ""
+        extraction_status = "success" if text else "empty"
+        page = DocumentPage(
+            document_id=document.id,
+            page_number=i + 1,
+            text=text or None,
+            text_markdown=text_markdown or None,
+            extraction_status=extraction_status,
+            text_length=len(text),
+            source_url=url,
+        )
+        db.add(page)
+
+    await db.commit()
+
+    return {
+        "document_id": str(document.id),
+        "filename": filename,
+        "pages_count": len(body.pages),
+        "status": "completed",
+    }
 
 
 def _critique_score(c: dict) -> float:
@@ -2010,6 +2179,7 @@ async def _run_chunking_loop(
     event_callback=None,  # Optional async generator callback: async def callback(event_type, data) -> yields SSE strings
     critique_enabled: bool = True,
     max_retries: int = 2,
+    extraction_enabled: bool = True,
 ):
     """
     Shared chunking loop logic. Runs the full paragraph processing loop.
@@ -2018,6 +2188,7 @@ async def _run_chunking_loop(
     - Checks _chunking_cancel at the start of each paragraph iteration
     - critique_enabled: if False, skip critique and retries (extraction only)
     - max_retries: when critique enabled, max extraction retries on critique fail
+    - extraction_enabled: if False, only build hierarchical chunks (no LLM extraction/critique)
     """
     results_paragraphs: dict = {}
     
@@ -2215,6 +2386,54 @@ async def _run_chunking_loop(
                                 yield line
                         except Exception as event_err:
                             logger.error(f"Error sending paragraph_start event: {event_err}", exc_info=True)
+                    
+                    # When extraction_enabled is False: only create hierarchical chunk, skip LLM
+                    if not extraction_enabled:
+                        para_start = para_data.get("start_offset") if isinstance(para_data, dict) else None
+                        chunk_query = await db.execute(
+                            select(HierarchicalChunk).where(
+                                HierarchicalChunk.document_id == doc_uuid,
+                                HierarchicalChunk.page_number == page.page_number,
+                                HierarchicalChunk.paragraph_index == para_idx
+                            )
+                        )
+                        chunk = chunk_query.scalar_one_or_none()
+                        if not chunk:
+                            chunk = HierarchicalChunk(
+                                document_id=doc_uuid,
+                                page_number=page.page_number,
+                                paragraph_index=para_idx,
+                                section_path=section_path,
+                                text=paragraph_text,
+                                text_length=len(paragraph_text),
+                                start_offset_in_page=para_start,
+                                extraction_status="skipped",
+                                critique_status="skipped",
+                            )
+                            db.add(chunk)
+                            await db.flush()
+                        results_paragraphs[para_id] = {
+                            "paragraph_id": para_id,
+                            "final_status": "skipped",
+                            "facts": [],
+                        }
+                        await _upsert("in_progress")
+                        if event_callback:
+                            try:
+                                completed_after = len(results_paragraphs)
+                                progress_pct_after = (completed_after / total_paragraphs * 100) if total_paragraphs > 0 else 0
+                                async for line in event_callback("progress_update", {
+                                    "current_paragraph": para_id,
+                                    "current_page": page_num,
+                                    "total_pages": total_pages,
+                                    "total_paragraphs": total_paragraphs,
+                                    "completed_paragraphs": completed_after,
+                                    "progress_percent": progress_pct_after
+                                }):
+                                    yield line
+                            except Exception as progress_err:
+                                logger.error(f"Error sending progress_update event: {progress_err}", exc_info=True)
+                        continue
                     
                     # Stage 1: Stream raw LLM output for extraction
                     # logger.debug(f"[{para_id}] Starting extraction streaming")  # Reduced logging
@@ -3538,6 +3757,7 @@ class ChunkingStartBody(BaseModel):
     threshold: Optional[float] = None
     critique_enabled: Optional[bool] = None
     max_retries: Optional[int] = None
+    extraction_enabled: Optional[bool] = None
     prompt_versions: Optional[dict] = None
     llm_config_version: Optional[str] = None
 
@@ -3549,6 +3769,7 @@ async def start_chunking(
     threshold: float | None = None,
     critique_enabled: bool | None = None,
     max_retries: int | None = None,
+    extraction_enabled: bool | None = None,
     llm_config_version: str | None = None,
     body: ChunkingStartBody | None = Body(None),
 ):
@@ -3564,6 +3785,8 @@ async def start_chunking(
             critique_enabled = body.critique_enabled
         if max_retries is None and body.max_retries is not None:
             max_retries = body.max_retries
+        if extraction_enabled is None and body.extraction_enabled is not None:
+            extraction_enabled = body.extraction_enabled
         if llm_config_version is None and body.llm_config_version is not None:
             llm_config_version = body.llm_config_version
         prompt_versions = body.prompt_versions
@@ -3571,10 +3794,11 @@ async def start_chunking(
     th = threshold if threshold is not None else CRITIQUE_RETRY_THRESHOLD
     th = max(0.0, min(1.0, th))
 
-    # Run mode defaults: critique on, max_retries 2
+    # Run mode defaults: critique on, max_retries 2, extraction on
     ce = critique_enabled if critique_enabled is not None else True
     mr = max_retries if max_retries is not None else 2
     mr = max(0, mr)
+    ee = extraction_enabled if extraction_enabled is not None else True
 
     try:
         doc_uuid = UUID(document_id)
@@ -3605,6 +3829,7 @@ async def start_chunking(
         threshold=str(th),
         critique_enabled="true" if ce else "false",
         max_retries=mr,
+        extraction_enabled="true" if ee else "false",
         prompt_versions=prompt_versions,
         llm_config_version=llm_config_version,
     )
@@ -3632,6 +3857,7 @@ class ChunkingRestartBody(BaseModel):
     threshold: Optional[float] = None
     critique_enabled: Optional[bool] = None
     max_retries: Optional[int] = None
+    extraction_enabled: Optional[bool] = None
 
 
 class ChunkingStatusUpdateBody(BaseModel):
@@ -3657,6 +3883,7 @@ async def restart_chunking(
     ce = body.critique_enabled if body and body.critique_enabled is not None else True
     mr = body.max_retries if body and body.max_retries is not None else 2
     mr = max(0, mr)
+    ee = body.extraction_enabled if body and body.extraction_enabled is not None else True
     
     try:
         doc_uuid = UUID(document_id)
@@ -3694,11 +3921,11 @@ async def restart_chunking(
         db_session = None
         try:
             _chunking_running.add(document_id)
-            logger.info(f"Restarting background chunking task for document {document_id} with threshold {th}, critique_enabled={ce}, max_retries={mr}")
+            logger.info(f"Restarting background chunking task for document {document_id} with threshold {th}, critique_enabled={ce}, extraction_enabled={ee}, max_retries={mr}")
             db_session = AsyncSessionLocal()
             try:
                 event_callback = await _create_event_buffer_callback(document_id, db_session)
-                async for _ in _run_chunking_loop(document_id, doc_uuid, pages, th, db_session, event_callback=event_callback, critique_enabled=ce, max_retries=mr):
+                async for _ in _run_chunking_loop(document_id, doc_uuid, pages, th, db_session, event_callback=event_callback, critique_enabled=ce, extraction_enabled=ee, max_retries=mr):
                     pass
             finally:
                 await db_session.close()

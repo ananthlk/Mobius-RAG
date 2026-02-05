@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
-from app.models import Document, DocumentPage, ChunkingJob, ChunkingResult, ChunkingEvent, EmbeddingJob
+from app.models import Document, DocumentPage, ChunkingJob, ChunkingResult, ChunkingEvent, EmbeddingJob, HierarchicalChunk
 from app.services.chunking import split_paragraphs_from_markdown
 from app.services.extraction import stream_extract_facts
 from app.services.critique import stream_critique, critique_extraction, normalize_critique_result
@@ -162,6 +162,7 @@ async def _run_chunking_loop(
     event_callback=None,
     critique_enabled: bool = True,
     max_retries: int = 2,
+    extraction_enabled: bool = True,
     extraction_prompt_body=None,
     retry_extraction_prompt_body=None,
     critique_prompt_body=None,
@@ -171,13 +172,14 @@ async def _run_chunking_loop(
     Shared chunking loop logic. Runs the full paragraph processing loop.
     critique_enabled: if False, skip critique and retries (extraction only).
     max_retries: when critique enabled, max extraction retries on critique fail (0 = no retry).
+    extraction_enabled: if False, only build hierarchical chunks (no LLM extraction/critique).
     extraction_prompt_body, retry_extraction_prompt_body, critique_prompt_body: optional prompt templates (from registry).
     llm: optional LLM provider instance (from llm_config).
     """
     results_paragraphs: dict = {}
 
     try:
-        logger.info(f"[{document_id}] Starting chunking loop with threshold {threshold}, critique_enabled={critique_enabled}, max_retries={max_retries}")
+        logger.info(f"[{document_id}] Starting chunking loop with threshold {threshold}, critique_enabled={critique_enabled}, extraction_enabled={extraction_enabled}, max_retries={max_retries}")
         # Materialize page (page_number, markdown) before any await; use text_markdown as canonical, fallback to raw->md
         from app.services.page_to_markdown import raw_page_to_markdown
         page_data_list = []
@@ -302,6 +304,55 @@ async def _run_chunking_loop(
                 logger.info(f"[{document_id}] [{para_id}] Starting extraction (text length: {len(paragraph_text)} chars)")
                 
                 try:
+                    # When extraction_enabled is False: only create hierarchical chunk, skip LLM
+                    if not extraction_enabled:
+                        para_start = para_data.get("start_offset") if isinstance(para_data, dict) else None
+                        chunk_query = await db.execute(
+                            select(HierarchicalChunk).where(
+                                HierarchicalChunk.document_id == doc_uuid,
+                                HierarchicalChunk.page_number == current_page_number,
+                                HierarchicalChunk.paragraph_index == para_idx
+                            )
+                        )
+                        chunk = chunk_query.scalar_one_or_none()
+                        if not chunk:
+                            chunk = HierarchicalChunk(
+                                document_id=doc_uuid,
+                                page_number=current_page_number,
+                                paragraph_index=para_idx,
+                                section_path=section_path,
+                                text=paragraph_text,
+                                text_length=len(paragraph_text),
+                                start_offset_in_page=para_start,
+                                extraction_status="skipped",
+                                critique_status="skipped",
+                            )
+                            db.add(chunk)
+                            await db.flush()
+                        results_paragraphs[para_id] = {
+                            "paragraph_id": para_id,
+                            "status": "skipped",
+                            "summary": None,
+                        }
+                        await _send_status(f"Paragraph {para_id} complete (structure only).")
+                        completed_after = len(results_paragraphs)
+                        progress_pct_after = (completed_after / total_paragraphs * 100) if total_paragraphs > 0 else 0
+                        if event_callback:
+                            try:
+                                async for _ in event_callback("progress_update", {
+                                    "current_paragraph": para_id,
+                                    "current_page": current_page_number,
+                                    "total_pages": total_pages,
+                                    "total_paragraphs": total_paragraphs,
+                                    "completed_paragraphs": completed_after,
+                                    "progress_percent": progress_pct_after
+                                }):
+                                    pass
+                            except Exception as progress_err:
+                                logger.error(f"[{document_id}] Error sending progress_update event: {progress_err}", exc_info=True)
+                        await _upsert("in_progress")
+                        continue
+
                     # Stage 1: Extract facts
                     raw_extraction_output = ""
                     extraction_result = None
@@ -817,6 +868,10 @@ async def process_job(job: ChunkingJob, db: AsyncSession):
             max_retries = 2 if job.max_retries is None else max(0, int(job.max_retries))
         except (TypeError, ValueError):
             max_retries = 2
+        try:
+            extraction_enabled = getattr(job, "extraction_enabled", None) is None or (str(getattr(job, "extraction_enabled", "true")).lower() == "true")
+        except Exception:
+            extraction_enabled = True
 
         # Resolve prompt versions and LLM config from job (run-configured). No assumptions.
         extraction_prompt_body = None
@@ -868,6 +923,7 @@ async def process_job(job: ChunkingJob, db: AsyncSession):
             event_callback=event_callback,
             critique_enabled=critique_enabled,
             max_retries=max_retries,
+            extraction_enabled=extraction_enabled,
             extraction_prompt_body=extraction_prompt_body,
             retry_extraction_prompt_body=retry_extraction_prompt_body,
             critique_prompt_body=critique_prompt_body,

@@ -17,6 +17,7 @@ dependencies = [
     "json-repair",
     "pyyaml",
     "pgvector",
+    "beautifulsoup4",
 ]
 
 [project.optional-dependencies]

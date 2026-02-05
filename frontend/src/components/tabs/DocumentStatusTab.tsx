@@ -34,6 +34,7 @@ export interface ChunkingOptions {
   threshold: number
   critiqueEnabled: boolean
   maxRetries: number
+  extractionEnabled: boolean
   promptVersions?: Record<string, string>
 }
 
@@ -41,6 +42,14 @@ const DEFAULT_CHUNK_OPTIONS: ChunkingOptions = {
   threshold: 0.6,
   critiqueEnabled: true,
   maxRetries: 2,
+  extractionEnabled: true,
+}
+
+/** Default termination date: 6 months from today (ISO date string). Used when document has no expiry. */
+function defaultTerminationDate(): string {
+  const d = new Date()
+  d.setMonth(d.getMonth() + 6)
+  return d.toISOString().slice(0, 10)
 }
 
 interface DocumentStatusTabProps {
@@ -52,6 +61,7 @@ interface DocumentStatusTabProps {
   onRestartChunking?: (documentId: string, options: ChunkingOptions) => Promise<void>
   onStartEmbedding?: (documentId: string) => Promise<void>
   onResetEmbedding?: (documentId: string) => Promise<void>
+  onMarkReadyForChunking?: (documentId: string) => Promise<void>
 }
 
 export function DocumentStatusTab({ 
@@ -63,6 +73,7 @@ export function DocumentStatusTab({
   onRestartChunking,
   onStartEmbedding,
   onResetEmbedding,
+  onMarkReadyForChunking,
 }: DocumentStatusTabProps) {
   const [documents, setDocuments] = useState<Document[]>([])
   const [loading, setLoading] = useState(false)
@@ -82,6 +93,7 @@ export function DocumentStatusTab({
   const [publishMessage, setPublishMessage] = useState<{ docId: string; text: string } | null>(null)
   const [chunkStatusLoadingDocId, setChunkStatusLoadingDocId] = useState<string | null>(null)
   const [chunkStatusMessage, setChunkStatusMessage] = useState<{ docId: string; text: string } | null>(null)
+  const [markReadyLoadingDocId, setMarkReadyLoadingDocId] = useState<string | null>(null)
   const [promptsConfig, setPromptsConfig] = useState<{ prompts: Record<string, string[]>; default: Record<string, string> } | null>(null)
   const [chunkOptionsByDoc, setChunkOptionsByDoc] = useState<Record<string, ChunkingOptions>>({})
 
@@ -121,6 +133,7 @@ export function DocumentStatusTab({
 
   const openMetadataForm = (doc: Document) => {
     setEditingMetadataDocumentId(doc.id)
+    const term = (doc.termination_date ?? '').trim()
     setMetadataForm({
       display_name: doc.display_name ?? '',
       payer: doc.payer ?? '',
@@ -128,7 +141,7 @@ export function DocumentStatusTab({
       program: doc.program ?? '',
       authority_level: doc.authority_level ?? '',
       effective_date: doc.effective_date ?? '',
-      termination_date: doc.termination_date ?? '',
+      termination_date: term || defaultTerminationDate(),
     })
     setMetadataError(null)
   }
@@ -462,8 +475,27 @@ export function DocumentStatusTab({
                         </span>
                       )}
                     </td>
-                    <td className="col-status">
+                    <td className="col-status col-extraction-with-action">
                       {getStatusBadge(doc.extraction_status, 'extraction')}
+                      {doc.extraction_status === 'uploaded' && onMarkReadyForChunking && (
+                        <button
+                          type="button"
+                          className="btn btn-small btn-link scrape-mark-ready"
+                          disabled={markReadyLoadingDocId === doc.id}
+                          title="Scraped/web docs are already stored; mark ready so you can start chunking"
+                          onClick={async (e) => {
+                            e.stopPropagation()
+                            setMarkReadyLoadingDocId(doc.id)
+                            try {
+                              await onMarkReadyForChunking(doc.id)
+                            } finally {
+                              setMarkReadyLoadingDocId(null)
+                            }
+                          }}
+                        >
+                          {markReadyLoadingDocId === doc.id ? 'Updating…' : 'Mark ready for chunking'}
+                        </button>
+                      )}
                     </td>
                     <td className="col-status col-chunk-with-menu">
                       <div className="chunk-cell">
@@ -521,6 +553,16 @@ export function DocumentStatusTab({
                                     <>
                                       {(doc.chunking_status === 'idle' || doc.chunking_status === null || (doc.chunking_status === 'stopped' || doc.chunking_status === 'failed')) && (
                                         <div className="chunk-options-form">
+                                          <div className="chunk-option-row">
+                                            <label className="chunk-option-checkbox">
+                                              <input
+                                                type="checkbox"
+                                                checked={getChunkOptionsForDoc(doc.id).extractionEnabled}
+                                                onChange={e => setChunkOptionForDoc(doc.id, p => ({ ...p, extractionEnabled: e.target.checked }))}
+                                              />
+                                              Run atomic extraction (LLM facts + critique)
+                                            </label>
+                                          </div>
                                           <div className="chunk-option-row">
                                             <label className="chunk-option-checkbox">
                                               <input
@@ -885,7 +927,7 @@ export function DocumentStatusTab({
                                 type="text"
                                 value={metadataForm.termination_date}
                                 onChange={e => setMetadataForm(prev => ({ ...prev, termination_date: e.target.value }))}
-                                placeholder="e.g. 2025-12-31 or ongoing"
+                                placeholder={`Default: ${defaultTerminationDate()} (6 months from today)`}
                               />
                             </div>
                           </div>

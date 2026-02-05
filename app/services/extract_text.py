@@ -1,6 +1,23 @@
 import fitz  # PyMuPDF
 from google.cloud import storage
+from bs4 import BeautifulSoup
 from app.config import GCS_BUCKET
+
+
+def html_to_plain_text(html: str) -> str:
+    """
+    Convert HTML to plain text (strip scripts/styles, get body text).
+    Used when importing scraped pages that have only html and no text.
+    """
+    if not html or not html.strip():
+        return ""
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style"]):
+        tag.decompose()
+    text = soup.get_text(separator="\n")
+    lines = (line.strip() for line in text.splitlines())
+    chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+    return "\n".join(chunk for chunk in chunks if chunk)
 
 
 async def extract_text_from_gcs(gcs_path: str) -> list[dict]:

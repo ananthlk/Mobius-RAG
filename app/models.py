@@ -25,6 +25,7 @@ class Document(Base):
     error_count = Column(Integer, default=0, nullable=False)
     critical_error_count = Column(Integer, default=0, nullable=False)
     review_status = Column(String(20), default="pending", nullable=False)  # pending, approved, rejected, reprocessing
+    source_metadata = Column(JSONB, nullable=True)  # e.g. {"source_type": "scraped", "scraped_seed_url": str, "scraped_page_count": int, "scraped_page_urls": [...]}
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
@@ -39,6 +40,7 @@ class DocumentPage(Base):
     extraction_status = Column(String(20), default="success", nullable=False)  # success, failed, empty
     extraction_error = Column(Text, nullable=True)  # Error message if extraction failed
     text_length = Column(Integer, default=0, nullable=False)  # Length of extracted text
+    source_url = Column(Text, nullable=True)  # Original URL for scraped pages; null for PDF pages
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
@@ -109,9 +111,10 @@ class ChunkingJob(Base):
     prompt_versions = Column(JSONB, nullable=True)  # e.g. {"extraction": "v1", "extraction_retry": "v1", "critique": "v1"}
     llm_config_version = Column(String(100), nullable=True)  # e.g. "default" or "v1" or content SHA
 
-    # Run mode: critique on/off, retries on/off
+    # Run mode: critique on/off, retries on/off, extraction on/off
     critique_enabled = Column(String(10), nullable=True)  # 'true', 'false' (store as string for consistency)
     max_retries = Column(Integer, nullable=True)  # 0 = no retry; 1, 2, etc.
+    extraction_enabled = Column(String(10), nullable=True)  # 'true', 'false'; when false, hierarchical chunks only, no LLM extraction/critique
 
 
 class ChunkingEvent(Base):

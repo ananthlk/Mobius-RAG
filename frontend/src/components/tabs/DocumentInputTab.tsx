@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { API_BASE, SCRAPER_API_BASE } from '../../config'
+import { STATE_OPTIONS } from '../../lib/documentMetadata'
 import './DocumentInputTab.css'
 
 interface DocumentInputTabProps {
@@ -55,6 +56,18 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
   const [importingDoc, setImportingDoc] = useState<string | null>(null)
   const [scrapeEvents, setScrapeEvents] = useState<ScraperEvent[]>([])
   const [scrapeProgressMessage, setScrapeProgressMessage] = useState<string | null>(null)
+  const [showAllPages, setShowAllPages] = useState(false)
+  const [selectedPageUrls, setSelectedPageUrls] = useState<Set<string>>(new Set())
+  const [selectedDocPaths, setSelectedDocPaths] = useState<Set<string>>(new Set())
+  // Optional metadata when adding scraped pages/docs to RAG (carries forward to document)
+  const [importMetadata, setImportMetadata] = useState<{ display_name: string; payer: string; state: string; program: string }>({
+    display_name: '',
+    payer: '',
+    state: '',
+    program: '',
+  })
+  const [importingPages, setImportingPages] = useState(false)
+  const [readerPage, setReaderPage] = useState<ScrapedPage | null>(null)
   const eventSourceRef = useRef<EventSource | null>(null)
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -105,6 +118,7 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
     setScrapeSummary(null)
     setScrapeEvents([])
     setScrapeProgressMessage(null)
+    setShowAllPages(false)
     try {
       const body: Record<string, unknown> = {
         url: scrapeUrl.trim(),
@@ -174,6 +188,8 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
           if (evt.payload?.error) setScrapeError(String(evt.payload.error))
           es.close()
           eventSourceRef.current = null
+          // Refresh pages/documents/summary from poll so displayPages has full content for "Add to RAG"
+          pollScrapeStatus()
         }
       } catch {
         // ignore parse errors
@@ -187,7 +203,7 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
       es.close()
       eventSourceRef.current = null
     }
-  }, [scrapeJobId])
+  }, [scrapeJobId, pollScrapeStatus])
 
   useEffect(() => {
     if (!scrapeJobId || !scraping || scrapeStatus === 'completed' || scrapeStatus === 'failed') return
@@ -215,6 +231,108 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
     }
   }
 
+  const addPageToRag = async (page: { url: string; text?: string; html?: string }) => {
+    setImportingPages(true)
+    try {
+      const body: Record<string, unknown> = {
+        pages: [{ url: page.url, text: page.text, html: page.html }],
+      }
+      if (importMetadata.display_name?.trim()) body.display_name = importMetadata.display_name.trim()
+      if (importMetadata.payer?.trim()) body.payer = importMetadata.payer.trim()
+      if (importMetadata.state?.trim()) body.state = importMetadata.state.trim()
+      if (importMetadata.program?.trim()) body.program = importMetadata.program.trim()
+      const resp = await fetch(`${API_BASE}/documents/import-scraped-pages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}))
+        throw new Error(err.detail?.message || err.detail || 'Import failed')
+      }
+      onDocumentAdded?.()
+    } catch (e) {
+      setScrapeError(e instanceof Error ? e.message : 'Import failed')
+    } finally {
+      setImportingPages(false)
+    }
+  }
+
+  const addSelectedToRag = async () => {
+    const pageList = displayPages.filter((p) => selectedPageUrls.has(p.url))
+    const docList = displayDocs.filter((d) => selectedDocPaths.has(d.gcs_path))
+    if (pageList.length === 0 && docList.length === 0) return
+    setImportingPages(true)
+    setScrapeError(null)
+    try {
+      if (pageList.length > 0) {
+        const body: Record<string, unknown> = {
+          pages: pageList.map((p) => ({ url: p.url, text: p.text, html: p.html })),
+        }
+        if (importMetadata.display_name?.trim()) body.display_name = importMetadata.display_name.trim()
+        if (importMetadata.payer?.trim()) body.payer = importMetadata.payer.trim()
+        if (importMetadata.state?.trim()) body.state = importMetadata.state.trim()
+        if (importMetadata.program?.trim()) body.program = importMetadata.program.trim()
+        const resp = await fetch(`${API_BASE}/documents/import-scraped-pages`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        })
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}))
+          throw new Error(err.detail?.message || err.detail || 'Import pages failed')
+        }
+        onDocumentAdded?.()
+      }
+      for (const d of docList) {
+        setImportingDoc(d.gcs_path)
+        try {
+          const resp = await fetch(`${API_BASE}/documents/import-from-gcs`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ gcs_path: d.gcs_path, filename: d.filename }),
+          })
+          if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}))
+            throw new Error(err.detail?.message || err.detail || 'Import document failed')
+          }
+          onDocumentAdded?.()
+        } finally {
+          setImportingDoc(null)
+        }
+      }
+    } catch (e) {
+      setScrapeError(e instanceof Error ? e.message : 'Add to RAG failed')
+    } finally {
+      setImportingPages(false)
+    }
+  }
+
+  const togglePageSelection = (url: string) => {
+    setSelectedPageUrls((prev) => {
+      const next = new Set(prev)
+      if (next.has(url)) next.delete(url)
+      else next.add(url)
+      return next
+    })
+  }
+  const toggleDocSelection = (gcsPath: string) => {
+    setSelectedDocPaths((prev) => {
+      const next = new Set(prev)
+      if (next.has(gcsPath)) next.delete(gcsPath)
+      else next.add(gcsPath)
+      return next
+    })
+  }
+  const selectAllPages = () => setSelectedPageUrls(new Set(displayPages.map((p) => p.url)))
+  const selectAllDocs = () => setSelectedDocPaths(new Set(displayDocs.map((d) => d.gcs_path)))
+  const clearSelection = () => {
+    setSelectedPageUrls(new Set())
+    setSelectedDocPaths(new Set())
+  }
+  const hasSelection = selectedPageUrls.size > 0 || selectedDocPaths.size > 0
+  const anyImporting = importingDoc !== null || importingPages
+
   // Derive display data from events or poll response
   const displayDocs = scrapeEvents.length
     ? scrapeEvents.filter((e) => e.type === 'document').map((e) => ({
@@ -240,6 +358,15 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
     scrapeEvents.length > 0
       ? (scrapeEvents.find((e) => e.type === 'summary')?.payload?.summary as string | undefined) ?? scrapeSummary
       : scrapeSummary
+
+  // Group documents by source page URL for hierarchy (page → documents)
+  const pageGroups = displayPages.map((page) => ({
+    page,
+    docs: displayDocs.filter((d) => d.source_page_url === page.url),
+  }))
+  const remainingDocs = displayDocs.filter(
+    (d) => !displayPages.some((p) => p.url === d.source_page_url)
+  )
 
   return (
     <div className="document-input-tab">
@@ -343,6 +470,9 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
             </div>
             {scrapeMode === 'tree' && (
               <div className="scrape-tree-options">
+                <p className="scrape-tree-tip">
+                  Tree scan follows links from this URL. For JS-heavy or SPA sites, use <strong>content mode: HTML</strong> below—the scraper fetches static HTML and does not run JavaScript.
+                </p>
                 <label>
                   Max depth: <input type="number" min={1} max={10} value={scrapeMaxDepth} onChange={(e) => setScrapeMaxDepth(parseInt(e.target.value, 10) || 3)} disabled={scraping} className="scrape-number" />
                 </label>
@@ -351,7 +481,7 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
                 </label>
               </div>
             )}
-            <div className="scrape-content-options">
+            <div className={`scrape-content-options ${scrapeMode === 'tree' ? 'scrape-content-with-tree' : ''}`}>
               <label>
                 Content mode:
                 <select
@@ -361,7 +491,7 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
                   className="scrape-select"
                 >
                   <option value="text">Text only</option>
-                  <option value="html">HTML only</option>
+                  <option value="html">HTML only (good for JS-heavy sites)</option>
                   <option value="both">Both</option>
                 </select>
               </label>
@@ -397,77 +527,239 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
               {scrapeError}
             </div>
           )}
-        {scraping && scrapeProgressMessage && (
-          <div className="scrape-progress">
-            <span className="scrape-progress-dot" />
-            {scrapeProgressMessage}
+        {(scraping || scrapeStatus === 'completed' || scrapeStatus === 'failed') && (
+          <div className="scrape-progress-block">
+            {scraping && (
+              <div className="scrape-progress">
+                <span className="scrape-progress-dot" />
+                <span className="scrape-progress-status">
+                  {scrapeProgressMessage || 'Starting…'}
+                </span>
+                <span className="scrape-progress-counts">
+                  {displayDocs.length} doc{displayDocs.length !== 1 ? 's' : ''}, {displayPages.length} page{displayPages.length !== 1 ? 's' : ''} so far
+                </span>
+              </div>
+            )}
           </div>
         )}
-        {(scrapeStatus === 'completed' || scrapeStatus === 'failed') && (
+        {(scraping || scrapeStatus === 'completed' || scrapeStatus === 'failed') && (
           <div className="scrape-results">
+            {scraping && (displayDocs.length > 0 || displayPages.length > 0) && (
+              <p className="scrape-results-live-title">
+                Live — {displayDocs.length} document{displayDocs.length !== 1 ? 's' : ''}, {displayPages.length} page{displayPages.length !== 1 ? 's' : ''}
+              </p>
+            )}
             {displaySummary && (
               <div className="scrape-summary-block">
                 <p className="scrape-results-title">Summary</p>
                 <div className="scrape-summary-text">{displaySummary}</div>
               </div>
             )}
-            {displayPages.length > 0 && (
-              <div className="scrape-pages-block">
-                <p className="scrape-results-title">Page content ({displayPages.length} page{displayPages.length !== 1 ? 's' : ''})</p>
-                {displayPages.slice(0, 5).map((p, i) => {
+            {(displayPages.length > 0 || displayDocs.length > 0) && (
+              <>
+                <div className="scrape-results-toolbar">
+                  <span className="scrape-results-toolbar-label">Selection:</span>
+                  <button type="button" className="btn btn-small" onClick={selectAllPages} disabled={anyImporting}>
+                    Select all {displayPages.length} pages
+                  </button>
+                  <button type="button" className="btn btn-small" onClick={selectAllDocs} disabled={anyImporting}>
+                    Select all {displayDocs.length} documents
+                  </button>
+                  <button type="button" className="btn btn-small" onClick={clearSelection} disabled={!hasSelection || anyImporting}>
+                    Clear
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-small"
+                    onClick={addSelectedToRag}
+                    disabled={!hasSelection || anyImporting}
+                  >
+                    {anyImporting ? 'Importing…' : `Add selected to RAG (${selectedPageUrls.size + selectedDocPaths.size})`}
+                  </button>
+                </div>
+                <details className="scrape-import-metadata" open={false}>
+                  <summary>Metadata (optional) — Payor, State, Program</summary>
+                  <p className="scrape-metadata-hint">Set these when adding pages to RAG so the document carries this metadata for filtering and display.</p>
+                  <div className="scrape-metadata-fields">
+                    <label className="scrape-metadata-label">
+                      <span>Payor name</span>
+                      <input
+                        type="text"
+                        className="scrape-metadata-input"
+                        placeholder="e.g. UnitedHealthcare"
+                        value={importMetadata.payer}
+                        onChange={e => setImportMetadata(prev => ({ ...prev, payer: e.target.value }))}
+                      />
+                    </label>
+                    <label className="scrape-metadata-label">
+                      <span>State</span>
+                      <select
+                        className="scrape-metadata-select"
+                        value={importMetadata.state}
+                        onChange={e => setImportMetadata(prev => ({ ...prev, state: e.target.value }))}
+                      >
+                        <option value="">—</option>
+                        {STATE_OPTIONS.map(opt => (
+                          <option key={opt.value} value={opt.value}>{opt.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="scrape-metadata-label">
+                      <span>Program</span>
+                      <input
+                        type="text"
+                        className="scrape-metadata-input"
+                        placeholder="e.g. Medicaid, Medicare"
+                        value={importMetadata.program}
+                        onChange={e => setImportMetadata(prev => ({ ...prev, program: e.target.value }))}
+                      />
+                    </label>
+                    <label className="scrape-metadata-label">
+                      <span>Display name</span>
+                      <input
+                        type="text"
+                        className="scrape-metadata-input"
+                        placeholder="Optional short name for the document"
+                        value={importMetadata.display_name}
+                        onChange={e => setImportMetadata(prev => ({ ...prev, display_name: e.target.value }))}
+                      />
+                    </label>
+                  </div>
+                </details>
+                <p className="scrape-results-title">Results (by page)</p>
+                {(showAllPages ? pageGroups : pageGroups.slice(0, 5)).map(({ page: p, docs }, i) => {
                   const content = p.text ?? p.html ?? '(no content)'
                   const preview = content.slice(0, 2000) + (content.length > 2000 ? '...' : '')
                   return (
-                    <details key={i} className="scrape-page-details">
-                      <summary>
-                        <span className="scrape-page-url">{p.url}</span>
-                        {p.depth != null && <span className="scrape-page-meta">depth {p.depth}</span>}
-                        {p.timestamp && <span className="scrape-page-meta">{p.timestamp}</span>}
-                      </summary>
-                      <pre className="scrape-page-text">{preview}</pre>
-                    </details>
+                    <div key={`${p.url}-${i}`} className="scrape-page-group">
+                      <details className="scrape-page-details">
+                        <summary>
+                          <span className="scrape-page-row-main">
+                            <label className="scrape-row-select" onClick={e => e.stopPropagation()}>
+                              <input
+                                type="checkbox"
+                                checked={selectedPageUrls.has(p.url)}
+                                onChange={() => togglePageSelection(p.url)}
+                                disabled={anyImporting}
+                              />
+                              <span className="scrape-checkbox-label">Select</span>
+                            </label>
+                            <button
+                              type="button"
+                              className="scrape-page-view-link"
+                              onClick={(e) => {
+                                e.preventDefault()
+                                e.stopPropagation()
+                                setReaderPage(p)
+                              }}
+                            >
+                              {p.url}
+                            </button>
+                            <span className="scrape-page-view-hint">View</span>
+                          </span>
+                          {p.depth != null && <span className="scrape-page-meta">depth {p.depth}</span>}
+                          {p.timestamp && <span className="scrape-page-meta">{p.timestamp}</span>}
+                          <button
+                            type="button"
+                            className="btn btn-small scrape-page-add-rag"
+                            onClick={(e) => {
+                              e.preventDefault()
+                              e.stopPropagation()
+                              addPageToRag(p)
+                            }}
+                            disabled={importingPages}
+                          >
+                            {importingPages ? 'Importing…' : 'Add to RAG'}
+                          </button>
+                        </summary>
+                        <pre className="scrape-page-text">{preview}</pre>
+                        {docs.length > 0 && (
+                          <ul className="scrape-doc-list scrape-doc-sublist">
+                            {docs.map((d) => (
+                              <li key={d.gcs_path}>
+                                <label className="scrape-row-select">
+                                  <input
+                                    type="checkbox"
+                                    checked={selectedDocPaths.has(d.gcs_path)}
+                                    onChange={() => toggleDocSelection(d.gcs_path)}
+                                    disabled={anyImporting}
+                                  />
+                                  <span>{d.filename}</span>
+                                </label>
+                                {(d.size_bytes != null || d.content_type) && (
+                                  <span className="scrape-doc-meta">
+                                    {d.size_bytes != null && `${(d.size_bytes / 1024).toFixed(1)} KB`}
+                                    {d.content_type && ` · ${d.content_type}`}
+                                  </span>
+                                )}
+                                <button
+                                  type="button"
+                                  className="btn btn-small"
+                                  onClick={() => importToRag(d.gcs_path, d.filename)}
+                                  disabled={importingDoc === d.gcs_path}
+                                >
+                                  {importingDoc === d.gcs_path ? 'Importing…' : 'Add to RAG'}
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </details>
+                    </div>
                   )
                 })}
-                {displayPages.length > 5 && <p className="scrape-more">... and {displayPages.length - 5} more pages</p>}
-              </div>
-            )}
-            {displayDocs.length > 0 && (
-              <>
-                <p className="scrape-results-title">Downloaded documents:</p>
-                <ul className="scrape-doc-list">
-                  {displayDocs.map((d) => (
-                    <li key={d.gcs_path}>
-                      <div className="scrape-doc-info">
-                        <span>{d.filename}</span>
-                        {(d.size_bytes != null || d.content_type || d.source_page_url) && (
-                          <span className="scrape-doc-meta">
-                            {d.size_bytes != null && `${(d.size_bytes / 1024).toFixed(1)} KB`}
-                            {d.content_type && ` · ${d.content_type}`}
-                            {d.source_page_url && ` · from ${d.source_page_url}`}
-                          </span>
-                        )}
-                      </div>
-                      <button
-                        type="button"
-                        className="btn btn-small"
-                        onClick={() => importToRag(d.gcs_path, d.filename)}
-                        disabled={importingDoc === d.gcs_path}
-                      >
-                        {importingDoc === d.gcs_path ? 'Importing…' : 'Add to RAG'}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-                <p className="upload-hint">PDF documents can be added to RAG for chunking and embedding.</p>
+                {pageGroups.length > 5 && !showAllPages && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary scrape-show-more-pages"
+                    onClick={() => setShowAllPages(true)}
+                  >
+                    Show all {displayPages.length} pages
+                  </button>
+                )}
+                {remainingDocs.length > 0 && (
+                  <div className="scrape-page-group">
+                    <p className="scrape-results-title">Other downloaded documents</p>
+                    <ul className="scrape-doc-list">
+                      {remainingDocs.map((d) => (
+                        <li key={d.gcs_path}>
+                          <label className="scrape-row-select">
+                            <input
+                              type="checkbox"
+                              checked={selectedDocPaths.has(d.gcs_path)}
+                              onChange={() => toggleDocSelection(d.gcs_path)}
+                              disabled={anyImporting}
+                            />
+                            <span>{d.filename}</span>
+                          </label>
+                          {(d.size_bytes != null || d.content_type || d.source_page_url) && (
+                            <span className="scrape-doc-meta">
+                              {d.size_bytes != null && `${(d.size_bytes / 1024).toFixed(1)} KB`}
+                              {d.content_type && ` · ${d.content_type}`}
+                              {d.source_page_url && ` · from ${d.source_page_url}`}
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            className="btn btn-small"
+                            onClick={() => importToRag(d.gcs_path, d.filename)}
+                            disabled={importingDoc === d.gcs_path}
+                          >
+                            {importingDoc === d.gcs_path ? 'Importing…' : 'Add to RAG'}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                <p className="upload-hint">Page content and PDF documents can be added to RAG for chunking and embedding.</p>
               </>
             )}
-            {displayDocs.length === 0 && displayPages.length === 0 && !displaySummary && (
+            {displayDocs.length === 0 && displayPages.length === 0 && !displaySummary && (scrapeStatus === 'completed' || scrapeStatus === 'failed') && (
               <div className="scrape-empty-state">
                 <p className="scrape-empty-title">No documents or page content extracted</p>
                 <p className="scrape-empty-desc">
-                  The scraper completed but found no downloadable files (PDF, DOC, etc.) and no extractable text from the page.
-                  This often happens with JavaScript-heavy sites—the scraper fetches static HTML; content loaded by JS is not captured.
-                  Try a simpler page, or use <strong>content mode: HTML</strong> to capture raw HTML.
+                  Try <strong>content mode: HTML</strong> (for JS-heavy sites) or a simpler page, then run the scan again.
                 </p>
               </div>
             )}
@@ -504,6 +796,65 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
           </div>
         </details>
       </div>
+
+      {/* Reader modal: view page content */}
+      {readerPage && (
+        <div
+          className="scrape-reader-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Page content reader"
+          onClick={() => setReaderPage(null)}
+        >
+          <div
+            className="scrape-reader-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="scrape-reader-header">
+              <a
+                href={readerPage.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="scrape-reader-url"
+                onClick={(e) => e.stopPropagation()}
+              >
+                {readerPage.url}
+              </a>
+              <button
+                type="button"
+                className="scrape-reader-close"
+                onClick={() => setReaderPage(null)}
+                aria-label="Close reader"
+              >
+                ×
+              </button>
+            </div>
+            <div className="scrape-reader-body">
+              {(() => {
+                const raw = readerPage.text ?? readerPage.html ?? ''
+                const text = readerPage.text
+                  ? readerPage.text
+                  : readerPage.html
+                    ? raw
+                        .replace(/<\s*br\s*\/?>/gi, '\n')
+                        .replace(/<\s*\/\s*(p|div|li|tr)/gi, '\n')
+                        .replace(/<[^>]+>/g, ' ')
+                        .replace(/[ \t]+/g, ' ')
+                        .replace(/\n\s*\n\s*\n/g, '\n\n')
+                        .trim()
+                    : ''
+                return text ? (
+                  <div className="scrape-reader-content">
+                    {text}
+                  </div>
+                ) : (
+                  <p className="scrape-reader-empty">No text content for this page.</p>
+                )
+              })()}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
