@@ -78,7 +78,8 @@ def _vertex_embed(
         from vertexai.language_models import TextEmbeddingModel, TextEmbeddingInput
     except ImportError as e:
         raise ImportError(
-            "Vertex AI package required. Install with: pip install -e '.[vertex]'"
+            "Vertex AI package required for embeddings. Either install it: pip install -e '.[vertex]' "
+            "(from mobius-rag repo), or use OpenAI instead by setting EMBEDDING_PROVIDER=openai and OPENAI_API_KEY."
         ) from e
     vertexai.init(project=project, location=location)
     emb_model = TextEmbeddingModel.from_pretrained(model)

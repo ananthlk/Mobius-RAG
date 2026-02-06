@@ -22,7 +22,7 @@ from app.services.extract_text import extract_text_from_gcs, html_to_plain_text
 from app.services.chunking import split_paragraphs, split_paragraphs_from_markdown
 from app.services.extraction import stream_extract_facts
 from app.services.critique import stream_critique, critique_extraction, normalize_critique_result
-from app.services.utils import parse_json_response, default_termination_date
+from app.services.utils import parse_json_response, default_termination_date, sanitize_text_for_db
 from app.services.publish import publish_document, PublishResult
 
 # Set up logging
@@ -54,12 +54,8 @@ async def _run_startup_migrations_background():
     from sqlalchemy import text
     from app.database import AsyncSessionLocal, engine
 
-    # pgvector extension must exist before create_all (chunk_embeddings uses vector type)
-    async with engine.begin() as conn:
-        try:
-            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-        except Exception as ext_err:
-            logger.warning("Could not enable pgvector extension: %s. Install pgvector: https://github.com/pgvector/pgvector", ext_err)
+    # Note: pgvector extension removed - embeddings are stored in Vertex AI Vector Search
+    # The embedding columns in PostgreSQL are kept for schema compatibility but unused.
 
     # Ensure all ORM tables exist first (documents, document_pages, processing_errors, etc.)
     # so raw SQL below that references them does not fail on a fresh database.
@@ -1256,12 +1252,12 @@ async def restart_extraction(
                 # Insert new pages (raw + markdown for reader)
                 from app.services.page_to_markdown import raw_page_to_markdown
                 for page_data in pages:
-                    raw_text = page_data.get("text") or ""
+                    raw_text = sanitize_text_for_db(page_data.get("text") or "") or ""
                     page = DocumentPage(
                         document_id=doc_uuid,
                         page_number=page_data["page_number"],
                         text=raw_text,
-                        text_markdown=raw_page_to_markdown(raw_text) if raw_text else None,
+                        text_markdown=sanitize_text_for_db(raw_page_to_markdown(raw_text) if raw_text else None),
                         text_length=page_data.get("text_length", 0),
                         extraction_status=page_data.get("extraction_status", "failed"),
                         extraction_error=page_data.get("extraction_error"),
@@ -1443,6 +1439,9 @@ async def delete_document(
             delete(ChunkingJob).where(ChunkingJob.document_id == doc_uuid)
         )
         await db.execute(
+            delete(EmbeddingJob).where(EmbeddingJob.document_id == doc_uuid)
+        )
+        await db.execute(
             delete(ProcessingError).where(ProcessingError.document_id == doc_uuid)
         )
         await db.execute(
@@ -1455,12 +1454,26 @@ async def delete_document(
             delete(ChunkingResult).where(ChunkingResult.document_id == doc_uuid)
         )
         await db.execute(
+            delete(ChunkEmbedding).where(ChunkEmbedding.document_id == doc_uuid)
+        )
+        await db.execute(
+            delete(RagPublishedEmbedding).where(RagPublishedEmbedding.document_id == doc_uuid)
+        )
+        await db.execute(
+            delete(PublishEvent).where(PublishEvent.document_id == doc_uuid)
+        )
+        await db.execute(
             delete(DocumentPage).where(DocumentPage.document_id == doc_uuid)
         )
         await db.execute(
             delete(Document).where(Document.id == doc_uuid)
         )
         await db.commit()
+        try:
+            from app.services.vector_store import get_vector_store
+            get_vector_store().delete_by_document(document_id)
+        except Exception as vec_err:
+            logger.warning("Vector store delete_by_document failed (non-fatal): %s", vec_err)
         
         logger.info(f"Deleted document {document_id} from database")
         
@@ -1583,12 +1596,13 @@ async def upload_file(
             # Save pages to database with error tracking (raw + markdown for reader)
             from app.services.page_to_markdown import raw_page_to_markdown
             for page_data in pages:
-                raw_text = page_data.get("text") or ""
+                raw_text = sanitize_text_for_db(page_data.get("text") or "") or ""
+                md = raw_page_to_markdown(raw_text) if raw_text else None
                 page = DocumentPage(
                     document_id=document.id,
                     page_number=page_data["page_number"],
                     text=raw_text,
-                    text_markdown=raw_page_to_markdown(raw_text) if raw_text else None,
+                    text_markdown=sanitize_text_for_db(md),
                     extraction_status=page_data.get("extraction_status", "failed"),
                     extraction_error=page_data.get("extraction_error"),
                     text_length=page_data.get("text_length", 0),
@@ -1631,6 +1645,10 @@ class ImportFromGcsRequest(BaseModel):
     """Request to import a document from GCS (e.g. from web scraper)."""
     gcs_path: str
     filename: Optional[str] = None
+    payer: Optional[str] = None
+    state: Optional[str] = None
+    program: Optional[str] = None
+    authority_level: Optional[str] = None
 
 
 @app.post("/documents/import-from-gcs")
@@ -1648,6 +1666,10 @@ async def import_document_from_gcs(
     filename = body.filename or gcs_path.split("/")[-1]
     if not filename:
         raise HTTPException(status_code=400, detail="Could not derive filename from gcs_path")
+    # Prefer body over query params for metadata
+    payer_val = body.payer if body.payer is not None else payer
+    state_val = body.state if body.state is not None else state
+    program_val = body.program if body.program is not None else program
 
     try:
         # Compute hash from GCS object
@@ -1678,9 +1700,10 @@ async def import_document_from_gcs(
             filename=filename,
             file_hash=file_hash,
             file_path=gcs_path,
-            payer=payer,
-            state=state,
-            program=program,
+            payer=payer_val,
+            state=state_val,
+            program=program_val,
+            authority_level=body.authority_level,
             termination_date=default_termination_date(),
             status="uploaded",
         )
@@ -1694,12 +1717,13 @@ async def import_document_from_gcs(
             from app.services.page_to_markdown import raw_page_to_markdown
             pages = await extract_text_from_gcs(gcs_path)
             for page_data in pages:
-                raw_text = page_data.get("text") or ""
+                raw_text = sanitize_text_for_db(page_data.get("text") or "") or ""
+                md = raw_page_to_markdown(raw_text) if raw_text else None
                 page = DocumentPage(
                     document_id=document.id,
                     page_number=page_data["page_number"],
                     text=raw_text,
-                    text_markdown=raw_page_to_markdown(raw_text) if raw_text else None,
+                    text_markdown=sanitize_text_for_db(md),
                     extraction_status=page_data.get("extraction_status", "failed"),
                     extraction_error=page_data.get("extraction_error"),
                     text_length=page_data.get("text_length", 0),
@@ -1849,15 +1873,16 @@ async def import_scraped_pages(
     await db.refresh(document)
 
     for i, (url, text) in enumerate(page_texts):
-        text_markdown = raw_page_to_markdown(text) if text else ""
-        extraction_status = "success" if text else "empty"
+        raw_text = sanitize_text_for_db(text) if text else None
+        text_markdown = raw_page_to_markdown(raw_text) if raw_text else ""
+        extraction_status = "success" if raw_text else "empty"
         page = DocumentPage(
             document_id=document.id,
             page_number=i + 1,
-            text=text or None,
-            text_markdown=text_markdown or None,
+            text=raw_text,
+            text_markdown=sanitize_text_for_db(text_markdown or None),
             extraction_status=extraction_status,
-            text_length=len(text),
+            text_length=len(raw_text) if raw_text else 0,
             source_url=url,
         )
         db.add(page)
@@ -1880,6 +1905,15 @@ def _critique_score(c: dict) -> float:
         return max(0.0, min(1.0, float(s)))
     except (TypeError, ValueError):
         return 0.5
+
+
+def _fact_text_value_for_db(v):
+    """Normalize fact text field for DB: dict/list -> JSON string (LLM may return e.g. when_applies as object)."""
+    if v is None:
+        return None
+    if isinstance(v, (dict, list)):
+        return json.dumps(v, default=str)
+    return v if isinstance(v, str) else str(v)
 
 
 async def _persist_paragraph_to_db(
@@ -2013,8 +2047,8 @@ async def _persist_paragraph_to_db(
         # logger.info(f"[_persist] Creating {len(facts)} ExtractedFact records for {para_id}")  # Reduced logging
         for idx, fact_data in enumerate(facts):
             try:
-                # Validate required fields
-                fact_text = fact_data.get("fact_text", "")
+                # Validate required fields; normalize text fields (LLM may return dict/list e.g. when_applies)
+                fact_text = _fact_text_value_for_db(fact_data.get("fact_text")) or ""
                 if not fact_text or not fact_text.strip():
                     logger.warning(f"[_persist] Fact {idx+1} for {para_id} has empty fact_text, skipping")
                     facts_failed += 1
@@ -2057,12 +2091,12 @@ async def _persist_paragraph_to_db(
                     hierarchical_chunk_id=chunk.id,
                     document_id=doc_uuid,
                     fact_text=fact_text,
-                    fact_type=fact_data.get("fact_type"),
-                    who_eligible=fact_data.get("who_eligible"),
-                    how_verified=fact_data.get("how_verified"),
-                    conflict_resolution=fact_data.get("conflict_resolution"),
-                    when_applies=fact_data.get("when_applies"),
-                    limitations=fact_data.get("limitations"),
+                    fact_type=_fact_text_value_for_db(fact_data.get("fact_type")),
+                    who_eligible=_fact_text_value_for_db(fact_data.get("who_eligible")),
+                    how_verified=_fact_text_value_for_db(fact_data.get("how_verified")),
+                    conflict_resolution=_fact_text_value_for_db(fact_data.get("conflict_resolution")),
+                    when_applies=_fact_text_value_for_db(fact_data.get("when_applies")),
+                    limitations=_fact_text_value_for_db(fact_data.get("limitations")),
                     is_verified=is_verified_val,
                     is_eligibility_related=is_eligibility_related_val,
                     is_pertinent_to_claims_or_members=is_pertinent_val,
@@ -4355,7 +4389,12 @@ async def query_rag(
     body: QueryRequest = Body(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """Embed query, search vector store (top k), resolve source_id to text. Returns chunks for RAG context (no fact/chunk differentiation)."""
+    """Embed query, search vector store (top k), resolve source_id to text.
+
+    Search order:
+    - Uses configured vector store (Chroma or Vertex AI Vector Search).
+    - Note: pgvector fallback removed - embeddings are in Vertex AI, not PostgreSQL.
+    """
     from uuid import UUID
     from app.services.embedding_provider import get_embedding_provider, embed_async
     from app.services.vector_store import get_vector_store
@@ -4371,9 +4410,11 @@ async def query_rag(
         return QueryResponse(chunks=[])
     query_embedding = query_embeddings[0]
 
-    # 2. Search vector store (Chroma returns id + metadata: document_id, source_type, source_id)
+    # 2. Search vector store (Chroma or Vertex AI Vector Search)
     vector_store = get_vector_store()
     results = vector_store.search(query_embedding, k=k)
+    # Note: pgvector fallback removed - embeddings are stored in Vertex AI Vector Search
+
     if not results:
         return QueryResponse(chunks=[])
 
@@ -5387,6 +5428,10 @@ async def delete_document_cascade(
             {"doc_id": doc_uuid}
         )
         await db.execute(
+            text("DELETE FROM embedding_jobs WHERE document_id = :doc_id"),
+            {"doc_id": doc_uuid}
+        )
+        await db.execute(
             text("DELETE FROM processing_errors WHERE document_id = :doc_id"),
             {"doc_id": doc_uuid}
         )
@@ -5403,6 +5448,18 @@ async def delete_document_cascade(
             {"doc_id": doc_uuid}
         )
         await db.execute(
+            text("DELETE FROM chunk_embeddings WHERE document_id = :doc_id"),
+            {"doc_id": doc_uuid}
+        )
+        await db.execute(
+            text("DELETE FROM rag_published_embeddings WHERE document_id = :doc_id"),
+            {"doc_id": doc_uuid}
+        )
+        await db.execute(
+            text("DELETE FROM publish_events WHERE document_id = :doc_id"),
+            {"doc_id": doc_uuid}
+        )
+        await db.execute(
             text("DELETE FROM document_pages WHERE document_id = :doc_id"),
             {"doc_id": doc_uuid}
         )
@@ -5412,6 +5469,11 @@ async def delete_document_cascade(
         )
         
         await db.commit()
+        try:
+            from app.services.vector_store import get_vector_store
+            get_vector_store().delete_by_document(document_id)
+        except Exception as vec_err:
+            logger.warning("Vector store delete_by_document failed (non-fatal): %s", vec_err)
         
         return {
             "status": "success",

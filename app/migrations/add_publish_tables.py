@@ -1,6 +1,9 @@
 """
 Migration: create rag_published_embeddings and publish_events tables.
 
+NOTE: Embeddings are stored in Vertex AI Vector Search, not PostgreSQL.
+The embedding column is JSONB for schema compatibility but not used for search.
+
 - rag_published_embeddings: dbt contract table; one row per published embedding (written on user Publish).
 - publish_events: audit log (document_id, published_at, published_by, rows_written).
 
@@ -23,12 +26,7 @@ async def migrate():
     url = DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
     conn = await asyncpg.connect(url)
     try:
-        try:
-            await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-            print("  pgvector extension enabled")
-        except Exception as ext_err:
-            print(f"  WARNING: Could not enable pgvector extension: {ext_err}")
-            raise
+        # Note: pgvector extension removed - embeddings are in Vertex AI Vector Search
 
         # 1. Create publish_events table
         exists_pe = await conn.fetchval("""
@@ -64,13 +62,14 @@ async def migrate():
         if exists_rpe:
             print("  Table rag_published_embeddings already exists")
         else:
+            # Note: embedding column is JSONB for compatibility; actual vectors in Vertex AI
             await conn.execute("""
                 CREATE TABLE rag_published_embeddings (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     document_id UUID NOT NULL,
                     source_type VARCHAR(20) NOT NULL,
                     source_id UUID NOT NULL,
-                    embedding vector(1536) NOT NULL,
+                    embedding JSONB,
                     model VARCHAR(100),
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     text TEXT NOT NULL DEFAULT '',
@@ -103,11 +102,7 @@ async def migrate():
             await conn.execute("""
                 CREATE INDEX idx_rag_published_embeddings_document_source ON rag_published_embeddings(document_id, source_type, source_id)
             """)
-            await conn.execute("""
-                CREATE INDEX idx_rag_published_embeddings_embedding ON rag_published_embeddings
-                USING hnsw (embedding vector_cosine_ops)
-            """)
-            print("  Created table rag_published_embeddings with vector index")
+            print("  Created table rag_published_embeddings")
     finally:
         await conn.close()
 

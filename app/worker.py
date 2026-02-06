@@ -14,7 +14,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
-from app.models import Document, DocumentPage, ChunkingJob, ChunkingResult, ChunkingEvent, EmbeddingJob, HierarchicalChunk
+from app.models import (
+    Document,
+    DocumentPage,
+    ChunkingJob,
+    ChunkingResult,
+    ChunkingEvent,
+    EmbeddingJob,
+    HierarchicalChunk,
+    ExtractedFact,
+    category_scores_dict_to_columns,
+)
 from app.services.chunking import split_paragraphs_from_markdown
 from app.services.extraction import stream_extract_facts
 from app.services.critique import stream_critique, critique_extraction, normalize_critique_result
@@ -81,6 +91,19 @@ def _utc_now_naive():
 WORKER_ID = f"worker-{os.getpid()}-{_utc_now_naive().isoformat()}"
 
 
+# Text columns that must be string in DB; LLM may return dict/list (e.g. when_applies: {"type": "days", "value": 120})
+_FACT_TEXT_KEYS = ("fact_text", "fact_type", "who_eligible", "how_verified", "conflict_resolution", "when_applies", "limitations")
+
+
+def _fact_value_to_str(v):
+    """Convert a fact field value to string for DB. Dict/list -> JSON string."""
+    if v is None:
+        return None
+    if isinstance(v, (dict, list)):
+        return json.dumps(v, default=str)
+    return v if isinstance(v, str) else str(v)
+
+
 def _sanitize_fact_for_db(fact_data: dict) -> dict:
     """Return a copy of fact_data safe for PostgreSQL (String columns). Category scores are parsed into columns separately."""
     import math
@@ -94,6 +117,8 @@ def _sanitize_fact_for_db(fact_data: dict) -> dict:
             out[k] = None
         elif k in ("is_verified", "is_eligibility_related", "is_pertinent_to_claims_or_members", "confidence") and v is not None:
             out[k] = str(v).lower() if isinstance(v, bool) else str(v)
+        elif k in _FACT_TEXT_KEYS:
+            out[k] = _fact_value_to_str(v)
         else:
             out[k] = v
     return out
@@ -123,33 +148,33 @@ async def _safe_log_error(**kwargs):
         logger.error("log_error failed (unexpected): %s", e, exc_info=True)
 
 
-async def _create_event_buffer_callback(document_id: str, db: AsyncSession):
-    """Create an event callback that writes events to the database."""
+async def _create_event_buffer_callback(document_id: str):
+    """Create an event callback that writes events to the database.
+    Uses a new short-lived session per event so the main job session is not held during event writes."""
     from app.models import ChunkingEvent
     from uuid import UUID
-    
+
     doc_uuid = UUID(document_id)
     event_count = 0
-    
+
     async def event_callback(event_type: str, data: dict):
         nonlocal event_count
         try:
-            event = ChunkingEvent(
-                document_id=doc_uuid,
-                event_type=event_type,
-                event_data=data
-            )
-            db.add(event)
-            event_count += 1
-            # Commit each progress/chunking event so Live Updates sees it right away
-            await db.commit()
-            logger.debug(f"[{document_id}] Event #{event_count}: {event_type} - {data.get('message', data.get('current_paragraph', 'no key'))}")
+            async with AsyncSessionLocal() as db:
+                event = ChunkingEvent(
+                    document_id=doc_uuid,
+                    event_type=event_type,
+                    event_data=data
+                )
+                db.add(event)
+                event_count += 1
+                await db.commit()
+                logger.debug(f"[{document_id}] Event #{event_count}: {event_type} - {data.get('message', data.get('current_paragraph', 'no key'))}")
         except Exception as e:
             logger.error(f"[{document_id}] Failed to write event {event_type}: {e}", exc_info=True)
-            await db.rollback()
         yield ""  # Yield empty for compatibility
-    
-    logger.info(f"[{document_id}] Event callback created, will write events to database")
+
+    logger.info(f"[{document_id}] Event callback created, will write events to database (short-lived session per event)")
     return event_callback
 
 
@@ -563,8 +588,6 @@ async def _run_chunking_loop(
                     if facts:
                         try:
                             logger.debug(f"[{document_id}] [{para_id}] Persisting {len(facts)} facts to database")
-                            from app.models import HierarchicalChunk, ExtractedFact, category_scores_dict_to_columns
-                            
                             # Get or create hierarchical chunk
                             chunk_query = await db.execute(
                                 select(HierarchicalChunk).where(
@@ -856,8 +879,8 @@ async def process_job(job: ChunkingJob, db: AsyncSession):
             threshold = 0.6
         logger.info(f"[JOB {job.id}] Using critique threshold: {threshold}")
         
-        # Create event callback (pass db session so it can write events)
-        event_callback = await _create_event_buffer_callback(str(job.document_id), db)
+        # Create event callback (uses short-lived session per event to avoid holding main session)
+        event_callback = await _create_event_buffer_callback(str(job.document_id))
         
         # Run mode from job (default: critique on, max_retries 2). No assumptions.
         try:
@@ -992,8 +1015,9 @@ async def worker_loop():
 
     while True:
         try:
+            # Short-lived session only to find a pending job (release connection before long process_job)
+            job_id = None
             async with AsyncSessionLocal() as db:
-                # Find pending job
                 result = await db.execute(
                     select(ChunkingJob)
                     .where(ChunkingJob.status == "pending")
@@ -1001,18 +1025,24 @@ async def worker_loop():
                     .limit(1)
                 )
                 job = result.scalar_one_or_none()
-                
                 if job:
-                    logger.info(f"Found pending job {job.id} for document {job.document_id}, processing...")
-                    await process_job(job, db)
-                    poll_count = 0  # Reset poll count after processing a job
-                else:
-                    poll_count += 1
-                    if poll_count % 10 == 0:  # Log every 10th poll (every ~20 seconds)
-                        logger.debug(f"No pending jobs, polling... (poll #{poll_count})")
-                    # No jobs, wait a bit
-                    await asyncio.sleep(2)
-        
+                    job_id = job.id
+            # Session closed here so we don't hold a connection during process_job
+
+            if job_id is not None:
+                async with AsyncSessionLocal() as db:
+                    result = await db.execute(select(ChunkingJob).where(ChunkingJob.id == job_id))
+                    job = result.scalar_one_or_none()
+                    if job:
+                        logger.info(f"Found pending job {job.id} for document {job.document_id}, processing...")
+                        await process_job(job, db)
+                poll_count = 0
+            else:
+                poll_count += 1
+                if poll_count % 10 == 0:
+                    logger.debug(f"No pending jobs, polling... (poll #{poll_count})")
+                await asyncio.sleep(2)
+
         except Exception as e:
             logger.error(f"Error in worker loop: {e}", exc_info=True)
             await asyncio.sleep(5)  # Wait longer on error

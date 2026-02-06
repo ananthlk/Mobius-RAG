@@ -16,7 +16,6 @@ dependencies = [
     "aiohttp",
     "json-repair",
     "pyyaml",
-    "pgvector",
     "beautifulsoup4",
 ]
 

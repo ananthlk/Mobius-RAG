@@ -7,6 +7,16 @@ from datetime import date, timedelta
 logger = logging.getLogger(__name__)
 
 
+def sanitize_text_for_db(text: str | None) -> str | None:
+    """Remove NUL bytes (0x00) from text. PostgreSQL text/varchar do not allow 0x00 (CharacterNotInRepertoireError).
+    Returns None if input is None, otherwise a string safe for DB text columns."""
+    if text is None:
+        return None
+    if "\x00" in text:
+        return text.replace("\x00", "")
+    return text
+
+
 def default_termination_date() -> str:
     """Return ISO date string 6 months from today. Used when creating documents without explicit expiry."""
     d = date.today() + timedelta(days=182)  # ~6 months

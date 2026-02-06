@@ -329,6 +329,44 @@
   border-radius: 4px;
 }
 
+.scrape-path-scope {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.scrape-path-input {
+  min-width: 12rem;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--border-light);
+  border-radius: 4px;
+  font-family: inherit;
+}
+
+.scrape-auto-path-btn {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.8125rem;
+  border: 1px solid var(--border-light);
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  cursor: pointer;
+}
+
+.scrape-auto-path-btn:hover:not(:disabled) {
+  background: var(--bg-tertiary);
+}
+
+.scrape-auto-path-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.scrape-path-hint {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+}
+
 .scrape-results {
   margin-top: 1rem;
   padding: 1rem;

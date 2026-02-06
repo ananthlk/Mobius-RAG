@@ -1,7 +1,8 @@
 from sqlalchemy import Boolean, Column, String, DateTime, Integer, Text, ForeignKey, Float
 from sqlalchemy.dialects.postgresql import UUID, JSONB
-from pgvector.sqlalchemy import Vector
 from datetime import datetime
+# Note: Embeddings are stored in Vertex AI Vector Search, not PostgreSQL.
+# The embedding columns below are kept for schema compatibility but not used.
 import uuid
 from app.database import Base
 
@@ -168,7 +169,7 @@ class ChunkEmbedding(Base):
     document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False)
     source_type = Column(String(20), nullable=False)  # 'hierarchical' | 'fact'
     source_id = Column(UUID(as_uuid=True), nullable=False)  # hierarchical_chunks.id or extracted_facts.id
-    embedding = Column(Vector(1536), nullable=False)
+    embedding = Column(JSONB, nullable=True)  # Embeddings stored in Vertex AI Vector Search, not here
     model = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
@@ -195,7 +196,7 @@ class RagPublishedEmbedding(Base):
     document_id = Column(UUID(as_uuid=True), nullable=False)
     source_type = Column(String(20), nullable=False)
     source_id = Column(UUID(as_uuid=True), nullable=False)
-    embedding = Column(Vector(1536), nullable=False)
+    embedding = Column(JSONB, nullable=True)  # Embeddings stored in Vertex AI Vector Search, not here
     model = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     text = Column(Text, default="", nullable=False)

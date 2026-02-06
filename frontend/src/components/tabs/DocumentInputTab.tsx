@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { API_BASE, SCRAPER_API_BASE } from '../../config'
-import { STATE_OPTIONS } from '../../lib/documentMetadata'
+import { STATE_OPTIONS, AUTHORITY_LEVEL_OPTIONS } from '../../lib/documentMetadata'
 import './DocumentInputTab.css'
 
 interface DocumentInputTabProps {
@@ -43,6 +43,7 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
   const [scrapeMode, setScrapeMode] = useState<'regular' | 'tree'>('regular')
   const [scrapeMaxDepth, setScrapeMaxDepth] = useState(3)
   const [scrapeMaxPages, setScrapeMaxPages] = useState(50)
+  const [scrapePathPrefix, setScrapePathPrefix] = useState('')
   const [scraping, setScraping] = useState(false)
   const [scrapeJobId, setScrapeJobId] = useState<string | null>(null)
   const [scrapeStatus, setScrapeStatus] = useState<'pending' | 'running' | 'completed' | 'failed' | null>(null)
@@ -60,11 +61,12 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
   const [selectedPageUrls, setSelectedPageUrls] = useState<Set<string>>(new Set())
   const [selectedDocPaths, setSelectedDocPaths] = useState<Set<string>>(new Set())
   // Optional metadata when adding scraped pages/docs to RAG (carries forward to document)
-  const [importMetadata, setImportMetadata] = useState<{ display_name: string; payer: string; state: string; program: string }>({
+  const [importMetadata, setImportMetadata] = useState<{ display_name: string; payer: string; state: string; program: string; authority_level: string }>({
     display_name: '',
     payer: '',
     state: '',
     program: '',
+    authority_level: '',
   })
   const [importingPages, setImportingPages] = useState(false)
   const [readerPage, setReaderPage] = useState<ScrapedPage | null>(null)
@@ -130,6 +132,21 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
       if (scrapeMode === 'tree') {
         body.max_depth = scrapeMaxDepth
         body.max_pages = scrapeMaxPages
+        let pathPrefix = scrapePathPrefix.trim()
+        if (!pathPrefix) {
+          try {
+            const u = new URL(scrapeUrl.trim())
+            const parts = u.pathname.split('/').filter(Boolean)
+            if (parts.length > 0) {
+              const first = parts[0]
+              const dir = first.includes('.') ? first.split('.')[0] : first
+              pathPrefix = '/' + dir
+            }
+          } catch {
+            // leave pathPrefix empty
+          }
+        }
+        if (pathPrefix) body.path_prefix = pathPrefix
       }
       const resp = await fetch(`${SCRAPER_API_BASE}/scrape`, {
         method: 'POST',
@@ -241,6 +258,7 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
       if (importMetadata.payer?.trim()) body.payer = importMetadata.payer.trim()
       if (importMetadata.state?.trim()) body.state = importMetadata.state.trim()
       if (importMetadata.program?.trim()) body.program = importMetadata.program.trim()
+      if (importMetadata.authority_level?.trim()) body.authority_level = importMetadata.authority_level.trim()
       const resp = await fetch(`${API_BASE}/documents/import-scraped-pages`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -273,6 +291,7 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
         if (importMetadata.payer?.trim()) body.payer = importMetadata.payer.trim()
         if (importMetadata.state?.trim()) body.state = importMetadata.state.trim()
         if (importMetadata.program?.trim()) body.program = importMetadata.program.trim()
+        if (importMetadata.authority_level?.trim()) body.authority_level = importMetadata.authority_level.trim()
         const resp = await fetch(`${API_BASE}/documents/import-scraped-pages`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -287,10 +306,15 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
       for (const d of docList) {
         setImportingDoc(d.gcs_path)
         try {
+          const importBody: Record<string, string> = { gcs_path: d.gcs_path, filename: d.filename }
+          if (importMetadata.payer?.trim()) importBody.payer = importMetadata.payer.trim()
+          if (importMetadata.state?.trim()) importBody.state = importMetadata.state.trim()
+          if (importMetadata.program?.trim()) importBody.program = importMetadata.program.trim()
+          if (importMetadata.authority_level?.trim()) importBody.authority_level = importMetadata.authority_level.trim()
           const resp = await fetch(`${API_BASE}/documents/import-from-gcs`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ gcs_path: d.gcs_path, filename: d.filename }),
+            body: JSON.stringify(importBody),
           })
           if (!resp.ok) {
             const err = await resp.json().catch(() => ({}))
@@ -333,27 +357,38 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
   const hasSelection = selectedPageUrls.size > 0 || selectedDocPaths.size > 0
   const anyImporting = importingDoc !== null || importingPages
 
-  // Derive display data from events or poll response
-  const displayDocs = scrapeEvents.length
-    ? scrapeEvents.filter((e) => e.type === 'document').map((e) => ({
-        gcs_path: (e.payload?.gcs_path as string) || '',
-        filename: (e.payload?.filename as string) || '',
-        content_type: e.metadata?.content_type,
-        source_url: e.metadata?.source_url,
-        size_bytes: e.metadata?.size_bytes,
-        source_page_url: e.metadata?.source_page_url,
-      }))
-    : scrapeDocuments
-  const displayPages = scrapeEvents.length
-    ? scrapeEvents.filter((e) => e.type === 'page').map((e) => ({
-        url: (e.payload?.url as string) || e.metadata?.source_url || '',
-        text: e.payload?.text as string | undefined,
-        html: e.payload?.html as string | undefined,
-        final_url: e.metadata?.final_url,
-        depth: e.metadata?.depth,
-        timestamp: e.metadata?.timestamp,
-      }))
-    : scrapePages
+  // Derive display data: use events when streaming; when job is done, prefer poll data if it has more (API is source of truth)
+  const docsFromEvents = scrapeEvents
+    .filter((e) => e.type === 'document')
+    .map((e) => ({
+      gcs_path: (e.payload?.gcs_path as string) || '',
+      filename: (e.payload?.filename as string) || '',
+      content_type: e.metadata?.content_type,
+      source_url: e.metadata?.source_url,
+      size_bytes: e.metadata?.size_bytes,
+      source_page_url: e.metadata?.source_page_url,
+    }))
+  const pagesFromEvents = scrapeEvents.filter((e) => e.type === 'page').map((e) => ({
+    url: (e.payload?.url as string) || e.metadata?.source_url || '',
+    text: e.payload?.text as string | undefined,
+    html: e.payload?.html as string | undefined,
+    final_url: e.metadata?.final_url,
+    depth: e.metadata?.depth,
+    timestamp: e.metadata?.timestamp,
+  }))
+  const jobDone = scrapeStatus === 'completed' || scrapeStatus === 'failed'
+  const displayDocs =
+    jobDone && scrapeDocuments.length >= docsFromEvents.length
+      ? scrapeDocuments
+      : docsFromEvents.length > 0
+        ? docsFromEvents
+        : scrapeDocuments
+  const displayPages =
+    jobDone && scrapePages.length >= pagesFromEvents.length
+      ? scrapePages
+      : pagesFromEvents.length > 0
+        ? pagesFromEvents
+        : scrapePages
   const displaySummary =
     scrapeEvents.length > 0
       ? (scrapeEvents.find((e) => e.type === 'summary')?.payload?.summary as string | undefined) ?? scrapeSummary
@@ -479,6 +514,43 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
                 <label>
                   Max pages: <input type="number" min={1} max={200} value={scrapeMaxPages} onChange={(e) => setScrapeMaxPages(parseInt(e.target.value, 10) || 50)} disabled={scraping} className="scrape-number" />
                 </label>
+                <label className="scrape-path-scope">
+                  Path scope (optional):{' '}
+                  <input
+                    type="text"
+                    value={scrapePathPrefix}
+                    onChange={(e) => setScrapePathPrefix(e.target.value)}
+                    placeholder="/providers"
+                    disabled={scraping}
+                    className="scrape-path-input"
+                    title="Only follow links under this path, e.g. /providers. Leave empty for whole site."
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      try {
+                        const u = new URL(scrapeUrl.trim())
+                        const parts = u.pathname.split('/').filter(Boolean)
+                        if (parts.length === 0) {
+                          setScrapePathPrefix('')
+                          return
+                        }
+                        // Use first path segment as directory: providers.html -> /providers, providers/become... -> /providers
+                        const first = parts[0]
+                        const dir = first.includes('.') ? first.split('.')[0] : first
+                        setScrapePathPrefix('/' + dir)
+                      } catch {
+                        setScrapePathPrefix('')
+                      }
+                    }}
+                    disabled={scraping || !scrapeUrl.trim()}
+                    className="scrape-auto-path-btn"
+                    title="Derive path from URL (e.g. /providers from .../providers.html or .../providers/become-a-provider.html)"
+                  >
+                    Auto
+                  </button>
+                </label>
+                <span className="scrape-path-hint">Leave empty for whole site.</span>
               </div>
             )}
             <div className={`scrape-content-options ${scrapeMode === 'tree' ? 'scrape-content-with-tree' : ''}`}>
@@ -578,8 +650,8 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
                   </button>
                 </div>
                 <details className="scrape-import-metadata" open={false}>
-                  <summary>Metadata (optional) — Payor, State, Program</summary>
-                  <p className="scrape-metadata-hint">Set these when adding pages to RAG so the document carries this metadata for filtering and display.</p>
+                  <summary>Metadata (optional) — Payor, State, Program, Authority level</summary>
+                  <p className="scrape-metadata-hint">Set these when adding pages or documents to RAG so the document carries this metadata for filtering and display.</p>
                   <div className="scrape-metadata-fields">
                     <label className="scrape-metadata-label">
                       <span>Payor name</span>
@@ -613,6 +685,19 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
                         value={importMetadata.program}
                         onChange={e => setImportMetadata(prev => ({ ...prev, program: e.target.value }))}
                       />
+                    </label>
+                    <label className="scrape-metadata-label">
+                      <span>Authority level</span>
+                      <select
+                        className="scrape-metadata-select"
+                        value={importMetadata.authority_level}
+                        onChange={e => setImportMetadata(prev => ({ ...prev, authority_level: e.target.value }))}
+                      >
+                        <option value="">—</option>
+                        {AUTHORITY_LEVEL_OPTIONS.map(opt => (
+                          <option key={opt.value} value={opt.value}>{opt.label}</option>
+                        ))}
+                      </select>
                     </label>
                     <label className="scrape-metadata-label">
                       <span>Display name</span>
