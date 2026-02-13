@@ -17,7 +17,7 @@ from asyncio import Lock
 import asyncio
 from app.config import GCS_BUCKET, ENV, CRITIQUE_RETRY_THRESHOLD
 from app.database import get_db, Base
-from app.models import Document, DocumentPage, ChunkingResult, HierarchicalChunk, ExtractedFact, ProcessingError, ChunkingJob, ChunkingEvent, LlmConfig, EmbeddingJob, ChunkEmbedding, PublishEvent, RagPublishedEmbedding, fact_to_category_scores_dict, PolicyLine, PolicyParagraph, PolicyLexiconCandidate
+from app.models import Document, DocumentPage, ChunkingResult, HierarchicalChunk, ExtractedFact, ProcessingError, ChunkingJob, ChunkingEvent, LlmConfig, EmbeddingJob, ChunkEmbedding, PublishEvent, RagPublishedEmbedding, fact_to_category_scores_dict, PolicyLine, PolicyParagraph, PolicyLexiconCandidate, DocumentTextTag
 from app.services.error_tracker import log_error, classify_error
 from app.services.extract_text import extract_text_from_gcs, html_to_plain_text
 from app.services.chunking import split_paragraphs, split_paragraphs_from_markdown
@@ -289,6 +289,11 @@ async def _run_startup_migrations_background():
                 await migrate_policy_lexcand_catalog()
             except Exception as migrate_err:
                 logger.warning(f"Startup migration (policy_lexicon_candidate_catalog) skipped: {migrate_err}")
+            try:
+                from app.migrations.add_document_text_tags import migrate as migrate_document_text_tags
+                await migrate_document_text_tags()
+            except Exception as migrate_err:
+                logger.warning(f"Startup migration (document_text_tags) skipped: {migrate_err}")
 
             logger.info("✓ Startup migrations completed successfully")
         except Exception as e:
@@ -1169,6 +1174,130 @@ async def get_document_pages(
             for p in pages
         ]
     }
+
+
+# ---------------------------------------------------------------------------
+# Document file download endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/documents/{document_id}/file")
+async def get_document_file(
+    document_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Stream the original document file from GCS.
+
+    Only works for documents whose ``file_path`` is a GCS path (starts with
+    ``gs://``).  Returns the raw bytes with the correct ``Content-Type`` and
+    a ``Content-Disposition: attachment`` header so the browser downloads it.
+    """
+    from uuid import UUID as _UUID
+
+    try:
+        doc_uuid = _UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID")
+
+    result = await db.execute(select(Document).where(Document.id == doc_uuid))
+    document = result.scalar_one_or_none()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    file_path = document.file_path or ""
+    if not file_path.startswith("gs://"):
+        raise HTTPException(
+            status_code=404,
+            detail="No original file available for this document (scraped or text-only)",
+        )
+
+    # Parse gs://<bucket>/<blob_name>
+    gcs_parts = file_path.replace("gs://", "").split("/", 1)
+    if len(gcs_parts) != 2:
+        raise HTTPException(status_code=500, detail="Malformed GCS path")
+    bucket_name, blob_name = gcs_parts
+
+    try:
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_name)
+
+        if not blob.exists():
+            raise HTTPException(status_code=404, detail="File not found in GCS")
+
+        content_type = blob.content_type or "application/octet-stream"
+        safe_filename = document.filename or blob_name.split("/")[-1]
+
+        def _stream():
+            with blob.open("rb") as f:
+                while True:
+                    chunk = f.read(1024 * 256)  # 256 KB chunks
+                    if not chunk:
+                        break
+                    yield chunk
+
+        return StreamingResponse(
+            _stream(),
+            media_type=content_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{safe_filename}"',
+            },
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to stream file from GCS: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve file: {e}")
+
+
+@app.get("/documents/{document_id}/download/markdown")
+async def download_document_markdown(
+    document_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate a ``.md`` file from all pages' ``text_markdown`` for download.
+
+    Useful for scraped / text-only documents that have no original binary file.
+    """
+    from uuid import UUID as _UUID
+
+    try:
+        doc_uuid = _UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID")
+
+    result = await db.execute(select(Document).where(Document.id == doc_uuid))
+    document = result.scalar_one_or_none()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    pages_result = await db.execute(
+        select(DocumentPage)
+        .where(DocumentPage.document_id == doc_uuid)
+        .order_by(DocumentPage.page_number)
+    )
+    pages = pages_result.scalars().all()
+
+    if not pages:
+        raise HTTPException(status_code=404, detail="No pages found for this document")
+
+    parts: list[str] = []
+    for p in pages:
+        text = getattr(p, "text_markdown", None) or p.text or ""
+        if text.strip():
+            parts.append(f"<!-- Page {p.page_number} -->\n\n{text.strip()}")
+
+    markdown_content = "\n\n---\n\n".join(parts)
+    safe_name = (document.display_name or document.filename or "document").replace(" ", "_")
+    if not safe_name.endswith(".md"):
+        safe_name += ".md"
+
+    return StreamingResponse(
+        iter([markdown_content.encode("utf-8")]),
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_name}"',
+        },
+    )
 
 
 @app.get("/documents/{document_id}/status")
@@ -5369,6 +5498,208 @@ async def update_document_fact(
         out["verified_at"] = fact.verified_at.isoformat() if fact.verified_at else None
         out["verification_status"] = fact.verification_status
     return out
+
+
+# ─── Policy Line Tags (from Path B pipeline) ─── #
+
+@app.get("/documents/{document_id}/policy-line-tags")
+async def get_document_policy_line_tags(
+    document_id: str,
+    page_number: Optional[int] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return policy lines with their p_tags, d_tags, and j_tags for rendering highlights."""
+    from uuid import UUID
+    try:
+        doc_uuid = UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID")
+
+    query = (
+        select(PolicyLine)
+        .where(PolicyLine.document_id == doc_uuid)
+        .where(
+            or_(
+                PolicyLine.p_tags.isnot(None),
+                PolicyLine.d_tags.isnot(None),
+                PolicyLine.j_tags.isnot(None),
+            )
+        )
+    )
+    if page_number is not None:
+        query = query.where(PolicyLine.page_number == page_number)
+    query = query.order_by(PolicyLine.page_number, PolicyLine.order_index)
+
+    result = await db.execute(query)
+    lines = result.scalars().all()
+
+    def clean_tags(val):
+        """Return a dict of tag->score, or None if empty / JSON null."""
+        if val is None:
+            return None
+        if isinstance(val, dict) and val:
+            return val
+        return None
+
+    items = []
+    for ln in lines:
+        p = clean_tags(ln.p_tags)
+        d = clean_tags(ln.d_tags)
+        j = clean_tags(ln.j_tags)
+        if not p and not d and not j:
+            continue
+        items.append({
+            "id": str(ln.id),
+            "page_number": ln.page_number,
+            "text": ln.text,
+            "start_offset": ln.start_offset,
+            "end_offset": ln.end_offset,
+            "p_tags": p,
+            "d_tags": d,
+            "j_tags": j,
+        })
+
+    return {
+        "document_id": document_id,
+        "total": len(items),
+        "lines": items,
+    }
+
+
+# ─── Document Text Tags (user-applied category tags on text ranges) ─── #
+
+@app.get("/documents/{document_id}/text-tags")
+async def list_document_text_tags(
+    document_id: str,
+    page_number: Optional[int] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """List text tags for a document, optionally filtered by page number."""
+    from uuid import UUID
+    try:
+        doc_uuid = UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID")
+    query = select(DocumentTextTag).where(DocumentTextTag.document_id == doc_uuid)
+    if page_number is not None:
+        query = query.where(DocumentTextTag.page_number == page_number)
+    query = query.order_by(DocumentTextTag.page_number, DocumentTextTag.start_offset)
+    result = await db.execute(query)
+    tags = result.scalars().all()
+    return {
+        "document_id": document_id,
+        "total": len(tags),
+        "tags": [
+            {
+                "id": str(t.id),
+                "document_id": str(t.document_id),
+                "page_number": t.page_number,
+                "start_offset": t.start_offset,
+                "end_offset": t.end_offset,
+                "tagged_text": t.tagged_text,
+                "tag": t.tag,
+                "created_at": t.created_at.isoformat() if t.created_at else None,
+            }
+            for t in tags
+        ],
+    }
+
+
+@app.post("/documents/{document_id}/text-tags")
+async def create_document_text_tag(
+    document_id: str,
+    body: dict = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a text tag (user selects text and applies a category label)."""
+    from uuid import UUID
+    try:
+        doc_uuid = UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID")
+
+    # Validate inputs
+    tagged_text = (body.get("tagged_text") or "").strip()
+    if not tagged_text:
+        raise HTTPException(status_code=400, detail="tagged_text is required")
+    tag = (body.get("tag") or "").strip()
+    if not tag:
+        raise HTTPException(status_code=400, detail="tag is required")
+    page_number = body.get("page_number")
+    if page_number is None:
+        raise HTTPException(status_code=400, detail="page_number is required")
+    try:
+        page_number = int(page_number)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="page_number must be an integer")
+    start_offset = body.get("start_offset")
+    end_offset = body.get("end_offset")
+    if start_offset is None or end_offset is None:
+        raise HTTPException(status_code=400, detail="start_offset and end_offset are required")
+    try:
+        start_offset = int(start_offset)
+        end_offset = int(end_offset)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="start_offset and end_offset must be integers")
+    if start_offset >= end_offset:
+        raise HTTPException(status_code=400, detail="start_offset must be less than end_offset")
+
+    # Verify document exists
+    result = await db.execute(select(Document).where(Document.id == doc_uuid))
+    document = result.scalar_one_or_none()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    text_tag = DocumentTextTag(
+        document_id=doc_uuid,
+        page_number=page_number,
+        start_offset=start_offset,
+        end_offset=end_offset,
+        tagged_text=tagged_text,
+        tag=tag,
+    )
+    db.add(text_tag)
+    await db.commit()
+    await db.refresh(text_tag)
+
+    return {
+        "id": str(text_tag.id),
+        "document_id": str(text_tag.document_id),
+        "page_number": text_tag.page_number,
+        "start_offset": text_tag.start_offset,
+        "end_offset": text_tag.end_offset,
+        "tagged_text": text_tag.tagged_text,
+        "tag": text_tag.tag,
+        "created_at": text_tag.created_at.isoformat() if text_tag.created_at else None,
+    }
+
+
+@app.delete("/documents/{document_id}/text-tags/{tag_id}")
+async def delete_document_text_tag(
+    document_id: str,
+    tag_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a text tag."""
+    from uuid import UUID
+    from sqlalchemy import delete as sql_delete
+    try:
+        doc_uuid = UUID(document_id)
+        tag_uuid = UUID(tag_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document or tag ID")
+    result = await db.execute(
+        select(DocumentTextTag).where(
+            DocumentTextTag.id == tag_uuid,
+            DocumentTextTag.document_id == doc_uuid,
+        )
+    )
+    tag = result.scalar_one_or_none()
+    if not tag:
+        raise HTTPException(status_code=404, detail="Text tag not found")
+    await db.execute(sql_delete(DocumentTextTag).where(DocumentTextTag.id == tag_uuid))
+    await db.commit()
+    return {"status": "deleted", "id": tag_id}
 
 
 @app.post("/documents/{document_id}/chunking/stop")

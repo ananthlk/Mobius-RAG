@@ -1,6 +1,6 @@
 /**
  * Shared API helpers for fact actions (approve, edit, delete).
- * Used by ReviewFactsTab and ReadDocumentTab for consistent behavior.
+ * Used by ReviewFactsTab and DocumentReaderTab for consistent behavior.
  */
 
 import { API_BASE } from '../config'

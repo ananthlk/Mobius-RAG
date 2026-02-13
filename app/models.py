@@ -494,6 +494,24 @@ class DocumentTags(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 
+class DocumentTextTag(Base):
+    """User-applied text-range tags (e.g. category labels on selected text in the reader).
+
+    Unlike DocumentTags (document-level aggregates), each row here represents
+    a single highlighted text range on a specific page.
+    """
+    __tablename__ = "document_text_tags"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False, index=True)
+    page_number = Column(Integer, nullable=False)
+    start_offset = Column(Integer, nullable=False)
+    end_offset = Column(Integer, nullable=False)
+    tagged_text = Column(Text, nullable=False)       # The selected text
+    tag = Column(String(100), nullable=False)         # Category key, e.g. "prior_authorization_required"
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class PolicyLexiconCandidate(Base):
     """Path B lexicon candidates generated from policy artifacts."""
     __tablename__ = "policy_lexicon_candidates"
@@ -513,6 +531,14 @@ class PolicyLexiconCandidate(Base):
     state = Column(String(20), nullable=False, default="proposed")  # proposed|approved|rejected|flagged
     reviewer = Column(String(255), nullable=True)
     reviewer_notes = Column(Text, nullable=True)
+
+    # LLM triage columns (populated by llm_triage_candidates after extraction)
+    llm_verdict = Column(String(20), nullable=True)         # new_tag | alias | reject
+    llm_confidence = Column(Float, nullable=True)            # 0.0 - 1.0
+    llm_reason = Column(Text, nullable=True)                 # one-line explanation
+    llm_suggested_parent = Column(String(500), nullable=True)
+    llm_suggested_code = Column(String(500), nullable=True)
+    llm_suggested_kind = Column(String(10), nullable=True)   # p | d | j
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     # Note: policy_lexicon_candidates table has no updated_at column; do not add unless the DB is migrated.

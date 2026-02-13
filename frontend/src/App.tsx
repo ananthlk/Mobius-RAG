@@ -6,7 +6,7 @@ import { Tabs, TabList, Tab, TabPanels, TabPanel } from './components/Tabs'
 import { DocumentInputTab } from './components/tabs/DocumentInputTab'
 import { DocumentStatusTab, type ChunkingOptions } from './components/tabs/DocumentStatusTab'
 import { LiveUpdatesTab } from './components/tabs/LiveUpdatesTab'
-import { ReadDocumentTab } from './components/tabs/ReadDocumentTab'
+import { DocumentReaderTab } from './components/tabs/DocumentReaderTab'
 import { ReviewFactsTab } from './components/tabs/ReviewFactsTab'
 import { DatabaseLayerTab } from './components/tabs/DatabaseLayerTab'
 import { ErrorReviewTab } from './components/tabs/ErrorReviewTab'
@@ -106,6 +106,7 @@ function App() {
   const [_processingRetryCount, setProcessingRetryCount] = useState(0)
   const [_chunkingStatus, setChunkingStatus] = useState<'idle' | 'in_progress' | 'completed' | 'stopped' | 'failed'>('idle')
   const streamContainerRef = useRef<HTMLDivElement>(null)
+
   const eventSourceRef = useRef<EventSource | null>(null)
   const [sseConnected, setSseConnected] = useState(false)
 
@@ -199,9 +200,30 @@ function App() {
     }
   }
 
-  // Load documents on mount
+  // Load documents on mount + handle deep-link URL params from cross-module links
+  // (e.g. mobius-chat opens ?tab=read&documentId=...&pageNumber=...)
   useEffect(() => {
     loadDocuments()
+    const params = new URLSearchParams(window.location.search)
+    const tab = params.get('tab')
+    const docId = params.get('documentId')
+    const pageNum = params.get('pageNumber')
+    if (tab && ['input', 'status', 'live', 'read', 'review', 'detail', 'database', 'errors'].includes(tab)) {
+      setActiveTab(tab as typeof activeTab)
+    }
+    if (docId) {
+      setSelectedDocumentId(docId)
+      if (tab === 'read') {
+        setNavigateToRead({
+          documentId: docId,
+          pageNumber: pageNum ? parseInt(pageNum, 10) : undefined,
+        })
+      }
+    }
+    // Clean URL params after consumption so they don't persist on refresh
+    if (params.toString()) {
+      window.history.replaceState({}, '', window.location.pathname)
+    }
   }, [])
 
   // Refresh documents when chunking is active or Live tab is visible so status and progress stay correct
@@ -241,7 +263,7 @@ function App() {
 
   const restartChunkingForDocument = async (documentId: string, options?: ChunkingOptions) => {
     try {
-      const opts = options ?? { threshold: 0.6, critiqueEnabled: true, maxRetries: 2 }
+      const opts: ChunkingOptions = options ?? { generatorId: 'A', threshold: 0.6, critiqueEnabled: true, maxRetries: 2, extractionEnabled: true }
       const restartBody: Record<string, unknown> = {
         threshold: opts.threshold,
         critique_enabled: opts.critiqueEnabled,
@@ -1396,7 +1418,7 @@ function App() {
           </TabPanel>
 
           <TabPanel id="read" isActive={activeTab === 'read'}>
-            <ReadDocumentTab
+            <DocumentReaderTab
               documents={documents}
               selectedDocumentId={selectedDocumentId}
               navigateToRead={navigateToRead}
