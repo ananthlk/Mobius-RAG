@@ -14,17 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
-from app.models import (
-    Document,
-    DocumentPage,
-    ChunkingJob,
-    ChunkingResult,
-    ChunkingEvent,
-    EmbeddingJob,
-    HierarchicalChunk,
-    ExtractedFact,
-    category_scores_dict_to_columns,
-)
+from app.models import Document, DocumentPage, ChunkingJob, ChunkingResult, ChunkingEvent, EmbeddingJob
 from app.services.chunking import split_paragraphs_from_markdown
 from app.services.extraction import stream_extract_facts
 from app.services.critique import stream_critique, critique_extraction, normalize_critique_result
@@ -91,19 +81,6 @@ def _utc_now_naive():
 WORKER_ID = f"worker-{os.getpid()}-{_utc_now_naive().isoformat()}"
 
 
-# Text columns that must be string in DB; LLM may return dict/list (e.g. when_applies: {"type": "days", "value": 120})
-_FACT_TEXT_KEYS = ("fact_text", "fact_type", "who_eligible", "how_verified", "conflict_resolution", "when_applies", "limitations")
-
-
-def _fact_value_to_str(v):
-    """Convert a fact field value to string for DB. Dict/list -> JSON string."""
-    if v is None:
-        return None
-    if isinstance(v, (dict, list)):
-        return json.dumps(v, default=str)
-    return v if isinstance(v, str) else str(v)
-
-
 def _sanitize_fact_for_db(fact_data: dict) -> dict:
     """Return a copy of fact_data safe for PostgreSQL (String columns). Category scores are parsed into columns separately."""
     import math
@@ -117,8 +94,6 @@ def _sanitize_fact_for_db(fact_data: dict) -> dict:
             out[k] = None
         elif k in ("is_verified", "is_eligibility_related", "is_pertinent_to_claims_or_members", "confidence") and v is not None:
             out[k] = str(v).lower() if isinstance(v, bool) else str(v)
-        elif k in _FACT_TEXT_KEYS:
-            out[k] = _fact_value_to_str(v)
         else:
             out[k] = v
     return out
@@ -148,33 +123,33 @@ async def _safe_log_error(**kwargs):
         logger.error("log_error failed (unexpected): %s", e, exc_info=True)
 
 
-async def _create_event_buffer_callback(document_id: str):
-    """Create an event callback that writes events to the database.
-    Uses a new short-lived session per event so the main job session is not held during event writes."""
+async def _create_event_buffer_callback(document_id: str, db: AsyncSession):
+    """Create an event callback that writes events to the database."""
     from app.models import ChunkingEvent
     from uuid import UUID
-
+    
     doc_uuid = UUID(document_id)
     event_count = 0
-
+    
     async def event_callback(event_type: str, data: dict):
         nonlocal event_count
         try:
-            async with AsyncSessionLocal() as db:
-                event = ChunkingEvent(
-                    document_id=doc_uuid,
-                    event_type=event_type,
-                    event_data=data
-                )
-                db.add(event)
-                event_count += 1
-                await db.commit()
-                logger.debug(f"[{document_id}] Event #{event_count}: {event_type} - {data.get('message', data.get('current_paragraph', 'no key'))}")
+            event = ChunkingEvent(
+                document_id=doc_uuid,
+                event_type=event_type,
+                event_data=data
+            )
+            db.add(event)
+            event_count += 1
+            # Commit each progress/chunking event so Live Updates sees it right away
+            await db.commit()
+            logger.debug(f"[{document_id}] Event #{event_count}: {event_type} - {data.get('message', data.get('current_paragraph', 'no key'))}")
         except Exception as e:
             logger.error(f"[{document_id}] Failed to write event {event_type}: {e}", exc_info=True)
+            await db.rollback()
         yield ""  # Yield empty for compatibility
-
-    logger.info(f"[{document_id}] Event callback created, will write events to database (short-lived session per event)")
+    
+    logger.info(f"[{document_id}] Event callback created, will write events to database")
     return event_callback
 
 
@@ -192,19 +167,20 @@ async def _run_chunking_loop(
     retry_extraction_prompt_body=None,
     critique_prompt_body=None,
     llm=None,
+    lexicon_snapshot=None,
 ):
     """
     Shared chunking loop logic. Runs the full paragraph processing loop.
     critique_enabled: if False, skip critique and retries (extraction only).
     max_retries: when critique enabled, max extraction retries on critique fail (0 = no retry).
-    extraction_enabled: if False, only build hierarchical chunks (no LLM extraction/critique).
+    extraction_enabled: if False, only create hierarchical chunks (no LLM extraction/critique).
     extraction_prompt_body, retry_extraction_prompt_body, critique_prompt_body: optional prompt templates (from registry).
     llm: optional LLM provider instance (from llm_config).
     """
     results_paragraphs: dict = {}
 
     try:
-        logger.info(f"[{document_id}] Starting chunking loop with threshold {threshold}, critique_enabled={critique_enabled}, extraction_enabled={extraction_enabled}, max_retries={max_retries}")
+        logger.info(f"[{document_id}] Starting chunking loop with threshold {threshold}, critique_enabled={critique_enabled}, max_retries={max_retries}")
         # Materialize page (page_number, markdown) before any await; use text_markdown as canonical, fallback to raw->md
         from app.services.page_to_markdown import raw_page_to_markdown
         page_data_list = []
@@ -280,6 +256,18 @@ async def _run_chunking_loop(
         # Initial upsert
         await _upsert("in_progress")
         logger.info(f"[{document_id}] Initial progress state saved to database")
+
+        # Path B: clear existing policy_paragraphs/lines for this document so we don't duplicate on re-run
+        if not extraction_enabled:
+            try:
+                from sqlalchemy import delete
+                from app.models import PolicyLine, PolicyParagraph
+                await db.execute(delete(PolicyLine).where(PolicyLine.document_id == doc_uuid))
+                await db.execute(delete(PolicyParagraph).where(PolicyParagraph.document_id == doc_uuid))
+                await db.flush()
+                logger.info(f"[{document_id}] Path B: cleared existing policy paragraphs/lines")
+            except Exception as clear_err:
+                logger.warning(f"[{document_id}] Path B clear existing policy data (non-fatal): {clear_err}")
         
         # Process each page (use materialized markdown)
         for page_num, (current_page_number, page_md) in enumerate(page_data_list, start=1):
@@ -326,17 +314,16 @@ async def _run_chunking_loop(
                     "current_paragraph": para_id,
                 })
                 await _send_status(f"Paragraph {para_id} (page {current_page_number}) started...")
-                logger.info(f"[{document_id}] [{para_id}] Starting extraction (text length: {len(paragraph_text)} chars)")
-                
-                try:
-                    # When extraction_enabled is False: only create hierarchical chunk, skip LLM
-                    if not extraction_enabled:
+                if not extraction_enabled:
+                    # Path B (no LLM): persist hierarchical chunk only, mark as skipped
+                    try:
+                        from app.models import HierarchicalChunk
                         para_start = para_data.get("start_offset") if isinstance(para_data, dict) else None
                         chunk_query = await db.execute(
                             select(HierarchicalChunk).where(
                                 HierarchicalChunk.document_id == doc_uuid,
                                 HierarchicalChunk.page_number == current_page_number,
-                                HierarchicalChunk.paragraph_index == para_idx
+                                HierarchicalChunk.paragraph_index == para_idx,
                             )
                         )
                         chunk = chunk_query.scalar_one_or_none()
@@ -354,30 +341,46 @@ async def _run_chunking_loop(
                             )
                             db.add(chunk)
                             await db.flush()
+                        # Record paragraph result
                         results_paragraphs[para_id] = {
                             "paragraph_id": para_id,
                             "status": "skipped",
+                            "facts": [],
                             "summary": None,
                         }
-                        await _send_status(f"Paragraph {para_id} complete (structure only).")
-                        completed_after = len(results_paragraphs)
-                        progress_pct_after = (completed_after / total_paragraphs * 100) if total_paragraphs > 0 else 0
-                        if event_callback:
-                            try:
-                                async for _ in event_callback("progress_update", {
-                                    "current_paragraph": para_id,
-                                    "current_page": current_page_number,
-                                    "total_pages": total_pages,
-                                    "total_paragraphs": total_paragraphs,
-                                    "completed_paragraphs": completed_after,
-                                    "progress_percent": progress_pct_after
-                                }):
-                                    pass
-                            except Exception as progress_err:
-                                logger.error(f"[{document_id}] Error sending progress_update event: {progress_err}", exc_info=True)
+                        # Path B: build policy_paragraph + policy_lines and apply lexicon tags
+                        try:
+                            from app.services.policy_path_b import (
+                                build_paragraph_and_lines,
+                                apply_lexicon_to_lines,
+                                get_phrase_to_tag_map,
+                            )
+                            para_obj, line_objs = await build_paragraph_and_lines(
+                                db, doc_uuid, current_page_number, para_idx, section_path, paragraph_text
+                            )
+                            n_with_tags = 0
+                            if lexicon_snapshot is not None and line_objs:
+                                phrase_map = get_phrase_to_tag_map(lexicon_snapshot)
+                                n_with_tags = await apply_lexicon_to_lines(line_objs, phrase_map)
+                            logger.info(
+                                f"[{document_id}] Path B: built 1 paragraph, {len(line_objs)} lines for {para_id}"
+                                + (f" ({n_with_tags} with tags)" if n_with_tags else "")
+                            )
+                            # Commit policy data so a later event_callback rollback doesn't undo it
+                            await db.commit()
+                        except Exception as policy_err:
+                            logger.warning(f"[{document_id}] [{para_id}] Path B policy build/tag (non-fatal): {policy_err}", exc_info=True)
+                            await db.rollback()  # so _upsert and later steps can use the session
                         await _upsert("in_progress")
+                        await _emit("paragraph_complete", {"paragraph_id": para_id, "status": "skipped", "facts": []})
                         continue
+                    except Exception as e:
+                        logger.error(f"[{document_id}] [{para_id}] Failed to persist hierarchical-only chunk: {e}", exc_info=True)
+                        # Fall through to normal flow (may fail); keep going
 
+                logger.info(f"[{document_id}] [{para_id}] Starting extraction (text length: {len(paragraph_text)} chars)")
+                
+                try:
                     # Stage 1: Extract facts
                     raw_extraction_output = ""
                     extraction_result = None
@@ -588,6 +591,8 @@ async def _run_chunking_loop(
                     if facts:
                         try:
                             logger.debug(f"[{document_id}] [{para_id}] Persisting {len(facts)} facts to database")
+                            from app.models import HierarchicalChunk, ExtractedFact, category_scores_dict_to_columns
+                            
                             # Get or create hierarchical chunk
                             chunk_query = await db.execute(
                                 select(HierarchicalChunk).where(
@@ -814,6 +819,15 @@ async def _run_chunking_loop(
                     pass
             except Exception as complete_err:
                 logger.error(f"[{document_id}] Error sending chunking_complete event: {complete_err}", exc_info=True)
+
+        # Path B: extract lexicon candidates (phrases not in lexicon)
+        if not extraction_enabled and lexicon_snapshot is not None:
+            try:
+                from app.services.policy_path_b import get_phrase_to_tag_map, extract_candidates_for_document
+                phrase_map = get_phrase_to_tag_map(lexicon_snapshot)
+                await extract_candidates_for_document(db, doc_uuid, run_id=None, phrase_map=phrase_map)
+            except Exception as cand_err:
+                logger.warning(f"[{document_id}] Path B candidate extraction (non-fatal): {cand_err}", exc_info=True)
         
         # Final upsert
         await _upsert("completed")
@@ -879,8 +893,8 @@ async def process_job(job: ChunkingJob, db: AsyncSession):
             threshold = 0.6
         logger.info(f"[JOB {job.id}] Using critique threshold: {threshold}")
         
-        # Create event callback (uses short-lived session per event to avoid holding main session)
-        event_callback = await _create_event_buffer_callback(str(job.document_id))
+        # Create event callback (pass db session so it can write events)
+        event_callback = await _create_event_buffer_callback(str(job.document_id), db)
         
         # Run mode from job (default: critique on, max_retries 2). No assumptions.
         try:
@@ -891,10 +905,16 @@ async def process_job(job: ChunkingJob, db: AsyncSession):
             max_retries = 2 if job.max_retries is None else max(0, int(job.max_retries))
         except (TypeError, ValueError):
             max_retries = 2
+
+        # Extraction enabled: default True when missing (back-compat). Path B (generator_id B) never runs LLM.
         try:
-            extraction_enabled = getattr(job, "extraction_enabled", None) is None or (str(getattr(job, "extraction_enabled", "true")).lower() == "true")
+            extraction_enabled = job.extraction_enabled is None or (str(job.extraction_enabled).lower() == "true")
         except Exception:
             extraction_enabled = True
+        gen = (getattr(job, "generator_id", None) or "A").strip().upper() or "A"
+        if gen == "B":
+            extraction_enabled = False
+            logger.info("[JOB %s] Path B: extraction_enabled=False (no LLM)", job.id)
 
         # Resolve prompt versions and LLM config from job (run-configured). No assumptions.
         extraction_prompt_body = None
@@ -935,6 +955,32 @@ async def process_job(job: ChunkingJob, db: AsyncSession):
                 await db.commit()
                 return
 
+        # Path B: load lexicon once for tag application and candidate extraction
+        lexicon_snapshot = None
+        if gen == "B":
+            try:
+                from app.services.policy_lexicon_repo import load_lexicon_snapshot_db
+                from app.services.policy_path_b import get_phrase_to_tag_map
+                lexicon_snapshot = await load_lexicon_snapshot_db(db)
+                n_p = len(getattr(lexicon_snapshot, "p_tags") or {})
+                n_d = len(getattr(lexicon_snapshot, "d_tags") or {})
+                n_j = len(getattr(lexicon_snapshot, "j_tags") or {})
+                phrase_map = get_phrase_to_tag_map(lexicon_snapshot)
+                n_phrases = len(phrase_map)
+                if n_phrases == 0:
+                    logger.warning(
+                        "[JOB %s] Path B: lexicon has 0 phrases (entries: p=%s d=%s j=%s). "
+                        "Populate policy_lexicon_entries with spec.phrases or spec.description; no p/d/j tags will be applied and candidates will not exclude existing tags.",
+                        job.id, n_p, n_d, n_j,
+                    )
+                else:
+                    logger.info(
+                        "[JOB %s] Path B: loaded lexicon with %s phrases for tagging (entries: p=%s d=%s j=%s)",
+                        job.id, n_phrases, n_p, n_d, n_j,
+                    )
+            except Exception as lex_err:
+                logger.warning("[JOB %s] Path B: could not load lexicon (tags/candidates may be empty): %s", job.id, lex_err)
+
         # Run chunking loop
         logger.info(f"[JOB {job.id}] Starting chunking loop...")
         success = await _run_chunking_loop(
@@ -951,6 +997,7 @@ async def process_job(job: ChunkingJob, db: AsyncSession):
             retry_extraction_prompt_body=retry_extraction_prompt_body,
             critique_prompt_body=critique_prompt_body,
             llm=llm,
+            lexicon_snapshot=lexicon_snapshot,
         )
         
         # Commit any remaining events
@@ -962,16 +1009,30 @@ async def process_job(job: ChunkingJob, db: AsyncSession):
             job.status = "completed"
             job.completed_at = _utc_now_naive()
             logger.info(f"[JOB {job.id}] Job completed successfully in {job_duration:.2f}s")
-            # Enqueue embedding job for this document (if not already pending)
+            # Enqueue embedding job for this document+generator (if not already pending)
             try:
+                gen = (getattr(job, "generator_id", None) or "A").strip().upper() or "A"
+                if gen not in ("A", "B"):
+                    gen = "A"
+                if gen == "A":
+                    from sqlalchemy import or_
+                    where_gen = or_(EmbeddingJob.generator_id.is_(None), EmbeddingJob.generator_id == "A")
+                else:
+                    where_gen = (EmbeddingJob.generator_id == "B")
                 existing = await db.execute(
                     select(EmbeddingJob).where(
                         EmbeddingJob.document_id == job.document_id,
+                        where_gen,
                         EmbeddingJob.status == "pending",
                     ).limit(1)
                 )
                 if existing.scalar_one_or_none() is None:
-                    embedding_job = EmbeddingJob(document_id=job.document_id, status="pending")
+                    # Preserve generator_id so A/B runs can embed independently.
+                    embedding_job = EmbeddingJob(
+                        document_id=job.document_id,
+                        status="pending",
+                        generator_id=getattr(job, "generator_id", None),
+                    )
                     db.add(embedding_job)
                     logger.info(f"[JOB {job.id}] Enqueued embedding job for document {job.document_id}")
             except Exception as enq_err:
@@ -1015,9 +1076,8 @@ async def worker_loop():
 
     while True:
         try:
-            # Short-lived session only to find a pending job (release connection before long process_job)
-            job_id = None
             async with AsyncSessionLocal() as db:
+                # Find pending job
                 result = await db.execute(
                     select(ChunkingJob)
                     .where(ChunkingJob.status == "pending")
@@ -1025,24 +1085,18 @@ async def worker_loop():
                     .limit(1)
                 )
                 job = result.scalar_one_or_none()
+                
                 if job:
-                    job_id = job.id
-            # Session closed here so we don't hold a connection during process_job
-
-            if job_id is not None:
-                async with AsyncSessionLocal() as db:
-                    result = await db.execute(select(ChunkingJob).where(ChunkingJob.id == job_id))
-                    job = result.scalar_one_or_none()
-                    if job:
-                        logger.info(f"Found pending job {job.id} for document {job.document_id}, processing...")
-                        await process_job(job, db)
-                poll_count = 0
-            else:
-                poll_count += 1
-                if poll_count % 10 == 0:
-                    logger.debug(f"No pending jobs, polling... (poll #{poll_count})")
-                await asyncio.sleep(2)
-
+                    logger.info(f"Found pending job {job.id} for document {job.document_id}, processing...")
+                    await process_job(job, db)
+                    poll_count = 0  # Reset poll count after processing a job
+                else:
+                    poll_count += 1
+                    if poll_count % 10 == 0:  # Log every 10th poll (every ~20 seconds)
+                        logger.debug(f"No pending jobs, polling... (poll #{poll_count})")
+                    # No jobs, wait a bit
+                    await asyncio.sleep(2)
+        
         except Exception as e:
             logger.error(f"Error in worker loop: {e}", exc_info=True)
             await asyncio.sleep(5)  # Wait longer on error

@@ -1,13 +1,14 @@
 import hashlib
 import logging
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Any
 from fastapi import FastAPI, UploadFile, HTTPException, Depends, Body, Query
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete, func, text, bindparam, and_, or_
+from sqlalchemy import select, delete, func, text, bindparam, and_, or_, cast, Text as SAText
+from sqlalchemy.orm import defer
 from google.cloud import storage
 import json
 from datetime import datetime
@@ -16,7 +17,7 @@ from asyncio import Lock
 import asyncio
 from app.config import GCS_BUCKET, ENV, CRITIQUE_RETRY_THRESHOLD
 from app.database import get_db, Base
-from app.models import Document, DocumentPage, ChunkingResult, HierarchicalChunk, ExtractedFact, ProcessingError, ChunkingJob, ChunkingEvent, LlmConfig, EmbeddingJob, ChunkEmbedding, PublishEvent, RagPublishedEmbedding, fact_to_category_scores_dict
+from app.models import Document, DocumentPage, ChunkingResult, HierarchicalChunk, ExtractedFact, ProcessingError, ChunkingJob, ChunkingEvent, LlmConfig, EmbeddingJob, ChunkEmbedding, PublishEvent, RagPublishedEmbedding, fact_to_category_scores_dict, PolicyLine, PolicyParagraph, PolicyLexiconCandidate
 from app.services.error_tracker import log_error, classify_error
 from app.services.extract_text import extract_text_from_gcs, html_to_plain_text
 from app.services.chunking import split_paragraphs, split_paragraphs_from_markdown
@@ -268,6 +269,26 @@ async def _run_startup_migrations_background():
                 await migrate_chunking_job_extraction_enabled()
             except Exception as migrate_err:
                 logger.warning(f"Startup migration (chunking_job extraction_enabled) skipped: {migrate_err}")
+            try:
+                from app.migrations.add_policy_lexicon_tables import migrate as migrate_policy_lexicon_tables
+                await migrate_policy_lexicon_tables()
+            except Exception as migrate_err:
+                logger.warning(f"Startup migration (policy_lexicon tables) skipped: {migrate_err}")
+            try:
+                from app.migrations.add_policy_line_offsets import migrate as migrate_policy_line_offsets
+                await migrate_policy_line_offsets()
+            except Exception as migrate_err:
+                logger.warning(f"Startup migration (policy_lines offsets) skipped: {migrate_err}")
+            try:
+                from app.migrations.add_policy_lexicon_candidate_occurrences import migrate as migrate_policy_lexcand_occ
+                await migrate_policy_lexcand_occ()
+            except Exception as migrate_err:
+                logger.warning(f"Startup migration (policy_lexicon_candidates occurrences) skipped: {migrate_err}")
+            try:
+                from app.migrations.add_policy_lexicon_candidate_catalog import migrate as migrate_policy_lexcand_catalog
+                await migrate_policy_lexcand_catalog()
+            except Exception as migrate_err:
+                logger.warning(f"Startup migration (policy_lexicon_candidate_catalog) skipped: {migrate_err}")
 
             logger.info("✓ Startup migrations completed successfully")
         except Exception as e:
@@ -665,6 +686,7 @@ async def list_documents(
             "authority_level": getattr(doc, "authority_level", None),
             "effective_date": getattr(doc, "effective_date", None),
             "termination_date": getattr(doc, "termination_date", None),
+            "source_metadata": getattr(doc, "source_metadata", None),
         }
         if processing_stage is not None:
             doc_item["chunking_processing_stage"] = processing_stage
@@ -733,6 +755,7 @@ async def list_facts(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     sort: str = Query("created_at", description="Sort by: created_at, document, page"),
+    sort_dir: str = Query("asc", description="Sort direction: asc, desc"),
 ):
     """List extracted facts with server-side filtering and pagination."""
     from uuid import UUID
@@ -825,11 +848,19 @@ async def list_facts(
     where_clause = " AND ".join(conditions)
 
     # Sort
-    sort_col = "ef.created_at"
+    dir_norm = (sort_dir or "asc").strip().lower()
+    if dir_norm not in ("asc", "desc"):
+        dir_norm = "asc"
+    dir_sql = dir_norm.upper()
+
+    # Default stable tiebreakers: created_at then id (so pagination is stable)
     if sort == "document":
-        sort_col = "d.display_name, d.filename, ef.created_at"
+        sort_clause = f"d.display_name ASC, d.filename ASC, ef.created_at DESC, ef.id DESC"
     elif sort == "page":
-        sort_col = "COALESCE(ef.page_number, hc.page_number), ef.created_at"
+        sort_clause = f"COALESCE(ef.page_number, hc.page_number) {dir_sql}, ef.created_at DESC, ef.id DESC"
+    else:
+        # created_at
+        sort_clause = f"ef.created_at {dir_sql}, ef.id DESC"
 
     # Count query
     count_sql = text(f"""
@@ -856,7 +887,7 @@ async def list_facts(
         JOIN hierarchical_chunks hc ON ef.hierarchical_chunk_id = hc.id
         JOIN documents d ON ef.document_id = d.id
         WHERE {where_clause}
-        ORDER BY {sort_col}
+        ORDER BY {sort_clause}
         OFFSET :skip LIMIT :limit
     """)
     data_result2 = await db.execute(data_sql2, params)
@@ -1133,6 +1164,7 @@ async def get_document_pages(
                 "text_length": p.text_length,
                 "extraction_status": p.extraction_status,
                 "extraction_error": p.extraction_error,
+                "source_url": getattr(p, "source_url", None),
             }
             for p in pages
         ]
@@ -1736,6 +1768,34 @@ async def import_document_from_gcs(
             await db.commit()
             logger.warning("Extraction failed for import-from-gcs %s: %s", gcs_path, e)
 
+        # Auto-chunk when extraction succeeded: queue Path B so chunk → embed run automatically
+        if document.status == "completed":
+            try:
+                where_gen = ChunkingJob.generator_id == "B"
+                existing = await db.execute(
+                    select(ChunkingJob).where(
+                        ChunkingJob.document_id == document.id,
+                        where_gen,
+                        ChunkingJob.status.in_(["pending", "processing"]),
+                    ).limit(1)
+                )
+                if existing.scalar_one_or_none() is None:
+                    job = ChunkingJob(
+                        document_id=document.id,
+                        generator_id="B",
+                        status="pending",
+                        threshold="0.6",
+                        critique_enabled="false",
+                        max_retries=0,
+                        extraction_enabled="false",
+                    )
+                    db.add(job)
+                    await db.commit()
+                    logger.info("Auto-queued Path B chunking job %s for import-from-gcs document %s", job.id, document.id)
+            except Exception as chunk_err:
+                logger.warning("Auto-chunk after import-from-gcs failed (non-fatal): %s", chunk_err)
+                await db.rollback()
+
         return {
             "filename": filename,
             "gcs_path": gcs_path,
@@ -1888,6 +1948,33 @@ async def import_scraped_pages(
         db.add(page)
 
     await db.commit()
+
+    # Auto-chunk: queue Path B chunking job so worker runs chunk → (embed auto-enqueued)
+    try:
+        where_gen = ChunkingJob.generator_id == "B"
+        existing = await db.execute(
+            select(ChunkingJob).where(
+                ChunkingJob.document_id == document.id,
+                where_gen,
+                ChunkingJob.status.in_(["pending", "processing"]),
+            ).limit(1)
+        )
+        if existing.scalar_one_or_none() is None:
+            job = ChunkingJob(
+                document_id=document.id,
+                generator_id="B",
+                status="pending",
+                threshold="0.6",
+                critique_enabled="false",
+                max_retries=0,
+                extraction_enabled="false",
+            )
+            db.add(job)
+            await db.commit()
+            logger.info("Auto-queued Path B chunking job %s for imported scraped document %s", job.id, document.id)
+    except Exception as e:
+        logger.warning("Auto-chunk after import-scraped-pages failed (non-fatal): %s", e)
+        await db.rollback()
 
     return {
         "document_id": str(document.id),
@@ -3280,6 +3367,1825 @@ async def get_document_facts(
     }
 
 
+@app.get("/documents/{document_id}/policy/summary")
+async def get_document_policy_summary(
+    document_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get Path B understanding summary for a document (rollups + progress metadata)."""
+    from uuid import UUID
+
+    try:
+        doc_uuid = UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID")
+
+    # Verify document exists
+    doc_result = await db.execute(select(Document).where(Document.id == doc_uuid))
+    doc = doc_result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    cr_result = await db.execute(select(ChunkingResult).where(ChunkingResult.document_id == doc_uuid))
+    cr = cr_result.scalar_one_or_none()
+    meta = (cr.metadata_ or {}) if cr else {}
+
+    return {
+        "document_id": document_id,
+        "document_metadata": {
+            "filename": doc.filename,
+            "display_name": getattr(doc, "display_name", None),
+            "payer": doc.payer,
+            "state": doc.state,
+            "program": doc.program,
+            "authority_level": getattr(doc, "authority_level", None),
+            "effective_date": getattr(doc, "effective_date", None),
+            "termination_date": getattr(doc, "termination_date", None),
+        },
+        "status": meta.get("status") or ("not_started" if not cr else None),
+        "mode": meta.get("mode"),
+        "lexicon_version": meta.get("lexicon_version"),
+        "last_updated": meta.get("last_updated"),
+        "total_pages": meta.get("total_pages"),
+        "total_lines": meta.get("total_lines"),
+        "completed_lines": meta.get("completed_lines"),
+        "document_rollup": meta.get("document_rollup") or {},
+        "section_rollups": meta.get("section_rollups") or {},
+    }
+
+
+@app.get("/documents/{document_id}/policy/paragraphs")
+async def list_document_policy_paragraphs(
+    document_id: str,
+    page_number: Optional[int] = Query(None),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(500, ge=1, le=5000),
+    db: AsyncSession = Depends(get_db),
+):
+    """List Path B paragraphs for a document (optionally filtered by page)."""
+    from uuid import UUID
+
+    try:
+        doc_uuid = UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID")
+
+    # Verify document exists
+    doc_result = await db.execute(select(Document.id).where(Document.id == doc_uuid))
+    if not doc_result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    q = select(PolicyParagraph).where(PolicyParagraph.document_id == doc_uuid)
+    if page_number is not None:
+        q = q.where(PolicyParagraph.page_number == int(page_number))
+
+    total_q = select(func.count()).select_from(q.subquery())
+    total = (await db.execute(total_q)).scalar_one()
+
+    q = q.order_by(PolicyParagraph.page_number, PolicyParagraph.order_index).offset(skip).limit(limit)
+    rows = (await db.execute(q)).scalars().all()
+
+    paragraphs = []
+    for p in rows:
+        paragraphs.append(
+            {
+                "id": str(p.id),
+                "document_id": str(p.document_id),
+                "page_number": p.page_number,
+                "order_index": p.order_index,
+                "paragraph_type": p.paragraph_type,
+                "heading_path": p.heading_path,
+                "text": p.text,
+                "p_tags": p.p_tags,
+                "d_tags": p.d_tags,
+                "j_tags": p.j_tags,
+                "inferred_d_tags": getattr(p, "inferred_d_tags", None),
+                "inferred_j_tags": getattr(p, "inferred_j_tags", None),
+                "conflict_flags": p.conflict_flags,
+                "created_at": p.created_at.isoformat() if getattr(p, "created_at", None) else None,
+            }
+        )
+
+    return {"total": int(total), "paragraphs": paragraphs}
+
+
+@app.get("/documents/{document_id}/policy/lines")
+async def list_document_policy_lines(
+    document_id: str,
+    page_number: Optional[int] = Query(None),
+    atomic_only: Optional[bool] = Query(None, description="If true, only return is_atomic lines"),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(1000, ge=1, le=10000),
+    db: AsyncSession = Depends(get_db),
+):
+    """List Path B atomic lines for a document (optionally filtered by page)."""
+    from uuid import UUID
+
+    try:
+        doc_uuid = UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID")
+
+    # Verify document exists
+    doc_result = await db.execute(select(Document.id).where(Document.id == doc_uuid))
+    if not doc_result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Join paragraphs only for ordering; select PolicyLine only to avoid asyncpg type 1043 (varchar) on joined columns
+    base = (
+        select(PolicyLine)
+        .join(PolicyParagraph, PolicyParagraph.id == PolicyLine.paragraph_id)
+        .where(PolicyLine.document_id == doc_uuid)
+    )
+    if page_number is not None:
+        base = base.where(PolicyLine.page_number == int(page_number))
+    if atomic_only is True:
+        base = base.where(PolicyLine.is_atomic.is_(True))
+
+    # Count with same filters
+    total_q = (
+        select(func.count(PolicyLine.id))
+        .select_from(PolicyLine)
+        .join(PolicyParagraph, PolicyParagraph.id == PolicyLine.paragraph_id)
+        .where(PolicyLine.document_id == doc_uuid)
+    )
+    if page_number is not None:
+        total_q = total_q.where(PolicyLine.page_number == int(page_number))
+    if atomic_only is True:
+        total_q = total_q.where(PolicyLine.is_atomic.is_(True))
+    total = (await db.execute(total_q)).scalar_one() or 0
+
+    q = (
+        base.order_by(PolicyLine.page_number, PolicyParagraph.order_index, PolicyLine.order_index)
+        .options(defer(PolicyLine.offset_match_quality))
+        .offset(skip)
+        .limit(limit)
+    )
+    rows = (await db.execute(q)).scalars().all()
+
+    lines = []
+    for ln in rows:
+        created_at = getattr(ln, "created_at", None)
+        lines.append(
+            {
+                "id": str(ln.id),
+                "document_id": str(ln.document_id),
+                "page_number": ln.page_number,
+                "paragraph_id": str(ln.paragraph_id),
+                "paragraph_order_index": None,
+                "order_index": ln.order_index,
+                "parent_line_id": str(ln.parent_line_id) if getattr(ln, "parent_line_id", None) else None,
+                "heading_path": ln.heading_path,
+                "line_type": ln.line_type,
+                "text": ln.text,
+                "is_atomic": ln.is_atomic,
+                "non_atomic_reason": ln.non_atomic_reason,
+                "p_tags": ln.p_tags,
+                "d_tags": ln.d_tags,
+                "j_tags": ln.j_tags,
+                "inferred_d_tags": getattr(ln, "inferred_d_tags", None),
+                "inferred_j_tags": getattr(ln, "inferred_j_tags", None),
+                "conflict_flags": ln.conflict_flags,
+                "extracted_fields": ln.extracted_fields,
+                "start_offset": getattr(ln, "start_offset", None),
+                "end_offset": getattr(ln, "end_offset", None),
+                "offset_match_quality": None,
+                "created_at": created_at.isoformat() if created_at else None,
+            }
+        )
+
+    return {"total": int(total), "lines": lines}
+
+
+@app.get("/documents/{document_id}/policy/candidates")
+async def list_document_policy_candidates(
+    document_id: str,
+    state: Optional[str] = Query("proposed", description="Filter by candidate state: proposed|approved|rejected|flagged|all"),
+    candidate_type: Optional[List[str]] = Query(None, description="Filter by candidate_type (p|d|j|alias)"),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(200, ge=1, le=2000),
+    db: AsyncSession = Depends(get_db),
+):
+    """List Path B lexicon candidates for a document (for human approval workflow)."""
+    from uuid import UUID
+
+    try:
+        doc_uuid = UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID")
+
+    q = select(PolicyLexiconCandidate).where(PolicyLexiconCandidate.document_id == doc_uuid)
+    st = (state or "proposed").strip().lower()
+    if st and st != "all":
+        q = q.where(PolicyLexiconCandidate.state == st)
+
+    if candidate_type:
+        types = [str(t).strip().lower() for t in candidate_type if str(t).strip()]
+        if types:
+            q = q.where(PolicyLexiconCandidate.candidate_type.in_(types))
+
+    total_q = select(func.count()).select_from(q.subquery())
+    total = (await db.execute(total_q)).scalar_one()
+    q = q.order_by(PolicyLexiconCandidate.created_at.desc()).offset(skip).limit(limit)
+    rows = (await db.execute(q)).scalars().all()
+
+    out = []
+    for c in rows:
+        out.append(
+            {
+                "id": str(c.id),
+                "document_id": str(c.document_id),
+                "run_id": str(c.run_id) if getattr(c, "run_id", None) else None,
+                "candidate_type": c.candidate_type,
+                "normalized": c.normalized,
+                "proposed_tag": c.proposed_tag,
+                "confidence": c.confidence,
+                "examples": c.examples,
+                "source": c.source,
+                "occurrences": getattr(c, "occurrences", None),
+                "state": c.state,
+                "reviewer": c.reviewer,
+                "reviewer_notes": c.reviewer_notes,
+                "created_at": c.created_at.isoformat() if getattr(c, "created_at", None) else None,
+            }
+        )
+
+    return {"total": int(total), "candidates": out}
+
+
+class CandidateReviewBody(BaseModel):
+    state: str  # proposed|approved|rejected|flagged
+    reviewer: Optional[str] = None
+    reviewer_notes: Optional[str] = None
+    # Back-compat: older clients send target_tag
+    target_tag: Optional[str] = None  # when approving: tag code to create/alias
+    # New (Reader "edit" modal)
+    candidate_type_override: Optional[str] = None  # p|d
+    tag_code: Optional[str] = None  # target tag code/path to create/update
+    tag_spec: Optional[dict] = None  # edited spec fields to write into YAML
+
+
+@app.post("/policy/candidates/{candidate_id}/review")
+async def review_policy_candidate(
+    candidate_id: str,
+    body: CandidateReviewBody = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Approve/reject a candidate. Approving p/d will also update the lexicon DB."""
+    from uuid import UUID
+
+    try:
+        cand_uuid = UUID(candidate_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid candidate ID")
+
+    q = await db.execute(select(PolicyLexiconCandidate).where(PolicyLexiconCandidate.id == cand_uuid))
+    c = q.scalar_one_or_none()
+    if not c:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    async def _upsert_catalog(*, kind: str, normalized: str, proposed_tag: str | None, state: str):
+        """Upsert global catalog row for suppression and analytics."""
+        try:
+            from app.models import PolicyLexiconCandidateCatalog
+            from datetime import datetime
+            k = (kind or "").strip().lower() or "alias"
+            norm = (normalized or "").strip()
+            norm_key = norm.lower()[:200]
+            prop = (proposed_tag or "").strip()
+            prop_key = prop.lower()[:300] if prop else ""
+            # Find existing
+            existing = (
+                await db.execute(
+                    select(PolicyLexiconCandidateCatalog).where(
+                        PolicyLexiconCandidateCatalog.candidate_type == k,
+                        PolicyLexiconCandidateCatalog.normalized_key == norm_key,
+                        PolicyLexiconCandidateCatalog.proposed_tag_key == prop_key,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is None:
+                db.add(
+                    PolicyLexiconCandidateCatalog(
+                        candidate_type=k,
+                        normalized_key=norm_key,
+                        normalized=norm[:200],
+                        proposed_tag_key=prop_key,
+                        proposed_tag=(prop[:300] if prop else None),
+                        state=state,
+                        reviewer=(body.reviewer or "").strip() or None,
+                        reviewer_notes=body.reviewer_notes,
+                        decided_at=datetime.utcnow(),
+                    )
+                )
+            else:
+                existing.state = state
+                existing.normalized = norm[:200] or existing.normalized
+                existing.proposed_tag = (prop[:300] if prop else existing.proposed_tag)
+                existing.reviewer = (body.reviewer or "").strip() or existing.reviewer
+                existing.reviewer_notes = body.reviewer_notes
+                existing.decided_at = datetime.utcnow()
+        except Exception:
+            # best-effort; catalog should not block reviews
+            return
+
+    next_state = (body.state or "").strip().lower()
+    if next_state not in ("proposed", "approved", "rejected", "flagged"):
+        raise HTTPException(status_code=400, detail="Invalid state (expected proposed|approved|rejected|flagged)")
+
+    # Optional override for misclassifications (ONLY allowed when approving).
+    override_kind = (body.candidate_type_override or "").strip().lower()
+    if override_kind and override_kind not in ("p", "d", "j"):
+        raise HTTPException(status_code=400, detail="Invalid candidate_type_override (expected p|d|j)")
+    if override_kind and next_state != "approved":
+        raise HTTPException(status_code=400, detail="candidate_type_override is only allowed when state=approved")
+    kind = override_kind or (c.candidate_type or "").strip().lower()
+    if override_kind:
+        c.candidate_type = override_kind
+
+    updated_lexicon = None
+    if next_state == "approved" and kind in ("p", "d", "j"):
+        try:
+            from app.services.policy_lexicon_repo import approve_phrase_to_db, bump_revision
+            tag_code = (body.tag_code or body.target_tag or "").strip() or None
+            res = await approve_phrase_to_db(
+                db,
+                kind=kind,
+                normalized=str(c.normalized or ""),
+                target_code=tag_code,
+                tag_spec=(body.tag_spec if isinstance(body.tag_spec, dict) else None),
+            )
+            # Keep proposed_tag in sync with what was actually written to DB
+            c.proposed_tag = str(res.get("code") or c.proposed_tag or "").strip() or c.proposed_tag
+            revision = await bump_revision(db)
+            updated_lexicon = {"path": None, "kind": res.get("kind"), "tag_code": res.get("code"), "action": res.get("action"), "revision": revision}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to update lexicon DB: {e}")
+
+    c.state = next_state
+    c.reviewer = (body.reviewer or "").strip() or c.reviewer
+    c.reviewer_notes = body.reviewer_notes
+    # Maintain global catalog so rejected candidates don't resurface (and restore is possible).
+    if next_state in ("rejected", "approved", "proposed"):
+        await _upsert_catalog(kind=c.candidate_type, normalized=c.normalized, proposed_tag=c.proposed_tag, state=next_state)
+    # Auto-backfill: approving a global lexicon change should trigger reprocessing for all impacted docs.
+    backfill_enqueued = 0
+    if next_state == "approved" and kind in ("p", "d", "j"):
+        try:
+            from uuid import UUID
+            norm_key = (c.normalized or "").strip().lower()
+            if norm_key:
+                doc_rows = (
+                    await db.execute(
+                        text(
+                            "SELECT DISTINCT document_id FROM policy_lexicon_candidates WHERE lower(normalized) = :n"
+                        ),
+                        {"n": norm_key},
+                    )
+                ).all()
+                doc_ids = [UUID(str(r[0])) for r in doc_rows if r and r[0]]
+                if doc_ids:
+                    # Avoid duplicate pending/processing jobs.
+                    existing = (
+                        await db.execute(
+                            select(ChunkingJob.document_id).where(
+                                ChunkingJob.document_id.in_(doc_ids),
+                                ChunkingJob.generator_id == "B",
+                                ChunkingJob.status.in_(("pending", "processing")),
+                            )
+                        )
+                    ).all()
+                    existing_set = {r[0] for r in existing}
+                    for did in doc_ids:
+                        if did in existing_set:
+                            continue
+                        db.add(ChunkingJob(document_id=did, generator_id="B", threshold="0.6", status="pending", extraction_enabled="false", critique_enabled="false", max_retries=0))
+                        backfill_enqueued += 1
+        except Exception:
+            # best-effort
+            backfill_enqueued = backfill_enqueued
+
+    await db.commit()
+
+    # Best-effort export to YAML for backward compatibility/tools.
+    if next_state == "approved" and kind in ("p", "d", "j"):
+        try:
+            from app.services.policy_lexicon_repo import export_yaml_from_db
+
+            yaml_path = await export_yaml_from_db(db)
+            if isinstance(updated_lexicon, dict):
+                updated_lexicon["path"] = yaml_path
+        except Exception:
+            pass
+
+    return {
+        "status": "ok",
+        "candidate": {
+            "id": str(c.id),
+            "document_id": str(c.document_id),
+            "candidate_type": c.candidate_type,
+            "normalized": c.normalized,
+            "proposed_tag": c.proposed_tag,
+            "confidence": c.confidence,
+            "examples": c.examples,
+            "source": c.source,
+            "state": c.state,
+            "reviewer": c.reviewer,
+            "reviewer_notes": c.reviewer_notes,
+        },
+        "lexicon_update": updated_lexicon,
+        "backfill_enqueued": backfill_enqueued,
+    }
+
+
+class CandidateBulkReviewBody(BaseModel):
+    candidate_ids: List[str]
+    state: str  # proposed|approved|rejected|flagged
+    reviewer: Optional[str] = None
+    reviewer_notes: Optional[str] = None
+    candidate_type_override: Optional[str] = None  # p|d (applies to all)
+
+
+@app.post("/policy/candidates/review-bulk")
+async def review_policy_candidates_bulk(
+    body: CandidateBulkReviewBody = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk approve/reject candidates. Bulk approve uses each candidate's proposed_tag when possible."""
+    raise HTTPException(
+        status_code=410,
+        detail="Lexicon maintenance has moved to the QA service. Use the QA Lexicon Maintenance API to bulk-review candidates, then publish into RAG.",
+    )
+    from uuid import UUID
+
+    next_state = (body.state or "").strip().lower()
+    if next_state not in ("proposed", "approved", "rejected", "flagged"):
+        raise HTTPException(status_code=400, detail="Invalid state (expected proposed|approved|rejected|flagged)")
+
+    override_kind = (body.candidate_type_override or "").strip().lower()
+    if override_kind and override_kind not in ("p", "d", "j"):
+        raise HTTPException(status_code=400, detail="Invalid candidate_type_override (expected p|d|j)")
+    if override_kind and next_state != "approved":
+        raise HTTPException(status_code=400, detail="candidate_type_override is only allowed when state=approved")
+
+    ids: list[UUID] = []
+    for s in body.candidate_ids or []:
+        try:
+            ids.append(UUID(str(s)))
+        except Exception:
+            continue
+    if not ids:
+        raise HTTPException(status_code=400, detail="candidate_ids is required")
+
+    q = await db.execute(select(PolicyLexiconCandidate).where(PolicyLexiconCandidate.id.in_(ids)))
+    rows = q.scalars().all()
+    found = {str(c.id): c for c in rows}
+
+    updated: list[dict] = []
+    errors: list[dict] = []
+
+    # Best-effort: maintain catalog for approved/rejected.
+    async def _upsert_catalog(*, kind: str, normalized: str, proposed_tag: str | None, state: str):
+        try:
+            from app.models import PolicyLexiconCandidateCatalog
+            from datetime import datetime
+            k = (kind or "").strip().lower() or "alias"
+            norm = (normalized or "").strip()
+            norm_key = norm.lower()[:200]
+            prop = (proposed_tag or "").strip()
+            prop_key = prop.lower()[:300] if prop else ""
+            existing = (
+                await db.execute(
+                    select(PolicyLexiconCandidateCatalog).where(
+                        PolicyLexiconCandidateCatalog.candidate_type == k,
+                        PolicyLexiconCandidateCatalog.normalized_key == norm_key,
+                        PolicyLexiconCandidateCatalog.proposed_tag_key == prop_key,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is None:
+                db.add(
+                    PolicyLexiconCandidateCatalog(
+                        candidate_type=k,
+                        normalized_key=norm_key,
+                        normalized=norm[:200],
+                        proposed_tag_key=prop_key,
+                        proposed_tag=(prop[:300] if prop else None),
+                        state=state,
+                        reviewer=(body.reviewer or "").strip() or None,
+                        reviewer_notes=body.reviewer_notes,
+                        decided_at=datetime.utcnow(),
+                    )
+                )
+            else:
+                existing.state = state
+                existing.normalized = norm[:200] or existing.normalized
+                existing.proposed_tag = (prop[:300] if prop else existing.proposed_tag)
+                existing.reviewer = (body.reviewer or "").strip() or existing.reviewer
+                existing.reviewer_notes = body.reviewer_notes
+                existing.decided_at = datetime.utcnow()
+        except Exception:
+            return
+
+    approved_norms: set[str] = set()
+    for cid in body.candidate_ids:
+        c = found.get(str(cid))
+        if not c:
+            errors.append({"id": str(cid), "error": "not_found"})
+            continue
+        try:
+            if override_kind:
+                c.candidate_type = override_kind
+            kind = override_kind or (c.candidate_type or "").strip().lower()
+
+            updated_lexicon = None
+            if next_state == "approved" and kind in ("p", "d", "j"):
+                from app.services.policy_lexicon_repo import approve_phrase_to_db
+
+                # Prefer approving into the candidate's proposed_tag, else create a new tag code.
+                res = await approve_phrase_to_db(
+                    db,
+                    kind=kind,
+                    normalized=str(c.normalized or ""),
+                    target_code=(str(c.proposed_tag).strip() if c.proposed_tag else None),
+                    tag_spec=None,
+                )
+                updated_lexicon = {"path": None, "kind": res.get("kind"), "tag_code": res.get("code"), "action": res.get("action")}
+                c.proposed_tag = str(res.get("code") or c.proposed_tag or "").strip() or c.proposed_tag
+                if (c.normalized or "").strip():
+                    approved_norms.add((c.normalized or "").strip().lower())
+
+            c.state = next_state
+            c.reviewer = (body.reviewer or "").strip() or c.reviewer
+            c.reviewer_notes = body.reviewer_notes
+            if next_state in ("approved", "rejected", "proposed"):
+                await _upsert_catalog(kind=c.candidate_type, normalized=c.normalized, proposed_tag=c.proposed_tag, state=next_state)
+            updated.append({"id": str(c.id), "state": c.state, "candidate_type": c.candidate_type, "proposed_tag": c.proposed_tag, "lexicon_update": updated_lexicon})
+        except Exception as e:
+            errors.append({"id": str(c.id), "error": str(e)})
+
+    backfill_enqueued = 0
+    revision = None
+    if next_state == "approved" and approved_norms:
+        try:
+            from app.services.policy_lexicon_repo import bump_revision
+
+            revision = await bump_revision(db)
+            # Auto-backfill: enqueue generator B reprocessing for docs that contain these candidates.
+            from uuid import UUID
+
+            doc_ids: set[UUID] = set()
+            for n in approved_norms:
+                rows2 = (
+                    await db.execute(
+                        text("SELECT DISTINCT document_id FROM policy_lexicon_candidates WHERE lower(normalized) = :n"),
+                        {"n": n},
+                    )
+                ).all()
+                for r in rows2:
+                    if r and r[0]:
+                        doc_ids.add(UUID(str(r[0])))
+            if doc_ids:
+                existing = (
+                    await db.execute(
+                        select(ChunkingJob.document_id).where(
+                            ChunkingJob.document_id.in_(list(doc_ids)),
+                            ChunkingJob.generator_id == "B",
+                            ChunkingJob.status.in_(("pending", "processing")),
+                        )
+                    )
+                ).all()
+                existing_set = {r[0] for r in existing}
+                for did in doc_ids:
+                    if did in existing_set:
+                        continue
+                    db.add(ChunkingJob(document_id=did, generator_id="B", threshold="0.6", status="pending", extraction_enabled="false", critique_enabled="false", max_retries=0))
+                    backfill_enqueued += 1
+        except Exception:
+            pass
+
+    await db.commit()
+    yaml_path = None
+    if next_state == "approved" and approved_norms:
+        try:
+            from app.services.policy_lexicon_repo import export_yaml_from_db
+
+            yaml_path = await export_yaml_from_db(db)
+        except Exception:
+            yaml_path = None
+
+    return {"status": "ok", "updated": updated, "errors": errors, "lexicon_revision": revision, "lexicon_yaml_path": yaml_path, "backfill_enqueued": backfill_enqueued}
+
+
+@app.get("/policy/lexicon")
+async def get_policy_lexicon_snapshot(db: AsyncSession = Depends(get_db)):
+    """Return the active policy lexicon snapshot (DB source-of-truth) in a UI-friendly shape."""
+    from app.services.policy_lexicon_repo import load_lexicon_snapshot_db
+
+    lex = await load_lexicon_snapshot_db(db)
+
+    def flatten_tags(kind: str, root: dict) -> list[dict]:
+        out: list[dict] = []
+
+        def rec(code: str, spec: Any, parent: str | None):
+            if not isinstance(spec, dict):
+                out.append({"kind": kind, "code": code, "spec": {"value": spec}, "parent": parent, "has_children": False})
+                return
+            children = spec.get("children")
+            spec_no_children = dict(spec)
+            spec_no_children.pop("children", None)
+            out.append(
+                {
+                    "kind": kind,
+                    "code": code,
+                    "spec": spec_no_children,
+                    "parent": parent,
+                    "has_children": bool(children) if isinstance(children, dict) else False,
+                }
+            )
+            if isinstance(children, dict):
+                for child_code, child_spec in children.items():
+                    rec(str(child_code), child_spec, code)
+
+        for code, spec in (root or {}).items():
+            rec(str(code), spec, None)
+        return out
+
+    return {
+        "lexicon_version": lex.version,
+        "lexicon_meta": lex.meta,
+        "tags": flatten_tags("p", lex.p_tags) + flatten_tags("d", lex.d_tags) + flatten_tags("j", lex.j_tags),
+    }
+
+
+@app.get("/policy/lexicon/overview")
+async def get_policy_lexicon_overview(
+    kind: str = Query("all", description="Kind filter: all|p|d|j"),
+    status: str = Query("all", description="Status filter: all|approved|proposed|rejected"),
+    search: Optional[str] = Query(None, description="Search (tag code/description or candidate phrase)"),
+    min_score: float = Query(0.6, ge=0.0, le=1.0),
+    limit: int = Query(500, ge=1, le=2000),
+    top_docs: int = Query(5, ge=0, le=20),
+    db: AsyncSession = Depends(get_db),
+):
+    """Merged Lexicon view for UI: approved tags + candidate groups with status chips."""
+    from app.services.policy_lexicon_repo import load_lexicon_snapshot_db
+
+    kind_norm = (kind or "all").strip().lower()
+    if kind_norm not in ("all", "p", "d", "j"):
+        raise HTTPException(status_code=400, detail="kind must be all|p|d|j")
+    status_norm = (status or "all").strip().lower()
+    if status_norm not in ("all", "approved", "proposed", "rejected"):
+        raise HTTPException(status_code=400, detail="status must be all|approved|proposed|rejected")
+    q = (search or "").strip().lower()
+
+    lex = await load_lexicon_snapshot_db(db)
+    # Pull revision if present
+    revision = None
+    if isinstance(lex.meta, dict):
+        try:
+            revision = int(lex.meta.get("revision")) if lex.meta.get("revision") is not None else None
+        except Exception:
+            revision = None
+
+    # Candidate groups
+    cand_rows: list[dict] = []
+    if status_norm in ("all", "proposed", "rejected", "approved"):
+        cand_state = "all" if status_norm == "all" else status_norm
+        cand_types = None if kind_norm == "all" else [kind_norm]
+        cand_payload = await list_policy_candidates_aggregate(
+            state=cand_state,
+            candidate_type=cand_types,
+            search=(q if q else None),
+            limit=min(limit, 2000),
+            sort="occurrences",
+            sort_dir="desc",
+            top_docs=top_docs,
+            db=db,
+        )
+        for c in (cand_payload.get("candidates") or []):
+            cand_rows.append(
+                {
+                    "id": f"cand:{c.get('key')}",
+                    "row_type": "candidate",
+                    "kind": (
+                        kind_norm
+                        if kind_norm in ("p", "d", "j")
+                        else ("p" if "p" in (c.get("candidate_types") or []) else "d" if "d" in (c.get("candidate_types") or []) else "j" if "j" in (c.get("candidate_types") or []) else "d")
+                    ),
+                    "status": c.get("state") or ("mixed" if cand_state == "all" else cand_state),
+                    "key": c.get("key"),
+                    "normalized": c.get("normalized"),
+                    "doc_count": c.get("doc_count"),
+                    "total_occurrences": c.get("total_occurrences"),
+                    "max_confidence": c.get("max_confidence"),
+                    "candidate_types": c.get("candidate_types"),
+                    "proposed_tags": c.get("proposed_tags"),
+                    "examples": c.get("examples"),
+                    "top_documents": c.get("top_documents"),
+                }
+            )
+
+    # Tag stats (approved tags)
+    tag_rows: list[dict] = []
+    if status_norm in ("all", "approved"):
+        # Build D-tag lookup (flatten hierarchy) for category/description/search.
+        d_lookup: dict[str, dict] = {}
+        try:
+            def _walk(code: str, spec_any: Any):
+                if isinstance(spec_any, dict):
+                    spec_no_children = dict(spec_any)
+                    children = spec_no_children.pop("children", None)
+                    d_lookup[str(code)] = spec_no_children
+                    if isinstance(children, dict):
+                        for cc, cs in children.items():
+                            _walk(str(cc), cs)
+            for root_code, root_spec in (lex.d_tags or {}).items():
+                _walk(str(root_code), root_spec)
+        except Exception:
+            d_lookup = {}
+
+        kinds = ("p", "d", "j") if kind_norm == "all" else (kind_norm,)
+        for k in kinds:
+            tag_expr = (
+                "policy_lines.p_tags"
+                if k == "p"
+                else "COALESCE(policy_lines.inferred_d_tags, policy_lines.d_tags)"
+                if k == "d"
+                else "policy_lines.j_tags"
+            )
+            stats_sql = f"""
+                WITH base AS (
+                    SELECT policy_lines.document_id AS document_id, {tag_expr} AS tag_map
+                    FROM policy_lines
+                    WHERE policy_lines.is_atomic = TRUE
+                      AND {tag_expr} IS NOT NULL
+                      AND jsonb_typeof({tag_expr}) = 'object'
+                ),
+                kv AS (
+                    SELECT document_id, (e.key)::text AS tag, (e.value)::float AS score
+                    FROM base, LATERAL jsonb_each_text(base.tag_map) AS e(key, value)
+                )
+                SELECT tag, COUNT(*)::int AS hit_lines, COUNT(DISTINCT document_id)::int AS hit_docs, MAX(score)::float AS max_score
+                FROM kv
+                WHERE score >= :min_score
+                GROUP BY tag
+                ORDER BY hit_lines DESC
+                LIMIT :limit
+            """
+            stats = (await db.execute(text(stats_sql), {"min_score": float(min_score), "limit": int(limit)})).all()
+
+            # For search, filter by tag code/description/category (best-effort)
+            def _tag_spec(code: str) -> dict:
+                if k == "p":
+                    return (lex.p_tags or {}).get(code) if isinstance((lex.p_tags or {}).get(code), dict) else {}
+                if k == "j":
+                    return (lex.j_tags or {}).get(code) if isinstance((lex.j_tags or {}).get(code), dict) else {}
+                # d: flatten lookup by code; easiest: rely on snapshot flatten
+                return d_lookup.get(code) if isinstance(d_lookup.get(code), dict) else {}
+
+            for tag, hit_lines, hit_docs, max_score in stats:
+                code = str(tag or "")
+                if not code:
+                    continue
+                spec = _tag_spec(code)
+                category = str(spec.get("category") or "") if isinstance(spec, dict) else ""
+                desc = str(spec.get("description") or "") if isinstance(spec, dict) else ""
+                if q:
+                    hay = f"{code} {category} {desc}".lower()
+                    if q not in hay:
+                        continue
+                tag_rows.append(
+                    {
+                        "id": f"tag:{k}:{code}",
+                        "row_type": "tag",
+                        "kind": k,
+                        "status": "approved",
+                        "code": code,
+                        "category": category,
+                        "description": desc,
+                        "hit_lines": int(hit_lines or 0),
+                        "hit_docs": int(hit_docs or 0),
+                        "max_score": float(max_score or 0.0),
+                    }
+                )
+
+    # Merge and sort by usage (so high-hit candidates surface in "All").
+    merged = tag_rows + cand_rows
+    def _usage(row: dict) -> int:
+        if row.get("row_type") == "tag":
+            return int(row.get("hit_lines") or 0)
+        return int(row.get("total_occurrences") or 0)
+    merged.sort(
+        key=lambda r: (
+            -_usage(r),
+            0 if r.get("row_type") == "tag" else 1,
+        )
+    )
+    merged = merged[: int(limit)]
+    return {
+        "lexicon_version": lex.version,
+        "lexicon_revision": revision,
+        "min_score": float(min_score),
+        "rows": merged,
+    }
+
+
+@app.get("/policy/lexicon/tag-details")
+async def get_policy_lexicon_tag_details(
+    kind: str = Query("d", description="Tag kind: p|d|j"),
+    code: str = Query(..., description="Tag code"),
+    min_score: float = Query(0.6, ge=0.0, le=1.0),
+    top_docs: int = Query(15, ge=0, le=50),
+    sample_lines: int = Query(20, ge=0, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    """Right-panel details: top documents + sample lines for one approved tag."""
+    kind_norm = (kind or "").strip().lower()
+    if kind_norm not in ("p", "d", "j"):
+        raise HTTPException(status_code=400, detail="kind must be p|d|j")
+    tag_code = (code or "").strip()
+    if not tag_code:
+        raise HTTPException(status_code=400, detail="code is required")
+
+    tag_expr = (
+        "policy_lines.p_tags"
+        if kind_norm == "p"
+        else "COALESCE(policy_lines.inferred_d_tags, policy_lines.d_tags)"
+        if kind_norm == "d"
+        else "policy_lines.j_tags"
+    )
+    kv_sql = f"""
+        WITH base AS (
+            SELECT
+                policy_lines.document_id AS document_id,
+                policy_lines.page_number AS page_number,
+                policy_lines.text AS text,
+                {tag_expr} AS tag_map
+            FROM policy_lines
+            WHERE policy_lines.is_atomic = TRUE
+              AND {tag_expr} IS NOT NULL
+              AND jsonb_typeof({tag_expr}) = 'object'
+        ),
+        kv AS (
+            SELECT document_id, page_number, text, (e.key)::text AS tag, (e.value)::float AS score
+            FROM base, LATERAL jsonb_each_text(base.tag_map) AS e(key, value)
+        ),
+        filtered AS (
+            SELECT document_id, page_number, text, score
+            FROM kv
+            WHERE tag = :tag_code AND score >= :min_score
+        ),
+        doc_agg AS (
+            SELECT document_id, COUNT(*)::int AS hits, MAX(score)::float AS max_score
+            FROM filtered
+            GROUP BY document_id
+            ORDER BY hits DESC
+            LIMIT :top_docs
+        )
+        SELECT
+            doc_agg.document_id,
+            COALESCE(documents.display_name, documents.filename) AS document_name,
+            doc_agg.hits,
+            doc_agg.max_score
+        FROM doc_agg
+        JOIN documents ON documents.id = doc_agg.document_id
+        ORDER BY doc_agg.hits DESC
+    """
+    docs = (await db.execute(text(kv_sql), {"tag_code": tag_code, "min_score": float(min_score), "top_docs": int(top_docs)})).all()
+    top_documents = [
+        {"document_id": str(did), "document_name": str(name or ""), "hits": int(hits or 0), "max_score": float(ms or 0.0)}
+        for did, name, hits, ms in docs
+    ]
+
+    lines_sql = f"""
+        WITH base AS (
+            SELECT
+                policy_lines.document_id AS document_id,
+                policy_lines.page_number AS page_number,
+                policy_lines.text AS text,
+                {tag_expr} AS tag_map
+            FROM policy_lines
+            WHERE policy_lines.is_atomic = TRUE
+              AND {tag_expr} IS NOT NULL
+              AND jsonb_typeof({tag_expr}) = 'object'
+        ),
+        kv AS (
+            SELECT document_id, page_number, text, (e.key)::text AS tag, (e.value)::float AS score
+            FROM base, LATERAL jsonb_each_text(base.tag_map) AS e(key, value)
+        )
+        SELECT
+            kv.document_id,
+            COALESCE(documents.display_name, documents.filename) AS document_name,
+            kv.page_number,
+            kv.score,
+            kv.text
+        FROM kv
+        JOIN documents ON documents.id = kv.document_id
+        WHERE kv.tag = :tag_code AND kv.score >= :min_score
+        ORDER BY kv.score DESC
+        LIMIT :sample_lines
+    """
+    lines = (await db.execute(text(lines_sql), {"tag_code": tag_code, "min_score": float(min_score), "sample_lines": int(sample_lines)})).all()
+    sample = [
+        {
+            "document_id": str(did),
+            "document_name": str(name or ""),
+            "page_number": int(pn or 0),
+            "score": float(score or 0.0),
+            "text": str(txt or ""),
+        }
+        for did, name, pn, score, txt in lines
+    ]
+
+    return {"kind": kind_norm, "code": tag_code, "min_score": float(min_score), "top_documents": top_documents, "sample_lines": sample}
+
+
+class LexiconTagUpdateBody(BaseModel):
+    spec: dict
+    active: Optional[bool] = None
+    reviewer: Optional[str] = None
+    reviewer_notes: Optional[str] = None
+
+
+@app.patch("/policy/lexicon/tags/{kind}/{code:path}")
+async def update_policy_lexicon_tag(
+    kind: str,
+    code: str,
+    body: LexiconTagUpdateBody = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update a lexicon tag spec (DB source of truth), bump revision, export YAML, and enqueue B reruns for consistency."""
+    kind_norm = (kind or "").strip().lower()
+    if kind_norm not in ("p", "d", "j"):
+        raise HTTPException(status_code=400, detail="kind must be p|d|j")
+    tag_code = (code or "").strip()
+    if not tag_code:
+        raise HTTPException(status_code=400, detail="code is required")
+    if not isinstance(body.spec, dict):
+        raise HTTPException(status_code=400, detail="spec must be an object")
+
+    # Apply update
+    try:
+        from app.services.policy_lexicon_repo import update_tag_in_db, bump_revision, export_yaml_from_db
+
+        await update_tag_in_db(db, kind=kind_norm, code=tag_code, spec=body.spec, active=body.active)
+        revision = await bump_revision(db)
+        # Persist revision bump + spec change
+        await db.commit()
+
+        # Export YAML for compat
+        yaml_path = None
+        try:
+            yaml_path = await export_yaml_from_db(db)
+        except Exception:
+            yaml_path = None
+
+        # Auto-backfill: on lexicon edit, rerun all past docs (best-effort).
+        backfill_enqueued = 0
+        try:
+            from uuid import UUID
+            # Only enqueue for docs that are not already pending/processing B.
+            doc_ids = (await db.execute(select(Document.id))).scalars().all()
+            if doc_ids:
+                existing = (
+                    await db.execute(
+                        select(ChunkingJob.document_id).where(
+                            ChunkingJob.document_id.in_(doc_ids),
+                            ChunkingJob.generator_id == "B",
+                            ChunkingJob.status.in_(("pending", "processing")),
+                        )
+                    )
+                ).all()
+                existing_set = {r[0] for r in existing}
+                for did in doc_ids:
+                    if did in existing_set:
+                        continue
+                    db.add(ChunkingJob(document_id=did, generator_id="B", threshold="0.6", status="pending", extraction_enabled="false", critique_enabled="false", max_retries=0))
+                    backfill_enqueued += 1
+                await db.commit()
+        except Exception:
+            backfill_enqueued = backfill_enqueued
+
+        return {"status": "ok", "kind": kind_norm, "code": tag_code, "lexicon_revision": revision, "lexicon_yaml_path": yaml_path, "backfill_enqueued": backfill_enqueued}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Tag not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update tag: {e}")
+
+
+@app.get("/policy/lexicon/stats")
+async def get_policy_lexicon_stats(
+    kind: str = Query("d", description="Tag kind: p|d"),
+    min_score: float = Query(0.6, ge=0.0, le=1.0),
+    limit: int = Query(200, ge=1, le=2000),
+    top_docs: int = Query(5, ge=0, le=20),
+    use_inferred_d: bool = Query(True, description="For d-stats, use inferred_d_tags when present (else d_tags)."),
+    db: AsyncSession = Depends(get_db),
+):
+    """Aggregate tag usage (hits + top documents) from policy_lines for UI ranking."""
+    kind_norm = (kind or "d").strip().lower()
+    if kind_norm not in ("p", "d"):
+        raise HTTPException(status_code=400, detail="kind must be p or d")
+
+    tag_expr = "policy_lines.p_tags" if kind_norm == "p" else ("COALESCE(policy_lines.inferred_d_tags, policy_lines.d_tags)" if use_inferred_d else "policy_lines.d_tags")
+
+    base_sql = f"""
+        WITH base AS (
+            SELECT policy_lines.document_id AS document_id, {tag_expr} AS tag_map
+            FROM policy_lines
+            WHERE policy_lines.is_atomic = TRUE
+              AND {tag_expr} IS NOT NULL
+        ),
+        kv AS (
+            SELECT document_id, (e.key)::text AS tag, (e.value)::float AS score
+            FROM base, LATERAL jsonb_each_text(base.tag_map) AS e(key, value)
+        )
+        SELECT tag, COUNT(*)::int AS hit_lines, COUNT(DISTINCT document_id)::int AS hit_docs, MAX(score)::float AS max_score
+        FROM kv
+        WHERE score >= :min_score
+        GROUP BY tag
+        ORDER BY hit_lines DESC
+        LIMIT :limit
+    """
+
+    rows = (await db.execute(text(base_sql), {"min_score": float(min_score), "limit": int(limit)})).all()
+    tags = [r[0] for r in rows]
+    stats_by_tag: dict[str, dict] = {
+        str(tag): {"tag": str(tag), "hit_lines": int(hit_lines or 0), "hit_docs": int(hit_docs or 0), "max_score": float(max_score or 0.0), "top_documents": []}
+        for tag, hit_lines, hit_docs, max_score in rows
+    }
+
+    if top_docs > 0 and tags:
+        docs_sql = f"""
+            WITH base AS (
+                SELECT policy_lines.document_id AS document_id, {tag_expr} AS tag_map
+                FROM policy_lines
+                WHERE policy_lines.is_atomic = TRUE
+                  AND {tag_expr} IS NOT NULL
+            ),
+            kv AS (
+                SELECT document_id, (e.key)::text AS tag, (e.value)::float AS score
+                FROM base, LATERAL jsonb_each_text(base.tag_map) AS e(key, value)
+            ),
+            agg AS (
+                SELECT tag, document_id, COUNT(*)::int AS hits
+                FROM kv
+                WHERE score >= :min_score AND tag IN :tags
+                GROUP BY tag, document_id
+            )
+            SELECT agg.tag, agg.document_id, agg.hits, COALESCE(documents.display_name, documents.filename) AS document_name
+            FROM agg
+            JOIN documents ON documents.id = agg.document_id
+            ORDER BY agg.tag, agg.hits DESC
+        """
+        docs_rows = (
+            await db.execute(
+                text(docs_sql).bindparams(bindparam("tags", expanding=True)),
+                {"min_score": float(min_score), "tags": tags},
+            )
+        ).all()
+        per_tag: dict[str, list[dict]] = {}
+        for tag, doc_id, hits, doc_name in docs_rows:
+            per_tag.setdefault(str(tag), []).append(
+                {"document_id": str(doc_id), "document_name": str(doc_name or ""), "hits": int(hits or 0)}
+            )
+        for tag, lst in per_tag.items():
+            stats_by_tag[tag]["top_documents"] = lst[: int(top_docs)]
+
+    return {"kind": kind_norm, "min_score": float(min_score), "stats": list(stats_by_tag.values())}
+
+
+@app.get("/policy/lexicon/doc-stats")
+async def get_policy_lexicon_document_stats(
+    kind: str = Query("d", description="Tag kind: p|d"),
+    min_score: float = Query(0.6, ge=0.0, le=1.0),
+    limit: int = Query(50, ge=1, le=500),
+    use_inferred_d: bool = Query(True, description="For d-stats, use inferred_d_tags when present (else d_tags)."),
+    db: AsyncSession = Depends(get_db),
+):
+    """Rank documents by total tag hits (for lexicon management UI)."""
+    kind_norm = (kind or "d").strip().lower()
+    if kind_norm not in ("p", "d"):
+        raise HTTPException(status_code=400, detail="kind must be p or d")
+
+    tag_expr = "policy_lines.p_tags" if kind_norm == "p" else ("COALESCE(policy_lines.inferred_d_tags, policy_lines.d_tags)" if use_inferred_d else "policy_lines.d_tags")
+    sql = f"""
+        WITH base AS (
+            SELECT policy_lines.document_id AS document_id, {tag_expr} AS tag_map
+            FROM policy_lines
+            WHERE policy_lines.is_atomic = TRUE
+              AND {tag_expr} IS NOT NULL
+        ),
+        kv AS (
+            SELECT document_id, (e.key)::text AS tag, (e.value)::float AS score
+            FROM base, LATERAL jsonb_each_text(base.tag_map) AS e(key, value)
+        ),
+        filtered AS (
+            SELECT document_id, tag
+            FROM kv
+            WHERE score >= :min_score
+        )
+        SELECT
+            filtered.document_id,
+            COALESCE(documents.display_name, documents.filename) AS document_name,
+            COUNT(*)::int AS hit_lines,
+            COUNT(DISTINCT filtered.tag)::int AS distinct_tags
+        FROM filtered
+        JOIN documents ON documents.id = filtered.document_id
+        GROUP BY filtered.document_id, documents.display_name, documents.filename
+        ORDER BY hit_lines DESC
+        LIMIT :limit
+    """
+    rows = (await db.execute(text(sql), {"min_score": float(min_score), "limit": int(limit)})).all()
+    return {
+        "kind": kind_norm,
+        "min_score": float(min_score),
+        "documents": [
+            {"document_id": str(doc_id), "document_name": str(doc_name or ""), "hit_lines": int(hit_lines or 0), "distinct_tags": int(distinct_tags or 0)}
+            for doc_id, doc_name, hit_lines, distinct_tags in rows
+        ],
+    }
+
+
+@app.get("/policy/lines")
+async def list_policy_lines(
+    db: AsyncSession = Depends(get_db),
+    document_id: Optional[List[str]] = Query(None, description="Filter by document ID(s)"),
+    page_number: Optional[int] = Query(None, description="Filter by page number"),
+    heading_path: Optional[str] = Query(None, description="Filter by heading_path (contains)"),
+    search: Optional[str] = Query(None, description="Search in line text"),
+    p_tag_min_scores: Optional[str] = Query(None, description="JSON object of p_tag -> min score, e.g. {\"eligibility\":0.6}"),
+    d_tag_min_scores: Optional[str] = Query(None, description="JSON object of d_tag -> min score, e.g. {\"behavioral_health\":0.7}"),
+    has_phone: Optional[bool] = Query(None, description="Filter by whether extracted_fields.phones is non-empty"),
+    has_email: Optional[bool] = Query(None, description="Filter by whether extracted_fields.emails is non-empty"),
+    has_url: Optional[bool] = Query(None, description="Filter by whether extracted_fields.urls is non-empty"),
+    has_date: Optional[bool] = Query(None, description="Filter by whether extracted_fields.dates is non-empty"),
+    has_code: Optional[bool] = Query(None, description="Filter by whether extracted_fields.codes is non-empty"),
+    payer: Optional[List[str]] = Query(None, description="Filter by payer"),
+    state: Optional[List[str]] = Query(None, description="Filter by state"),
+    program: Optional[List[str]] = Query(None, description="Filter by program"),
+    atomic_only: Optional[bool] = Query(True, description="If true, only return is_atomic lines"),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(500, ge=1, le=5000),
+    sort: str = Query("created_at", description="Sort by: created_at, document, page"),
+    sort_dir: str = Query("asc", description="Sort direction: asc, desc"),
+):
+    """Global list endpoint for Path B lines (for Facts-tab A/B view)."""
+    from uuid import UUID
+
+    q = (
+        select(
+            PolicyLine,
+            PolicyParagraph.order_index.label("paragraph_order"),
+            Document.filename.label("doc_filename"),
+            Document.display_name.label("doc_display_name"),
+            Document.payer.label("doc_payer"),
+            Document.state.label("doc_state"),
+            Document.program.label("doc_program"),
+        )
+        .join(Document, Document.id == PolicyLine.document_id)
+        .join(PolicyParagraph, PolicyParagraph.id == PolicyLine.paragraph_id)
+    )
+
+    if atomic_only is True:
+        q = q.where(PolicyLine.is_atomic.is_(True))
+
+    if document_id and len(document_id) > 0:
+        try:
+            uuids = [UUID(d) for d in document_id]
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid document_id")
+        q = q.where(PolicyLine.document_id.in_(uuids))
+
+    if page_number is not None:
+        q = q.where(PolicyLine.page_number == int(page_number))
+
+    if heading_path and heading_path.strip():
+        # JSONB heading_path contains string match (best-effort)
+        q = q.where(cast(PolicyLine.heading_path, SAText).ilike(f"%{heading_path.strip()}%"))
+
+    if search and search.strip():
+        q = q.where(PolicyLine.text.ilike(f"%{search.strip()}%"))
+
+    # P/D tag threshold filters (JSON objects: {tag_code: min_score})
+    def _apply_tag_mins(json_str: Optional[str], kind: str) -> None:
+        nonlocal q
+        if not json_str or not json_str.strip():
+            return
+        try:
+            mins = json.loads(json_str)
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"Invalid {kind}_tag_min_scores JSON")
+        if not isinstance(mins, dict):
+            raise HTTPException(status_code=400, detail=f"{kind}_tag_min_scores must be a JSON object")
+
+        for i, (tag, min_val) in enumerate(mins.items()):
+            if tag is None:
+                continue
+            tag_s = str(tag).strip()
+            try:
+                mv = float(min_val)
+            except Exception:
+                continue
+            if not tag_s or mv <= 0:
+                continue
+
+            if kind == "p":
+                cond = text(
+                    f"COALESCE((policy_lines.p_tags ->> :ptag_{i})::float, 0) >= :pmin_{i}"
+                ).bindparams(
+                    bindparam(f"ptag_{i}", value=tag_s),
+                    bindparam(f"pmin_{i}", value=mv),
+                )
+            else:
+                # Prefer inferred D if present, else asserted D
+                cond = text(
+                    f"""COALESCE(
+                        (policy_lines.inferred_d_tags ->> :dtag_{i})::float,
+                        (policy_lines.d_tags ->> :dtag_{i})::float,
+                        0
+                      ) >= :dmin_{i}"""
+                ).bindparams(
+                    bindparam(f"dtag_{i}", value=tag_s),
+                    bindparam(f"dmin_{i}", value=mv),
+                )
+            q = q.where(cond)
+
+    _apply_tag_mins(p_tag_min_scores, "p")
+    _apply_tag_mins(d_tag_min_scores, "d")
+
+    # Hard-field presence filters from extracted_fields (phones/emails/urls/dates/codes)
+    def _apply_has(field: str, val: Optional[bool]) -> None:
+        nonlocal q
+        if val is None:
+            return
+        allowed = {
+            "phones": "phones",
+            "emails": "emails",
+            "urls": "urls",
+            "dates": "dates",
+            "codes": "codes",
+        }
+        key = allowed.get(field)
+        if not key:
+            return
+        op = ">" if val else "="
+        q = q.where(
+            text(f"COALESCE(jsonb_array_length(policy_lines.extracted_fields -> '{key}'), 0) {op} 0")
+        )
+
+    _apply_has("phones", has_phone)
+    _apply_has("emails", has_email)
+    _apply_has("urls", has_url)
+    _apply_has("dates", has_date)
+    _apply_has("codes", has_code)
+
+    def _in(values: Optional[List[str]], col):
+        nonlocal q
+        if values and len(values) > 0:
+            q = q.where(col.in_(values))
+
+    _in(payer, Document.payer)
+    _in(state, Document.state)
+    _in(program, Document.program)
+
+    total_q = select(func.count()).select_from(q.subquery())
+    total = (await db.execute(total_q)).scalar_one()
+
+    dir_norm = (sort_dir or "asc").strip().lower()
+    if dir_norm not in ("asc", "desc"):
+        dir_norm = "asc"
+    page_order = PolicyLine.page_number.desc() if dir_norm == "desc" else PolicyLine.page_number.asc()
+    created_order = PolicyLine.created_at.desc() if dir_norm == "desc" else PolicyLine.created_at.asc()
+
+    if sort == "document":
+        q = q.order_by(Document.display_name, Document.filename, PolicyLine.created_at.desc())
+    elif sort == "page":
+        # Only reverse page order; keep within-page reading order stable.
+        q = q.order_by(page_order, PolicyParagraph.order_index, PolicyLine.order_index)
+    else:
+        q = q.order_by(created_order, PolicyLine.id.desc())
+
+    q = q.offset(skip).limit(limit)
+    rows = (await db.execute(q)).all()
+
+    lines = []
+    for ln, paragraph_order, doc_filename, doc_display_name, doc_payer, doc_state, doc_program in rows:
+        lines.append(
+            {
+                "id": str(ln.id),
+                "document_id": str(ln.document_id),
+                "document_filename": doc_filename,
+                "document_display_name": doc_display_name,
+                "payer": doc_payer,
+                "state": doc_state,
+                "program": doc_program,
+                "page_number": ln.page_number,
+                "paragraph_id": str(ln.paragraph_id),
+                "paragraph_order_index": int(paragraph_order) if paragraph_order is not None else None,
+                "order_index": ln.order_index,
+                "heading_path": ln.heading_path,
+                "line_type": ln.line_type,
+                "text": ln.text,
+                "is_atomic": ln.is_atomic,
+                "non_atomic_reason": ln.non_atomic_reason,
+                "p_tags": ln.p_tags,
+                "d_tags": ln.d_tags,
+                "j_tags": ln.j_tags,
+                "inferred_d_tags": getattr(ln, "inferred_d_tags", None),
+                "conflict_flags": ln.conflict_flags,
+                "extracted_fields": ln.extracted_fields,
+                "start_offset": getattr(ln, "start_offset", None),
+                "end_offset": getattr(ln, "end_offset", None),
+                "offset_match_quality": getattr(ln, "offset_match_quality", None),
+                "created_at": ln.created_at.isoformat() if getattr(ln, "created_at", None) else None,
+            }
+        )
+
+    return {"total": int(total), "lines": lines}
+
+
+@app.get("/policy/candidates/aggregate")
+async def list_policy_candidates_aggregate(
+    state: str = Query("proposed", description="Filter by candidate state: proposed|approved|rejected|flagged|all"),
+    candidate_type: Optional[List[str]] = Query(None, description="Filter by candidate_type (p|d|j|alias)"),
+    search: Optional[str] = Query(None, description="Search in normalized phrase"),
+    limit: int = Query(200, ge=1, le=2000),
+    sort: str = Query("occurrences", description="Sort by: occurrences, docs, confidence"),
+    sort_dir: str = Query("desc", description="Sort direction: asc, desc"),
+    top_docs: int = Query(10, ge=0, le=50),
+    db: AsyncSession = Depends(get_db),
+):
+    """Aggregate candidates across documents (for lexicon management)."""
+    st = (state or "proposed").strip().lower()
+    sort_norm = (sort or "occurrences").strip().lower()
+    dir_norm = (sort_dir or "desc").strip().lower()
+    if dir_norm not in ("asc", "desc"):
+        dir_norm = "desc"
+    if sort_norm not in ("occurrences", "docs", "confidence"):
+        sort_norm = "occurrences"
+
+    where = ["1=1"]
+    params: dict[str, Any] = {"limit": int(limit), "top_docs": int(top_docs)}
+    if st and st != "all":
+        where.append("c.state = :state")
+        params["state"] = st
+    if candidate_type:
+        types = [str(t).strip().lower() for t in candidate_type if str(t).strip()]
+        if types:
+            where.append("lower(c.candidate_type) = ANY(:types)")
+            params["types"] = types
+    if search and search.strip():
+        where.append("lower(c.normalized) LIKE :q")
+        params["q"] = f"%{search.strip().lower()}%"
+
+    order_expr = "total_occurrences" if sort_norm == "occurrences" else "doc_count" if sort_norm == "docs" else "max_confidence"
+    order_dir = "ASC" if dir_norm == "asc" else "DESC"
+
+    sql = f"""
+        WITH c AS (
+            SELECT
+                lower(normalized) AS norm_key,
+                normalized,
+                state,
+                candidate_type,
+                proposed_tag,
+                confidence,
+                COALESCE(occurrences, 1) AS occ,
+                document_id,
+                examples
+            FROM policy_lexicon_candidates c
+            WHERE {" AND ".join(where)}
+        ),
+        ex AS (
+            SELECT
+                c.norm_key,
+                jsonb_agg(DISTINCT ex_txt) FILTER (WHERE ex_txt IS NOT NULL) AS examples
+            FROM c
+            LEFT JOIN LATERAL jsonb_array_elements_text(COALESCE(c.examples, '[]'::jsonb)) AS ex_txt ON TRUE
+            GROUP BY c.norm_key
+        ),
+        agg AS (
+            SELECT
+                norm_key,
+                MAX(normalized) AS normalized,
+                COUNT(DISTINCT document_id)::int AS doc_count,
+                SUM(occ)::int AS total_occurrences,
+                MAX(COALESCE(confidence, 0))::float AS max_confidence,
+                ARRAY_AGG(DISTINCT lower(state)) AS states,
+                ARRAY_AGG(DISTINCT lower(candidate_type)) AS candidate_types,
+                ARRAY_AGG(DISTINCT proposed_tag) FILTER (WHERE proposed_tag IS NOT NULL) AS proposed_tags
+            FROM c
+            GROUP BY norm_key
+        ),
+        doc_agg AS (
+            SELECT
+                c.norm_key,
+                c.document_id,
+                SUM(c.occ)::int AS occurrences
+            FROM c
+            GROUP BY c.norm_key, c.document_id
+        ),
+        ranked_docs AS (
+            SELECT
+                doc_agg.norm_key,
+                doc_agg.document_id,
+                doc_agg.occurrences,
+                COALESCE(d.display_name, d.filename) AS document_name,
+                ROW_NUMBER() OVER (PARTITION BY doc_agg.norm_key ORDER BY doc_agg.occurrences DESC) AS rn
+            FROM doc_agg
+            JOIN documents d ON d.id = doc_agg.document_id
+        )
+        SELECT
+            agg.norm_key,
+            agg.normalized,
+            CASE
+              WHEN 'rejected' = ANY(agg.states) THEN 'rejected'
+              WHEN 'approved' = ANY(agg.states) THEN 'approved'
+              WHEN 'flagged' = ANY(agg.states) THEN 'flagged'
+              ELSE 'proposed'
+            END AS group_state,
+            agg.doc_count,
+            agg.total_occurrences,
+            agg.max_confidence,
+            agg.candidate_types,
+            agg.proposed_tags,
+            COALESCE(ex.examples, '[]'::jsonb) AS examples,
+            COALESCE(
+                jsonb_agg(
+                    jsonb_build_object(
+                        'document_id', ranked_docs.document_id::text,
+                        'document_name', ranked_docs.document_name,
+                        'occurrences', ranked_docs.occurrences
+                    )
+                    ORDER BY ranked_docs.occurrences DESC
+                ) FILTER (WHERE ranked_docs.rn <= :top_docs),
+                '[]'::jsonb
+            ) AS top_documents
+        FROM agg
+        LEFT JOIN ex ON ex.norm_key = agg.norm_key
+        LEFT JOIN ranked_docs ON ranked_docs.norm_key = agg.norm_key
+        GROUP BY agg.norm_key, agg.normalized, agg.doc_count, agg.total_occurrences, agg.max_confidence, agg.candidate_types, agg.proposed_tags, ex.examples, agg.states
+        ORDER BY {order_expr} {order_dir}
+        LIMIT :limit
+    """
+
+    rows = (await db.execute(text(sql), params)).all()
+    out = []
+    for norm_key, normalized, group_state, doc_count, total_occurrences, max_confidence, candidate_types, proposed_tags, examples, top_documents in rows:
+        out.append(
+            {
+                "key": str(norm_key),
+                "normalized": str(normalized or ""),
+                "state": str(group_state or "proposed"),
+                "doc_count": int(doc_count or 0),
+                "total_occurrences": int(total_occurrences or 0),
+                "max_confidence": float(max_confidence or 0.0),
+                "candidate_types": list(candidate_types or []),
+                "proposed_tags": [str(x) for x in (proposed_tags or []) if x],
+                "examples": examples,
+                "top_documents": top_documents,
+            }
+        )
+    return {"total": len(out), "candidates": out}
+
+
+class CandidateAggregateBulkReviewBody(BaseModel):
+    normalized_list: List[str]
+    state: str  # proposed|approved|rejected|flagged
+    candidate_type_override: Optional[str] = None  # p|d|j
+    reviewer: Optional[str] = None
+    reviewer_notes: Optional[str] = None
+    # optional: normalized -> tag_code
+    tag_code_map: Optional[dict] = None
+
+
+@app.post("/policy/candidates/aggregate/review-bulk")
+async def review_policy_candidates_aggregate_bulk(
+    body: CandidateAggregateBulkReviewBody = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk review candidate groups across documents (keyed by normalized phrase)."""
+    raise HTTPException(
+        status_code=410,
+        detail="Lexicon maintenance has moved to the QA service. Use the QA Lexicon Maintenance API to approve/reject candidates, then publish into RAG.",
+    )
+    next_state = (body.state or "").strip().lower()
+    if next_state not in ("proposed", "approved", "rejected", "flagged"):
+        raise HTTPException(status_code=400, detail="Invalid state (expected proposed|approved|rejected|flagged)")
+    override_kind = (body.candidate_type_override or "").strip().lower()
+    if override_kind and override_kind not in ("p", "d", "j"):
+        raise HTTPException(status_code=400, detail="Invalid candidate_type_override (expected p|d|j)")
+    if override_kind and next_state != "approved":
+        raise HTTPException(status_code=400, detail="candidate_type_override is only allowed when state=approved")
+
+    norms = [str(s).strip() for s in (body.normalized_list or []) if str(s).strip()]
+    if not norms:
+        raise HTTPException(status_code=400, detail="normalized_list is required")
+    norm_lowers = [n.lower() for n in norms]
+
+    # Restore path: state=proposed means "restore" (rejected/flagged → proposed). No lexicon write.
+    if next_state == "proposed":
+        updated: list[dict] = []
+        errors: list[dict] = []
+        for norm_key in norm_lowers:
+            try:
+                await db.execute(
+                    text(
+                        """
+                        UPDATE policy_lexicon_candidates
+                        SET state = 'proposed',
+                            reviewer = :reviewer,
+                            reviewer_notes = :notes
+                        WHERE lower(normalized) = :norm_key
+                        """
+                    ),
+                    {
+                        "reviewer": (body.reviewer or "").strip() or None,
+                        "notes": body.reviewer_notes,
+                        "norm_key": norm_key,
+                    },
+                )
+                # Update catalog too so suppression is removed.
+                try:
+                    await db.execute(
+                        text(
+                            """
+                            UPDATE policy_lexicon_candidate_catalog
+                            SET state = 'proposed',
+                                reviewer = COALESCE(NULLIF(:reviewer, ''), reviewer),
+                                reviewer_notes = COALESCE(:notes, reviewer_notes),
+                                decided_at = NOW(),
+                                updated_at = NOW()
+                            WHERE normalized_key = :norm_key
+                            """
+                        ),
+                        {
+                            "reviewer": (body.reviewer or "").strip(),
+                            "notes": body.reviewer_notes,
+                            "norm_key": norm_key[:200],
+                        },
+                    )
+                except Exception:
+                    pass
+                updated.append({"normalized": norm_key, "state": "proposed"})
+            except Exception as e:
+                errors.append({"normalized": norm_key, "error": str(e)})
+        await db.commit()
+        return {"status": "ok", "updated": updated, "errors": errors, "backfill_enqueued": 0, "lexicon_revision": None, "lexicon_yaml_path": None}
+
+    # Fetch representative rows (highest occurrences / confidence) per normalized
+    rep_sql = text(
+        """
+        SELECT DISTINCT ON (lower(normalized))
+            lower(normalized) AS norm_key,
+            normalized,
+            candidate_type,
+            proposed_tag
+        FROM policy_lexicon_candidates
+        WHERE lower(normalized) = ANY(:norms)
+          AND state = 'proposed'
+        ORDER BY lower(normalized),
+                 COALESCE(occurrences, 1) DESC,
+                 COALESCE(confidence, 0) DESC,
+                 created_at DESC
+        """
+    )
+    reps = (await db.execute(rep_sql, {"norms": norm_lowers})).all()
+    rep_by_key = {str(r[0]): {"normalized": r[1], "candidate_type": r[2], "proposed_tag": r[3]} for r in reps}
+
+    updated: list[dict] = []
+    errors: list[dict] = []
+    tag_code_map = body.tag_code_map if isinstance(body.tag_code_map, dict) else {}
+
+    approved_norms: set[str] = set()
+    for norm_key in norm_lowers:
+        rep = rep_by_key.get(norm_key)
+        if not rep:
+            errors.append({"normalized": norm_key, "error": "not_found"})
+            continue
+        try:
+            kind = override_kind or str(rep.get("candidate_type") or "").strip().lower() or "d"
+            if kind not in ("p", "d", "j"):
+                kind = "d"
+
+            updated_lexicon = None
+            if next_state == "approved" and kind in ("p", "d", "j"):
+                from app.services.policy_lexicon_repo import approve_phrase_to_db
+
+                tag_code = None
+                try:
+                    tag_code = str(tag_code_map.get(norm_key) or "").strip() or None
+                except Exception:
+                    tag_code = None
+                # Default to proposed_tag if present; else let YAML editor generate snake.
+                tag_code = tag_code or (str(rep.get("proposed_tag") or "").strip() or None)
+                res = await approve_phrase_to_db(
+                    db,
+                    kind=kind,
+                    normalized=str(rep.get("normalized") or ""),
+                    target_code=tag_code,
+                    tag_spec=None,
+                )
+                updated_lexicon = {"path": None, "kind": res.get("kind"), "tag_code": res.get("code"), "action": res.get("action")}
+                approved_norms.add(norm_key)
+
+                # Update all matching candidate rows across docs to reflect the chosen tag_code.
+                await db.execute(
+                    text(
+                        """
+                        UPDATE policy_lexicon_candidates
+                        SET state = :state,
+                            candidate_type = :kind,
+                            proposed_tag = :tag_code,
+                            reviewer = :reviewer,
+                            reviewer_notes = :notes
+                        WHERE lower(normalized) = :norm_key
+                        """
+                    ),
+                    {
+                        "state": next_state,
+                        "kind": kind,
+                        "tag_code": str(res.get("code") or ""),
+                        "reviewer": (body.reviewer or "").strip() or None,
+                        "notes": body.reviewer_notes,
+                        "norm_key": norm_key,
+                    },
+                )
+            else:
+                await db.execute(
+                    text(
+                        """
+                        UPDATE policy_lexicon_candidates
+                        SET state = :state,
+                            reviewer = :reviewer,
+                            reviewer_notes = :notes
+                        WHERE lower(normalized) = :norm_key
+                        """
+                    ),
+                    {
+                        "state": next_state,
+                        "reviewer": (body.reviewer or "").strip() or None,
+                        "notes": body.reviewer_notes,
+                        "norm_key": norm_key,
+                    },
+                )
+
+            # Maintain global catalog so rejected candidates do not resurface in future runs.
+            if next_state in ("rejected", "approved", "proposed"):
+                try:
+                    prop = None
+                    if isinstance(updated_lexicon, dict) and updated_lexicon.get("tag_code"):
+                        prop = str(updated_lexicon.get("tag_code") or "").strip() or None
+                    if not prop:
+                        prop = str(rep.get("proposed_tag") or "").strip() or None
+                    prop_key = (prop or "").lower()[:300] if prop else ""
+                    await db.execute(
+                        text(
+                            """
+                            INSERT INTO policy_lexicon_candidate_catalog(
+                              candidate_type, normalized_key, normalized, proposed_tag_key, proposed_tag,
+                              state, reviewer, reviewer_notes, decided_at, updated_at
+                            )
+                            VALUES (:kind, :norm_key, :normalized, :prop_key, :prop, :state, :reviewer, :notes, NOW(), NOW())
+                            ON CONFLICT (candidate_type, normalized_key, proposed_tag_key)
+                            DO UPDATE SET
+                              state = EXCLUDED.state,
+                              normalized = EXCLUDED.normalized,
+                              proposed_tag = EXCLUDED.proposed_tag,
+                              reviewer = COALESCE(EXCLUDED.reviewer, policy_lexicon_candidate_catalog.reviewer),
+                              reviewer_notes = EXCLUDED.reviewer_notes,
+                              decided_at = EXCLUDED.decided_at,
+                              updated_at = NOW()
+                            """
+                        ),
+                        {
+                            "kind": kind,
+                            "norm_key": norm_key,
+                            "normalized": str(rep.get("normalized") or "")[:200],
+                            "prop_key": prop_key,
+                            "prop": (prop[:300] if prop else None),
+                            "state": next_state,
+                            "reviewer": (body.reviewer or "").strip() or None,
+                            "notes": body.reviewer_notes,
+                        },
+                    )
+                except Exception:
+                    pass
+
+            updated.append({"normalized": norm_key, "state": next_state, "candidate_type": kind, "lexicon_update": updated_lexicon})
+        except Exception as e:
+            errors.append({"normalized": norm_key, "error": str(e)})
+
+    backfill_enqueued = 0
+    revision = None
+    if next_state == "approved" and approved_norms:
+        try:
+            from app.services.policy_lexicon_repo import bump_revision
+            from uuid import UUID
+
+            revision = await bump_revision(db)
+            doc_rows = (
+                await db.execute(
+                    text(
+                        "SELECT DISTINCT document_id FROM policy_lexicon_candidates WHERE lower(normalized) = ANY(:norms)"
+                    ),
+                    {"norms": list(approved_norms)},
+                )
+            ).all()
+            doc_ids = [UUID(str(r[0])) for r in doc_rows if r and r[0]]
+            if doc_ids:
+                existing = (
+                    await db.execute(
+                        select(ChunkingJob.document_id).where(
+                            ChunkingJob.document_id.in_(doc_ids),
+                            ChunkingJob.generator_id == "B",
+                            ChunkingJob.status.in_(("pending", "processing")),
+                        )
+                    )
+                ).all()
+                existing_set = {r[0] for r in existing}
+                for did in doc_ids:
+                    if did in existing_set:
+                        continue
+                    db.add(ChunkingJob(document_id=did, generator_id="B", threshold="0.6", status="pending", extraction_enabled="false", critique_enabled="false", max_retries=0))
+                    backfill_enqueued += 1
+        except Exception:
+            pass
+
+    await db.commit()
+    yaml_path = None
+    if next_state == "approved" and approved_norms:
+        try:
+            from app.services.policy_lexicon_repo import export_yaml_from_db
+
+            yaml_path = await export_yaml_from_db(db)
+        except Exception:
+            yaml_path = None
+    return {"status": "ok", "updated": updated, "errors": errors, "lexicon_revision": revision, "lexicon_yaml_path": yaml_path, "backfill_enqueued": backfill_enqueued}
+
+
+@app.get("/policy/candidates/catalog")
+async def list_policy_candidate_catalog(
+    state: str = Query("rejected", description="Filter: rejected|approved|flagged|all"),
+    candidate_type: Optional[List[str]] = Query(None, description="Filter by candidate_type (p|d|j|alias)"),
+    search: Optional[str] = Query(None, description="Search in normalized phrase"),
+    limit: int = Query(200, ge=1, le=2000),
+    db: AsyncSession = Depends(get_db),
+):
+    """Inspect the global candidate catalog (mostly for rejected suppression)."""
+    from app.models import PolicyLexiconCandidateCatalog
+
+    q = select(PolicyLexiconCandidateCatalog)
+    st = (state or "rejected").strip().lower()
+    if st and st != "all":
+        q = q.where(PolicyLexiconCandidateCatalog.state == st)
+    if candidate_type:
+        types = [str(t).strip().lower() for t in candidate_type if str(t).strip()]
+        if types:
+            q = q.where(func.lower(PolicyLexiconCandidateCatalog.candidate_type).in_(types))
+    if search and search.strip():
+        q = q.where(PolicyLexiconCandidateCatalog.normalized.ilike(f"%{search.strip()}%"))
+    q = q.order_by(PolicyLexiconCandidateCatalog.decided_at.desc().nullslast(), PolicyLexiconCandidateCatalog.updated_at.desc()).limit(limit)
+    rows = (await db.execute(q)).scalars().all()
+    return {
+        "total": len(rows),
+        "items": [
+            {
+                "id": str(r.id),
+                "candidate_type": r.candidate_type,
+                "normalized": r.normalized,
+                "proposed_tag": r.proposed_tag,
+                "state": r.state,
+                "reviewer": r.reviewer,
+                "reviewer_notes": r.reviewer_notes,
+                "decided_at": r.decided_at.isoformat() if r.decided_at else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+class CandidateAggregateBulkClassifyBody(BaseModel):
+    normalized_list: List[str]
+    candidate_type_override: str  # p|d|j
+    reviewer: Optional[str] = None
+    reviewer_notes: Optional[str] = None
+
+
+@app.post("/policy/candidates/aggregate/classify-bulk")
+async def classify_policy_candidates_aggregate_bulk(
+    body: CandidateAggregateBulkClassifyBody = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Disabled: classification-only changes cause integrity issues. Approve instead (writes lexicon + triggers backfill)."""
+    raise HTTPException(
+        status_code=400,
+        detail="Classification-only is disabled for integrity. Use /policy/candidates/aggregate/review-bulk with state=approved (and candidate_type_override) to approve into lexicon.",
+    )
+
+
 @app.post("/documents/{document_id}/reader-facts")
 async def create_reader_fact(
     document_id: str,
@@ -3792,6 +5698,7 @@ class ChunkingStartBody(BaseModel):
     critique_enabled: Optional[bool] = None
     max_retries: Optional[int] = None
     extraction_enabled: Optional[bool] = None
+    generator_id: Optional[str] = None  # "A" (default) | "B"
     prompt_versions: Optional[dict] = None
     llm_config_version: Optional[str] = None
 
@@ -3804,6 +5711,7 @@ async def start_chunking(
     critique_enabled: bool | None = None,
     max_retries: int | None = None,
     extraction_enabled: bool | None = None,
+    generator_id: str | None = None,
     llm_config_version: str | None = None,
     body: ChunkingStartBody | None = Body(None),
 ):
@@ -3821,6 +5729,8 @@ async def start_chunking(
             max_retries = body.max_retries
         if extraction_enabled is None and body.extraction_enabled is not None:
             extraction_enabled = body.extraction_enabled
+        if generator_id is None and body.generator_id is not None:
+            generator_id = body.generator_id
         if llm_config_version is None and body.llm_config_version is not None:
             llm_config_version = body.llm_config_version
         prompt_versions = body.prompt_versions
@@ -3833,6 +5743,9 @@ async def start_chunking(
     mr = max_retries if max_retries is not None else 2
     mr = max(0, mr)
     ee = extraction_enabled if extraction_enabled is not None else True
+    gen = (generator_id or "A").strip().upper() or "A"
+    if gen not in ("A", "B"):
+        gen = "A"
 
     try:
         doc_uuid = UUID(document_id)
@@ -3846,10 +5759,33 @@ async def start_chunking(
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    # Check if there's already a pending or processing job for this document
+    # When starting Path B: cancel any pending Path A jobs for this document so the worker doesn't run the wrong path
+    if gen == "B":
+        from sqlalchemy import or_, update
+        where_a = or_(ChunkingJob.generator_id.is_(None), ChunkingJob.generator_id == "A")
+        cancel_result = await db.execute(
+            update(ChunkingJob)
+            .where(
+                ChunkingJob.document_id == doc_uuid,
+                where_a,
+                ChunkingJob.status == "pending",
+            )
+            .values(status="cancelled")
+        )
+        if cancel_result.rowcount and cancel_result.rowcount > 0:
+            await db.commit()
+            logger.info(f"Cancelled {cancel_result.rowcount} pending Path A job(s) for document {document_id} so Path B can run")
+
+    # Check if there's already a pending or processing job for this document (same generator)
+    if gen == "A":
+        from sqlalchemy import or_
+        where_chunk_gen = or_(ChunkingJob.generator_id.is_(None), ChunkingJob.generator_id == "A")
+    else:
+        where_chunk_gen = (ChunkingJob.generator_id == gen)
     existing_job = await db.execute(
         select(ChunkingJob).where(
             ChunkingJob.document_id == doc_uuid,
+            where_chunk_gen,
             ChunkingJob.status.in_(["pending", "processing"])
         )
     )
@@ -3859,6 +5795,7 @@ async def start_chunking(
     # Create new job (run-configured: prompt_versions, llm_config_version optional)
     job = ChunkingJob(
         document_id=doc_uuid,
+        generator_id=gen,
         status="pending",
         threshold=str(th),
         critique_enabled="true" if ce else "false",
@@ -3878,6 +5815,7 @@ async def start_chunking(
         "job_id": str(job.id),
         "critique_enabled": ce,
         "max_retries": mr,
+        "generator_id": gen,
     }
     if prompt_versions is not None:
         out["prompt_versions"] = prompt_versions
@@ -3892,6 +5830,7 @@ class ChunkingRestartBody(BaseModel):
     critique_enabled: Optional[bool] = None
     max_retries: Optional[int] = None
     extraction_enabled: Optional[bool] = None
+    generator_id: Optional[str] = None  # "A" (default) | "B"
 
 
 class ChunkingStatusUpdateBody(BaseModel):
@@ -3904,6 +5843,7 @@ async def restart_chunking(
     document_id: str,
     db: AsyncSession = Depends(get_db),
     threshold: float | None = None,
+    generator_id: str | None = None,
     body: ChunkingRestartBody | None = Body(None),
 ):
     """Restart chunking for a document that failed or was stopped."""
@@ -3918,6 +5858,23 @@ async def restart_chunking(
     mr = body.max_retries if body and body.max_retries is not None else 2
     mr = max(0, mr)
     ee = body.extraction_enabled if body and body.extraction_enabled is not None else True
+    gen = (generator_id or (body.generator_id if body else None) or "A").strip().upper() or "A"
+    if gen not in ("A", "B"):
+        gen = "A"
+
+    # Path B restart = re-run deterministic chunking from scratch (no "resume" semantics yet)
+    if gen == "B":
+        return await start_chunking(
+            document_id=document_id,
+            db=db,
+            threshold=th,
+            critique_enabled=False,
+            max_retries=0,
+            extraction_enabled=False,
+            generator_id="B",
+            llm_config_version=None,
+            body=None,
+        )
     
     try:
         doc_uuid = UUID(document_id)
@@ -4052,6 +6009,7 @@ async def update_chunking_status(
 async def start_embedding(
     document_id: str,
     db: AsyncSession = Depends(get_db),
+    generator_id: str | None = None,
 ):
     """Queue an embedding job for a document. Embedding worker will pick it up. Use after chunking completes or to re-embed."""
     from uuid import UUID
@@ -4065,26 +6023,36 @@ async def start_embedding(
     if not result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Document not found")
 
+    gen = (generator_id or "A").strip().upper() or "A"
+    if gen not in ("A", "B"):
+        gen = "A"
+    if gen == "A":
+        from sqlalchemy import or_
+        where_gen = or_(EmbeddingJob.generator_id.is_(None), EmbeddingJob.generator_id == "A")
+    else:
+        where_gen = (EmbeddingJob.generator_id == gen)
     existing = await db.execute(
         select(EmbeddingJob).where(
             EmbeddingJob.document_id == doc_uuid,
+            where_gen,
             EmbeddingJob.status == "pending",
         ).limit(1)
     )
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Embedding job already queued for this document")
 
-    job = EmbeddingJob(document_id=doc_uuid, status="pending")
+    job = EmbeddingJob(document_id=doc_uuid, generator_id=gen, status="pending")
     db.add(job)
     await db.commit()
 
-    return {"status": "queued", "document_id": document_id, "job_id": str(job.id)}
+    return {"status": "queued", "document_id": document_id, "job_id": str(job.id), "generator_id": gen}
 
 
 @app.post("/documents/{document_id}/embedding/reset")
 async def reset_embedding(
     document_id: str,
     db: AsyncSession = Depends(get_db),
+    generator_id: str | None = None,
 ):
     """Reset stuck embedding jobs (pending/processing). Clears partial embeddings and sets job to pending so worker can retry. Use when worker was killed mid-run."""
     from uuid import UUID
@@ -4099,9 +6067,18 @@ async def reset_embedding(
     if not result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Document not found")
 
+    gen = (generator_id or "A").strip().upper() or "A"
+    if gen not in ("A", "B"):
+        gen = "A"
+    if gen == "A":
+        from sqlalchemy import or_
+        where_job_gen = or_(EmbeddingJob.generator_id.is_(None), EmbeddingJob.generator_id == "A")
+    else:
+        where_job_gen = (EmbeddingJob.generator_id == gen)
     jobs_result = await db.execute(
         select(EmbeddingJob).where(
             EmbeddingJob.document_id == doc_uuid,
+            where_job_gen,
             EmbeddingJob.status.in_(["pending", "processing"]),
         ).order_by(EmbeddingJob.created_at.desc())
     )
@@ -4109,7 +6086,13 @@ async def reset_embedding(
     if not jobs:
         raise HTTPException(status_code=404, detail="No pending or processing embedding job found for this document")
 
-    await db.execute(delete(ChunkEmbedding).where(ChunkEmbedding.document_id == doc_uuid))
+    # Clear partial embeddings for this generator only (back-compat: NULL treated as "A")
+    if gen == "A":
+        from sqlalchemy import or_
+        where_gen = or_(ChunkEmbedding.generator_id.is_(None), ChunkEmbedding.generator_id == "A")
+    else:
+        where_gen = (ChunkEmbedding.generator_id == gen)
+    await db.execute(delete(ChunkEmbedding).where(ChunkEmbedding.document_id == doc_uuid, where_gen))
     vector_store = get_vector_store()
     vector_store.delete_by_document(document_id)
 
@@ -4121,12 +6104,13 @@ async def reset_embedding(
         job.error_message = None
 
     await db.commit()
-    return {"status": "reset", "document_id": document_id, "jobs_reset": len(jobs)}
+    return {"status": "reset", "document_id": document_id, "jobs_reset": len(jobs), "generator_id": gen}
 
 
 class PublishBody(BaseModel):
     """Optional body for POST /documents/{id}/publish (audit)."""
     published_by: Optional[str] = None
+    generator_id: Optional[str] = None  # "A" (default) | "B"
 
 
 @app.post("/documents/{document_id}/publish")
@@ -4135,7 +6119,7 @@ async def publish_document_endpoint(
     body: Optional[PublishBody] = Body(None),
     db: AsyncSession = Depends(get_db),
 ):
-    """Publish entire document to rag_published_embeddings (dbt contract). Writes all embeddings for this document; replaces any existing published rows for this document."""
+    """Publish a document to rag_published_embeddings (dbt contract) for one generator (A/B)."""
     from uuid import UUID
 
     try:
@@ -4143,8 +6127,9 @@ async def publish_document_endpoint(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid document ID")
 
+    gen = (body.generator_id if body else None) or None
     try:
-        result = await publish_document(doc_uuid, db)
+        result = await publish_document(doc_uuid, db, generator_id=gen)
     except ValueError as e:
         msg = str(e)
         if "not found" in msg.lower():
@@ -4338,6 +6323,7 @@ async def get_document_detail(
             "has_errors": doc.has_errors or "false",
             "error_count": doc.error_count or 0,
             "critical_error_count": doc.critical_error_count or 0,
+            "source_metadata": getattr(doc, "source_metadata", None),
         },
         "chunking_status": chunking_status,
         "embedding_status": embedding_status,
