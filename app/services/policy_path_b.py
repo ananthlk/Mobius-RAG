@@ -30,12 +30,29 @@ COMMON_PHRASES = frozenset({
     "thank you", "please contact", "as follows", "for more information", "in order to", "prior to",
     "in accordance with", "with respect to", "due to", "as well as", "such as", "as of", "in addition to",
     "in the event", "as required", "as applicable", "if applicable", "as needed", "at least", "at the time",
+    "a copy of", "a member", "a provider", "a copy", "and provider", "and providers", "and services",
+    "are required", "are required to", "in order", "of the", "to the", "for the", "with the",
+    "access to", "accordance with", "along with", "and appeals", "and behavioral", "and behavioral health",
 })
 
 # All-caps tokens we do not propose as abbreviation candidates (generic or roman numerals).
 COMMON_ABBREVIATIONS = frozenset({
     "i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x", "id", "pdf", "url", "faq", "usa", "etc",
+    "inc", "llc", "ltd", "tel", "fax", "www", "http", "https", "org", "com", "gov", "edu",
 })
+
+# Regex patterns for junk candidates that should never be proposed.
+_JUNK_PATTERNS = re.compile(
+    r"^(?:"
+    r"©.*"                       # copyright lines
+    r"|\d+\s*(?:a\.m\.|p\.m\.)"  # time patterns: "8 a.m.", "5 p.m."
+    r"|\d+\s+days?"              # "30 days", "90 day"
+    r"|(?:and|or|the|of|to|for|with|from|by|in|on|at|as|if|but|an?)\s" # starts with conjunction/preposition
+    r"|.*\d{4,}"                 # contains long numbers (years, phone fragments)
+    r"|\d+\s*$"                  # pure numbers
+    r")",
+    re.IGNORECASE,
+)
 
 
 def _normalize_phrase(s: str) -> str:
@@ -61,11 +78,23 @@ def _split_paragraph_into_lines(text: str) -> list[str]:
     return lines if lines else [text.strip()] if text.strip() else []
 
 
-def get_phrase_to_tag_map(lexicon_snapshot) -> dict[str, tuple[str, str]]:
-    """Build map: normalized_phrase -> (kind, code) from lexicon snapshot.
-    Includes spec.phrases, spec.description (if no phrases), and tag code so candidates exclude existing tags.
+def get_phrase_to_tag_map(lexicon_snapshot) -> dict[str, tuple[str, str, float]]:
+    """Build map: normalized_phrase -> (kind, code, score) from lexicon snapshot.
+
+    Reads from multiple spec keys for backward/forward compatibility:
+      - spec.phrases          (legacy RAG format)
+      - spec.strong_phrases   (QA Lexicon Maintenance UI format)
+      - spec.aliases          (alternative names, same weight as strong_phrases)
+      - spec.description      (fallback when no phrases at all)
+      - spec.weak_keywords.any_of  (weak matches at lower score)
+
+    Domain containers (no dot in code) are skipped for matching -- only leaf tags
+    (with dot) carry matchable phrases.
+
+    The tag code itself (e.g. "member_services" -> "member services") is also
+    registered so candidates with the same normalized text are auto-suppressed.
     """
-    out = {}
+    out: dict[str, tuple[str, str, float]] = {}
     for kind, root in (("p", getattr(lexicon_snapshot, "p_tags", None)), ("d", getattr(lexicon_snapshot, "d_tags", None)), ("j", getattr(lexicon_snapshot, "j_tags", None))):
         if not isinstance(root, dict):
             continue
@@ -73,37 +102,67 @@ def get_phrase_to_tag_map(lexicon_snapshot) -> dict[str, tuple[str, str]]:
             if not isinstance(spec, dict):
                 continue
             code_str = str(code)
+
+            # Skip domain containers (no dot) -- they carry no matching metadata
+            is_domain_container = "." not in code_str
+            if is_domain_container:
+                # Still register the code itself to suppress it as a candidate
+                code_key = _normalize_phrase(code_str.replace("_", " "))
+                if code_key:
+                    out[code_key] = (kind, code_str, 1.0)
+                continue
+
             # Tag code as known (e.g. "member_services") so we don't propose it as a candidate
             code_key = _normalize_phrase(code_str.replace("_", " "))
             if code_key:
-                out[code_key] = (kind, code_str)
-            phrases = spec.get("phrases") or []
+                out[code_key] = (kind, code_str, 1.0)
+
+            # Collect strong phrases from both legacy and QA-UI keys, plus aliases
+            phrases: list[str] = []
+            for key in ("phrases", "strong_phrases", "aliases"):
+                val = spec.get(key)
+                if isinstance(val, list):
+                    phrases.extend(str(p) for p in val if p and isinstance(p, str))
             if not phrases and isinstance(spec.get("description"), str):
                 phrases = [spec["description"]]
+
             for phrase in phrases:
-                if phrase and isinstance(phrase, str):
-                    key = _normalize_phrase(phrase)
-                    if key:
-                        out[key] = (kind, code_str)
+                norm = _normalize_phrase(phrase)
+                if norm:
+                    out[norm] = (kind, code_str, 1.0)
+
+            # Weak keywords at a lower score (0.6) so they tag but don't dominate
+            weak = spec.get("weak_keywords")
+            if isinstance(weak, dict):
+                any_of = weak.get("any_of")
+                if isinstance(any_of, list):
+                    for phrase in any_of:
+                        if phrase and isinstance(phrase, str):
+                            norm = _normalize_phrase(phrase)
+                            if norm and norm not in out:
+                                out[norm] = (kind, code_str, 0.6)
     return out
 
 
-def _apply_tags_to_line_text(line_text: str, phrase_map: dict[str, tuple[str, str]]) -> tuple[dict, dict, dict]:
-    """Compute p_tags, d_tags, j_tags for a line by matching phrases. Returns (p_tags, d_tags, j_tags) as {code: score}."""
-    p_tags, d_tags, j_tags = {}, {}, {}
+def _apply_tags_to_line_text(line_text: str, phrase_map: dict[str, tuple[str, str, float]]) -> tuple[dict, dict, dict]:
+    """Compute p_tags, d_tags, j_tags for a line by matching phrases. Returns (p_tags, d_tags, j_tags) as {code: score}.
+
+    phrase_map values are (kind, code, score) tuples -- strong phrases have score=1.0, weak phrases 0.6.
+    When a tag is matched by both strong and weak, the higher score wins.
+    """
+    p_tags: dict[str, float] = {}
+    d_tags: dict[str, float] = {}
+    j_tags: dict[str, float] = {}
     normalized_line = _normalize_phrase(line_text)
     if not normalized_line:
         return p_tags, d_tags, j_tags
-    for phrase, (kind, code) in phrase_map.items():
+    for phrase, (kind, code, score) in phrase_map.items():
         if not phrase or phrase not in normalized_line:
             continue
-        score = 1.0
-        if kind == "p":
-            p_tags[code] = score
-        elif kind == "d":
-            d_tags[code] = score
-        else:
-            j_tags[code] = score
+        target = p_tags if kind == "p" else (d_tags if kind == "d" else j_tags)
+        # Keep the highest score if the same code is matched multiple times
+        if code not in target or score > target[code]:
+            target[code] = score
     return p_tags, d_tags, j_tags
 
 
@@ -158,7 +217,7 @@ async def build_paragraph_and_lines(
     return para, lines
 
 
-async def apply_lexicon_to_lines(lines: list, phrase_map: dict[str, tuple[str, str]]) -> int:
+async def apply_lexicon_to_lines(lines: list, phrase_map: dict[str, tuple[str, str, float]]) -> int:
     """Set p_tags, d_tags, j_tags on each line in place. Caller should commit. Returns count of lines that got at least one tag."""
     n_with_tags = 0
     for line in lines:
@@ -175,17 +234,47 @@ async def apply_lexicon_to_lines(lines: list, phrase_map: dict[str, tuple[str, s
 _ABBREV_PATTERN = re.compile(r"\b[A-Z][A-Z0-9]{1,14}\b")
 
 
+def _is_junk_ngram(ngram: str) -> bool:
+    """Return True if the n-gram matches any junk pattern and should be rejected."""
+    return bool(_JUNK_PATTERNS.match(ngram))
+
+
+def _has_single_char_word(ngram: str) -> bool:
+    """Return True if any word in the n-gram is a single character (e.g., 'a copy')."""
+    return any(len(w) == 1 for w in ngram.split())
+
+
+def _is_substring_of_known_tag(ngram: str, phrase_map: dict) -> bool:
+    """Return True if the ngram is a substring of an existing tag phrase or vice versa.
+    This catches things like 'behavioral health' when 'health_care_services.behavioral_health' exists.
+    """
+    for known_phrase in phrase_map:
+        if not known_phrase:
+            continue
+        # ngram is contained in an existing phrase, or existing phrase is contained in ngram
+        if ngram in known_phrase or known_phrase in ngram:
+            return True
+    return False
+
+
 async def extract_candidates_for_document(
     db: AsyncSession,
     document_id,
     run_id=None,
     phrase_map: dict | None = None,
-    min_occurrences: int = 2,
+    min_occurrences: int = 3,
 ):
     """
     Find phrases in policy_lines that are not in the lexicon and insert PolicyLexiconCandidate rows.
-    Excludes: approved lexicon, rejected catalog, common phrases, stopword-only n-grams.
-    Uses weighted counts (heading lines count more). Also extracts all-caps abbreviations as separate candidates.
+
+    Guardrails (anti-explosion):
+      - Excludes approved lexicon phrases, rejected catalog, common phrases, stopword-only n-grams
+      - Skips junk patterns (copyright, time, conjunctions, numbers)
+      - Skips n-grams where any word is a single character ("a copy", "a member")
+      - Skips n-grams that are substrings of existing tags (prevents re-proposing known concepts)
+      - min_occurrences=3 (was 2) -- phrase must appear 3+ times to be considered
+      - cap_ngrams=100 (was 200) -- max candidates per document
+      - cap_abbrevs=30 (was 50) -- max abbreviation candidates per document
     """
     from app.models import PolicyLine, PolicyParagraph, PolicyLexiconCandidate, PolicyLexiconCandidateCatalog
 
@@ -194,19 +283,43 @@ async def extract_candidates_for_document(
     known = set(phrase_map.keys())
     known.update(COMMON_PHRASES)
 
-    # Load rejected phrases from catalog so we don't re-propose them
+    # Also suppress candidates whose code form matches an existing tag code
+    known_codes = set()
+    for _phrase, val in phrase_map.items():
+        code = val[1] if len(val) > 1 else ""
+        if code:
+            known_codes.add(_normalize_phrase(code.replace("_", " ")))
+
+    # Load decided phrases from candidate catalog (approved + rejected) so we don't re-propose them.
+    # These are global decisions that persist across extraction runs.
     try:
-        rejected_result = await db.execute(
+        catalog_result = await db.execute(
             select(PolicyLexiconCandidateCatalog.normalized_key).where(
-                PolicyLexiconCandidateCatalog.state == "rejected",
+                PolicyLexiconCandidateCatalog.state.in_(["approved", "rejected"]),
                 PolicyLexiconCandidateCatalog.normalized_key.isnot(None),
             )
         )
-        for row in rejected_result.scalars().all():
-            if row[0]:
-                known.add(row[0].strip().lower())
+        for nk in catalog_result.scalars().all():
+            # scalars().all() returns plain strings for single-column select
+            if nk and isinstance(nk, str):
+                known.add(nk.strip().lower())
     except Exception as e:
-        logger.debug("Could not load rejected catalog for candidate extraction: %s", e)
+        logger.debug("Could not load decided catalog for candidate extraction: %s", e)
+
+    # Also suppress candidates already decided in policy_lexicon_candidates itself
+    # (catches cases where catalog doesn't have them but the candidate table does).
+    try:
+        decided_cands = await db.execute(
+            select(PolicyLexiconCandidate.normalized).where(
+                PolicyLexiconCandidate.state.in_(["approved", "rejected"]),
+                PolicyLexiconCandidate.normalized.isnot(None),
+            ).distinct()
+        )
+        for nk in decided_cands.scalars().all():
+            if nk and isinstance(nk, str):
+                known.add(nk.strip().lower())
+    except Exception as e:
+        logger.debug("Could not load decided candidates for suppression: %s", e)
 
     # Get (line text, paragraph_type) via join so we can weight heading lines
     result = await db.execute(
@@ -233,6 +346,11 @@ async def extract_candidates_for_document(
                     continue
                 if _is_only_stopwords(ngram, STOPWORDS):
                     continue
+                # Guardrail: skip single-character words and junk patterns
+                if _has_single_char_word(ngram):
+                    continue
+                if _is_junk_ngram(ngram):
+                    continue
                 prev = ngram_weighted.get(ngram, (0, 0))
                 if is_heading:
                     ngram_weighted[ngram] = (prev[0], prev[1] + 1)
@@ -241,7 +359,7 @@ async def extract_candidates_for_document(
 
     run_uuid = run_id or uuid4()
     inserted = 0
-    cap_ngrams = 200
+    cap_ngrams = 100
 
     # Sort by weighted count descending, then take up to cap_ngrams
     def weighted(ngram: str) -> float:
@@ -257,6 +375,13 @@ async def extract_candidates_for_document(
         if w < min_occurrences:
             continue
         if len(ngram) > 500:
+            continue
+        # Guardrail: skip if substring of an existing approved tag phrase
+        if _is_substring_of_known_tag(ngram, phrase_map):
+            continue
+        # Guardrail: skip if code form matches an existing tag
+        code_form = _normalize_phrase(ngram.replace(" ", "_"))
+        if code_form in known_codes:
             continue
         base_conf = min(0.9, 0.5 + 0.1 * w)
         confidence = min(0.9, base_conf + 0.1) if count_heading > 0 else base_conf
@@ -287,7 +412,7 @@ async def extract_candidates_for_document(
             else:
                 abbrev_weighted[norm] = (prev[0] + 1, prev[1])
 
-    cap_abbrevs = 50
+    cap_abbrevs = 30
     def abbrev_weight(norm: str) -> float:
         b, h = abbrev_weighted[norm]
         return b + HEADING_WEIGHT * h
