@@ -6570,6 +6570,116 @@ async def get_chunking_events(
     }
 
 
+# ---------------------------------------------------------------------------
+# SSE stream – real-time push via PostgreSQL LISTEN / NOTIFY
+# ---------------------------------------------------------------------------
+
+@app.get("/documents/{document_id}/chunking/events/stream")
+async def stream_chunking_events_sse(document_id: str):
+    """Server-Sent Events stream of chunking/embedding events for a document.
+
+    1. Establishes ``LISTEN chunking_events`` so no notifications are lost.
+    2. Replays all existing events (chronological) from the DB.
+    3. Then pushes new events in real-time, deduplicating against the replay set.
+    4. Sends a keepalive comment every 15 s to prevent proxy timeouts.
+
+    The frontend connects with ``new EventSource(url)`` which auto-reconnects.
+    """
+    import asyncpg as _asyncpg
+    from uuid import UUID as _UUID
+    from app.config import DATABASE_URL
+    from app.database import AsyncSessionLocal
+
+    try:
+        doc_uuid = _UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID")
+
+    async def _sse_generator():
+        """Async generator yielding SSE frames."""
+        queue: asyncio.Queue[str] = asyncio.Queue()
+        seen_ids: set[str] = set()  # track replayed event IDs to avoid duplicates
+        conn: _asyncpg.Connection | None = None
+
+        dsn = DATABASE_URL.replace("+asyncpg", "")  # strip SQLAlchemy dialect prefix
+
+        try:
+            # --- Phase 1: Set up LISTEN first so notifications queue up ---
+            conn = await _asyncpg.connect(dsn)
+
+            def _on_notify(
+                pg_conn: _asyncpg.Connection,
+                pid: int,
+                channel: str,
+                payload: str,
+            ) -> None:
+                queue.put_nowait(payload)
+
+            await conn.add_listener("chunking_events", _on_notify)
+
+            # --- Phase 2: Replay existing events from DB ---
+            async with AsyncSessionLocal() as db:
+                q = (
+                    select(ChunkingEvent)
+                    .where(ChunkingEvent.document_id == doc_uuid)
+                    .order_by(ChunkingEvent.created_at, ChunkingEvent.id)
+                )
+                result = await db.execute(q)
+                for ev in result.scalars():
+                    ev_id = str(ev.id)
+                    seen_ids.add(ev_id)
+                    yield (
+                        f"id: {ev_id}\n"
+                        f"data: {json.dumps({'event': ev.event_type, 'data': ev.event_data})}\n\n"
+                    )
+
+            # --- Phase 3: Stream live events, skipping any already replayed ---
+            while True:
+                try:
+                    payload = await asyncio.wait_for(queue.get(), timeout=15)
+                    try:
+                        msg = json.loads(payload)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    # Filter: only forward events for *this* document
+                    if msg.get("document_id") != document_id:
+                        continue
+                    ev_id = msg.get("id", "")
+                    if ev_id in seen_ids:
+                        continue  # already sent during replay
+                    yield (
+                        f"id: {ev_id}\n"
+                        f"data: {json.dumps({'event': msg.get('event_type', 'message'), 'data': msg.get('event_data', {})})}\n\n"
+                    )
+                except asyncio.TimeoutError:
+                    # Keepalive: SSE comment line keeps the connection alive
+                    yield ": keepalive\n\n"
+        except asyncio.CancelledError:
+            pass  # client disconnected
+        except Exception as exc:
+            logger.warning("[sse] stream error for doc %s: %s", document_id, exc)
+        finally:
+            if conn is not None:
+                try:
+                    await conn.remove_listener("chunking_events", _on_notify)
+                except Exception:
+                    pass
+                try:
+                    await conn.close()
+                except Exception:
+                    pass
+
+    return StreamingResponse(
+        _sse_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Disable nginx buffering
+        },
+    )
+
+
 # ============================================================================
 # Database Admin Endpoints
 # ============================================================================

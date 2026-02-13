@@ -125,10 +125,48 @@
 
 .streaming-cell {
   min-height: 48px;
-  max-height: 100px;
+  max-height: 140px;
   overflow: hidden;
   display: flex;
   flex-direction: column;
+}
+
+/* SSE connection indicator header */
+.streaming-header {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.15rem 0.5rem 0.25rem;
+  font-size: 0.6875rem;
+  color: var(--text-tertiary);
+}
+
+.sse-indicator {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.sse-indicator.connected {
+  background: #22c55e;
+  box-shadow: 0 0 4px #22c55e88;
+  animation: sse-pulse 2s ease-in-out infinite;
+}
+
+.sse-indicator.disconnected {
+  background: #f59e0b;
+  animation: sse-pulse 1s ease-in-out infinite;
+}
+
+.sse-label {
+  font-weight: 500;
+}
+
+@keyframes sse-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
 }
 
 .streaming-cell .streaming-output {
@@ -138,6 +176,7 @@
   background: var(--bg-secondary);
   color: var(--text-secondary);
   overflow-y: auto;
+  scroll-behavior: smooth;
   font-family: inherit;
   font-size: 0.75rem;
   line-height: 1.5;

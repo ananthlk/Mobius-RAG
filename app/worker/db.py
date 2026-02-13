@@ -9,12 +9,13 @@ Path A and Path B never call ``db.add()`` or raw SQL directly.
 """
 from __future__ import annotations
 
+import json as _json
 import logging
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -117,7 +118,7 @@ async def write_event(
     event_type: str,
     event_data: dict,
 ) -> None:
-    """Persist a single ChunkingEvent and commit so live-updates see it."""
+    """Persist a single ChunkingEvent, commit, and pg_notify for SSE push."""
     try:
         event = ChunkingEvent(
             document_id=doc_uuid,
@@ -126,6 +127,22 @@ async def write_event(
         )
         db.add(event)
         await db.commit()
+
+        # Push real-time notification via pg_notify (payload < 8 KB)
+        try:
+            payload = _json.dumps({
+                "id": str(event.id),
+                "document_id": str(doc_uuid),
+                "event_type": event_type,
+                "event_data": event_data,
+            }, default=str)
+            await db.execute(
+                text("SELECT pg_notify('chunking_events', :p)"), {"p": payload}
+            )
+            await db.commit()
+        except Exception as notify_exc:
+            # Non-fatal: SSE will still pick up on next poll/reconnect
+            logger.debug("[db] pg_notify failed (non-fatal): %s", notify_exc)
     except Exception as exc:
         logger.error("[db] write_event(%s) failed: %s", event_type, exc, exc_info=True)
         await db.rollback()

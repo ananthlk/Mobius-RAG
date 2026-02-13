@@ -236,10 +236,14 @@ async def _process_paragraphs(
                     continue
 
             # --- paragraph_start event ---
+            section_label = f" — {section_path}" if section_path else ""
             await ctx.emit(
                 "paragraph_start",
                 message=f"Starting paragraph {para_id}{' (Path B)' if not extraction_enabled else ''}.",
-                user_message=f"Reading section {ctx.completed_count + 1} of {ctx.total_paragraphs}...",
+                user_message=(
+                    f"Analyzing section {ctx.completed_count + 1} of {ctx.total_paragraphs} "
+                    f"(page {current_page_number}{section_label})..."
+                ),
                 paragraph_id=para_id,
                 extra={
                     "paragraph_text": paragraph_text[:2000],
@@ -288,11 +292,17 @@ async def _process_paragraphs(
                     )
 
                 # ── paragraph complete ────────────────────────────────────
+                pct = round(ctx.progress_percent)
                 await ctx.emit(
                     "paragraph_complete",
                     message=f"Paragraph {para_id} complete{' (Path B)' if not extraction_enabled else ''}.",
-                    user_message=f"Section {ctx.completed_count} of {ctx.total_paragraphs} done.",
+                    user_message=f"Section {ctx.completed_count} of {ctx.total_paragraphs} complete ({pct}%).",
                     paragraph_id=para_id,
+                    extra={
+                        "completed_paragraphs": ctx.completed_count,
+                        "total_paragraphs": ctx.total_paragraphs,
+                        "progress_percent": ctx.progress_percent,
+                    },
                 )
                 await ctx.upsert_progress("in_progress")
 

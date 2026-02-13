@@ -6,12 +6,13 @@ Queue-based parallelism: N workers each process one job at a time.
 Commits after every batch so records appear incrementally.
 """
 import asyncio
+import json as _json
 import logging
 import os
 import uuid as uuid_module
 from datetime import datetime, timezone
 from uuid import UUID
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
@@ -33,6 +34,21 @@ EMBEDDING_WORKER_CONCURRENCY = int(os.getenv("EMBEDDING_WORKER_CONCURRENCY", "2"
 
 def _utc_now_naive():
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+async def _pg_notify_event(db: AsyncSession, event: ChunkingEvent) -> None:
+    """Fire pg_notify for an already-committed ChunkingEvent (non-fatal on failure)."""
+    try:
+        payload = _json.dumps({
+            "id": str(event.id),
+            "document_id": str(event.document_id),
+            "event_type": event.event_type,
+            "event_data": event.event_data,
+        }, default=str)
+        await db.execute(text("SELECT pg_notify('chunking_events', :p)"), {"p": payload})
+        await db.commit()
+    except Exception as exc:
+        logger.debug("[embed] pg_notify failed (non-fatal): %s", exc)
 
 
 def _build_text_for_chunk(chunk: HierarchicalChunk) -> str:
@@ -131,6 +147,7 @@ async def process_embedding_job(job: EmbeddingJob, db: AsyncSession) -> None:
         )
         db.add(ev_start)
         await db.commit()
+        await _pg_notify_event(db, ev_start)
 
         # Embed in batches; commit after each batch so records appear incrementally
         batch_size = 50
@@ -198,6 +215,7 @@ async def process_embedding_job(job: EmbeddingJob, db: AsyncSession) -> None:
             )
             db.add(ev_progress)
             await db.commit()
+            await _pg_notify_event(db, ev_progress)
 
         # Stream embedding_complete event
         ev_complete = ChunkingEvent(
@@ -213,6 +231,7 @@ async def process_embedding_job(job: EmbeddingJob, db: AsyncSession) -> None:
         job.status = "completed"
         job.completed_at = _utc_now_naive()
         await db.commit()
+        await _pg_notify_event(db, ev_complete)
         duration = (job.completed_at - job_start).total_seconds()
         logger.info("[JOB %s] Completed in %.2fs: %d embeddings stored", job.id, duration, total_embedded)
 
@@ -227,6 +246,8 @@ async def process_embedding_job(job: EmbeddingJob, db: AsyncSession) -> None:
                 event_data={"error": str(e)[:500], "message": f"Embedding failed: {e}"},
             )
             db.add(ev_err)
+            await db.flush()
+            await _pg_notify_event(db, ev_err)
         except Exception:
             pass
         job.status = "failed"

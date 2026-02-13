@@ -143,6 +143,31 @@ async def process_paragraph(
             f" ({n_with_tags} with tags)" if n_with_tags else "",
         )
 
+        # --- Emit user-friendly result event ---
+        n_lines = len(line_objs)
+        # Gather distinct tag names from tagged lines
+        tag_names: list[str] = []
+        for ln in line_objs:
+            p_tags = getattr(ln, "p_tags", None) or {}
+            if isinstance(p_tags, dict):
+                tag_names.extend(p_tags.keys())
+        unique_tags = sorted(set(tag_names))
+
+        if n_with_tags and unique_tags:
+            tag_preview = ", ".join(unique_tags[:5])
+            if len(unique_tags) > 5:
+                tag_preview += f" (+{len(unique_tags) - 5} more)"
+            user_msg = f"Page {page_number}: analyzed {n_lines} lines, {n_with_tags} matched policy terms: {tag_preview}"
+        elif n_with_tags:
+            user_msg = f"Page {page_number}: analyzed {n_lines} lines, {n_with_tags} matched policy terms"
+        else:
+            user_msg = f"Page {page_number}: analyzed {n_lines} lines, no policy term matches"
+
+        await ctx.send_status(
+            message=f"Path B: {n_lines} lines, {n_with_tags} tagged for {para_id}",
+            user_message=user_msg,
+        )
+
     except Exception as policy_err:
         logger.warning("[%s] [%s] Path B policy build/tag (non-fatal): %s", doc_id, para_id, policy_err, exc_info=True)
         await db_handler.safe_rollback(db)
@@ -165,19 +190,35 @@ async def finalise(ctx: ChunkingRunContext, resources: PathBResources | None) ->
     res = resources or prepare_resources(None)
 
     # ── Forward propagation: paragraph tags -> document tags ──────────
+    await ctx.send_status(
+        message="Aggregating paragraph tags to document level...",
+        user_message="Aggregating policy tags across all sections into a document summary...",
+    )
     try:
         await res.aggregate_paragraph_tags_to_document(db, doc_uuid)
         await db_handler.safe_commit(db)
         logger.info("[%s] Path B: document-level tag aggregation complete", doc_id)
+        await ctx.send_status(
+            message="Document tag aggregation complete.",
+            user_message="Document-level policy tag summary built successfully.",
+        )
     except Exception as doc_agg_err:
         logger.warning("[%s] Path B document tag aggregation (non-fatal): %s", doc_id, doc_agg_err, exc_info=True)
         await db_handler.safe_rollback(db)
 
     # ── Extract lexicon candidates ────────────────────────────────────
     if res.lexicon_snapshot is not None:
+        await ctx.send_status(
+            message="Extracting lexicon candidates...",
+            user_message="Identifying new candidate terms for the policy lexicon...",
+        )
         try:
             pm = res.phrase_map or res.get_phrase_to_tag_map(res.lexicon_snapshot)
             await res.extract_candidates_for_document(db, doc_uuid, run_id=None, phrase_map=pm)
             logger.info("[%s] Path B: candidate extraction complete", doc_id)
+            await ctx.send_status(
+                message="Candidate extraction complete.",
+                user_message="Lexicon candidate extraction complete.",
+            )
         except Exception as cand_err:
             logger.warning("[%s] Path B candidate extraction (non-fatal): %s", doc_id, cand_err, exc_info=True)

@@ -106,9 +106,8 @@ function App() {
   const [_processingRetryCount, setProcessingRetryCount] = useState(0)
   const [_chunkingStatus, setChunkingStatus] = useState<'idle' | 'in_progress' | 'completed' | 'stopped' | 'failed'>('idle')
   const streamContainerRef = useRef<HTMLDivElement>(null)
-  const lastEventIdRef = useRef<string | null>(null)
-  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  // Live updates poll PostgreSQL via GET /chunking/events (worker writes to DB)
+  const eventSourceRef = useRef<EventSource | null>(null)
+  const [sseConnected, setSseConnected] = useState(false)
 
   // Live updates state
   const [activeJobs, setActiveJobs] = useState<Array<{
@@ -263,7 +262,7 @@ function App() {
         setChunkingActive(true)
         setChunkingComplete(false)
         setStreamingOutput('')
-        lastEventIdRef.current = null
+        // SSE will reconnect automatically when selectedJobId / activeTab triggers the effect
         await loadDocuments()
       } else {
         const errorData = await response.json().catch(() => null)
@@ -293,11 +292,11 @@ function App() {
           setChunkingActive(false)
           setChunkingComplete(false)
           setParagraphs(new Map())
-          if (pollIntervalRef.current) {
-            clearInterval(pollIntervalRef.current)
-            pollIntervalRef.current = null
+          // SSE will close when selectedJobId changes via the useEffect cleanup
+          if (eventSourceRef.current) {
+            eventSourceRef.current.close()
+            eventSourceRef.current = null
           }
-          lastEventIdRef.current = null
         }
       } else {
         const errorData = await response.json().catch(() => null)
@@ -318,11 +317,10 @@ function App() {
       setChunkingActive(false)
       setChunkingComplete(false)
       setParagraphs(new Map())
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current)
-        pollIntervalRef.current = null
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close()
+        eventSourceRef.current = null
       }
-      lastEventIdRef.current = null
       return
     }
 
@@ -363,7 +361,7 @@ function App() {
     
     switch (event) {
       case 'llm_stream':
-        // Update raw_llm_output for the current paragraph
+        // Update raw_llm_output for the current paragraph (stored in paragraphs Map)
         setParagraphs(prev => {
           const newMap = new Map(prev)
           const paraId = data.paragraph_id || processingParagraphId
@@ -388,17 +386,6 @@ function App() {
               raw_llm_output: newOutput,
               is_streaming: true
             })
-            
-            // Update streaming output immediately if this is the selected job
-            // Show output if: selectedJobId is set AND (paraId matches processingParagraphId OR processingParagraphId isn't set yet)
-            // This ensures we show output as soon as events arrive, even if processingParagraphId hasn't been set yet
-            if (selectedJobId) {
-              // If processingParagraphId is set, only show if it matches
-              // If not set yet, show any output (will be refined when paragraph_start event arrives)
-              if (!processingParagraphId || paraId === processingParagraphId) {
-                setStreamingOutput(newOutput)
-              }
-            }
           }
           return newMap
         })
@@ -576,12 +563,20 @@ function App() {
           }
           return newMap
         })
-        // Update activeJobs - paragraph complete, stage is now idle (will update to persisting when persisted)
-        setActiveJobs(prev => prev.map(job => 
-          job.document_id === selectedJobId
-            ? { ...job, processing_stage: 'idle' }
-            : job
-        ))
+        // Update activeJobs with progress from event + idle stage
+        if (selectedJobId) {
+          setActiveJobs(prev => prev.map(job =>
+            job.document_id === selectedJobId
+              ? {
+                  ...job,
+                  processing_stage: 'idle',
+                  ...(data.completed_paragraphs != null ? { completed_paragraphs: data.completed_paragraphs } : {}),
+                  ...(data.total_paragraphs != null ? { total_paragraphs: data.total_paragraphs } : {}),
+                  ...(data.progress_percent != null ? { progress: Math.round(data.progress_percent) } : {}),
+                }
+              : job
+          ))
+        }
         break
         
       case 'paragraph_persisted':
@@ -612,12 +607,21 @@ function App() {
         // But don't do it immediately to avoid disrupting user's view
         break
         
-      case 'status_message':
-        // Live "thinking" stream: paragraph started, facts found, critique passed/failed, etc.
-        if (selectedJobId && data?.message != null) {
-          const msg = String(data.message).trim()
-          if (msg) setStreamingOutput(prev => prev + msg + '\n')
+      case 'job_start':
+        // Mark job as in_progress as soon as the worker picks it up
+        setChunkingActive(true)
+        setChunkingComplete(false)
+        if (selectedJobId) {
+          setActiveJobs(prev => prev.map(job =>
+            job.document_id === selectedJobId
+              ? { ...job, status: 'in_progress', total_paragraphs: data.total_paragraphs, total_pages: data.total_pages }
+              : job
+          ))
         }
+        break
+
+      case 'status_message':
+        // State updates only – log output is handled by the SSE event handler
         break
 
       case 'progress_update':
@@ -640,9 +644,45 @@ function App() {
       case 'chunking_complete':
         setChunkingActive(false)
         setChunkingComplete(true)
+        // Update status to completed (will switch to embedding status if embedding starts)
+        if (selectedJobId) {
+          setActiveJobs(prev => prev.map(job =>
+            job.document_id === selectedJobId
+              ? { ...job, status: 'completed', progress: 100 }
+              : job
+          ))
+        }
+        break
+
+      case 'job_failed':
+      case 'job_timeout':
+        setChunkingActive(false)
+        if (selectedJobId) {
+          setActiveJobs(prev => prev.map(job =>
+            job.document_id === selectedJobId
+              ? { ...job, status: 'failed' }
+              : job
+          ))
+        }
         break
 
       case 'embedding_start':
+        // Switch status to show embedding is happening
+        if (selectedJobId) {
+          setActiveJobs(prev => prev.map(job =>
+            job.document_id === selectedJobId
+              ? {
+                  ...job,
+                  status: 'processing',
+                  total_paragraphs: data?.total_items ?? job.total_paragraphs,
+                  completed_paragraphs: 0,
+                  progress: 0,
+                }
+              : job
+          ))
+        }
+        break
+
       case 'embedding_progress':
         if (data?.completed_items != null && data?.total_items != null && selectedJobId) {
           setActiveJobs(prev => prev.map(job =>
@@ -677,6 +717,57 @@ function App() {
         }
         break
       }
+    }
+  }
+
+  // Keep a ref to the latest handleStreamEvent so SSE callbacks avoid stale closures
+  const handleStreamEventRef = useRef(handleStreamEvent)
+  useEffect(() => { handleStreamEventRef.current = handleStreamEvent })
+
+  // Convert an SSE event into a human-readable log line (or null to skip).
+  // Prefers `user_message` (set by the worker for user-facing text) over raw `message`.
+  const eventToLogLine = (event: string, data: any): string | null => {
+    // Most events carry a user_message — use it directly when available
+    const userMsg = data?.user_message ? String(data.user_message).trim() : ''
+
+    switch (event) {
+      case 'status_message':
+        return userMsg || (data?.message ? String(data.message).trim() : null)
+
+      case 'job_start':
+        return userMsg || 'Starting document analysis...'
+
+      case 'paragraph_start':
+        return userMsg || (data?.paragraph_id
+          ? `Analyzing section ${data.paragraph_id} (page ${data.page_number ?? '?'})...`
+          : null)
+
+      case 'paragraph_complete':
+        return userMsg || (data?.paragraph_id
+          ? `Section ${data.paragraph_id} complete.`
+          : null)
+
+      case 'chunking_complete':
+        return userMsg || 'Document analysis complete.'
+
+      case 'job_failed':
+      case 'job_timeout':
+        return userMsg || (data?.message ? String(data.message).trim() : 'Processing failed.')
+
+      case 'embedding_start':
+      case 'embedding_progress':
+      case 'embedding_complete':
+        return data?.message ? String(data.message) : null
+
+      case 'embedding_error':
+        return data?.message ? `Error: ${data.message}` : null
+
+      case 'stream_end':
+        return data?.reason ? `Stream ended: ${data.reason}` : null
+
+      default:
+        // Unknown event — surface user_message if present
+        return userMsg || null
     }
   }
 
@@ -870,11 +961,10 @@ function App() {
         { method: 'POST' }
       )
       if (response.ok) {
-        if (pollIntervalRef.current) {
-          clearInterval(pollIntervalRef.current)
-          pollIntervalRef.current = null
+        if (eventSourceRef.current) {
+          eventSourceRef.current.close()
+          eventSourceRef.current = null
         }
-        lastEventIdRef.current = null
         await loadChunkingResults(documentId)
       }
     } catch (err) {
@@ -1160,118 +1250,78 @@ function App() {
     }
   }
 
-  // Load events from PostgreSQL and poll for new events when Live Updates tab is active (worker writes to DB)
+  // SSE live-event stream (replaces the old polling useEffect)
+  // The backend endpoint replays all existing events on connect, then pushes
+  // new events in real-time via PostgreSQL LISTEN/NOTIFY.
   useEffect(() => {
+    // Close any previous connection
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close()
+      eventSourceRef.current = null
+      setSseConnected(false)
+    }
+
     if (activeTab !== 'live' || !selectedJobId) {
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current)
-        pollIntervalRef.current = null
-      }
-      lastEventIdRef.current = null
+      setStreamingOutput('')
       return
     }
 
-    const doc = documents.find(d => d.id === selectedJobId)
-    if (!doc) return
-
     const jobId = selectedJobId
-    const apiBase = API_BASE
+    setStreamingOutput('')  // clear before replay
 
-    // Initial load: get most recent events (API returns desc order); reverse for chronological display
-    const loadInitialEvents = async () => {
+    const es = new EventSource(`${API_BASE}/documents/${jobId}/chunking/events/stream`)
+    eventSourceRef.current = es
+
+    es.onopen = () => {
+      setSseConnected(true)
+    }
+
+    es.onmessage = (msg) => {
       try {
-        const res = await fetch(`${apiBase}/documents/${jobId}/chunking/events?limit=1000`)
-        if (!res.ok) return
-        const data = await res.json()
-        const events = data.events || []
-        if (events.length === 0) {
-          setStreamingOutput('')
-          lastEventIdRef.current = null
-          return
+        const parsed = JSON.parse(msg.data)
+        const { event, data } = parsed
+
+        // Update component state (paragraphs, activeJobs, flags, …)
+        handleStreamEventRef.current({ event, data })
+
+        // Append a human-readable log line (if the event is loggable)
+        const line = eventToLogLine(event, data)
+        if (line) {
+          setStreamingOutput(prev => prev + line + '\n')
         }
-        // API returns newest first (desc); reverse for chronological order
-        const chronological = [...events].reverse()
-        const lines: string[] = []
-        for (const ev of chronological) {
-          if (ev.event === 'status_message' && ev.data?.message) {
-            const msg = String(ev.data.message).trim()
-            if (msg) lines.push(msg)
-          } else if (ev.event === 'paragraph_start' && ev.data?.paragraph_id) {
-            const page = ev.data.page_number ?? ev.data.paragraph_id?.split('_')[0]
-            lines.push(`Processing paragraph ${ev.data.paragraph_id} (page ${page})`)
-          } else if (ev.event === 'chunking_complete') {
-            lines.push('Chunking complete.')
-          } else if (ev.event === 'stream_end' && ev.data?.reason) {
-            lines.push(`Stream ended: ${ev.data.reason}`)
-          } else if (ev.event === 'embedding_start' && ev.data?.message) {
-            lines.push(String(ev.data.message))
-          } else if (ev.event === 'embedding_progress' && ev.data?.message) {
-            lines.push(String(ev.data.message))
-          } else if (ev.event === 'embedding_complete' && ev.data?.message) {
-            lines.push(String(ev.data.message))
-          } else if (ev.event === 'embedding_error' && ev.data?.message) {
-            lines.push(`Error: ${ev.data.message}`)
-          }
-          handleStreamEvent({ event: ev.event, data: ev.data })
-        }
-        setStreamingOutput(lines.length ? lines.join('\n') + '\n' : '')
-        // Newest event id (first in API response) for subsequent polling
-        lastEventIdRef.current = events[0].id ?? null
       } catch (err) {
-        console.error('Failed to load chunking events:', err)
+        console.error('[SSE] parse error:', err)
       }
     }
 
-    loadInitialEvents()
-
-    // Poll for new events when job is in progress
-    const isInProgress =
-      doc.chunking_status === 'in_progress' || doc.chunking_status === 'pending' ||
-      doc.embedding_status === 'processing' || doc.embedding_status === 'pending'
-    if (isInProgress) {
-      let tick = 0
-      const POLL_MS = 1500
-      pollIntervalRef.current = setInterval(async () => {
-        const afterId = lastEventIdRef.current
-        try {
-          const url = afterId
-            ? `${apiBase}/documents/${jobId}/chunking/events?after_id=${encodeURIComponent(afterId)}&limit=500`
-            : `${apiBase}/documents/${jobId}/chunking/events?limit=500`
-          const res = await fetch(url)
-          if (!res.ok) return
-          const data = await res.json()
-          const newEvents = data.events || []
-          for (const ev of newEvents) {
-            if (ev.event === 'status_message' && ev.data?.message) {
-              const msg = String(ev.data.message).trim()
-              if (msg) setStreamingOutput(prev => prev + msg + '\n')
-            } else if (ev.event === 'embedding_start' && ev.data?.message) {
-              setStreamingOutput(prev => prev + String(ev.data.message) + '\n')
-            } else if (ev.event === 'embedding_progress' && ev.data?.message) {
-              setStreamingOutput(prev => prev + String(ev.data.message) + '\n')
-            } else if (ev.event === 'embedding_complete' && ev.data?.message) {
-              setStreamingOutput(prev => prev + String(ev.data.message) + '\n')
-            } else if (ev.event === 'embedding_error' && ev.data?.message) {
-              setStreamingOutput(prev => prev + `Error: ${ev.data.message}\n`)
-            }
-            handleStreamEvent({ event: ev.event, data: ev.data })
-            if (ev.id) lastEventIdRef.current = ev.id
-          }
-          // Every ~3s refresh chunking results to detect completion
-          tick += 1
-          if (tick % 2 === 0) loadChunkingResults(jobId, false)
-        } catch (err) {
-          console.error('Poll chunking events error:', err)
-        }
-      }, POLL_MS)
+    es.onerror = () => {
+      // EventSource auto-reconnects with exponential backoff.
+      // The server replays all events on reconnect, so no data is lost.
+      setSseConnected(false)
     }
 
     return () => {
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current)
-        pollIntervalRef.current = null
-      }
+      es.close()
+      eventSourceRef.current = null
+      setSseConnected(false)
     }
+  }, [activeTab, selectedJobId])
+
+  // Periodically refresh chunking results while a job is in progress
+  // (independent of SSE — detects completion for the status badge / results view)
+  useEffect(() => {
+    if (activeTab !== 'live' || !selectedJobId) return
+    const doc = documents.find(d => d.id === selectedJobId)
+    if (!doc) return
+    const isInProgress =
+      doc.chunking_status === 'in_progress' || doc.chunking_status === 'pending' ||
+      doc.embedding_status === 'processing' || doc.embedding_status === 'pending'
+    if (!isInProgress) return
+
+    const interval = setInterval(() => {
+      loadChunkingResults(selectedJobId, false)
+    }, 5000)
+    return () => clearInterval(interval)
   }, [activeTab, selectedJobId, documents])
 
   return (
@@ -1341,6 +1391,7 @@ function App() {
               selectedJobId={selectedJobId}
               streamingOutput={streamingOutput}
               isActive={activeTab === 'live'}
+              sseConnected={sseConnected}
             />
           </TabPanel>
 

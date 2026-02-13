@@ -34,6 +34,7 @@ interface LiveUpdatesTabProps {
   selectedJobId: string | null
   streamingOutput: string
   isActive?: boolean
+  sseConnected?: boolean
 }
 
 // Export the interface for use in App.tsx
@@ -44,7 +45,8 @@ export function LiveUpdatesTab({
   onJobSelect, 
   selectedJobId,
   streamingOutput,
-  isActive = true
+  isActive = true,
+  sseConnected = false
 }: LiveUpdatesTabProps) {
   const streamRef = useRef<HTMLDivElement>(null)
 
@@ -56,18 +58,16 @@ export function LiveUpdatesTab({
     }
   }, [isActive, selectedJobId, activeJobs, onJobSelect])
 
-  // Limit output to last 2500 characters to keep it compact
-  const MAX_OUTPUT_LENGTH = 2500
-  const isTruncated = streamingOutput.length > MAX_OUTPUT_LENGTH
-  const limitedOutput = isTruncated
-    ? streamingOutput.slice(-MAX_OUTPUT_LENGTH)
-    : streamingOutput
-  const logLines = limitedOutput ? limitedOutput.trim().split('\n').filter(Boolean) : []
+  // Keep last N lines so memory stays bounded (SSE delivers events incrementally)
+  const MAX_LOG_LINES = 500
+  const allLines = streamingOutput ? streamingOutput.trim().split('\n').filter(Boolean) : []
+  const isTruncated = allLines.length > MAX_LOG_LINES
+  const logLines = isTruncated ? allLines.slice(-MAX_LOG_LINES) : allLines
 
   useEffect(() => {
     if (streamRef.current) {
-      // Scroll to bottom to show latest content (since we're showing the tail)
-      streamRef.current.scrollTop = streamRef.current.scrollHeight
+      // Smooth-scroll to bottom on new output
+      streamRef.current.scrollTo({ top: streamRef.current.scrollHeight, behavior: 'smooth' })
     }
   }, [streamingOutput])
 
@@ -148,6 +148,11 @@ export function LiveUpdatesTab({
                     <td className="col-output">
                       {isStreamingJob ? (
                         <div className="streaming-cell">
+                          <div className="streaming-header">
+                            <span className={`sse-indicator ${sseConnected ? 'connected' : 'disconnected'}`}
+                                  title={sseConnected ? 'Live connection active' : 'Reconnecting…'} />
+                            <span className="sse-label">{sseConnected ? 'Live' : 'Reconnecting…'}</span>
+                          </div>
                           <div className="streaming-output" ref={streamRef}>
                             {streamingOutput ? (
                               <div className="streaming-log">
