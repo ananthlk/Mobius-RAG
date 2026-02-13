@@ -4,6 +4,7 @@ import logging
 from typing import Dict, List, Any, Optional
 from app.services.llm_provider import get_llm_provider
 from app.services.utils import parse_json_response
+from app.services.extraction import _safe_format
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +152,7 @@ async def critique_extraction(
 
     facts_list = _format_facts_list(extraction_result)
     template = critique_prompt_body if critique_prompt_body else CRITIQUE_PROMPT
-    prompt = template.format(
+    prompt = _safe_format(template,
         paragraph_text=paragraph_text,
         summary=extraction_result.get("summary", ""),
         facts_list="\n".join(facts_list) if facts_list else "No facts extracted"
@@ -197,7 +198,7 @@ async def stream_critique(
 
     facts_list = _format_facts_list(extraction_result)
     template = critique_prompt_body if critique_prompt_body else CRITIQUE_PROMPT
-    prompt = template.format(
+    prompt = _safe_format(template,
         paragraph_text=paragraph_text,
         summary=extraction_result.get("summary", ""),
         facts_list="\n".join(facts_list) if facts_list else "No facts extracted"

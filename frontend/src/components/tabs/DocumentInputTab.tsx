@@ -70,7 +70,9 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
   })
   const [importingPages, setImportingPages] = useState(false)
   const [readerPage, setReaderPage] = useState<ScrapedPage | null>(null)
+  const [autoAddToRagWhenComplete, setAutoAddToRagWhenComplete] = useState(false)
   const eventSourceRef = useRef<EventSource | null>(null)
+  const autoAddRunForJobRef = useRef<string | null>(null)
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -275,6 +277,79 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
       setImportingPages(false)
     }
   }
+
+  /** Add all displayed pages (as one doc) and all displayed docs to RAG. Used for auto-add when scrape completes. */
+  const addAllDisplayedToRag = useCallback(async (pages: ScrapedPage[], docs: ScrapedDoc[]) => {
+    if (pages.length === 0 && docs.length === 0) return
+    setImportingPages(true)
+    setScrapeError(null)
+    try {
+      if (pages.length > 0) {
+        const body: Record<string, unknown> = {
+          pages: pages.map((p) => ({ url: p.url, text: p.text, html: p.html })),
+        }
+        if (importMetadata.display_name?.trim()) body.display_name = importMetadata.display_name.trim()
+        if (importMetadata.payer?.trim()) body.payer = importMetadata.payer.trim()
+        if (importMetadata.state?.trim()) body.state = importMetadata.state.trim()
+        if (importMetadata.program?.trim()) body.program = importMetadata.program.trim()
+        if (importMetadata.authority_level?.trim()) body.authority_level = importMetadata.authority_level.trim()
+        const resp = await fetch(`${API_BASE}/documents/import-scraped-pages`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        })
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}))
+          throw new Error(err.detail?.message || err.detail || 'Import pages failed')
+        }
+        onDocumentAdded?.()
+      }
+      for (const d of docs) {
+        setImportingDoc(d.gcs_path)
+        try {
+          const importBody: Record<string, string> = { gcs_path: d.gcs_path, filename: d.filename }
+          if (importMetadata.payer?.trim()) importBody.payer = importMetadata.payer.trim()
+          if (importMetadata.state?.trim()) importBody.state = importMetadata.state.trim()
+          if (importMetadata.program?.trim()) importBody.program = importMetadata.program.trim()
+          if (importMetadata.authority_level?.trim()) importBody.authority_level = importMetadata.authority_level.trim()
+          const resp = await fetch(`${API_BASE}/documents/import-from-gcs`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(importBody),
+          })
+          if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}))
+            throw new Error(err.detail?.message || err.detail || 'Import document failed')
+          }
+          onDocumentAdded?.()
+        } finally {
+          setImportingDoc(null)
+        }
+      }
+    } catch (e) {
+      setScrapeError(e instanceof Error ? e.message : 'Auto-add to RAG failed')
+    } finally {
+      setImportingPages(false)
+    }
+  }, [importMetadata, onDocumentAdded])
+
+  // Reset "already ran auto-add" when starting a new job
+  useEffect(() => {
+    autoAddRunForJobRef.current = null
+  }, [scrapeJobId])
+
+  // Auto-add to RAG when scrape completes and option is on (runs once per job)
+  useEffect(() => {
+    if (
+      scrapeStatus !== 'completed' ||
+      !autoAddToRagWhenComplete ||
+      !scrapeJobId ||
+      autoAddRunForJobRef.current === scrapeJobId
+    ) return
+    if (scrapePages.length === 0 && scrapeDocuments.length === 0) return
+    autoAddRunForJobRef.current = scrapeJobId
+    addAllDisplayedToRag(scrapePages, scrapeDocuments)
+  }, [scrapeStatus, autoAddToRagWhenComplete, scrapeJobId, scrapePages, scrapeDocuments, addAllDisplayedToRag])
 
   const addSelectedToRag = async () => {
     const pageList = displayPages.filter((p) => selectedPageUrls.has(p.url))
@@ -585,6 +660,15 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
                 disabled={scraping}
               />
               Include summary (requires OPENAI_API_KEY or Vertex in scraper)
+            </label>
+            <label className="scrape-summary-option">
+              <input
+                type="checkbox"
+                checked={autoAddToRagWhenComplete}
+                onChange={(e) => setAutoAddToRagWhenComplete(e.target.checked)}
+                disabled={scraping}
+              />
+              Auto-add to RAG when scrape completes (import + chunk + embed)
             </label>
             <button
               onClick={startScrape}

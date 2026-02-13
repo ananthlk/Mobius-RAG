@@ -192,13 +192,9 @@ function App() {
       if (response.ok) {
         const data = await response.json()
         setDocuments(data.documents || [])
-        setError(null)
-      } else {
-        setError(`RAG backend at ${API_BASE} returned ${response.status}. Is the RAG backend running on port 8001?`)
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Network error'
-      setError(`Cannot reach RAG backend at ${API_BASE}. Failed to load documents (${msg}). Start from Module Hub (mstart) or run: cd mobius-rag && .venv/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8001`)
+      setError('Failed to load documents')
     } finally {
       setLoadingDocuments(false)
     }
@@ -207,20 +203,6 @@ function App() {
   // Load documents on mount
   useEffect(() => {
     loadDocuments()
-  }, [])
-
-  // Deep link: open Read tab at document + page when URL has ?tab=read&documentId=...&pageNumber=... (e.g. from chat "Open in new tab")
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search)
-    const tab = params.get('tab')
-    const documentId = params.get('documentId')?.trim()
-    if (tab !== 'read' || !documentId) return
-    const pageNumberRaw = params.get('pageNumber')
-    const pageNumber = pageNumberRaw != null ? parseInt(pageNumberRaw, 10) : undefined
-    const factId = params.get('factId')?.trim() || undefined
-    setActiveTab('read')
-    setSelectedDocumentId(documentId)
-    setNavigateToRead({ documentId, pageNumber: Number.isFinite(pageNumber) ? pageNumber : undefined, factId })
   }, [])
 
   // Refresh documents when chunking is active or Live tab is visible so status and progress stay correct
@@ -260,12 +242,11 @@ function App() {
 
   const restartChunkingForDocument = async (documentId: string, options?: ChunkingOptions) => {
     try {
-      const opts = options ?? { threshold: 0.6, critiqueEnabled: true, maxRetries: 2, extractionEnabled: true }
+      const opts = options ?? { threshold: 0.6, critiqueEnabled: true, maxRetries: 2 }
       const restartBody: Record<string, unknown> = {
         threshold: opts.threshold,
         critique_enabled: opts.critiqueEnabled,
         max_retries: Math.max(0, opts.maxRetries),
-        extraction_enabled: opts.extractionEnabled,
       }
       if (defaultLlmConfigVersion) restartBody.llm_config_version = defaultLlmConfigVersion
       if (opts.promptVersions && Object.keys(opts.promptVersions).length > 0) restartBody.prompt_versions = opts.promptVersions
@@ -290,24 +271,6 @@ function App() {
       }
     } catch (err) {
       setError('Failed to restart chunking')
-    }
-  }
-
-  const handleMarkReadyForChunking = async (documentId: string) => {
-    try {
-      const response = await fetch(`${API_BASE}/documents/${documentId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'completed' }),
-      })
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => null)
-        setError(errorData?.detail || 'Failed to mark document ready for chunking')
-        return
-      }
-      await loadDocuments()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to mark ready for chunking')
     }
   }
 
@@ -845,20 +808,22 @@ function App() {
 
   const startChunking = async (documentId: string, options?: ChunkingOptions) => {
     setError(null)
-    const opts = options ?? { threshold: 0.6, critiqueEnabled: true, maxRetries: 2, extractionEnabled: true }
+    const opts = options ?? { generatorId: 'A', threshold: 0.6, critiqueEnabled: true, maxRetries: 2, extractionEnabled: true }
     console.log(`Starting chunking for document ${documentId}...`)
     
     try {
+      const gen = opts.generatorId ?? 'A'
       const body: Record<string, unknown> = {
         threshold: opts.threshold,
         critique_enabled: opts.critiqueEnabled,
         max_retries: Math.max(0, opts.maxRetries),
-        extraction_enabled: opts.extractionEnabled,
+        generator_id: gen,
+        extraction_enabled: gen === 'B' ? false : (opts.extractionEnabled ?? true),
       }
       if (defaultLlmConfigVersion) body.llm_config_version = defaultLlmConfigVersion
       if (opts.promptVersions && Object.keys(opts.promptVersions).length > 0) body.prompt_versions = opts.promptVersions
       const response = await fetch(
-        `${API_BASE}/documents/${documentId}/chunking/start?threshold=${encodeURIComponent(opts.threshold)}&critique_enabled=${opts.critiqueEnabled}&max_retries=${opts.maxRetries}&extraction_enabled=${opts.extractionEnabled}`,
+        `${API_BASE}/documents/${documentId}/chunking/start?threshold=${encodeURIComponent(opts.threshold)}&critique_enabled=${opts.critiqueEnabled}&max_retries=${opts.maxRetries}&generator_id=${encodeURIComponent(gen)}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1353,7 +1318,6 @@ function App() {
               onUpload={handleUpload}
               uploading={uploading}
               error={error}
-              onDocumentAdded={loadDocuments}
             />
           </TabPanel>
 
@@ -1367,7 +1331,6 @@ function App() {
               onRestartChunking={handleRestartChunking}
               onStartEmbedding={handleStartEmbedding}
               onResetEmbedding={handleResetEmbedding}
-              onMarkReadyForChunking={handleMarkReadyForChunking}
             />
           </TabPanel>
 

@@ -1,0 +1,316 @@
+
+========================================================================
+  INTEGRATION TEST: Chunking Worker Refactor
+========================================================================
+Test document: 3 paragraphs (General, Verification, Effective Date)
+Started: 2026-02-13T16:15:42.325502
+Test markdown length: 610 chars
+
+========================================================================
+  PATH A: LLM Extraction + Critique
+========================================================================
+
+  Runtime: 137.44s
+  Job final status: completed
+
+  --- Path A: ChunkingJob ---
+id        status     gen  worker                                   started              completed            error  config_snap
+--------  ---------  ---  ---------------------------------------  -------------------  -------------------  -----  -----------
+2bab48ce  completed  A    worker-22350-2026-02-13T16:15:43.469176  2026-02-13 16:15:43  2026-02-13 16:18:00  -      YES        
+
+  Config snapshot (job 2bab48ce):
+    threshold: 0.6
+    max_retries: 1
+    snapshot_at: 2026-02-13T16:15:43.583975
+    generator_id: A
+    prompt_versions: None
+    worker_defaults: {'default_threshold': 0.6, 'path_b_cap_ngrams': 500, 'path_b_cap_abbrevs': 200, 'default_max_retries': 2, 'path_b_min_occurrences': 1, 'default_critique_enabled': True}
+    critique_enabled: true
+    extraction_enabled: true
+    llm_config_version: None
+
+  --- Path A: ChunkingResult ---
+  status=in_progress  total_paragraphs=4  completed=0  pages=1
+  errors={'info': 0, 'warning': 0, 'critical': 0}
+    paragraph 1_0: status=passed  facts=5  summary=This paragraph describes the nature and authority of the Mol
+    paragraph 1_1: status=no_facts  facts=0  summary=
+    paragraph 1_2: status=review  facts=3  summary=
+    paragraph 1_3: status=no_facts  facts=0  summary=
+
+  --- Path A: ChunkingEvents ---
+id        event_type           message (ops)                                    user_message                                      
+--------  -------------------  -----------------------------------------------  --------------------------------------------------
+df1c54a0  job_start            Chunking started (4 paragraphs across 1 pages).  Starting document analysis: 4 sections found acros
+7c4f6887  paragraph_start      Starting paragraph 1_0.                          Reading section 1 of 4...                         
+73f218fa  extraction_start     Extraction started for 1_0.                      Analyzing section 1_0...                          
+b59f2ede  extraction_complete  Paragraph 1_0: extraction complete, 5 facts.     Found 5 fact(s) in this section.                  
+9e25af2b  critique_start       Critique started for 1_0 (threshold=0.6).        Reviewing extraction quality for section 1_0...   
+31af3c15  critique_complete    Critique for 1_0: PASS.                          Quality check: passed.                            
+dd6b7771  paragraph_complete   Paragraph 1_0 complete.                          Section 1 of 4 done.                              
+4430fde2  paragraph_start      Starting paragraph 1_1.                          Reading section 2 of 4...                         
+84d407e0  extraction_start     Extraction started for 1_1.                      Analyzing section 1_1...                          
+9467f3f1  extraction_complete  Paragraph 1_1: extraction complete, 0 facts.     Found 0 fact(s) in this section.                  
+0c3dbfe1  critique_start       Critique started for 1_1 (threshold=0.6).        Reviewing extraction quality for section 1_1...   
+827bb135  critique_complete    Critique for 1_1: FAIL.                          Quality check: needs review.                      
+2ce1976b  paragraph_complete   Paragraph 1_1 complete.                          Section 2 of 4 done.                              
+b53a9431  paragraph_start      Starting paragraph 1_2.                          Reading section 3 of 4...                         
+9f5b5502  extraction_start     Extraction started for 1_2.                      Analyzing section 1_2...                          
+2095e15a  extraction_complete  Paragraph 1_2: extraction complete, 0 facts.     Found 0 fact(s) in this section.                  
+1f59c19a  critique_start       Critique started for 1_2 (threshold=0.6).        Reviewing extraction quality for section 1_2...   
+849cc80a  critique_complete    Critique for 1_2: FAIL.                          Quality check: needs review.                      
+f09b373c  paragraph_complete   Paragraph 1_2 complete.                          Section 3 of 4 done.                              
+4cdc95a7  paragraph_start      Starting paragraph 1_3.                          Reading section 4 of 4...                         
+b1aabc73  extraction_start     Extraction started for 1_3.                      Analyzing section 1_3...                          
+daa04bd4  extraction_complete  Paragraph 1_3: extraction complete, 0 facts.     Found 0 fact(s) in this section.                  
+af3d94bc  critique_start       Critique started for 1_3 (threshold=0.6).        Reviewing extraction quality for section 1_3...   
+e6dfa58b  critique_complete    Critique for 1_3: FAIL.                          Quality check: needs review.                      
+930a6640  paragraph_complete   Paragraph 1_3 complete.                          Section 4 of 4 done.                              
+77ec55c6  chunking_complete    Chunking complete. 4/4 paragraphs processed.     Document analysis complete. 4 of 4 sections proces
+  Total events: 26
+
+  --- Path A: HierarchicalChunks ---
+id        page  para  extraction  critique  text_preview                                        summary                                 
+--------  ----  ----  ----------  --------  --------------------------------------------------  ----------------------------------------
+c8d03360  1     0     extracted   passed    # Member Eligibility                                This paragraph describes the nature and 
+6e483f06  1     1     extracted   failed    Members must be enrolled in the plan to receive be  -                                       
+b4264020  1     2     extracted   failed    The member must provide proof of eligibility upon   -                                       
+55d9c4c4  1     3     extracted   failed    Coverage begins on the effective date shown on the  -                                       
+  Total chunks: 4
+
+  --- Path A: ExtractedFacts ---
+id        fact_text                                           type                 page  start  end   elig  conf
+--------  --------------------------------------------------  -------------------  ----  -----  ----  ----  ----
+8551d2eb  The Molina Healthcare of New Mexico (MHNM) Provide  other                None  None   None  -     -   
+c540daa9  This manual is not a contract and does not modify   other                None  None   None  -     -   
+5dcda926  In the event of a conflict between the Provider Ag  conflict             None  None   None  -     -   
+c3e3129a  MHNM reserves the right to amend the manual at any  other                None  None   None  -     -   
+616940f2  Providers will be notified of amendments via a Pro  verification_method  None  None   None  -     -   
+29bed34a                                                      -                    1     242    299   -     -   
+3bb64515                                                      -                    1     300    351   -     -   
+48420f44                                                      -                    None  None   None  -     -   
+  Total facts: 8
+
+  Extracted fact details:
+    [1] The Molina Healthcare of New Mexico (MHNM) Provider Manual is a guide for providers who serve Molina Healthcare members.
+        type=other confidence=None
+        page=None offset=None..None
+    [2] This manual is not a contract and does not modify or amend the terms and conditions of the Provider Agreement between MHNM and the Provider.
+        type=other confidence=None
+        page=None offset=None..None
+    [3] In the event of a conflict between the Provider Agreement and this manual, the Provider Agreement shall govern.
+        type=conflict confidence=None
+        page=None offset=None..None
+    [4] MHNM reserves the right to amend the manual at any time.
+        type=other confidence=None
+        page=None offset=None..None
+    [5] Providers will be notified of amendments via a Provider Bulletin or other written notification.
+        type=verification_method confidence=None
+        page=None offset=None..None
+    [6] 
+        type=None confidence=None
+        page=1 offset=242..299
+    [7] 
+        type=None confidence=None
+        page=1 offset=300..351
+    [8] 
+        type=None confidence=None
+        page=None offset=None..None
+
+  --- Path A: PolicyParagraphs + PolicyLines ---
+  (no PolicyParagraphs)
+
+  --- Path A: EmbeddableUnits ---
+id        gen  source_type  text_preview                                        status 
+--------  ---  -----------  --------------------------------------------------  -------
+ddba9f6a  A    chunk        # Member Eligibility                                pending
+a18f249c  A    fact         The Molina Healthcare of New Mexico (MHNM) Provide  pending
+3039cc18  A    fact         This manual is not a contract and does not modify   pending
+50161f68  A    fact         In the event of a conflict between the Provider Ag  pending
+25ff2217  A    fact         MHNM reserves the right to amend the manual at any  pending
+0bc5728c  A    fact         Providers will be notified of amendments via a Pro  pending
+9904eaad  A    chunk        The member must provide proof of eligibility upon   pending
+  Total embeddable_units: 7
+
+  Embeddable unit details:
+    [1] gen=A type=chunk status=pending
+         text: # Member Eligibility
+         metadata: {"summary": "This paragraph describes the nature and authority of the Molina Healthcare of New Mexico Provider Manual, c
+    [2] gen=A type=fact status=pending
+         text: The Molina Healthcare of New Mexico (MHNM) Provider Manual is a guide for providers who serve Molina
+    [3] gen=A type=fact status=pending
+         text: This manual is not a contract and does not modify or amend the terms and conditions of the Provider 
+    [4] gen=A type=fact status=pending
+         text: In the event of a conflict between the Provider Agreement and this manual, the Provider Agreement sh
+    [5] gen=A type=fact status=pending
+         text: MHNM reserves the right to amend the manual at any time.
+    [6] gen=A type=fact status=pending
+         text: Providers will be notified of amendments via a Provider Bulletin or other written notification.
+    [7] gen=A type=chunk status=pending
+         text: The member must provide proof of eligibility upon request. Verification can be completed online or b
+         metadata: {"summary": ""}
+
+  --- Path A: DocumentTags ---
+  (no DocumentTags row)
+
+  --- Path A: EmbeddingJobs ---
+id        status   gen
+--------  -------  ---
+4f2773fa  pending  A  
+  Total embedding_jobs: 1
+
+  --- Path A: ProcessingErrors ---
+id  paragraph  category  message
+--  ---------  --------  -------
+  (no rows)
+
+========================================================================
+  PATH B: Deterministic Policy Chunking
+========================================================================
+
+  Runtime: 5.92s
+  Job final status: completed
+
+  --- Path B: ChunkingJob ---
+id        status     gen  worker                                   started              completed            error  config_snap
+--------  ---------  ---  ---------------------------------------  -------------------  -------------------  -----  -----------
+7a327853  completed  B    worker-22350-2026-02-13T16:15:43.469176  2026-02-13 16:18:02  2026-02-13 16:18:07  -      YES        
+
+  Config snapshot (job 7a327853):
+    threshold: 0.6
+    max_retries: 0
+    snapshot_at: 2026-02-13T16:18:02.218494
+    generator_id: B
+    prompt_versions: None
+    worker_defaults: {'default_threshold': 0.6, 'path_b_cap_ngrams': 500, 'path_b_cap_abbrevs': 200, 'default_max_retries': 2, 'path_b_min_occurrences': 1, 'default_critique_enabled': True}
+    critique_enabled: false
+    extraction_enabled: false
+    llm_config_version: None
+
+  --- Path B: ChunkingResult ---
+  status=in_progress  total_paragraphs=4  completed=0  pages=1
+  errors={'info': 0, 'warning': 0, 'critical': 0}
+    paragraph 1_0: status=skipped  facts=0  summary=
+    paragraph 1_1: status=skipped  facts=0  summary=
+    paragraph 1_2: status=skipped  facts=0  summary=
+    paragraph 1_3: status=skipped  facts=0  summary=
+
+  --- Path B: ChunkingEvents ---
+id        event_type          message (ops)                                    user_message                                      
+--------  ------------------  -----------------------------------------------  --------------------------------------------------
+e10d9cfd  job_start           Chunking started (4 paragraphs across 1 pages).  Starting document analysis: 4 sections found acros
+456ac2d9  paragraph_start     Starting paragraph 1_0 (Path B).                 Reading section 1 of 4...                         
+1a0f062c  paragraph_complete  Paragraph 1_0 complete (Path B).                 Section 1 of 4 done.                              
+b720866a  paragraph_start     Starting paragraph 1_1 (Path B).                 Reading section 2 of 4...                         
+1a46a41b  paragraph_complete  Paragraph 1_1 complete (Path B).                 Section 2 of 4 done.                              
+7d3d263b  paragraph_start     Starting paragraph 1_2 (Path B).                 Reading section 3 of 4...                         
+ef172087  paragraph_complete  Paragraph 1_2 complete (Path B).                 Section 3 of 4 done.                              
+9ac5ee2b  paragraph_start     Starting paragraph 1_3 (Path B).                 Reading section 4 of 4...                         
+9a416567  paragraph_complete  Paragraph 1_3 complete (Path B).                 Section 4 of 4 done.                              
+b56403ca  chunking_complete   Chunking complete. 4/4 paragraphs processed.     Document analysis complete. 4 of 4 sections proces
+  Total events: 10
+
+  --- Path B: HierarchicalChunks ---
+id        page  para  extraction  critique  text_preview                                        summary
+--------  ----  ----  ----------  --------  --------------------------------------------------  -------
+cf344128  1     0     skipped     skipped   # Member Eligibility                                -      
+48e327ad  1     1     skipped     skipped   Members must be enrolled in the plan to receive be  -      
+ff5fa119  1     2     skipped     skipped   The member must provide proof of eligibility upon   -      
+19d4a3af  1     3     skipped     skipped   Coverage begins on the effective date shown on the  -      
+  Total chunks: 4
+
+  --- Path B: ExtractedFacts ---
+id  fact_text  type  page  start  end  elig  conf
+--  ---------  ----  ----  -----  ---  ----  ----
+  (no rows)
+  Total facts: 0
+
+  --- Path B: PolicyParagraphs + PolicyLines ---
+  Paragraph idx=0 (page 1): type=body  p_tags=null d_tags={"eligibility": 1} j_tags=null
+    text: # Member Eligibility
+      line 0: # Member Eligibility  (p_tags=null d_tags={"eligibility": 1.0})
+    (1 lines)
+  Paragraph idx=1 (page 1): type=body  p_tags=null d_tags={"eligibility": 1} j_tags=null
+    text: Members must be enrolled in the plan to receive benefits. Eligibility is determi
+      line 0: Members must be enrolled in the plan to receive benefits. El  (p_tags=null d_tags={"eligibility": 1.0})
+    (1 lines)
+  Paragraph idx=2 (page 1): type=body  p_tags={"verify": 1} d_tags={"claims": 1, "eligibility": 1} j_tags=null
+    text: The member must provide proof of eligibility upon request. Verification can be c
+      line 0: The member must provide proof of eligibility upon request. V  (p_tags={"verify": 1.0} d_tags={"claims": 1.0, "eligibility": 1.0})
+    (1 lines)
+  Paragraph idx=3 (page 1): type=body  p_tags={"appeal": 1} d_tags={"eligibility": 1} j_tags=null
+    text: Coverage begins on the effective date shown on the member's card. Termination of
+      line 0: Coverage begins on the effective date shown on the member's   (p_tags={"appeal": 1.0} d_tags={"eligibility": 1.0})
+    (1 lines)
+
+  --- Path B: EmbeddableUnits ---
+id        gen  source_type  text_preview                                        status 
+--------  ---  -----------  --------------------------------------------------  -------
+5a9b4ba1  B    policy_line  # Member Eligibility                                pending
+6ed41ba3  B    policy_line  Members must be enrolled in the plan to receive be  pending
+e98bad22  B    policy_line  The member must provide proof of eligibility upon   pending
+5c1dec1f  B    policy_line  Coverage begins on the effective date shown on the  pending
+  Total embeddable_units: 4
+
+  Embeddable unit details:
+    [1] gen=B type=policy_line status=pending
+         text: # Member Eligibility
+         metadata: {"d_tags": {"eligibility": 1.0}, "p_tags": null}
+    [2] gen=B type=policy_line status=pending
+         text: Members must be enrolled in the plan to receive benefits. Eligibility is determined at the time of s
+         metadata: {"d_tags": {"eligibility": 1.0}, "p_tags": null}
+    [3] gen=B type=policy_line status=pending
+         text: The member must provide proof of eligibility upon request. Verification can be completed online or b
+         metadata: {"d_tags": {"claims": 1.0, "eligibility": 1.0}, "p_tags": {"verify": 1.0}}
+    [4] gen=B type=policy_line status=pending
+         text: Coverage begins on the effective date shown on the member's card. Termination of eligibility ends be
+         metadata: {"d_tags": {"eligibility": 1.0}, "p_tags": {"appeal": 1.0}}
+
+  --- Path B: DocumentTags ---
+  p_tags: {"appeal": 1, "verify": 1}
+  d_tags: {"claims": 1, "eligibility": 4}
+  j_tags: null
+
+  --- Path B: EmbeddingJobs ---
+id        status   gen
+--------  -------  ---
+4c354b04  pending  B  
+  Total embedding_jobs: 1
+
+  --- Path B: ProcessingErrors ---
+id  paragraph  category  message
+--  ---------  --------  -------
+  (no rows)
+
+========================================================================
+  SUMMARY & EXPECTATIONS vs ACTUAL
+========================================================================
+
+Expectations:
+  Path A (LLM Extraction + Critique):
+    - 3 HierarchicalChunks created (one per paragraph)
+    - ExtractedFacts for each paragraph (5-10 facts expected)
+    - Each fact has: fact_text, fact_type, page_number, offsets, confidence
+    - ChunkingEvents emitted: job_start, paragraph_start/complete x3, chunking_complete
+    - Config snapshot stored on ChunkingJob
+    - EmbeddableUnits: 1 per chunk + 1 per fact
+    - EmbeddingJob: queued on success
+    - ChunkingResult: metadata with status, paragraph counts
+
+  Path B (Deterministic Policy Chunking):
+    - 3 PolicyParagraphs + policy_lines per paragraph
+    - Tags applied (if lexicon entries exist for content)
+    - HierarchicalChunks created (skipped extraction/critique status)
+    - Tag propagation: line -> paragraph -> document
+    - ChunkingEvents emitted: job_start, paragraph_start/complete x3, chunking_complete
+    - EmbeddableUnits: 1 per policy_line
+    - DocumentTags row aggregated
+    - EmbeddingJob: queued on success
+
+Behavior Notes:
+    
+
+========================================================================
+  CLEANUP
+========================================================================
+  Cleaned up Path A doc: 4ad75286-5931-45d5-9109-e8085b3fc3b3
+  Cleaned up Path B doc: 4f532657-9bc6-4f6f-9bdf-8dac18586504

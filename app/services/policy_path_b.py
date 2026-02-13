@@ -319,3 +319,135 @@ async def extract_candidates_for_document(
     if inserted:
         logger.info(f"[Path B] Extracted {inserted} lexicon candidates for document {document_id}")
     return inserted
+
+
+# ---------------------------------------------------------------------------
+# Tag propagation (forward: line → paragraph → document)
+# ---------------------------------------------------------------------------
+
+def _merge_tag_counts(
+    existing: dict | None,
+    new_tags: dict | None,
+) -> dict:
+    """Merge JSONB tag dicts (tag_code -> count or detail)."""
+    merged: dict = dict(existing or {})
+    for code, value in (new_tags or {}).items():
+        if code in merged:
+            if isinstance(merged[code], (int, float)) and isinstance(value, (int, float)):
+                merged[code] = merged[code] + value
+            elif isinstance(merged[code], dict) and isinstance(value, dict):
+                # nested: sum numeric fields
+                for k, v in value.items():
+                    if isinstance(v, (int, float)):
+                        merged[code][k] = merged[code].get(k, 0) + v
+                    else:
+                        merged[code][k] = v
+            # else: overwrite
+            else:
+                merged[code] = value
+        else:
+            merged[code] = value
+    return merged
+
+
+def _count_tags(tag_dict: dict | None) -> dict[str, int]:
+    """Convert ``{code: <anything>}`` to ``{code: 1}`` for simple counting."""
+    if not tag_dict:
+        return {}
+    return {code: 1 for code in tag_dict}
+
+
+async def aggregate_line_tags_to_paragraph(
+    db: AsyncSession,
+    paragraph_id,
+) -> None:
+    """Forward-propagate: aggregate all child PolicyLine tags into the parent
+    PolicyParagraph (p_tags, d_tags, j_tags).  Caller should commit.
+    """
+    from app.models import PolicyParagraph, PolicyLine
+
+    para = await db.get(PolicyParagraph, paragraph_id)
+    if para is None:
+        return
+
+    lines_q = await db.execute(
+        select(PolicyLine).where(PolicyLine.paragraph_id == paragraph_id)
+    )
+    lines = lines_q.scalars().all()
+
+    agg_p: dict = {}
+    agg_d: dict = {}
+    agg_j: dict = {}
+    for ln in lines:
+        agg_p = _merge_tag_counts(agg_p, _count_tags(ln.p_tags))
+        agg_d = _merge_tag_counts(agg_d, _count_tags(ln.d_tags))
+        agg_j = _merge_tag_counts(agg_j, _count_tags(ln.j_tags))
+
+    para.p_tags = agg_p or None
+    para.d_tags = agg_d or None
+    para.j_tags = agg_j or None
+
+
+async def aggregate_paragraph_tags_to_document(
+    db: AsyncSession,
+    document_id,
+) -> None:
+    """Forward-propagate: aggregate all PolicyParagraph tags into
+    DocumentTags (one row per document).  Caller should commit.
+    """
+    from app.models import PolicyParagraph, DocumentTags
+
+    paras_q = await db.execute(
+        select(PolicyParagraph).where(PolicyParagraph.document_id == document_id)
+    )
+    paras = paras_q.scalars().all()
+
+    agg_p: dict = {}
+    agg_d: dict = {}
+    agg_j: dict = {}
+    for p in paras:
+        agg_p = _merge_tag_counts(agg_p, _count_tags(p.p_tags))
+        agg_d = _merge_tag_counts(agg_d, _count_tags(p.d_tags))
+        agg_j = _merge_tag_counts(agg_j, _count_tags(p.j_tags))
+
+    doc_tags_q = await db.execute(
+        select(DocumentTags).where(DocumentTags.document_id == document_id)
+    )
+    doc_tags = doc_tags_q.scalar_one_or_none()
+    if doc_tags is None:
+        doc_tags = DocumentTags(document_id=document_id)
+        db.add(doc_tags)
+
+    doc_tags.p_tags = agg_p or None
+    doc_tags.d_tags = agg_d or None
+    doc_tags.j_tags = agg_j or None
+
+
+def compute_effective_line_tags(
+    line_tags: dict | None,
+    paragraph_tags: dict | None,
+    document_tags: dict | None,
+    *,
+    w_line: float = 1.0,
+    w_paragraph: float = 0.3,
+    w_document: float = 0.1,
+) -> dict[str, float]:
+    """Backward-propagate: compute effective line-level tag scores as a
+    weighted combination of line, paragraph, and document tag presence.
+
+    Returns ``{tag_code: effective_score}`` for all tags found at any level.
+    Called at query time (not persisted by default).
+    """
+    all_codes: set[str] = set()
+    all_codes.update(line_tags or {})
+    all_codes.update(paragraph_tags or {})
+    all_codes.update(document_tags or {})
+
+    effective: dict[str, float] = {}
+    for code in all_codes:
+        l_val = 1.0 if code in (line_tags or {}) else 0.0
+        p_val = 1.0 if code in (paragraph_tags or {}) else 0.0
+        d_val = 1.0 if code in (document_tags or {}) else 0.0
+        score = l_val * w_line + p_val * w_paragraph + d_val * w_document
+        effective[code] = round(score, 4)
+    return effective

@@ -609,6 +609,86 @@
   gap: 0.5rem;
 }
 
+/* Bulk action bar (when documents selected) */
+.bulk-action-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.bulk-action-label {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  margin-right: 0.25rem;
+}
+
+.bulk-message {
+  margin-top: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  font-size: 0.875rem;
+}
+
+.bulk-message-success {
+  background: var(--success-bg, #dcfce7);
+  color: var(--success-fg, #166534);
+  border: 1px solid rgba(22, 101, 52, 0.2);
+}
+
+.bulk-message-error {
+  background: var(--error-bg, #fef2f2);
+  color: var(--error-fg, #b91c1c);
+  border: 1px solid rgba(185, 28, 28, 0.2);
+}
+
+/* Bulk modal overlay and dialog */
+.bulk-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.bulk-modal {
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  padding: 1.5rem;
+  max-width: 520px;
+  width: 90%;
+  max-height: 90vh;
+  overflow-y: auto;
+  box-shadow: 0 4px 20px var(--shadow-md, rgba(0, 0, 0, 0.15));
+}
+
+.bulk-modal-confirm {
+  max-width: 400px;
+}
+
+.bulk-modal-title {
+  margin: 0 0 1rem 0;
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.bulk-modal-body {
+  margin: 0 0 1.25rem 0;
+  font-size: 0.9375rem;
+  color: var(--text-secondary);
+}
+
+.bulk-modal-actions {
+  display: flex;
+  gap: 0.75rem;
+  justify-content: flex-end;
+  margin-top: 1rem;
+}
+
 @media (max-width: 768px) {
   .status-table-container {
     overflow-x: auto;
@@ -625,6 +705,14 @@
   
   .toolbar-left,
   .toolbar-right {
+    width: 100%;
+  }
+  
+  .toolbar-right {
+    flex-wrap: wrap;
+  }
+  
+  .bulk-action-bar {
     width: 100%;
   }
   

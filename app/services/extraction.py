@@ -1,11 +1,30 @@
 """Extraction service for extracting facts from paragraphs."""
 import json
 import logging
+import re
 from typing import Dict, List, Any, Optional
 from app.services.llm_provider import get_llm_provider
 from app.services.utils import parse_json_response
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_format(template: str, **kwargs) -> str:
+    """Substitute ``{key}`` placeholders without crashing on literal braces.
+
+    The YAML prompt templates contain JSON examples with ``{`` / ``}`` that
+    are *not* intended as format-string variables.  A naive ``str.format()``
+    raises ``KeyError`` for those literals.
+
+    Strategy: use ``$__OPEN__`` / ``$__CLOSE__`` as temporary sentinels,
+    replace known placeholders, then restore the braces.
+    """
+    # Escape all braces
+    safe = template.replace("{", "{{").replace("}", "}}")
+    # Un-escape only the known placeholders
+    for key in kwargs:
+        safe = safe.replace("{{" + key + "}}", "{" + key + "}")
+    return safe.format(**kwargs)
 
 
 EXTRACTION_PROMPT = """You are extracting facts from a Medicaid/managed-care provider manual. Extract ALL relevant facts, not just eligibility-related ones.
@@ -149,14 +168,14 @@ async def extract_facts(
     block = _paragraph_block(paragraph_text, section_path)
     if critique_feedback:
         template = retry_extraction_prompt_body if retry_extraction_prompt_body else RETRY_EXTRACTION_PROMPT
-        prompt = template.format(
+        prompt = _safe_format(template,
             paragraph_block=block,
             critique_feedback=critique_feedback,
             issues="\n".join(f"- {issue}" for issue in (issues or []))
         )
     else:
         template = extraction_prompt_body if extraction_prompt_body else EXTRACTION_PROMPT
-        prompt = template.format(paragraph_block=block)
+        prompt = _safe_format(template, paragraph_block=block)
     try:
         response = await llm.generate(prompt)
         result = parse_json_response(response)
@@ -203,14 +222,14 @@ async def stream_extract_facts(
     block = _paragraph_block(paragraph_text, section_path)
     if critique_feedback:
         template = retry_extraction_prompt_body if retry_extraction_prompt_body else RETRY_EXTRACTION_PROMPT
-        prompt = template.format(
+        prompt = _safe_format(template,
             paragraph_block=block,
             critique_feedback=critique_feedback,
             issues="\n".join(f"- {issue}" for issue in (issues or []))
         )
     else:
         template = extraction_prompt_body if extraction_prompt_body else EXTRACTION_PROMPT
-        prompt = template.format(paragraph_block=block)
+        prompt = _safe_format(template, paragraph_block=block)
     
     # Stream response and collect
     try:

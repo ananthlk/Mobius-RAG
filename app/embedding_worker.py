@@ -108,8 +108,16 @@ async def process_embedding_job(job: EmbeddingJob, db: AsyncSession) -> None:
         provider = get_embedding_provider(config)
         texts = [t for _, _, t in items]
 
-        # Delete existing embeddings for this document (re-embed)
-        await db.execute(delete(ChunkEmbedding).where(ChunkEmbedding.document_id == doc_uuid))
+        # Delete existing embeddings for this document + generator (NULL treated as "A")
+        gen = (getattr(job, "generator_id", None) or "A").strip().upper() or "A"
+        if gen not in ("A", "B"):
+            gen = "A"
+        if gen == "A":
+            from sqlalchemy import or_
+            where_gen = or_(ChunkEmbedding.generator_id.is_(None), ChunkEmbedding.generator_id == "A")
+        else:
+            where_gen = (ChunkEmbedding.generator_id == "B")
+        await db.execute(delete(ChunkEmbedding).where(ChunkEmbedding.document_id == doc_uuid, where_gen))
         vector_store = get_vector_store()
         vector_store.delete_by_document(str(job.document_id))
         await db.commit()
@@ -154,6 +162,7 @@ async def process_embedding_job(job: EmbeddingJob, db: AsyncSession) -> None:
                     source_id=UUID(source_id),
                     embedding=emb,
                     model=embed_model,
+                    generator_id=gen,
                 )
                 db.add(ce)
                 ids_to_store.append(str(ce_id))
@@ -227,13 +236,9 @@ async def process_embedding_job(job: EmbeddingJob, db: AsyncSession) -> None:
 
 
 async def worker_task(worker_id: int) -> None:
-    """Single worker: poll and process embedding jobs.
-    Uses a short-lived session only to find and claim a job (update to processing);
-    then a separate session for the long process_embedding_job to avoid holding a connection during poll."""
+    """Single worker: poll and process embedding jobs."""
     while True:
         try:
-            job_id = None
-            # Short-lived session: find pending job and claim it (update to processing)
             async with AsyncSessionLocal() as db:
                 result = await db.execute(
                     select(EmbeddingJob)
@@ -244,22 +249,10 @@ async def worker_task(worker_id: int) -> None:
                 )
                 job = result.scalar_one_or_none()
                 if job:
-                    job.status = "processing"
-                    job.worker_id = WORKER_ID
-                    job.started_at = _utc_now_naive()
-                    await db.commit()
-                    job_id = job.id
-            # Session closed here; no connection held until we open next session
-
-            if job_id is not None:
-                async with AsyncSessionLocal() as db:
-                    result = await db.execute(select(EmbeddingJob).where(EmbeddingJob.id == job_id))
-                    job = result.scalar_one_or_none()
-                    if job and job.status == "processing":
-                        logger.info("[Worker %d] Processing job %s for document %s", worker_id, job.id, job.document_id)
-                        await process_embedding_job(job, db)
-            else:
-                await asyncio.sleep(2)
+                    logger.info("[Worker %d] Processing job %s for document %s", worker_id, job.id, job.document_id)
+                    await process_embedding_job(job, db)
+                else:
+                    await asyncio.sleep(2)
         except Exception as e:
             logger.error("[Worker %d] Error: %s", worker_id, e, exc_info=True)
             await asyncio.sleep(5)

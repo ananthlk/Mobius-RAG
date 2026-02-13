@@ -1,8 +1,8 @@
 from sqlalchemy import Boolean, Column, String, DateTime, Integer, Text, ForeignKey, Float
 from sqlalchemy.dialects.postgresql import UUID, JSONB
+# NOTE: Embeddings are stored as JSONB arrays in this DB (for Vertex sync).
+# pgvector may be installed, but the current schema uses JSONB for embedding columns.
 from datetime import datetime
-# Note: Embeddings are stored in Vertex AI Vector Search, not PostgreSQL.
-# The embedding columns below are kept for schema compatibility but not used.
 import uuid
 from app.database import Base
 
@@ -26,7 +26,6 @@ class Document(Base):
     error_count = Column(Integer, default=0, nullable=False)
     critical_error_count = Column(Integer, default=0, nullable=False)
     review_status = Column(String(20), default="pending", nullable=False)  # pending, approved, rejected, reprocessing
-    source_metadata = Column(JSONB, nullable=True)  # e.g. {"source_type": "scraped", "scraped_seed_url": str, "scraped_page_count": int, "scraped_page_urls": [...]}
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
@@ -41,7 +40,6 @@ class DocumentPage(Base):
     extraction_status = Column(String(20), default="success", nullable=False)  # success, failed, empty
     extraction_error = Column(Text, nullable=True)  # Error message if extraction failed
     text_length = Column(Integer, default=0, nullable=False)  # Length of extracted text
-    source_url = Column(Text, nullable=True)  # Original URL for scraped pages; null for PDF pages
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
@@ -112,10 +110,18 @@ class ChunkingJob(Base):
     prompt_versions = Column(JSONB, nullable=True)  # e.g. {"extraction": "v1", "extraction_retry": "v1", "critique": "v1"}
     llm_config_version = Column(String(100), nullable=True)  # e.g. "default" or "v1" or content SHA
 
-    # Run mode: critique on/off, retries on/off, extraction on/off
+    # Run mode: critique on/off, retries on/off
     critique_enabled = Column(String(10), nullable=True)  # 'true', 'false' (store as string for consistency)
     max_retries = Column(Integer, nullable=True)  # 0 = no retry; 1, 2, etc.
-    extraction_enabled = Column(String(10), nullable=True)  # 'true', 'false'; when false, hierarchical chunks only, no LLM extraction/critique
+
+    # Run mode: extraction on/off (Path A extraction may be disabled for deterministic runs)
+    extraction_enabled = Column(String(10), nullable=True)  # 'true', 'false'
+
+    # A/B generator (NULL treated as "A" for back-compat)
+    generator_id = Column(String(10), nullable=True)  # "A" | "B"
+
+    # Resolved run config snapshot (set once at job start; never mutated).
+    chunking_config_snapshot = Column(JSONB, nullable=True)
 
 
 class ChunkingEvent(Base):
@@ -160,6 +166,9 @@ class EmbeddingJob(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
+    # A/B generator (NULL treated as "A" for back-compat)
+    generator_id = Column(String(10), nullable=True)  # "A" | "B"
+
 
 class ChunkEmbedding(Base):
     """Embeddings for hierarchical chunks and facts. No text column; link back via source_type + source_id."""
@@ -169,9 +178,12 @@ class ChunkEmbedding(Base):
     document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False)
     source_type = Column(String(20), nullable=False)  # 'hierarchical' | 'fact'
     source_id = Column(UUID(as_uuid=True), nullable=False)  # hierarchical_chunks.id or extracted_facts.id
-    embedding = Column(JSONB, nullable=True)  # Embeddings stored in Vertex AI Vector Search, not here
+    embedding = Column(JSONB, nullable=False)  # list[float] length=1536
     model = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    # A/B generator (NULL treated as "A" for back-compat)
+    generator_id = Column(String(10), nullable=True)  # "A" | "B"
 
 
 class PublishEvent(Base):
@@ -196,7 +208,7 @@ class RagPublishedEmbedding(Base):
     document_id = Column(UUID(as_uuid=True), nullable=False)
     source_type = Column(String(20), nullable=False)
     source_id = Column(UUID(as_uuid=True), nullable=False)
-    embedding = Column(JSONB, nullable=True)  # Embeddings stored in Vertex AI Vector Search, not here
+    embedding = Column(JSONB, nullable=False)  # list[float] length=1536
     model = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     text = Column(Text, default="", nullable=False)
@@ -221,6 +233,33 @@ class RagPublishedEmbedding(Base):
     content_sha = Column(String(64), default="", nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     source_verification_status = Column(String(20), default="", nullable=False)
+
+
+class EmbeddableUnit(Base):
+    """Consolidated table of texts to embed.
+
+    Both Path A and Path B write rows here after persisting their own artefacts.
+    The embedding worker reads solely from this table, giving a single contract
+    regardless of which chunking path produced the data.
+    """
+    __tablename__ = "embeddable_units"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False)
+    generator_id = Column(String(10), nullable=True)  # "A" | "B"
+    source_type = Column(String(30), nullable=False)   # "chunk", "fact", "policy_line"
+    source_id = Column(UUID(as_uuid=True), nullable=False)  # PK of the source row
+
+    text = Column(Text, nullable=False)                # The text to embed
+    page_number = Column(Integer, nullable=True)
+    paragraph_index = Column(Integer, nullable=True)
+    section_path = Column(String(500), nullable=True)
+
+    metadata_ = Column("metadata", JSONB, nullable=True, default=dict)  # Arbitrary metadata (tags, scores, etc.)
+
+    # Lifecycle
+    status = Column(String(20), default="pending", nullable=False)  # pending, embedded, failed
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 # Category names for relevance scores (must match extraction prompt)
@@ -366,3 +405,134 @@ class ProcessingError(Base):
     resolution_notes = Column(Text, nullable=True)
     
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+# --------------------------------------------------------------------------------------
+# Path B (deterministic policy chunking + lexicon candidates)
+#
+# Note: Lexicon maintenance has moved to the QA service, but the RAG API still exposes
+# read-only endpoints for Path B artifacts. These models are required for API import to load.
+# If the underlying tables are not present in the current DB, those endpoints will error
+# at query time, but the API server can still start (and Path A flows continue to work).
+# --------------------------------------------------------------------------------------
+
+
+class PolicyParagraph(Base):
+    """Path B paragraph-level units (structured, taggable)."""
+    __tablename__ = "policy_paragraphs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False)
+    page_number = Column(Integer, nullable=False)
+    order_index = Column(Integer, nullable=False)
+
+    paragraph_type = Column(String(50), nullable=True)  # e.g. heading|body|table|list
+    heading_path = Column(JSONB, nullable=True)  # e.g. ["Section 1", "Subsection"] or null
+    text = Column(Text, nullable=False, default="")
+
+    # Tags (Path B)
+    p_tags = Column(JSONB, nullable=True)  # prescriptive tags
+    d_tags = Column(JSONB, nullable=True)  # descriptive tags
+    j_tags = Column(JSONB, nullable=True)  # jurisdiction tags
+    inferred_d_tags = Column(JSONB, nullable=True)
+    inferred_j_tags = Column(JSONB, nullable=True)
+    conflict_flags = Column(JSONB, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class PolicyLine(Base):
+    """Path B line-level units (may be atomic)."""
+    __tablename__ = "policy_lines"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False)
+    page_number = Column(Integer, nullable=False)
+    paragraph_id = Column(UUID(as_uuid=True), ForeignKey("policy_paragraphs.id"), nullable=False)
+    order_index = Column(Integer, nullable=False)
+
+    parent_line_id = Column(UUID(as_uuid=True), nullable=True)
+    heading_path = Column(JSONB, nullable=True)  # e.g. ["Section 1"] or null
+    line_type = Column(String(50), nullable=True)  # e.g. bullet|sentence|table_row
+    text = Column(Text, nullable=False, default="")
+
+    is_atomic = Column(Boolean, default=False, nullable=False)
+    non_atomic_reason = Column(Text, nullable=True)
+
+    # Tags / features
+    p_tags = Column(JSONB, nullable=True)
+    d_tags = Column(JSONB, nullable=True)
+    j_tags = Column(JSONB, nullable=True)
+    inferred_d_tags = Column(JSONB, nullable=True)
+    inferred_j_tags = Column(JSONB, nullable=True)
+    conflict_flags = Column(JSONB, nullable=True)
+    extracted_fields = Column(JSONB, nullable=True)
+
+    # Optional offsets in raw page text
+    start_offset = Column(Integer, nullable=True)
+    end_offset = Column(Integer, nullable=True)
+    offset_match_quality = Column(Float, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # Note: policy_lines table has no updated_at column; do not add it to the model unless the DB is migrated.
+
+
+class DocumentTags(Base):
+    """Document-level tag aggregates (forward propagation from paragraph tags).
+
+    One row per document.  Updated at the end of a Path B run by
+    ``aggregate_paragraph_tags_to_document()``.
+    """
+    __tablename__ = "document_tags"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False, unique=True)
+    p_tags = Column(JSONB, nullable=True)  # { tag_code: { count, lines_total, avg_weight, ... } }
+    d_tags = Column(JSONB, nullable=True)
+    j_tags = Column(JSONB, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class PolicyLexiconCandidate(Base):
+    """Path B lexicon candidates generated from policy artifacts."""
+    __tablename__ = "policy_lexicon_candidates"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False)
+
+    run_id = Column(UUID(as_uuid=True), nullable=True)
+    candidate_type = Column(String(20), nullable=False)  # p|d|j|alias
+    normalized = Column(String(500), nullable=False, default="")
+    proposed_tag = Column(String(500), nullable=True)
+    confidence = Column(Float, nullable=True)
+    examples = Column(JSONB, nullable=True)
+    source = Column(String(50), nullable=True)
+    occurrences = Column(Integer, nullable=True)
+
+    state = Column(String(20), nullable=False, default="proposed")  # proposed|approved|rejected|flagged
+    reviewer = Column(String(255), nullable=True)
+    reviewer_notes = Column(Text, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # Note: policy_lexicon_candidates table has no updated_at column; do not add unless the DB is migrated.
+
+
+class PolicyLexiconCandidateCatalog(Base):
+    """Global catalog of candidate decisions (used to suppress already-rejected candidates, analytics)."""
+    __tablename__ = "policy_lexicon_candidate_catalog"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    candidate_type = Column(String(20), nullable=False)  # p|d|j|alias
+    normalized_key = Column(String(300), nullable=True)  # normalized key for upsert
+    normalized = Column(String(500), nullable=False, default="")
+    proposed_tag_key = Column(String(300), nullable=True)  # proposed_tag key for upsert
+    proposed_tag = Column(String(500), nullable=True)
+
+    state = Column(String(20), nullable=False, default="rejected")  # rejected|approved|flagged
+    reviewer = Column(String(255), nullable=True)
+    reviewer_notes = Column(Text, nullable=True)
+    decided_at = Column(DateTime, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

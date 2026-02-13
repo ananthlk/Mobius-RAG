@@ -60,7 +60,7 @@ def _content_sha(document_id: UUID, source_id: UUID, text: str) -> str:
     return hashlib.sha256(f"{document_id}{source_id}{text}".encode()).hexdigest()
 
 
-async def publish_document(document_id: UUID, db: AsyncSession) -> PublishResult:
+async def publish_document(document_id: UUID, db: AsyncSession, generator_id: str | None = None) -> PublishResult:
     """
     Write all embeddings for the given document to rag_published_embeddings (dbt contract).
     Deletes existing published rows for this document first, then inserts new set.
@@ -68,18 +68,48 @@ async def publish_document(document_id: UUID, db: AsyncSession) -> PublishResult
     Returns PublishResult(rows_written, verification_passed, verification_message).
     """
     now = datetime.now(timezone.utc).replace(tzinfo=None)
+    gen_input = (generator_id or "").strip().upper() or None
+    if gen_input and gen_input not in ("A", "B"):
+        gen_input = "A"
 
     doc_result = await db.execute(select(Document).where(Document.id == document_id))
     doc = doc_result.scalar_one_or_none()
     if not doc:
         raise ValueError("Document not found")
 
+    # Resolve generator_id: use explicit value, or infer from which embeddings exist (try A then B)
+    from sqlalchemy import or_
+    gen: str
+    if gen_input in ("A", "B"):
+        gen = gen_input
+    else:
+        # Caller did not specify; use whichever generator has embeddings (prefer A)
+        for candidate in ("A", "B"):
+            if candidate == "A":
+                where_gen = or_(ChunkEmbedding.generator_id.is_(None), ChunkEmbedding.generator_id == "A")
+            else:
+                where_gen = (ChunkEmbedding.generator_id == "B")
+            ce_check = await db.execute(
+                select(ChunkEmbedding).where(ChunkEmbedding.document_id == document_id, where_gen)
+            )
+            if ce_check.scalars().first() is not None:
+                gen = candidate
+                break
+        else:
+            raise ValueError(
+                "No chunk embeddings for this document (tried generator_id A and B); run embedding first"
+            )
+
+    if gen == "A":
+        where_gen = or_(ChunkEmbedding.generator_id.is_(None), ChunkEmbedding.generator_id == "A")
+    else:
+        where_gen = (ChunkEmbedding.generator_id == "B")
     ce_result = await db.execute(
-        select(ChunkEmbedding).where(ChunkEmbedding.document_id == document_id)
+        select(ChunkEmbedding).where(ChunkEmbedding.document_id == document_id, where_gen)
     )
     embeddings = ce_result.scalars().all()
     if not embeddings:
-        raise ValueError("No chunk embeddings for this document; run embedding first")
+        raise ValueError(f"No chunk embeddings for this document (generator_id={gen}); run embedding first")
 
     # Document metadata (contract: empty string when null)
     doc_filename = _str_or_empty(doc.filename)

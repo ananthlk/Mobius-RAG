@@ -31,6 +31,7 @@ interface Document {
 }
 
 export interface ChunkingOptions {
+  generatorId: 'A' | 'B'
   threshold: number
   critiqueEnabled: boolean
   maxRetries: number
@@ -39,6 +40,7 @@ export interface ChunkingOptions {
 }
 
 const DEFAULT_CHUNK_OPTIONS: ChunkingOptions = {
+  generatorId: 'A',
   threshold: 0.6,
   critiqueEnabled: true,
   maxRetries: 2,
@@ -96,6 +98,11 @@ export function DocumentStatusTab({
   const [markReadyLoadingDocId, setMarkReadyLoadingDocId] = useState<string | null>(null)
   const [promptsConfig, setPromptsConfig] = useState<{ prompts: Record<string, string[]>; default: Record<string, string> } | null>(null)
   const [chunkOptionsByDoc, setChunkOptionsByDoc] = useState<Record<string, ChunkingOptions>>({})
+  const [bulkMetadataModalOpen, setBulkMetadataModalOpen] = useState(false)
+  const [bulkDeleteConfirmOpen, setBulkDeleteConfirmOpen] = useState(false)
+  const [bulkMetadataForm, setBulkMetadataForm] = useState<{ display_name: string; payer: string; state: string; program: string; authority_level: string; effective_date: string; termination_date: string }>({ display_name: '', payer: '', state: '', program: '', authority_level: '', effective_date: '', termination_date: '' })
+  const [bulkActionLoading, setBulkActionLoading] = useState(false)
+  const [bulkMessage, setBulkMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
   useEffect(() => {
     if (!openChunkMenuDocId) return
@@ -243,6 +250,139 @@ export function DocumentStatusTab({
     await loadDocuments()
   }
 
+  const handleBatchStartEmbedding = async () => {
+    if (!onStartEmbedding) return
+    setBulkActionLoading(true)
+    setBulkMessage(null)
+    const ids = Array.from(selectedDocs)
+    let started = 0
+    let failed = 0
+    for (const docId of ids) {
+      try {
+        await onStartEmbedding(docId)
+        started += 1
+      } catch (err) {
+        console.error(`Failed to start embedding for ${docId}:`, err)
+        failed += 1
+      }
+    }
+    setBulkActionLoading(false)
+    setSelectedDocs(new Set())
+    await loadDocuments()
+    if (failed > 0) {
+      setBulkMessage({ type: 'error', text: `Started embedding for ${started} of ${ids.length} documents; ${failed} failed.` })
+    } else {
+      setBulkMessage({ type: 'success', text: `Started embedding for ${started} document(s).` })
+    }
+    setTimeout(() => setBulkMessage(null), 5000)
+  }
+
+  const handleBatchDelete = async () => {
+    setBulkActionLoading(true)
+    setBulkMessage(null)
+    const ids = Array.from(selectedDocs)
+    let deleted = 0
+    let failed = 0
+    for (const docId of ids) {
+      try {
+        const response = await fetch(`${API_BASE}/admin/db/documents/${docId}/delete-cascade`, { method: 'POST' })
+        if (response.ok) {
+          deleted += 1
+        } else {
+          failed += 1
+        }
+      } catch (err) {
+        console.error(`Failed to delete ${docId}:`, err)
+        failed += 1
+      }
+    }
+    setBulkActionLoading(false)
+    setSelectedDocs(new Set())
+    setBulkDeleteConfirmOpen(false)
+    await loadDocuments()
+    if (failed > 0) {
+      setBulkMessage({ type: 'error', text: `Deleted ${deleted} of ${ids.length} documents; ${failed} failed.` })
+    } else {
+      setBulkMessage({ type: 'success', text: `Deleted ${deleted} document(s).` })
+    }
+    setTimeout(() => setBulkMessage(null), 5000)
+  }
+
+  const handleBatchMetadata = async () => {
+    setBulkActionLoading(true)
+    setBulkMessage(null)
+    const ids = Array.from(selectedDocs)
+    const payload = {
+      display_name: bulkMetadataForm.display_name || undefined,
+      payer: bulkMetadataForm.payer || undefined,
+      state: bulkMetadataForm.state || undefined,
+      program: bulkMetadataForm.program || undefined,
+      authority_level: bulkMetadataForm.authority_level || undefined,
+      effective_date: bulkMetadataForm.effective_date || undefined,
+      termination_date: bulkMetadataForm.termination_date || undefined,
+    }
+    let updated = 0
+    let failed = 0
+    for (const docId of ids) {
+      try {
+        const response = await fetch(`${API_BASE}/documents/${docId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        })
+        if (response.ok) {
+          updated += 1
+        } else {
+          failed += 1
+        }
+      } catch {
+        failed += 1
+      }
+    }
+    setBulkActionLoading(false)
+    setBulkMetadataModalOpen(false)
+    setSelectedDocs(new Set())
+    await loadDocuments()
+    if (failed > 0) {
+      setBulkMessage({ type: 'error', text: `Updated metadata for ${updated} of ${ids.length} documents; ${failed} failed.` })
+    } else {
+      setBulkMessage({ type: 'success', text: `Updated metadata for ${updated} document(s).` })
+    }
+    setTimeout(() => setBulkMessage(null), 5000)
+  }
+
+  const handleBatchMarkReady = async () => {
+    if (!onMarkReadyForChunking) return
+    setBulkActionLoading(true)
+    setBulkMessage(null)
+    const ids = Array.from(selectedDocs).filter(id => {
+      const doc = documents.find(d => d.id === id)
+      return doc?.extraction_status === 'uploaded'
+    })
+    let done = 0
+    let failed = 0
+    for (const docId of ids) {
+      try {
+        await onMarkReadyForChunking(docId)
+        done += 1
+      } catch (err) {
+        console.error(`Failed to mark ready ${docId}:`, err)
+        failed += 1
+      }
+    }
+    setBulkActionLoading(false)
+    setSelectedDocs(new Set())
+    await loadDocuments()
+    if (ids.length === 0) {
+      setBulkMessage({ type: 'error', text: 'No selected documents are in "uploaded" status.' })
+    } else if (failed > 0) {
+      setBulkMessage({ type: 'error', text: `Marked ready ${done} of ${ids.length}; ${failed} failed.` })
+    } else {
+      setBulkMessage({ type: 'success', text: `Marked ${done} document(s) ready for chunking.` })
+    }
+    setTimeout(() => setBulkMessage(null), 5000)
+  }
+
   const handleSaveMetadata = async (docId: string, payload: { display_name?: string; payer?: string; state?: string; program?: string; authority_level?: string; effective_date?: string; termination_date?: string }) => {
     setMetadataSaving(true)
     setMetadataError(null)
@@ -286,10 +426,11 @@ export function DocumentStatusTab({
     setPublishMessage(null)
     setPublishLoadingDocId(docId)
     try {
+      const gen = getChunkOptionsForDoc(docId).generatorId || 'A'
       const res = await fetch(`${API_BASE}/documents/${docId}/publish`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
+        body: JSON.stringify({ generator_id: gen }),
       })
       const data = await res.json().catch(() => ({}))
       if (res.ok) {
@@ -387,12 +528,56 @@ export function DocumentStatusTab({
         </div>
         <div className="toolbar-right">
           {selectedDocs.size > 0 && (
-            <button
-              onClick={handleBatchStartChunking}
-              className="btn btn-primary"
-            >
-              Invoke Extraction ({selectedDocs.size})
-            </button>
+            <div className="bulk-action-bar">
+              <span className="bulk-action-label">{selectedDocs.size} selected</span>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={handleBatchStartChunking}
+                disabled={bulkActionLoading}
+              >
+                Chunk
+              </button>
+              {onStartEmbedding && (
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={handleBatchStartEmbedding}
+                  disabled={bulkActionLoading}
+                >
+                  Start embedding
+                </button>
+              )}
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => {
+                  setBulkMetadataForm({ display_name: '', payer: '', state: '', program: '', authority_level: '', effective_date: '', termination_date: '' })
+                  setBulkMetadataModalOpen(true)
+                }}
+                disabled={bulkActionLoading}
+              >
+                Edit metadata
+              </button>
+              {onMarkReadyForChunking && Array.from(selectedDocs).some(id => documents.find(d => d.id === id)?.extraction_status === 'uploaded') && (
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={handleBatchMarkReady}
+                  disabled={bulkActionLoading}
+                >
+                  Mark ready for chunking
+                </button>
+              )}
+              <button
+                type="button"
+                className="btn btn-danger"
+                onClick={() => setBulkDeleteConfirmOpen(true)}
+                disabled={bulkActionLoading}
+              >
+                Delete
+              </button>
+            </div>
           )}
           <button
             onClick={loadDocuments}
@@ -403,6 +588,11 @@ export function DocumentStatusTab({
           </button>
         </div>
       </div>
+      {bulkMessage && (
+        <div className={`bulk-message bulk-message-${bulkMessage.type}`}>
+          {bulkMessage.text}
+        </div>
+      )}
 
       <div className="status-table-container">
         <table className="status-table">
@@ -554,13 +744,35 @@ export function DocumentStatusTab({
                                       {(doc.chunking_status === 'idle' || doc.chunking_status === null || (doc.chunking_status === 'stopped' || doc.chunking_status === 'failed')) && (
                                         <div className="chunk-options-form">
                                           <div className="chunk-option-row">
+                                            <label htmlFor={`chunk-generator-${doc.id}`}>Pipeline</label>
+                                            <select
+                                              id={`chunk-generator-${doc.id}`}
+                                              value={getChunkOptionsForDoc(doc.id).generatorId}
+                                              onChange={e => {
+                                                const v = (e.target.value === 'B' ? 'B' : 'A') as 'A' | 'B'
+                                                setChunkOptionForDoc(doc.id, p => ({
+                                                  ...p,
+                                                  generatorId: v,
+                                                  // Path B is deterministic; these are ignored server-side but we lock UI for clarity.
+                                                  extractionEnabled: v === 'B' ? false : p.extractionEnabled,
+                                                  critiqueEnabled: v === 'B' ? false : p.critiqueEnabled,
+                                                  maxRetries: v === 'B' ? 0 : p.maxRetries,
+                                                }))
+                                              }}
+                                            >
+                                              <option value="A">A (LLM facts)</option>
+                                              <option value="B">B (Policy NLP spans)</option>
+                                            </select>
+                                          </div>
+                                          <div className="chunk-option-row">
                                             <label className="chunk-option-checkbox">
                                               <input
                                                 type="checkbox"
                                                 checked={getChunkOptionsForDoc(doc.id).extractionEnabled}
+                                                disabled={getChunkOptionsForDoc(doc.id).generatorId === 'B'}
                                                 onChange={e => setChunkOptionForDoc(doc.id, p => ({ ...p, extractionEnabled: e.target.checked }))}
                                               />
-                                              Run atomic extraction (LLM facts + critique)
+                                              Run atomic extraction (Path A: LLM facts + critique)
                                             </label>
                                           </div>
                                           <div className="chunk-option-row">
@@ -568,6 +780,7 @@ export function DocumentStatusTab({
                                               <input
                                                 type="checkbox"
                                                 checked={getChunkOptionsForDoc(doc.id).critiqueEnabled}
+                                                disabled={getChunkOptionsForDoc(doc.id).generatorId === 'B'}
                                                 onChange={e => setChunkOptionForDoc(doc.id, p => ({ ...p, critiqueEnabled: e.target.checked }))}
                                               />
                                               Run critique
@@ -581,6 +794,7 @@ export function DocumentStatusTab({
                                               min={0}
                                               max={10}
                                               value={getChunkOptionsForDoc(doc.id).maxRetries}
+                                              disabled={getChunkOptionsForDoc(doc.id).generatorId === 'B'}
                                               onChange={e => setChunkOptionForDoc(doc.id, p => ({ ...p, maxRetries: parseInt(e.target.value, 10) || 0 }))}
                                             />
                                           </div>
@@ -960,6 +1174,143 @@ export function DocumentStatusTab({
           </tbody>
         </table>
       </div>
+
+      {bulkMetadataModalOpen && (
+        <div className="bulk-modal-overlay" onClick={() => !bulkActionLoading && setBulkMetadataModalOpen(false)}>
+          <div className="bulk-modal" onClick={e => e.stopPropagation()}>
+            <h3 className="bulk-modal-title">Edit metadata for {selectedDocs.size} documents</h3>
+            <div className="metadata-form-grid">
+              <div className="metadata-form-field metadata-form-field-full">
+                <label htmlFor="bulk-meta-display-name">Display name</label>
+                <input
+                  id="bulk-meta-display-name"
+                  type="text"
+                  value={bulkMetadataForm.display_name}
+                  onChange={e => setBulkMetadataForm(prev => ({ ...prev, display_name: e.target.value }))}
+                  placeholder="User-friendly name (optional)"
+                />
+              </div>
+              <div className="metadata-form-field">
+                <label htmlFor="bulk-meta-payer">Payer</label>
+                <input
+                  id="bulk-meta-payer"
+                  type="text"
+                  value={bulkMetadataForm.payer}
+                  onChange={e => setBulkMetadataForm(prev => ({ ...prev, payer: e.target.value }))}
+                  placeholder="Payor name"
+                />
+              </div>
+              <div className="metadata-form-field">
+                <label htmlFor="bulk-meta-state">State</label>
+                <select
+                  id="bulk-meta-state"
+                  value={bulkMetadataForm.state}
+                  onChange={e => setBulkMetadataForm(prev => ({ ...prev, state: e.target.value }))}
+                >
+                  <option value="">—</option>
+                  {STATE_OPTIONS.map(({ value, label }) => (
+                    <option key={value} value={value}>{label} ({value})</option>
+                  ))}
+                  {bulkMetadataForm.state && !STATE_OPTIONS.some(s => s.value === bulkMetadataForm.state) && (
+                    <option value={bulkMetadataForm.state}>{bulkMetadataForm.state} (other)</option>
+                  )}
+                </select>
+              </div>
+              <div className="metadata-form-field">
+                <label htmlFor="bulk-meta-program">Program</label>
+                <input
+                  id="bulk-meta-program"
+                  type="text"
+                  value={bulkMetadataForm.program}
+                  onChange={e => setBulkMetadataForm(prev => ({ ...prev, program: e.target.value }))}
+                  placeholder="Program"
+                />
+              </div>
+              <div className="metadata-form-field">
+                <label htmlFor="bulk-meta-authority">Authority level</label>
+                <select
+                  id="bulk-meta-authority"
+                  value={bulkMetadataForm.authority_level}
+                  onChange={e => setBulkMetadataForm(prev => ({ ...prev, authority_level: e.target.value }))}
+                >
+                  <option value="">—</option>
+                  {AUTHORITY_LEVEL_OPTIONS.map(({ value, label }) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
+                  {bulkMetadataForm.authority_level && !AUTHORITY_LEVEL_OPTIONS.some(a => a.value === bulkMetadataForm.authority_level) && (
+                    <option value={bulkMetadataForm.authority_level}>{bulkMetadataForm.authority_level} (other)</option>
+                  )}
+                </select>
+              </div>
+              <div className="metadata-form-field">
+                <label htmlFor="bulk-meta-effective">Effective date</label>
+                <input
+                  id="bulk-meta-effective"
+                  type="text"
+                  value={bulkMetadataForm.effective_date}
+                  onChange={e => setBulkMetadataForm(prev => ({ ...prev, effective_date: e.target.value }))}
+                  placeholder="e.g. 2024-01-15"
+                />
+              </div>
+              <div className="metadata-form-field">
+                <label htmlFor="bulk-meta-termination">Termination date</label>
+                <input
+                  id="bulk-meta-termination"
+                  type="text"
+                  value={bulkMetadataForm.termination_date}
+                  onChange={e => setBulkMetadataForm(prev => ({ ...prev, termination_date: e.target.value }))}
+                  placeholder={defaultTerminationDate()}
+                />
+              </div>
+            </div>
+            <div className="bulk-modal-actions">
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setBulkMetadataModalOpen(false)}
+                disabled={bulkActionLoading}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={handleBatchMetadata}
+                disabled={bulkActionLoading}
+              >
+                {bulkActionLoading ? 'Applying…' : `Apply to ${selectedDocs.size} documents`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {bulkDeleteConfirmOpen && (
+        <div className="bulk-modal-overlay" onClick={() => !bulkActionLoading && setBulkDeleteConfirmOpen(false)}>
+          <div className="bulk-modal bulk-modal-confirm" onClick={e => e.stopPropagation()}>
+            <h3 className="bulk-modal-title">Delete {selectedDocs.size} documents?</h3>
+            <p className="bulk-modal-body">This cannot be undone.</p>
+            <div className="bulk-modal-actions">
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setBulkDeleteConfirmOpen(false)}
+                disabled={bulkActionLoading}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger"
+                onClick={handleBatchDelete}
+                disabled={bulkActionLoading}
+              >
+                {bulkActionLoading ? 'Deleting…' : `Delete ${selectedDocs.size} documents`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
