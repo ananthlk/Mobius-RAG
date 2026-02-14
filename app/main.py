@@ -7945,6 +7945,7 @@ async def _enqueue_retag_job(db: AsyncSession, doc_uuid, document_id_str: str) -
         extraction_enabled="false",
         critique_enabled="false",
         max_retries=0,
+        skip_embedding="true",
     )
     db.add(job)
     return {"document_id": document_id_str, "job_id": str(job.id)}
@@ -8042,6 +8043,66 @@ async def retag_documents_bulk(
         "skipped": skipped,
         "total_documents": len(documents),
         "jobs": queued,
+    }
+
+
+@app.get("/documents/retag/status")
+async def retag_status(db: AsyncSession = Depends(get_db)):
+    """
+    Compare each document's lexicon_revision (in document_tags) against the
+    current lexicon revision (in policy_lexicon_meta).  Returns a summary of
+    which documents are stale and need retagging.
+    """
+    from sqlalchemy import text as _text
+
+    # Current lexicon revision
+    meta_row = await db.execute(
+        _text("SELECT revision FROM policy_lexicon_meta ORDER BY updated_at DESC NULLS LAST LIMIT 1")
+    )
+    meta = meta_row.fetchone()
+    current_revision = int(meta[0]) if meta else 0
+
+    # Per-document revision info
+    rows = await db.execute(
+        _text("""
+            SELECT d.id, d.filename, d.display_name, d.status,
+                   dt.lexicon_revision, dt.tagged_at
+            FROM documents d
+            LEFT JOIN document_tags dt ON dt.document_id = d.id
+            WHERE d.status = 'completed'
+            ORDER BY d.filename
+        """)
+    )
+    docs = rows.fetchall()
+
+    stale = []
+    current = []
+    untagged = []
+    for row in docs:
+        doc_id, filename, display_name, status, lex_rev, tagged_at = row
+        info = {
+            "document_id": str(doc_id),
+            "filename": filename,
+            "display_name": display_name,
+            "lexicon_revision": int(lex_rev) if lex_rev is not None else None,
+            "tagged_at": tagged_at.isoformat() if tagged_at else None,
+        }
+        if lex_rev is None:
+            untagged.append(info)
+        elif int(lex_rev) < current_revision:
+            stale.append(info)
+        else:
+            current.append(info)
+
+    return {
+        "current_lexicon_revision": current_revision,
+        "total_documents": len(docs),
+        "stale_count": len(stale),
+        "current_count": len(current),
+        "untagged_count": len(untagged),
+        "stale": stale,
+        "current": current,
+        "untagged": untagged,
     }
 
 

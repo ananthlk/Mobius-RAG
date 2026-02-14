@@ -107,7 +107,8 @@ const TAG_TAXONOMY: readonly TagDomain[] = [
 ] as const
 
 // Flat list for backward compat (used by context menu rendering)
-const CATEGORIES = TAG_TAXONOMY.flatMap((d) => d.tags)
+const _CATEGORIES = TAG_TAXONOMY.flatMap((d) => d.tags)
+void _CATEGORIES // suppress unused warning
 
 const CATEGORY_LABELS: Record<string, string> = Object.fromEntries(
   TAG_TAXONOMY.flatMap((d) => d.tags.map((t) => [t.key, `${d.label} > ${t.label}`])),

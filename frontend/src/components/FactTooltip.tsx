@@ -158,9 +158,9 @@ export function PolicyLineTagTooltipContent({ data }: { data: Record<string, unk
           <span style={{ color: '#374151' }}>{jLabels.join(', ')}</span>
         </div>
       )}
-      {data.taggedText && (
+      {typeof data.taggedText === 'string' && data.taggedText && (
         <div style={{ color: '#6b7280', fontSize: '0.75rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: '0.125rem' }}>
-          {data.taggedText as string}
+          {data.taggedText}
         </div>
       )}
     </div>

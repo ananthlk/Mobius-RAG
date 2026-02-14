@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Column, String, DateTime, Integer, Text, ForeignKey, Float
+from sqlalchemy import BigInteger, Boolean, Column, String, DateTime, Integer, Text, ForeignKey, Float
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 # NOTE: Embeddings are stored as JSONB arrays in this DB (for Vertex sync).
 # pgvector may be installed, but the current schema uses JSONB for embedding columns.
@@ -119,6 +119,10 @@ class ChunkingJob(Base):
 
     # A/B generator (NULL treated as "A" for back-compat)
     generator_id = Column(String(10), nullable=True)  # "A" | "B"
+
+    # When 'true', worker skips auto-enqueue of embedding job after completion.
+    # Used by retag jobs so lexicon re-tagging doesn't trigger re-embedding.
+    skip_embedding = Column(String(10), nullable=True)  # 'true' | NULL
 
     # Resolved run config snapshot (set once at job start; never mutated).
     chunking_config_snapshot = Column(JSONB, nullable=True)
@@ -492,6 +496,10 @@ class DocumentTags(Base):
     j_tags = Column(JSONB, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    # Lexicon revision tracking — enables stale-document detection
+    lexicon_revision = Column(BigInteger, nullable=True)  # policy_lexicon_meta.revision used for tagging
+    tagged_at = Column(DateTime, nullable=True)            # timestamp of the tagging run
 
 
 class DocumentTextTag(Base):

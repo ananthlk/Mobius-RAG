@@ -147,12 +147,16 @@ async def process_job(job: ChunkingJob, db: AsyncSession, *, worker_cfg: WorkerC
             job.status = "completed"
             job.completed_at = _utc_now_naive()
             logger.info("[JOB %s] Completed in %.2fs", job.id, job_duration)
-            try:
-                enqueued = await enqueue_embedding_job(db, job.document_id, getattr(job, "generator_id", None))
-                if enqueued:
-                    logger.info("[JOB %s] Enqueued embedding job", job.id)
-            except Exception as enq_err:
-                logger.warning("[JOB %s] Failed to enqueue embedding: %s", job.id, enq_err, exc_info=True)
+            # Skip embedding enqueue for retag jobs (lexicon-only re-tagging)
+            if getattr(job, "skip_embedding", None) == "true":
+                logger.info("[JOB %s] skip_embedding=true – skipping embedding enqueue", job.id)
+            else:
+                try:
+                    enqueued = await enqueue_embedding_job(db, job.document_id, getattr(job, "generator_id", None))
+                    if enqueued:
+                        logger.info("[JOB %s] Enqueued embedding job", job.id)
+                except Exception as enq_err:
+                    logger.warning("[JOB %s] Failed to enqueue embedding: %s", job.id, enq_err, exc_info=True)
         else:
             job.status = "failed"
             job.error_message = "Chunking loop returned False"

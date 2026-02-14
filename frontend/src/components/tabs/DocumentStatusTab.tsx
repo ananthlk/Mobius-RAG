@@ -106,6 +106,58 @@ export function DocumentStatusTab({
   const [bulkActionLoading, setBulkActionLoading] = useState(false)
   const [bulkMessage, setBulkMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
+  // ── Retag / stale-document tracking ────────────────────────────────
+  const [retagStatus, setRetagStatus] = useState<{
+    current_lexicon_revision: number
+    stale_count: number
+    untagged_count: number
+    stale: Array<{ document_id: string }>
+    untagged: Array<{ document_id: string }>
+  } | null>(null)
+  const [bulkRetagLoading, setBulkRetagLoading] = useState(false)
+
+  const loadRetagStatus = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/documents/retag/status`)
+      if (res.ok) {
+        setRetagStatus(await res.json())
+      }
+    } catch (e) {
+      console.error('Failed to load retag status:', e)
+    }
+  }
+
+  useEffect(() => {
+    loadRetagStatus()
+    const interval = setInterval(loadRetagStatus, 15000) // refresh every 15s
+    return () => clearInterval(interval)
+  }, [])
+
+  const staleDocIds = new Set([
+    ...(retagStatus?.stale ?? []).map(d => d.document_id),
+    ...(retagStatus?.untagged ?? []).map(d => d.document_id),
+  ])
+
+  const handleBulkRetag = async () => {
+    setBulkRetagLoading(true)
+    try {
+      const res = await fetch(`${API_BASE}/documents/retag`, { method: 'POST' })
+      if (res.ok) {
+        const data = await res.json()
+        setBulkMessage({ type: 'success', text: `Queued retag for ${data.queued} document(s), ${data.skipped} skipped.` })
+        await loadRetagStatus()
+        await loadDocuments()
+      } else {
+        const data = await res.json().catch(() => ({}))
+        setBulkMessage({ type: 'error', text: data.detail || 'Bulk retag failed' })
+      }
+    } catch {
+      setBulkMessage({ type: 'error', text: 'Failed to queue bulk retag' })
+    } finally {
+      setBulkRetagLoading(false)
+    }
+  }
+
   useEffect(() => {
     if (!openChunkMenuDocId) return
     const load = async () => {
@@ -581,6 +633,24 @@ export function DocumentStatusTab({
               </button>
             </div>
           )}
+          {retagStatus && (retagStatus.stale_count + retagStatus.untagged_count) > 0 && (
+            <button
+              type="button"
+              className="btn btn-warning"
+              onClick={handleBulkRetag}
+              disabled={bulkRetagLoading}
+              title={`${retagStatus.stale_count + retagStatus.untagged_count} document(s) tagged with an older lexicon revision`}
+            >
+              {bulkRetagLoading
+                ? 'Queuing...'
+                : `Retag ${retagStatus.stale_count + retagStatus.untagged_count} stale`}
+            </button>
+          )}
+          {retagStatus && (
+            <span className="lexicon-rev-badge" title="Current lexicon revision">
+              Lexicon rev {retagStatus.current_lexicon_revision}
+            </span>
+          )}
           <button
             onClick={loadDocuments}
             className="btn btn-secondary"
@@ -692,6 +762,9 @@ export function DocumentStatusTab({
                     <td className="col-status col-chunk-with-menu">
                       <div className="chunk-cell">
                         {getStatusBadge(doc.chunking_status, 'chunking')}
+                        {doc.chunking_status === 'completed' && staleDocIds.has(doc.id) && (
+                          <span className="stale-tag-badge" title="Tagged with older lexicon revision — retag recommended">stale</span>
+                        )}
                         {(() => {
                           const hasChunkActions =
                             doc.chunking_status === 'idle' || doc.chunking_status === null ||

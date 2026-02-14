@@ -1,7 +1,8 @@
 @import './mobius-tokens.css';
 
 :root {
-  font-family: var(--mobius-font-system);
+  /* Use DM Sans as the primary font (Mobius brand) */
+  font-family: var(--mobius-font-sans);
   line-height: 1.5;
   font-weight: 400;
   color: var(--mobius-text-primary);
@@ -11,26 +12,36 @@
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 
+  /* RAG module accent — a distinctive teal-blue */
+  --rag-accent: #0ea5e9;
+  --rag-accent-hover: #0284c7;
+  --rag-accent-light: rgba(14, 165, 233, 0.08);
+  --rag-accent-border: rgba(14, 165, 233, 0.25);
+
   /* Aliases from mobius-design tokens */
   --bg-primary: var(--mobius-bg-primary);
   --bg-secondary: var(--mobius-bg-secondary);
+  --bg-tertiary: var(--mobius-bg-tertiary);
   --bg-card: var(--mobius-bg-card);
   --bg-hover: var(--mobius-bg-hover);
 
   --border-light: var(--mobius-border-light);
   --border-medium: var(--mobius-border-medium);
+  --border: var(--mobius-border);
 
   --text-primary: var(--mobius-text-primary);
   --text-secondary: var(--mobius-text-secondary);
   --text-tertiary: var(--mobius-text-tertiary);
+  --text-muted: var(--mobius-text-muted);
 
   --accent-blue: var(--mobius-accent);
   --accent-green: var(--mobius-success);
   --accent-red: var(--mobius-error);
   --accent-amber: var(--mobius-warning);
 
-  --shadow-sm: rgba(0, 0, 0, 0.05);
-  --shadow-md: rgba(0, 0, 0, 0.1);
+  --shadow-sm: var(--mobius-shadow-sm);
+  --shadow-md: var(--mobius-shadow-md);
+  --shadow-lg: var(--mobius-shadow-lg);
 }
 
 * {
@@ -54,25 +65,27 @@ html, body {
 
 a {
   font-weight: 500;
-  color: var(--accent-blue);
+  color: var(--rag-accent);
   text-decoration: none;
+  transition: color 0.15s;
 }
 a:hover {
+  color: var(--rag-accent-hover);
   text-decoration: underline;
 }
 
 button {
-  border-radius: 8px;
+  border-radius: var(--mobius-radius-base);
   border: 1px solid transparent;
-  padding: 0.5rem 1rem;
-  font-size: 0.9375rem;
+  padding: var(--mobius-space-sm) var(--mobius-space-md);
+  font-size: var(--mobius-text-base);
   font-weight: 500;
   font-family: inherit;
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
 }
 button:focus-visible {
-  outline: 2px solid var(--accent-blue);
+  outline: 2px solid var(--rag-accent);
   outline-offset: 2px;
 }
 
@@ -80,4 +93,10 @@ h1, h2, h3, h4 {
   margin: 0;
   font-weight: 600;
   line-height: 1.25;
+  letter-spacing: -0.01em;
+}
+
+/* Monospace elements */
+pre, code, .mono {
+  font-family: var(--mobius-font-mono);
 }

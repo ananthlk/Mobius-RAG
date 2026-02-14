@@ -207,6 +207,27 @@ async def finalise(ctx: ChunkingRunContext, resources: PathBResources | None) ->
         logger.warning("[%s] Path B document tag aggregation (non-fatal): %s", doc_id, doc_agg_err, exc_info=True)
         await db_handler.safe_rollback(db)
 
+    # ── Stamp lexicon revision on document_tags ───────────────────────
+    try:
+        lex_rev = None
+        if res.lexicon_snapshot and hasattr(res.lexicon_snapshot, "meta"):
+            lex_rev = res.lexicon_snapshot.meta.get("revision")
+        if lex_rev is not None:
+            from datetime import datetime as _dt
+            from sqlalchemy import text as _text
+            await db.execute(
+                _text(
+                    "UPDATE document_tags SET lexicon_revision = :rev, tagged_at = :ts "
+                    "WHERE document_id = :doc_id"
+                ),
+                {"rev": int(lex_rev), "ts": _dt.utcnow(), "doc_id": doc_uuid},
+            )
+            await db_handler.safe_commit(db)
+            logger.info("[%s] Path B: stamped lexicon_revision=%s on document_tags", doc_id, lex_rev)
+    except Exception as rev_err:
+        logger.warning("[%s] Path B lexicon revision stamp (non-fatal): %s", doc_id, rev_err, exc_info=True)
+        await db_handler.safe_rollback(db)
+
     # ── Extract lexicon candidates ────────────────────────────────────
     if res.lexicon_snapshot is not None:
         await ctx.send_status(

@@ -1,4 +1,4 @@
-/* Tab Container */
+/* ── Tab Container ─────────────────────────────────────────── */
 .tabs-container {
   display: flex;
   flex-direction: column;
@@ -6,40 +6,41 @@
   height: 100%;
 }
 
-/* Tab List */
+/* ── Tab List ─────────────────────────────────────────────── */
 .tab-list {
   display: flex;
   gap: 0;
-  border-bottom: 1px solid #e5e7eb;
-  background: #ffffff;
-  padding: 0 1rem;
+  border-bottom: 1px solid var(--mobius-border);
+  background: var(--mobius-bg-card);
+  padding: 0 1.25rem;
   overflow-x: auto;
   scrollbar-width: thin;
 }
 
 .tab-list::-webkit-scrollbar {
-  height: 4px;
+  height: 3px;
 }
 
 .tab-list::-webkit-scrollbar-track {
-  background: #f9fafb;
+  background: var(--mobius-bg-secondary);
 }
 
 .tab-list::-webkit-scrollbar-thumb {
-  background: #d1d5db;
+  background: var(--mobius-border-medium);
   border-radius: 2px;
 }
 
 .tab-list::-webkit-scrollbar-thumb:hover {
-  background: #9ca3af;
+  background: var(--mobius-text-muted);
 }
 
-/* Tab Button */
+/* ── Tab Button ───────────────────────────────────────────── */
 .tab {
-  padding: 0.75rem 1.25rem;
-  font-size: 0.9375rem;
+  padding: 0.75rem 1.125rem;
+  font-family: var(--mobius-font-sans);
+  font-size: var(--mobius-text-sm);
   font-weight: 500;
-  color: #6b7280;
+  color: var(--mobius-text-muted);
   background: transparent;
   border: none;
   border-bottom: 2px solid transparent;
@@ -48,28 +49,31 @@
   white-space: nowrap;
   position: relative;
   margin-bottom: -1px;
+  letter-spacing: 0.01em;
 }
 
 .tab:hover {
-  color: #374151;
-  background: #f9fafb;
+  color: var(--mobius-text-primary);
+  background: var(--mobius-bg-hover);
 }
 
 .tab-active {
-  color: #1f2937;
-  border-bottom-color: #3b82f6;
+  color: var(--rag-accent, #0ea5e9);
+  border-bottom-color: var(--rag-accent, #0ea5e9);
   background: transparent;
+  font-weight: 600;
 }
 
 .tab-active:hover {
   background: transparent;
+  color: var(--rag-accent, #0ea5e9);
 }
 
-/* Tab Panels */
+/* ── Tab Panels ───────────────────────────────────────────── */
 .tab-panels {
   flex: 1;
   overflow-y: auto;
-  background: #f7f7f8;
+  background: var(--mobius-bg-secondary);
   padding: 1.5rem;
 }
 
@@ -83,15 +87,15 @@
   display: block;
 }
 
-/* Responsive */
+/* ── Responsive ───────────────────────────────────────────── */
 @media (max-width: 768px) {
   .tab-list {
-    padding: 0 0.5rem;
+    padding: 0 0.75rem;
   }
   
   .tab {
-    padding: 0.625rem 1rem;
-    font-size: 0.875rem;
+    padding: 0.625rem 0.875rem;
+    font-size: var(--mobius-text-xs);
   }
   
   .tab-panels {
