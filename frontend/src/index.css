@@ -1,5 +1,11 @@
 @import './mobius-tokens.css';
 
+html {
+  /* DM Sans has a taller x-height than system-ui; 15px root keeps
+     the visual density similar to the old 16px system font. */
+  font-size: 15px;
+}
+
 :root {
   /* Use DM Sans as the primary font (Mobius brand) */
   font-family: var(--mobius-font-sans);

@@ -40,12 +40,12 @@
   --mobius-font-mono: "JetBrains Mono", ui-monospace, monospace;
   --mobius-font-system: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 
-  --mobius-text-xs: 0.7rem;
-  --mobius-text-sm: 0.8125rem;
-  --mobius-text-base: 0.9375rem;
+  --mobius-text-xs: 0.733rem;
+  --mobius-text-sm: 0.833rem;
+  --mobius-text-base: 0.933rem;
   --mobius-text-md: 1rem;
-  --mobius-text-lg: 1.125rem;
-  --mobius-text-xl: 1.25rem;
+  --mobius-text-lg: 1.133rem;
+  --mobius-text-xl: 1.267rem;
 
   --mobius-space-xs: 0.25rem;
   --mobius-space-sm: 0.5rem;
