@@ -36,6 +36,10 @@ class WorkerConfig:
     llm_call_timeout_seconds: float | None = None
     heartbeat_interval_seconds: float = 30.0
 
+    # --- Stale job recovery ---
+    stale_job_timeout_minutes: float = 10.0   # reset "processing" jobs older than this
+    stale_recovery_interval_polls: int = 30   # run recovery every N poll cycles
+
     # --- Logging ---
     log_level: str = "INFO"
     log_format: str = "%(asctime)s - [WORKER] - %(levelname)s - %(message)s"
@@ -90,6 +94,8 @@ def load_worker_config() -> WorkerConfig:
         job_timeout_seconds=_opt_float("WORKER_JOB_TIMEOUT"),
         llm_call_timeout_seconds=_opt_float("WORKER_LLM_CALL_TIMEOUT"),
         heartbeat_interval_seconds=_float("WORKER_HEARTBEAT_INTERVAL", 30.0),
+        stale_job_timeout_minutes=_float("WORKER_STALE_JOB_TIMEOUT_MINUTES", 10.0),
+        stale_recovery_interval_polls=_int("WORKER_STALE_RECOVERY_INTERVAL", 30),
         log_level=os.getenv("WORKER_LOG_LEVEL", "INFO"),
         log_format=os.getenv(
             "WORKER_LOG_FORMAT",

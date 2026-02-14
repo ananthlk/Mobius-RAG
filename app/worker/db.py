@@ -15,11 +15,12 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, delete, text
+from sqlalchemy import select, delete, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
     ChunkingEvent,
+    ChunkingJob,
     ChunkingResult,
     Document,
     EmbeddingJob,
@@ -36,6 +37,54 @@ logger = logging.getLogger(__name__)
 def _utc_now_naive() -> datetime:
     """Naive UTC datetime for DB (TIMESTAMP WITHOUT TIME ZONE)."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+# ---------------------------------------------------------------------------
+# Stale job recovery
+# ---------------------------------------------------------------------------
+
+async def recover_stale_jobs(
+    db: AsyncSession,
+    timeout_minutes: float = 10.0,
+    worker_id: str | None = None,
+) -> int:
+    """Reset jobs stuck in 'processing' for longer than *timeout_minutes*.
+
+    This catches jobs whose workers died (crash, restart, OOM) without
+    transitioning the job to ``failed``.  Resets them to ``pending`` so
+    a healthy worker can pick them up.
+
+    Returns the number of recovered jobs.
+    """
+    from datetime import timedelta
+
+    cutoff = _utc_now_naive() - timedelta(minutes=timeout_minutes)
+
+    stmt = (
+        update(ChunkingJob)
+        .where(
+            ChunkingJob.status == "processing",
+            ChunkingJob.started_at < cutoff,
+        )
+        .values(
+            status="pending",
+            worker_id=None,
+            started_at=None,
+            error_message=f"Auto-recovered: stuck in processing >{timeout_minutes}min (by {worker_id or 'unknown'})",
+        )
+        .returning(ChunkingJob.id, ChunkingJob.document_id)
+    )
+
+    result = await db.execute(stmt)
+    recovered = result.fetchall()
+    await db.commit()
+
+    for job_id, doc_id in recovered:
+        logger.warning(
+            "[stale-recovery] Reset job %s (doc %s) from processing -> pending",
+            job_id, doc_id,
+        )
+    return len(recovered)
 
 
 # ---------------------------------------------------------------------------

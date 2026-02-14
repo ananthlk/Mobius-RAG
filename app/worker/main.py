@@ -22,6 +22,7 @@ from app.worker.config import load_worker_config, WorkerConfig
 from app.worker.coordinator import run_chunking_loop
 from app.worker.db import (
     enqueue_embedding_job,
+    recover_stale_jobs,
     safe_commit,
     set_config_snapshot,
 )
@@ -209,12 +210,28 @@ async def worker_loop():
     poll_count = 0
     while True:
         try:
+            # ── Periodic stale-job recovery ──────────────────────────────
+            if poll_count % cfg.stale_recovery_interval_polls == 0:
+                try:
+                    async with AsyncSessionLocal() as recovery_db:
+                        n = await recover_stale_jobs(
+                            recovery_db,
+                            timeout_minutes=cfg.stale_job_timeout_minutes,
+                            worker_id=WORKER_ID,
+                        )
+                        if n:
+                            logger.info("Recovered %d stale job(s)", n)
+                except Exception as recovery_err:
+                    logger.warning("Stale job recovery failed (non-fatal): %s", recovery_err)
+
+            # ── Claim next pending job (atomic with FOR UPDATE SKIP LOCKED) ──
             async with AsyncSessionLocal() as db:
                 result = await db.execute(
                     select(ChunkingJob)
                     .where(ChunkingJob.status == "pending")
                     .order_by(ChunkingJob.created_at)
                     .limit(1)
+                    .with_for_update(skip_locked=True)
                 )
                 job = result.scalar_one_or_none()
 
