@@ -39,6 +39,9 @@ export function Header({
     <header className="app-header">
       <div className="app-header-inner">
         <div className="app-header-left">
+          <a className="app-header-hub-link" href="http://localhost:3999/" title="Back to Module Hub">
+            {'\u2190'} Module Hub
+          </a>
           <div className="app-header-brand">
             <img src="/logo.svg" alt="Mobius" className="app-header-logo" width={32} height={32} />
             <h1>Mobius RAG</h1>

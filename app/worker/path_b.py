@@ -29,6 +29,7 @@ class PathBResources:
     """Pre-loaded lexicon data, reused across paragraphs."""
     lexicon_snapshot: Any | None = None
     phrase_map: dict | None = None
+    refuted_map: dict | None = None
     # Service functions (lazy-imported once)
     build_paragraph_and_lines: Any = None
     apply_lexicon_to_lines: Any = None
@@ -60,7 +61,7 @@ def prepare_resources(lexicon_snapshot: Any | None) -> PathBResources:
     )
 
     if lexicon_snapshot is not None:
-        res.phrase_map = get_phrase_to_tag_map(lexicon_snapshot)
+        res.phrase_map, res.refuted_map = get_phrase_to_tag_map(lexicon_snapshot)
 
     return res
 
@@ -109,7 +110,7 @@ async def process_paragraph(
         # ── Apply lexicon tags to lines ───────────────────────────────
         n_with_tags = 0
         if res.phrase_map and line_objs:
-            n_with_tags = await res.apply_lexicon_to_lines(line_objs, res.phrase_map)
+            n_with_tags = await res.apply_lexicon_to_lines(line_objs, res.phrase_map, res.refuted_map)
 
         # ── Forward propagation: line tags -> paragraph tags ──────────
         try:
@@ -213,7 +214,10 @@ async def finalise(ctx: ChunkingRunContext, resources: PathBResources | None) ->
             user_message="Identifying new candidate terms for the policy lexicon...",
         )
         try:
-            pm = res.phrase_map or res.get_phrase_to_tag_map(res.lexicon_snapshot)
+            if res.phrase_map:
+                pm = res.phrase_map
+            else:
+                pm, _refuted = res.get_phrase_to_tag_map(res.lexicon_snapshot)
             await res.extract_candidates_for_document(db, doc_uuid, run_id=None, phrase_map=pm)
             logger.info("[%s] Path B: candidate extraction complete", doc_id)
             await ctx.send_status(

@@ -17,6 +17,22 @@
   flex: 1;
 }
 
+.app-header-hub-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: #6b7280;
+  text-decoration: none;
+  margin-bottom: 0.375rem;
+  transition: color 0.15s;
+}
+
+.app-header-hub-link:hover {
+  color: #2563eb;
+}
+
 .app-header-brand {
   display: flex;
   align-items: center;

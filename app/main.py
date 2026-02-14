@@ -7913,6 +7913,138 @@ async def delete_document_cascade(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── Retag endpoints ─────────────────────────────────────────────────────────
+# Re-apply lexicon tags to already-processed documents by queueing Path B jobs.
+# Designed to be called by the Lexicon module after publishing updated tags.
+
+class RetagBulkBody(BaseModel):
+    """Body for bulk retag. If document_ids is omitted or empty, ALL completed documents are retagged."""
+    document_ids: Optional[List[str]] = None
+
+
+async def _enqueue_retag_job(db: AsyncSession, doc_uuid, document_id_str: str) -> dict | None:
+    """Enqueue a single Path B retag job.  Returns job summary dict or None if skipped."""
+    from uuid import UUID as _UUID
+
+    # Skip if a Path B job is already pending/processing
+    existing = await db.execute(
+        select(ChunkingJob).where(
+            ChunkingJob.document_id == doc_uuid,
+            ChunkingJob.generator_id == "B",
+            ChunkingJob.status.in_(("pending", "processing")),
+        )
+    )
+    if existing.scalar_one_or_none():
+        return None  # already queued
+
+    job = ChunkingJob(
+        document_id=doc_uuid,
+        generator_id="B",
+        threshold="0.6",
+        status="pending",
+        extraction_enabled="false",
+        critique_enabled="false",
+        max_retries=0,
+    )
+    db.add(job)
+    return {"document_id": document_id_str, "job_id": str(job.id)}
+
+
+@app.post("/documents/{document_id}/retag")
+async def retag_document(
+    document_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Re-apply the latest lexicon tags to a single document by queueing a Path B job.
+    The document must have completed extraction already.
+    Intended to be called by the Lexicon module or from the RAG UI.
+    """
+    from uuid import UUID
+
+    try:
+        doc_uuid = UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID")
+
+    result = await db.execute(select(Document).where(Document.id == doc_uuid))
+    document = result.scalar_one_or_none()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if document.status != "completed":
+        raise HTTPException(status_code=400, detail="Document extraction must be completed before retagging")
+
+    job_info = await _enqueue_retag_job(db, doc_uuid, document_id)
+    if job_info is None:
+        return {"status": "already_queued", "document_id": document_id, "message": "A Path B job is already pending or processing for this document"}
+
+    await db.commit()
+    logger.info("Retag queued for document %s  job=%s", document_id, job_info["job_id"])
+    return {"status": "queued", **job_info}
+
+
+@app.post("/documents/retag")
+async def retag_documents_bulk(
+    db: AsyncSession = Depends(get_db),
+    body: RetagBulkBody | None = Body(None),
+):
+    """
+    Re-apply the latest lexicon tags to multiple documents.
+    - If body.document_ids is provided, retag only those documents.
+    - If body is omitted or document_ids is empty, retag ALL documents that have completed extraction.
+
+    Returns a summary of how many jobs were queued vs skipped.
+    Intended to be called by the Lexicon module after a publish.
+    """
+    from uuid import UUID
+
+    specific_ids: list[str] | None = body.document_ids if body else None
+
+    if specific_ids:
+        # Validate and fetch specific documents
+        doc_uuids = []
+        for did in specific_ids:
+            try:
+                doc_uuids.append(UUID(did))
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid document ID: {did}")
+
+        docs_result = await db.execute(
+            select(Document).where(
+                Document.id.in_(doc_uuids),
+                Document.status == "completed",
+            )
+        )
+        documents = docs_result.scalars().all()
+    else:
+        # All completed documents
+        docs_result = await db.execute(
+            select(Document).where(Document.status == "completed")
+        )
+        documents = docs_result.scalars().all()
+
+    queued = []
+    skipped = 0
+    for doc in documents:
+        job_info = await _enqueue_retag_job(db, doc.id, str(doc.id))
+        if job_info:
+            queued.append(job_info)
+        else:
+            skipped += 1
+
+    if queued:
+        await db.commit()
+
+    logger.info("Bulk retag: %d queued, %d skipped (already pending)", len(queued), skipped)
+    return {
+        "status": "ok",
+        "queued": len(queued),
+        "skipped": skipped,
+        "total_documents": len(documents),
+        "jobs": queued,
+    }
+
+
 # Serve frontend static files (for Cloud Run / single-container deployment)
 # Must be last so API routes take precedence
 _frontend_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"

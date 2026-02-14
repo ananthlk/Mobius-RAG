@@ -105,19 +105,38 @@ def test_split_paragraph_into_lines_empty():
 
 def test_get_phrase_to_tag_map_builds_normalized_phrase_to_kind_code():
     lex = SimpleNamespace(
-        p_tags={"eligibility": {"phrases": ["Member Eligibility", "prior auth"]}},
-        d_tags={"coverage": {"phrases": ["covered services"]}},
+        p_tags={"eligibility.general": {"phrases": ["Member Eligibility", "prior auth"]}},
+        d_tags={"coverage.general": {"phrases": ["covered services"]}},
         j_tags={},
     )
-    m = get_phrase_to_tag_map(lex)
-    assert m["member eligibility"] == ("p", "eligibility")
-    assert m["prior auth"] == ("p", "eligibility")
-    assert m["covered services"] == ("d", "coverage")
+    m, refuted = get_phrase_to_tag_map(lex)
+    assert m["member eligibility"] == ("p", "eligibility.general", 1.0)
+    assert m["prior auth"] == ("p", "eligibility.general", 1.0)
+    assert m["covered services"] == ("d", "coverage.general", 1.0)
+    assert refuted == {}
 
 
 def test_get_phrase_to_tag_map_empty_snapshot():
     lex = SimpleNamespace(p_tags={}, d_tags={}, j_tags={})
-    assert get_phrase_to_tag_map(lex) == {}
+    m, refuted = get_phrase_to_tag_map(lex)
+    assert m == {}
+    assert refuted == {}
+
+
+def test_get_phrase_to_tag_map_refuted_words():
+    lex = SimpleNamespace(
+        p_tags={},
+        d_tags={"claims.denial": {
+            "strong_phrases": ["denial", "denied claim"],
+            "refuted_words": ["approval", "approved"],
+        }},
+        j_tags={},
+    )
+    m, refuted = get_phrase_to_tag_map(lex)
+    assert m["denial"] == ("d", "claims.denial", 1.0)
+    assert ("d", "claims.denial") in refuted
+    assert "approval" in refuted[("d", "claims.denial")]
+    assert "approved" in refuted[("d", "claims.denial")]
 
 
 # --- _apply_tags_to_line_text ---
@@ -125,8 +144,8 @@ def test_get_phrase_to_tag_map_empty_snapshot():
 
 def test_apply_tags_to_line_text_matches_phrases():
     phrase_map = {
-        "member eligibility": ("p", "elig"),
-        "prior authorization": ("d", "pa"),
+        "member eligibility": ("p", "elig", 1.0),
+        "prior authorization": ("d", "pa", 1.0),
     }
     p, d, j = _apply_tags_to_line_text("The member eligibility criteria require prior authorization.", phrase_map)
     assert p == {"elig": 1.0}
@@ -135,7 +154,7 @@ def test_apply_tags_to_line_text_matches_phrases():
 
 
 def test_apply_tags_to_line_text_no_match():
-    phrase_map = {"member eligibility": ("p", "elig")}
+    phrase_map = {"member eligibility": ("p", "elig", 1.0)}
     p, d, j = _apply_tags_to_line_text("Nothing relevant here.", phrase_map)
     assert p == {}
     assert d == {}
@@ -143,9 +162,29 @@ def test_apply_tags_to_line_text_no_match():
 
 
 def test_apply_tags_to_line_text_normalizes_line():
-    phrase_map = {"prior authorization": ("d", "pa")}
+    phrase_map = {"prior authorization": ("d", "pa", 1.0)}
     p, d, j = _apply_tags_to_line_text("  Prior   Authorization  required.  ", phrase_map)
     assert d == {"pa": 1.0}
+
+
+def test_apply_tags_to_line_text_refuted_words_suppress_match():
+    phrase_map = {
+        "denial": ("d", "claims.denial", 1.0),
+        "claim": ("d", "claims.general", 1.0),
+    }
+    refuted = {("d", "claims.denial"): {"approval", "approved"}}
+    # "denial" matches but "approved" refutes it -- should suppress claims.denial
+    p, d, j = _apply_tags_to_line_text("The claim denial was approved.", phrase_map, refuted)
+    assert "claims.denial" not in d  # suppressed by refuted word "approved"
+    assert d == {"claims.general": 1.0}  # claims.general is NOT refuted
+
+
+def test_apply_tags_to_line_text_refuted_words_no_refute():
+    phrase_map = {"denial": ("d", "claims.denial", 1.0)}
+    refuted = {("d", "claims.denial"): {"approval", "approved"}}
+    # No refuted word present -- match should proceed
+    p, d, j = _apply_tags_to_line_text("The claim denial was rejected.", phrase_map, refuted)
+    assert d == {"claims.denial": 1.0}
 
 
 # --- Heading vs body paragraph_type logic (no DB) ---

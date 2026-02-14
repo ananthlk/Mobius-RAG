@@ -62,6 +62,32 @@ def _normalize_phrase(s: str) -> str:
     return " ".join(s.split()).strip().lower()
 
 
+# Threshold for word-boundary matching: phrases this short (in chars) must
+# match as whole words to avoid false positives (e.g. "er" matching "provider").
+_SHORT_PHRASE_BOUNDARY_LEN = 4
+
+# Pre-compiled word-boundary patterns for short phrases (cached for perf).
+_boundary_cache: dict[str, "re.Pattern[str]"] = {}
+
+
+def _phrase_in_text(phrase: str, text: str) -> bool:
+    """Check if phrase appears in text, using word boundaries for short phrases.
+
+    Short phrases (<= _SHORT_PHRASE_BOUNDARY_LEN chars) use \\b word-boundary
+    regex to prevent substring false positives. Longer phrases use fast
+    substring matching.
+    """
+    if not phrase or not text:
+        return False
+    if len(phrase) <= _SHORT_PHRASE_BOUNDARY_LEN:
+        pat = _boundary_cache.get(phrase)
+        if pat is None:
+            pat = re.compile(r"\b" + re.escape(phrase) + r"\b")
+            _boundary_cache[phrase] = pat
+        return pat.search(text) is not None
+    return phrase in text
+
+
 def _is_only_stopwords(ngram: str, stopwords: frozenset | set) -> bool:
     """True if every word in the n-gram is in the stopword set."""
     if not ngram or not stopwords:
@@ -78,8 +104,19 @@ def _split_paragraph_into_lines(text: str) -> list[str]:
     return lines if lines else [text.strip()] if text.strip() else []
 
 
-def get_phrase_to_tag_map(lexicon_snapshot) -> dict[str, tuple[str, str, float]]:
-    """Build map: normalized_phrase -> (kind, code, score) from lexicon snapshot.
+
+# Type alias for the refuted-words map: (kind, code) -> set of normalized refuted phrases
+RefutedMap = dict[tuple[str, str], set[str]]
+
+
+def get_phrase_to_tag_map(
+    lexicon_snapshot,
+) -> tuple[dict[str, tuple[str, str, float]], RefutedMap]:
+    """Build phrase map and refuted-words map from a lexicon snapshot.
+
+    Returns (phrase_map, refuted_map) where:
+      - phrase_map: normalized_phrase -> (kind, code, score)
+      - refuted_map: (kind, code) -> {normalized refuted words}
 
     Reads from multiple spec keys for backward/forward compatibility:
       - spec.phrases          (legacy RAG format)
@@ -87,6 +124,7 @@ def get_phrase_to_tag_map(lexicon_snapshot) -> dict[str, tuple[str, str, float]]
       - spec.aliases          (alternative names, same weight as strong_phrases)
       - spec.description      (fallback when no phrases at all)
       - spec.weak_keywords.any_of  (weak matches at lower score)
+      - spec.refuted_words    (words that suppress a tag match when present)
 
     Domain containers (no dot in code) are skipped for matching -- only leaf tags
     (with dot) carry matchable phrases.
@@ -95,6 +133,8 @@ def get_phrase_to_tag_map(lexicon_snapshot) -> dict[str, tuple[str, str, float]]
     registered so candidates with the same normalized text are auto-suppressed.
     """
     out: dict[str, tuple[str, str, float]] = {}
+    refuted_map: RefutedMap = {}
+
     for kind, root in (("p", getattr(lexicon_snapshot, "p_tags", None)), ("d", getattr(lexicon_snapshot, "d_tags", None)), ("j", getattr(lexicon_snapshot, "j_tags", None))):
         if not isinstance(root, dict):
             continue
@@ -141,14 +181,31 @@ def get_phrase_to_tag_map(lexicon_snapshot) -> dict[str, tuple[str, str, float]]
                             norm = _normalize_phrase(phrase)
                             if norm and norm not in out:
                                 out[norm] = (kind, code_str, 0.6)
-    return out
+
+            # Refuted words: if any appear in a line, suppress the tag match
+            refuted = spec.get("refuted_words")
+            if isinstance(refuted, list):
+                for rw in refuted:
+                    if rw and isinstance(rw, str):
+                        norm_rw = _normalize_phrase(str(rw))
+                        if norm_rw:
+                            refuted_map.setdefault((kind, code_str), set()).add(norm_rw)
+
+    return out, refuted_map
 
 
-def _apply_tags_to_line_text(line_text: str, phrase_map: dict[str, tuple[str, str, float]]) -> tuple[dict, dict, dict]:
+def _apply_tags_to_line_text(
+    line_text: str,
+    phrase_map: dict[str, tuple[str, str, float]],
+    refuted_map: RefutedMap | None = None,
+) -> tuple[dict, dict, dict]:
     """Compute p_tags, d_tags, j_tags for a line by matching phrases. Returns (p_tags, d_tags, j_tags) as {code: score}.
 
     phrase_map values are (kind, code, score) tuples -- strong phrases have score=1.0, weak phrases 0.6.
     When a tag is matched by both strong and weak, the higher score wins.
+
+    refuted_map: if a tag's refuted words appear in the line, the match is suppressed entirely.
+    This prevents false positives (e.g., "approved" suppresses claims.denial).
     """
     p_tags: dict[str, float] = {}
     d_tags: dict[str, float] = {}
@@ -157,8 +214,13 @@ def _apply_tags_to_line_text(line_text: str, phrase_map: dict[str, tuple[str, st
     if not normalized_line:
         return p_tags, d_tags, j_tags
     for phrase, (kind, code, score) in phrase_map.items():
-        if not phrase or phrase not in normalized_line:
+        if not phrase or not _phrase_in_text(phrase, normalized_line):
             continue
+        # Check refuted words: if any refuted word for this tag is in the line, skip the match
+        if refuted_map:
+            refuted_words = refuted_map.get((kind, code))
+            if refuted_words and any(_phrase_in_text(rw, normalized_line) for rw in refuted_words):
+                continue
         target = p_tags if kind == "p" else (d_tags if kind == "d" else j_tags)
         # Keep the highest score if the same code is matched multiple times
         if code not in target or score > target[code]:
@@ -217,11 +279,15 @@ async def build_paragraph_and_lines(
     return para, lines
 
 
-async def apply_lexicon_to_lines(lines: list, phrase_map: dict[str, tuple[str, str, float]]) -> int:
+async def apply_lexicon_to_lines(
+    lines: list,
+    phrase_map: dict[str, tuple[str, str, float]],
+    refuted_map: RefutedMap | None = None,
+) -> int:
     """Set p_tags, d_tags, j_tags on each line in place. Caller should commit. Returns count of lines that got at least one tag."""
     n_with_tags = 0
     for line in lines:
-        p_tags, d_tags, j_tags = _apply_tags_to_line_text(line.text or "", phrase_map)
+        p_tags, d_tags, j_tags = _apply_tags_to_line_text(line.text or "", phrase_map, refuted_map)
         line.p_tags = p_tags if p_tags else None
         line.d_tags = d_tags if d_tags else None
         line.j_tags = j_tags if j_tags else None

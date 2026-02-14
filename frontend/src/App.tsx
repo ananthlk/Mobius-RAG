@@ -295,6 +295,20 @@ function App() {
     }
   }
 
+  const retagDocument = async (documentId: string) => {
+    try {
+      const response = await fetch(`${API_BASE}/documents/${documentId}/retag`, { method: 'POST' })
+      if (response.ok) {
+        await loadDocuments()
+      } else {
+        const errorData = await response.json().catch(() => null)
+        setError(errorData?.detail || 'Failed to queue retag')
+      }
+    } catch {
+      setError('Failed to queue retag')
+    }
+  }
+
   const deleteDocument = async (documentId: string) => {
     if (!confirm('Are you sure you want to delete this document and all its data?')) {
       return
@@ -1401,6 +1415,7 @@ function App() {
               onViewDocumentDetail={handleViewDocumentDetail}
               onDeleteDocument={deleteDocument}
               onRestartChunking={handleRestartChunking}
+              onRetag={retagDocument}
               onStartEmbedding={handleStartEmbedding}
               onResetEmbedding={handleResetEmbedding}
             />

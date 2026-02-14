@@ -3,8 +3,28 @@
  * provided by @mobius/document-viewer.
  */
 
-/** Short labels for compact tooltip display. */
+/** Short labels for compact tooltip display (supports both old flat codes and new dotted codes). */
 const CATEGORY_SHORT: Record<string, string> = {
+  // New dotted taxonomy
+  'claims.submission': 'Claims submission',
+  'claims.denial': 'Denial',
+  'claims.appeals_grievances': 'Appeals',
+  'claims.clean_claim': 'Clean claim',
+  'claims.timely_filing': 'Timely filing',
+  'claims.coordination_of_benefits': 'COB',
+  'claims.electronic_claims': 'E-claims',
+  'eligibility.verification': 'Elig. verification',
+  'eligibility.enrollment': 'Enrollment',
+  'utilization_management.prior_authorization': 'Prior auth',
+  'utilization_management.referrals': 'Referrals',
+  'credentialing.general': 'Credentialing',
+  'compliance.fraud_waste_abuse': 'FWA',
+  'compliance.hipaa': 'HIPAA',
+  'provider.network': 'Provider network',
+  'pharmacy.pharmacy_benefit': 'Pharmacy',
+  'responsibilities.continuity_of_care': 'Continuity',
+  'contact_information.phone': 'Phone',
+  // Legacy flat codes (backward compat)
   contacting_marketing_members: 'Contacting members',
   member_eligibility_molina: 'Eligibility',
   benefit_access_limitations: 'Benefits / access',
@@ -99,7 +119,14 @@ function formatTagKeys(tags: Record<string, number> | null | undefined, labels?:
   if (!tags) return []
   return Object.entries(tags)
     .filter(([, v]) => v != null && v > 0)
-    .map(([k]) => labels?.[k] ?? k.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()))
+    .map(([k]) => {
+      if (labels?.[k]) return labels[k]
+      // Handle dotted codes: "claims.denial" -> "Claims > Denial"
+      return k
+        .replace(/\./g, ' > ')
+        .replace(/_/g, ' ')
+        .replace(/\b\w/g, (c) => c.toUpperCase())
+    })
 }
 
 export function PolicyLineTagTooltipContent({ data }: { data: Record<string, unknown> }) {

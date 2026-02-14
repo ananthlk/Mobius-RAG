@@ -61,6 +61,7 @@ interface DocumentStatusTabProps {
   onViewDocumentDetail?: (documentId: string) => void
   onDeleteDocument: (documentId: string) => Promise<void>
   onRestartChunking?: (documentId: string, options: ChunkingOptions) => Promise<void>
+  onRetag?: (documentId: string) => Promise<void>
   onStartEmbedding?: (documentId: string) => Promise<void>
   onResetEmbedding?: (documentId: string) => Promise<void>
   onMarkReadyForChunking?: (documentId: string) => Promise<void>
@@ -73,6 +74,7 @@ export function DocumentStatusTab({
   onViewDocumentDetail,
   onDeleteDocument,
   onRestartChunking,
+  onRetag,
   onStartEmbedding,
   onResetEmbedding,
   onMarkReadyForChunking,
@@ -694,7 +696,8 @@ export function DocumentStatusTab({
                           const hasChunkActions =
                             doc.chunking_status === 'idle' || doc.chunking_status === null ||
                             doc.chunking_status === 'in_progress' || doc.chunking_status === 'queued' ||
-                            ((doc.chunking_status === 'stopped' || doc.chunking_status === 'failed') && onRestartChunking)
+                            ((doc.chunking_status === 'stopped' || doc.chunking_status === 'failed') && onRestartChunking) ||
+                            (doc.chunking_status === 'completed' && onRetag)
                           if (!hasChunkActions) return null
                           return (
                             <div className="dropdown-wrap">
@@ -855,6 +858,16 @@ export function DocumentStatusTab({
                                           onClick={() => { onRestartChunking(doc.id, getChunkOptionsForDoc(doc.id)); setOpenChunkMenuDocId(null) }}
                                         >
                                           Restart chunking
+                                        </button>
+                                      )}
+                                      {(doc.chunking_status === 'completed' && onRetag) && (
+                                        <button
+                                          type="button"
+                                          className="dropdown-item"
+                                          title="Re-apply latest lexicon tags (Path B)"
+                                          onClick={() => { onRetag(doc.id); setOpenChunkMenuDocId(null) }}
+                                        >
+                                          Retag with latest lexicon
                                         </button>
                                       )}
                                     </>

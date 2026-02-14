@@ -324,7 +324,7 @@ async def _load_lexicon(job: ChunkingJob, db: AsyncSession):
         from app.services.policy_lexicon_repo import load_lexicon_snapshot_db
         from app.services.policy_path_b import get_phrase_to_tag_map
         snapshot = await load_lexicon_snapshot_db(db)
-        phrase_map = get_phrase_to_tag_map(snapshot)
+        phrase_map, _refuted_map = get_phrase_to_tag_map(snapshot)
         n_phrases = len(phrase_map)
         if n_phrases == 0:
             logger.warning("[JOB %s] Path B: lexicon has 0 phrases", job.id)

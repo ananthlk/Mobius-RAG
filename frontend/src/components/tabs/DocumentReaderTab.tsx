@@ -20,23 +20,97 @@ import { API_BASE } from '../../config'
 import { approveFactApi, deleteFactApi, rejectFactApi } from '../../lib/factActions'
 import { FactTooltipContent, TagTooltipContent, PolicyLineTagTooltipContent, type FactTooltipData, type TagTooltipData } from '../FactTooltip'
 
-/* ─── Category definitions ─── */
-const CATEGORIES = [
-  { key: 'contacting_marketing_members', label: 'Contacting / marketing members' },
-  { key: 'member_eligibility_molina', label: 'Member eligibility (Molina)' },
-  { key: 'benefit_access_limitations', label: 'Benefit access / limitations' },
-  { key: 'prior_authorization_required', label: 'Prior authorization required' },
-  { key: 'claims_authorization_submissions', label: 'Claims / authorization / submissions' },
-  { key: 'compliant_claim_requirements', label: 'Compliant claim requirements' },
-  { key: 'claim_disputes', label: 'Claim disputes' },
-  { key: 'credentialing', label: 'Credentialing' },
-  { key: 'claim_submission_important', label: 'Claim submission (important)' },
-  { key: 'coordination_of_benefits', label: 'Coordination of benefits' },
-  { key: 'other_important', label: 'Other important' },
+/* ─── Tag taxonomy (domain > leaf tags) for right-click "Add tag" menu ─── */
+
+interface TagDomain {
+  domain: string
+  label: string
+  tags: readonly { key: string; label: string }[]
+}
+
+const TAG_TAXONOMY: readonly TagDomain[] = [
+  {
+    domain: 'claims', label: 'Claims', tags: [
+      { key: 'claims.submission', label: 'Submission' },
+      { key: 'claims.denial', label: 'Denial' },
+      { key: 'claims.appeals_grievances', label: 'Appeals & Grievances' },
+      { key: 'claims.clean_claim', label: 'Clean Claim' },
+      { key: 'claims.timely_filing', label: 'Timely Filing' },
+      { key: 'claims.coordination_of_benefits', label: 'Coordination of Benefits' },
+      { key: 'claims.electronic_claims', label: 'Electronic Claims' },
+      { key: 'claims.corrected_claims', label: 'Corrected Claims' },
+    ],
+  },
+  {
+    domain: 'eligibility', label: 'Eligibility', tags: [
+      { key: 'eligibility.verification', label: 'Verification' },
+      { key: 'eligibility.enrollment', label: 'Enrollment' },
+      { key: 'eligibility.member_status', label: 'Member Status' },
+      { key: 'eligibility.plan_assignment', label: 'Plan Assignment' },
+    ],
+  },
+  {
+    domain: 'utilization_management', label: 'Utilization Management', tags: [
+      { key: 'utilization_management.prior_authorization', label: 'Prior Authorization' },
+      { key: 'utilization_management.referrals', label: 'Referrals' },
+      { key: 'utilization_management.medical_necessity', label: 'Medical Necessity' },
+    ],
+  },
+  {
+    domain: 'credentialing', label: 'Credentialing', tags: [
+      { key: 'credentialing.general', label: 'Credentialing (general)' },
+    ],
+  },
+  {
+    domain: 'compliance', label: 'Compliance', tags: [
+      { key: 'compliance.fraud_waste_abuse', label: 'Fraud, Waste & Abuse' },
+      { key: 'compliance.hipaa', label: 'HIPAA' },
+      { key: 'compliance.audits', label: 'Audits' },
+      { key: 'compliance.nondiscrimination', label: 'Nondiscrimination' },
+    ],
+  },
+  {
+    domain: 'provider', label: 'Provider', tags: [
+      { key: 'provider.network', label: 'Network' },
+      { key: 'provider.relations', label: 'Relations' },
+      { key: 'provider.services', label: 'Services' },
+    ],
+  },
+  {
+    domain: 'health_care_services', label: 'Health Care Services', tags: [
+      { key: 'health_care_services.behavioral_health', label: 'Behavioral Health' },
+      { key: 'health_care_services.primary_care', label: 'Primary Care' },
+      { key: 'health_care_services.urgent_care', label: 'Urgent Care' },
+    ],
+  },
+  {
+    domain: 'pharmacy', label: 'Pharmacy', tags: [
+      { key: 'pharmacy.pharmacy_benefit', label: 'Pharmacy Benefit' },
+      { key: 'pharmacy.preferred_drug_list', label: 'Preferred Drug List' },
+      { key: 'pharmacy.specialty_pharmacy', label: 'Specialty Pharmacy' },
+    ],
+  },
+  {
+    domain: 'responsibilities', label: 'Responsibilities', tags: [
+      { key: 'responsibilities.continuity_of_care', label: 'Continuity of Care' },
+      { key: 'responsibilities.training', label: 'Training' },
+      { key: 'responsibilities.abuse_neglect_reporting', label: 'Abuse/Neglect Reporting' },
+    ],
+  },
+  {
+    domain: 'contact_information', label: 'Contact Information', tags: [
+      { key: 'contact_information.phone', label: 'Phone' },
+      { key: 'contact_information.portal', label: 'Portal' },
+      { key: 'contact_information.provider_contact', label: 'Provider Contact' },
+    ],
+  },
 ] as const
 
+// Flat list for backward compat (used by context menu rendering)
+const CATEGORIES = TAG_TAXONOMY.flatMap((d) => d.tags)
+
 const CATEGORY_LABELS: Record<string, string> = Object.fromEntries(
-  CATEGORIES.map((c) => [c.key, c.label]),
+  TAG_TAXONOMY.flatMap((d) => d.tags.map((t) => [t.key, `${d.label} > ${t.label}`])),
 )
 
 /* ─── Types ─── */
@@ -272,7 +346,7 @@ export function DocumentReaderTab({
         start: so,
         end: eo,
         label: `Tag: ${tagLabel}`,
-        className: `dv-tag-highlight dv-tag-${tag.tag}`,
+        className: `dv-tag-highlight dv-tag-${tag.tag.replace(/\./g, '-')}`,
         data: {
           type: 'tag',
           matchText: tag.tagged_text,
@@ -302,21 +376,26 @@ export function DocumentReaderTab({
       const allTagParts: string[] = []
       let primaryCls = 'dv-pltag-highlight'
 
+      // Helper: tag code -> CSS-safe class suffix (dots -> hyphens)
+      const cssSafe = (code: string) => code.replace(/\./g, '-').replace(/_/g, '-')
+      // Helper: extract domain prefix (e.g. "claims.denial" -> "claims")
+      const domainOf = (code: string) => code.includes('.') ? code.split('.')[0] : code
+
       if (pTags && Object.keys(pTags).length) {
         const keys = Object.keys(pTags)
-        allTagParts.push(...keys.map((k) => `p:${k.replace(/_/g, ' ')}`))
-        primaryCls += ` dv-pltag-p dv-pltag-p-${keys[0]}`
+        allTagParts.push(...keys.map((k) => `p:${k.replace(/\./g, ' > ').replace(/_/g, ' ')}`))
+        primaryCls += ` dv-pltag-p dv-pltag-p-${cssSafe(domainOf(keys[0]))}`
       }
       if (dTags && Object.keys(dTags).length) {
         const keys = Object.keys(dTags)
-        allTagParts.push(...keys.map((k) => `d:${k.replace(/_/g, ' ')}`))
+        allTagParts.push(...keys.map((k) => `d:${k.replace(/\./g, ' > ').replace(/_/g, ' ')}`))
         if (!pTags || !Object.keys(pTags).length) {
-          primaryCls += ` dv-pltag-d dv-pltag-d-${keys[0]}`
+          primaryCls += ` dv-pltag-d dv-pltag-d-${cssSafe(domainOf(keys[0]))}`
         }
       }
       if (jTags && Object.keys(jTags).length) {
         const keys = Object.keys(jTags)
-        allTagParts.push(...keys.map((k) => `j:${k.replace(/_/g, ' ')}`))
+        allTagParts.push(...keys.map((k) => `j:${k.replace(/\./g, ' > ').replace(/_/g, ' ')}`))
         if (!pTags && !dTags) {
           primaryCls += ` dv-pltag-j`
         }
@@ -524,15 +603,20 @@ export function DocumentReaderTab({
           </button>
           <div className="dv-context-menu-divider" />
           <span className="dv-context-menu-label">Add tag</span>
-          {CATEGORIES.map((cat) => (
-            <button
-              key={cat.key}
-              type="button"
-              className="dv-context-menu-item"
-              onClick={() => { addTag(selection, cat.key); dismiss() }}
-            >
-              {cat.label}
-            </button>
+          {TAG_TAXONOMY.map((domain) => (
+            <div key={domain.domain}>
+              <span className="dv-context-menu-sublabel">{domain.label}</span>
+              {domain.tags.map((tag) => (
+                <button
+                  key={tag.key}
+                  type="button"
+                  className="dv-context-menu-item dv-context-menu-item-indented"
+                  onClick={() => { addTag(selection, tag.key); dismiss() }}
+                >
+                  {tag.label}
+                </button>
+              ))}
+            </div>
           ))}
         </>
       ),
