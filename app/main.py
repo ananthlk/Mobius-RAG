@@ -2,12 +2,12 @@ import hashlib
 import logging
 from pathlib import Path
 from typing import Optional, List, Any
-from fastapi import FastAPI, UploadFile, HTTPException, Depends, Body, Query
+from fastapi import FastAPI, UploadFile, HTTPException, Depends, Body, Query, Request, Header
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, RedirectResponse, JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete, func, text, bindparam, and_, or_, cast, Text as SAText
+from sqlalchemy import select, delete, update, func, text, bindparam, and_, or_, cast, Text as SAText
 from sqlalchemy.orm import defer
 from google.cloud import storage
 import json
@@ -15,9 +15,18 @@ from datetime import datetime
 from collections import deque
 from asyncio import Lock
 import asyncio
-from app.config import GCS_BUCKET, ENV, CRITIQUE_RETRY_THRESHOLD
+from app.config import (
+    GCS_BUCKET,
+    ENV,
+    CRITIQUE_RETRY_THRESHOLD,
+    DRIVE_API_ENABLED,
+    GOOGLE_DRIVE_CLIENT_ID,
+    GOOGLE_DRIVE_CLIENT_SECRET,
+    GOOGLE_DRIVE_REDIRECT_URI,
+    RAG_FRONTEND_URL,
+)
 from app.database import get_db, Base
-from app.models import Document, DocumentPage, ChunkingResult, HierarchicalChunk, ExtractedFact, ProcessingError, ChunkingJob, ChunkingEvent, LlmConfig, EmbeddingJob, ChunkEmbedding, PublishEvent, RagPublishedEmbedding, fact_to_category_scores_dict, PolicyLine, PolicyParagraph, PolicyLexiconCandidate, DocumentTextTag
+from app.models import Document, DocumentPage, ChunkingResult, HierarchicalChunk, ExtractedFact, ProcessingError, ChunkingJob, ChunkingEvent, LlmConfig, EmbeddingJob, ChunkEmbedding, PublishEvent, RagPublishedEmbedding, fact_to_category_scores_dict, PolicyLine, PolicyParagraph, PolicyLexiconCandidate, DocumentTextTag, DriveConnection
 from app.services.error_tracker import log_error, classify_error
 from app.services.extract_text import extract_text_from_gcs, html_to_plain_text
 from app.services.chunking import split_paragraphs, split_paragraphs_from_markdown
@@ -40,6 +49,9 @@ _chunking_running: set[str] = set()
 # Event buffer: document_id -> deque of events
 _chunking_events: dict[str, deque] = {}
 _chunking_events_lock: dict[str, Lock] = {}
+
+# OAuth state cache: state -> (session_id, expiry_time). Cleaned on access.
+_drive_oauth_state: dict[str, tuple[str, float]] = {}
 
 app = FastAPI(title="Mobius RAG", version="0.1.0")
 
@@ -294,6 +306,11 @@ async def _run_startup_migrations_background():
                 await migrate_document_text_tags()
             except Exception as migrate_err:
                 logger.warning(f"Startup migration (document_text_tags) skipped: {migrate_err}")
+            try:
+                from app.migrations.add_drive_connections import migrate as migrate_drive_connections
+                await migrate_drive_connections()
+            except Exception as migrate_err:
+                logger.warning(f"Startup migration (drive_connections) skipped: {migrate_err}")
 
             logger.info("✓ Startup migrations completed successfully")
         except Exception as e:
@@ -373,12 +390,19 @@ async def _create_event_buffer_callback(document_id: str, db: Optional[AsyncSess
     
     return event_callback
 
-# CORS - in dev allow any origin so Vite (any port) and localhost/127.0.0.1 all work
-cors_origins = ["*"] if ENV == "dev" else []
+# CORS - in dev allow localhost origins with credentials (for Drive OAuth cookies)
+# 3999 = Module Hub / Master landing (RAG UI may be loaded there)
+_dev_origins = [
+    "http://localhost:8001", "http://localhost:5173", "http://localhost:3999",
+    "http://127.0.0.1:8001", "http://127.0.0.1:5173", "http://127.0.0.1:3999",
+]
+cors_origins = _dev_origins if ENV == "dev" else []
+if not cors_origins:
+    cors_origins = ["*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
-    allow_credentials=False,  # must be False when allow_origins=["*"]
+    allow_credentials=(cors_origins != ["*"]),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -387,6 +411,30 @@ app.add_middleware(
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
+
+@app.post("/admin/cleanup-stale-jobs")
+async def cleanup_stale_jobs(
+    timeout_minutes: float = Query(30.0, ge=1, le=1440, description="Mark jobs stuck in processing for this many minutes as failed"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Mark chunking and embedding jobs stuck in 'processing' as failed.
+    Use when PostgreSQL connection slots are exhausted: fail stuck jobs,
+    then stop chunking/embedding workers to free connections.
+    If the API cannot connect, run scripts/cleanup_stale_jobs.sql as superuser.
+    """
+    from app.worker.db import fail_stale_jobs_for_cleanup
+
+    chunking_failed, embedding_failed = await fail_stale_jobs_for_cleanup(db, timeout_minutes=timeout_minutes)
+    total = chunking_failed + embedding_failed
+    return {
+        "status": "ok",
+        "chunking_jobs_failed": chunking_failed,
+        "embedding_jobs_failed": embedding_failed,
+        "total_failed": total,
+        "message": f"Marked {total} stuck job(s) as failed. Stop chunking/embedding workers to free DB connections if slots are exhausted.",
+    }
 
 
 @app.get("/test/gcs")
@@ -602,6 +650,63 @@ async def list_documents(
         latest_publish = {}
         publish_count_by_doc = {}
 
+    # Batch-fetch chunking job/result data (one connection, no per-row queries)
+    active_job_per_doc: dict[str, ChunkingJob] = {}
+    latest_job_per_doc: dict[str, ChunkingJob] = {}
+    latest_result_per_doc: dict[str, ChunkingResult] = {}
+    if doc_ids:
+        # Active jobs (pending/processing) – latest per document
+        active_result = await db.execute(
+            text("""
+                SELECT id FROM (
+                    SELECT id, document_id, status, critique_enabled, max_retries,
+                           ROW_NUMBER() OVER (PARTITION BY document_id ORDER BY created_at DESC, id DESC) AS rn
+                    FROM chunking_jobs
+                    WHERE document_id IN :doc_ids AND status IN ('pending', 'processing')
+                ) sub WHERE rn = 1
+            """).bindparams(bindparam("doc_ids", expanding=True)),
+            {"doc_ids": doc_ids},
+        )
+        active_ids = [row.id for row in active_result]
+        if active_ids:
+            active_jobs_result = await db.execute(select(ChunkingJob).where(ChunkingJob.id.in_(active_ids)))
+            for job in active_jobs_result.scalars().all():
+                active_job_per_doc[str(job.document_id)] = job
+        # Latest ChunkingJob per document (any status) – for completed override
+        latest_job_result = await db.execute(
+            text("""
+                SELECT id FROM (
+                    SELECT id, document_id, status,
+                           ROW_NUMBER() OVER (PARTITION BY document_id ORDER BY created_at DESC, id DESC) AS rn
+                    FROM chunking_jobs
+                    WHERE document_id IN :doc_ids
+                ) sub WHERE rn = 1
+            """).bindparams(bindparam("doc_ids", expanding=True)),
+            {"doc_ids": doc_ids},
+        )
+        latest_job_ids = [row.id for row in latest_job_result]
+        if latest_job_ids:
+            latest_jobs_rows = await db.execute(select(ChunkingJob).where(ChunkingJob.id.in_(latest_job_ids)))
+            for job in latest_jobs_rows.scalars().all():
+                latest_job_per_doc[str(job.document_id)] = job
+        # Latest ChunkingResult per document
+        latest_cr_result = await db.execute(
+            text("""
+                SELECT id FROM (
+                    SELECT id, document_id,
+                           ROW_NUMBER() OVER (PARTITION BY document_id ORDER BY id DESC) AS rn
+                    FROM chunking_results
+                    WHERE document_id IN :doc_ids
+                ) sub WHERE rn = 1
+            """).bindparams(bindparam("doc_ids", expanding=True)),
+            {"doc_ids": doc_ids},
+        )
+        latest_cr_ids = [row.id for row in latest_cr_result]
+        if latest_cr_ids:
+            latest_cr_rows = await db.execute(select(ChunkingResult).where(ChunkingResult.id.in_(latest_cr_ids)))
+            for cr in latest_cr_rows.scalars().all():
+                latest_result_per_doc[str(cr.document_id)] = cr
+
     document_list = []
     for doc in documents:
         doc_id_str = str(doc.id)
@@ -616,27 +721,20 @@ async def list_documents(
             chunking_status = None
             processing_stage = None
 
+        active_job = active_job_per_doc.get(doc_id_str)
+        latest_job = latest_job_per_doc.get(doc_id_str)
+        latest_result = latest_result_per_doc.get(doc_id_str)
+
         if chunking_status is None:
-            # No events: fall back to ChunkingJob + ChunkingResult
-            job_result = await db.execute(
-                select(ChunkingJob).where(
-                    ChunkingJob.document_id == doc.id,
-                    ChunkingJob.status.in_(["pending", "processing"])
-                ).order_by(ChunkingJob.created_at.desc())
-            )
-            active_job = job_result.scalar_one_or_none()
+            # No events: fall back to ChunkingJob + ChunkingResult (from batch)
             if active_job:
                 chunking_status = "queued" if active_job.status == "pending" else "in_progress"
                 job_id = str(active_job.id)
                 job_critique_enabled = active_job.critique_enabled is None or str(active_job.critique_enabled).lower() == "true"
                 job_max_retries = active_job.max_retries if active_job.max_retries is not None else 2
             else:
-                chunking_result = await db.execute(
-                    select(ChunkingResult).where(ChunkingResult.document_id == doc.id)
-                )
-                chunking = chunking_result.scalar_one_or_none()
-                if chunking and chunking.metadata_:
-                    chunking_meta = chunking.metadata_
+                if latest_result and latest_result.metadata_:
+                    chunking_meta = latest_result.metadata_
                     chunking_status = chunking_meta.get("status", "idle")
                 else:
                     chunking_status = "idle"
@@ -644,30 +742,16 @@ async def list_documents(
                 job_critique_enabled = None
                 job_max_retries = None
         else:
-            job_result = await db.execute(
-                select(ChunkingJob).where(
-                    ChunkingJob.document_id == doc.id,
-                    ChunkingJob.status.in_(["pending", "processing"])
-                ).order_by(ChunkingJob.created_at.desc())
-            )
-            active_job = job_result.scalar_one_or_none()
             job_id = str(active_job.id) if active_job else None
             job_critique_enabled = (active_job.critique_enabled is None or str(active_job.critique_enabled).lower() == "true") if active_job else None
             job_max_retries = (active_job.max_retries if active_job.max_retries is not None else 2) if active_job else None
 
         # Prefer job/result when they say "completed" (e.g. chunking_complete event was never written)
         if chunking_status in ("in_progress", "queued"):
-            latest_job_result = await db.execute(
-                select(ChunkingJob).where(ChunkingJob.document_id == doc.id).order_by(ChunkingJob.created_at.desc()).limit(1)
-            )
-            latest_job = latest_job_result.scalar_one_or_none()
             if latest_job and latest_job.status == "completed":
                 chunking_status = "completed"
-            else:
-                cr_check = await db.execute(select(ChunkingResult).where(ChunkingResult.document_id == doc.id))
-                cr_row = cr_check.scalar_one_or_none()
-                if cr_row and (cr_row.metadata_ or {}).get("status") == "completed":
-                    chunking_status = "completed"
+            elif latest_result and (latest_result.metadata_ or {}).get("status") == "completed":
+                chunking_status = "completed"
 
         emb_status = latest_embedding.get(doc_id_str)
         embedding_status = emb_status if emb_status else "idle"
@@ -2097,6 +2181,336 @@ async def import_document_from_gcs(
         await db.rollback()
         logger.error(f"Import from GCS error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Google Drive OAuth and import
+# ---------------------------------------------------------------------------
+
+def _get_session_id(request: Request, x_rag_session: str | None = Header(None)) -> str:
+    """Get or create session ID from cookie or X-RAG-Session header."""
+    import uuid
+    sid = x_rag_session or (request.cookies.get("rag_session") if hasattr(request, "cookies") else None)
+    if sid:
+        return sid
+    return str(uuid.uuid4())
+
+
+def _drive_require_enabled():
+    """Raise 503 if Drive API is not configured."""
+    if not DRIVE_API_ENABLED or not GOOGLE_DRIVE_CLIENT_ID or not GOOGLE_DRIVE_CLIENT_SECRET or not GOOGLE_DRIVE_REDIRECT_URI:
+        raise HTTPException(
+            status_code=503,
+            detail="Google Drive import is not configured. Set DRIVE_API_ENABLED=true, GOOGLE_DRIVE_CLIENT_ID, GOOGLE_DRIVE_CLIENT_SECRET, GOOGLE_DRIVE_REDIRECT_URI in .env",
+        )
+
+
+@app.get("/drive/auth-url")
+async def drive_auth_url(
+    request: Request,
+    x_rag_session: str | None = Header(None, alias="X-RAG-Session"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return OAuth URL for Google Drive. Frontend redirects user there."""
+    _drive_require_enabled()
+    import secrets
+
+    session_id = _get_session_id(request, x_rag_session)
+    state = secrets.token_urlsafe(32)
+    import time
+    _drive_oauth_state[state] = (session_id, time.time() + 600)
+
+    from google_auth_oauthlib.flow import Flow
+    flow = Flow.from_client_config(
+        {
+            "web": {
+                "client_id": GOOGLE_DRIVE_CLIENT_ID,
+                "client_secret": GOOGLE_DRIVE_CLIENT_SECRET,
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "redirect_uris": [GOOGLE_DRIVE_REDIRECT_URI],
+            }
+        },
+        scopes=["https://www.googleapis.com/auth/drive.readonly"],
+        redirect_uri=GOOGLE_DRIVE_REDIRECT_URI,
+    )
+    url, _ = flow.authorization_url(access_type="offline", prompt="consent", state=state)
+
+    response = JSONResponse({"url": url, "session_id": session_id})
+    response.set_cookie(key="rag_session", value=session_id, max_age=86400 * 7, samesite="lax", httponly=True)
+    return response
+
+
+@app.get("/drive/callback")
+async def drive_callback(
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """OAuth callback: exchange code for tokens, store, redirect to frontend."""
+    _drive_require_enabled()
+    import time
+
+    if error:
+        logger.warning("Drive OAuth error: %s", error)
+        return RedirectResponse(url=f"{RAG_FRONTEND_URL}/#/drive?error={error}")
+
+    if not code or not state:
+        return RedirectResponse(url=f"{RAG_FRONTEND_URL}/#/drive?error=missing_params")
+
+    entry = _drive_oauth_state.pop(state, None)
+    if not entry:
+        return RedirectResponse(url=f"{RAG_FRONTEND_URL}/#/drive?error=invalid_state")
+
+    session_id, expiry = entry
+    if time.time() > expiry:
+        return RedirectResponse(url=f"{RAG_FRONTEND_URL}/#/drive?error=state_expired")
+
+    from google_auth_oauthlib.flow import Flow
+    flow = Flow.from_client_config(
+        {
+            "web": {
+                "client_id": GOOGLE_DRIVE_CLIENT_ID,
+                "client_secret": GOOGLE_DRIVE_CLIENT_SECRET,
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "redirect_uris": [GOOGLE_DRIVE_REDIRECT_URI],
+            }
+        },
+        scopes=["https://www.googleapis.com/auth/drive.readonly"],
+        redirect_uri=GOOGLE_DRIVE_REDIRECT_URI,
+    )
+    flow.fetch_token(code=code)
+
+    creds = flow.credentials
+    email = None
+    try:
+        from googleapiclient.discovery import build
+        drive = build("drive", "v3", credentials=creds)
+        about = drive.about().get(fields="user(emailAddress)").execute()
+        email = about.get("user", {}).get("emailAddress")
+    except Exception as e:
+        logger.warning("Could not fetch Drive user email: %s", e)
+
+    await db.execute(delete(DriveConnection).where(DriveConnection.session_id == session_id))
+    conn = DriveConnection(
+        session_id=session_id,
+        access_token=creds.token,
+        refresh_token=creds.refresh_token,
+        expires_at=creds.expiry,
+        email=email,
+    )
+    db.add(conn)
+    await db.commit()
+
+    return RedirectResponse(url=f"{RAG_FRONTEND_URL}/#/drive?connected=1")
+
+
+@app.get("/drive/status")
+async def drive_status(
+    request: Request,
+    x_rag_session: str | None = Header(None, alias="X-RAG-Session"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return {connected: bool, email?: str} for current session."""
+    if not DRIVE_API_ENABLED:
+        return {"connected": False, "enabled": False}
+
+    session_id = _get_session_id(request, x_rag_session)
+    result = await db.execute(
+        select(DriveConnection).where(DriveConnection.session_id == session_id)
+    )
+    conn = result.scalar_one_or_none()
+    if not conn:
+        return {"connected": False, "enabled": True}
+    return {"connected": True, "enabled": True, "email": conn.email}
+
+
+@app.delete("/drive/disconnect")
+async def drive_disconnect(
+    request: Request,
+    x_rag_session: str | None = Header(None, alias="X-RAG-Session"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove Drive connection for current session."""
+    session_id = _get_session_id(request, x_rag_session)
+    await db.execute(delete(DriveConnection).where(DriveConnection.session_id == session_id))
+    await db.commit()
+    return {"status": "ok"}
+
+
+@app.get("/drive/folders/{folder_id}/files")
+async def drive_list_folder_files(
+    folder_id: str,
+    request: Request,
+    x_rag_session: str | None = Header(None, alias="X-RAG-Session"),
+    db: AsyncSession = Depends(get_db),
+):
+    """List folders and PDF/Google Doc files in a Drive folder. Use 'root' for My Drive."""
+    _drive_require_enabled()
+    from app.services.drive_sync import get_credentials, list_folder_contents, parse_folder_id
+
+    fid = parse_folder_id(folder_id) if folder_id else "root"
+    if fid is None:
+        raise HTTPException(status_code=400, detail="Invalid folder link or ID")
+
+    session_id = _get_session_id(request, x_rag_session)
+    creds = await get_credentials(session_id, db)
+    if not creds:
+        raise HTTPException(status_code=401, detail="Connect Google Drive first")
+
+    contents = list_folder_contents(creds, fid)
+    return contents
+
+
+class ImportFromDriveRequest(BaseModel):
+    folder_id: str
+    file_ids: Optional[List[str]] = None
+    filename_overrides: Optional[dict[str, str]] = None
+    payer: Optional[str] = None
+    state: Optional[str] = None
+    program: Optional[str] = None
+    authority_level: Optional[str] = None
+
+
+@app.post("/documents/import-from-drive")
+async def import_from_drive(
+    request: Request,
+    body: ImportFromDriveRequest = Body(...),
+    x_rag_session: str | None = Header(default=None, alias="X-RAG-Session"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Import selected files from a Drive folder. Downloads, uploads to GCS, creates documents."""
+    _drive_require_enabled()
+    from app.services.drive_sync import get_credentials, list_folder_files, download_file, parse_folder_id
+
+    fid = parse_folder_id(body.folder_id)
+    if not fid:
+        raise HTTPException(status_code=400, detail="Invalid folder link or ID")
+
+    session_id = _get_session_id(request, x_rag_session)
+    creds = await get_credentials(session_id, db)
+    if not creds:
+        raise HTTPException(status_code=401, detail="Connect Google Drive first")
+
+    file_list = list_folder_files(creds, fid)
+    file_ids = body.file_ids or [f["id"] for f in file_list]
+    overrides = body.filename_overrides or {}
+
+    results = []
+    for f in file_list:
+        if f["id"] not in file_ids:
+            continue
+        file_id = f["id"]
+        name = overrides.get(file_id, f.get("name", "unknown"))
+        mime = f.get("mimeType", "")
+        if mime not in ("application/pdf", "application/vnd.google-apps.document"):
+            continue
+
+        try:
+            content = download_file(creds, file_id, mime)
+        except Exception as e:
+            logger.warning("Drive download failed for %s: %s", file_id, e)
+            results.append({"file_id": file_id, "filename": name, "status": "failed", "error": str(e)})
+            continue
+
+        file_hash = hashlib.sha256(content).hexdigest()
+        result = await db.execute(select(Document).where(Document.file_hash == file_hash))
+        if result.scalar_one_or_none():
+            results.append({"file_id": file_id, "filename": name, "status": "duplicate"})
+            continue
+
+        ext = ".pdf" if mime == "application/vnd.google-apps.document" else ("" if name.lower().endswith(".pdf") else "")
+        if ext and not name.lower().endswith(".pdf"):
+            name = name + ".pdf"
+        blob_path = f"drive/{fid}/{name}"
+        gcs_path = f"gs://{GCS_BUCKET}/{blob_path}"
+
+        try:
+            client = storage.Client()
+            bucket = client.bucket(GCS_BUCKET)
+            blob = bucket.blob(blob_path)
+            blob.upload_from_string(content, content_type="application/pdf")
+        except Exception as e:
+            logger.error("GCS upload failed for %s: %s", name, e)
+            results.append({"file_id": file_id, "filename": name, "status": "failed", "error": str(e)})
+            continue
+
+        doc = Document(
+            filename=name,
+            file_hash=file_hash,
+            file_path=gcs_path,
+            payer=body.payer,
+            state=body.state,
+            program=body.program,
+            authority_level=body.authority_level,
+            termination_date=default_termination_date(),
+            status="uploaded",
+        )
+        db.add(doc)
+        await db.commit()
+        await db.refresh(doc)
+
+        try:
+            doc.status = "extracting"
+            await db.commit()
+            from app.services.page_to_markdown import raw_page_to_markdown
+            pages = await extract_text_from_gcs(gcs_path)
+            for page_data in pages:
+                raw_text = sanitize_text_for_db(page_data.get("text") or "") or ""
+                md = raw_page_to_markdown(raw_text) if raw_text else None
+                page = DocumentPage(
+                    document_id=doc.id,
+                    page_number=page_data["page_number"],
+                    text=raw_text,
+                    text_markdown=sanitize_text_for_db(md),
+                    extraction_status=page_data.get("extraction_status", "failed"),
+                    extraction_error=page_data.get("extraction_error"),
+                    text_length=page_data.get("text_length", 0),
+                )
+                db.add(page)
+            doc.status = "completed"
+            await db.commit()
+        except Exception as e:
+            doc.status = "failed"
+            await db.commit()
+            logger.warning("Extraction failed for Drive import %s: %s", name, e)
+
+        if doc.status == "completed":
+            try:
+                existing = await db.execute(
+                    select(ChunkingJob).where(
+                        ChunkingJob.document_id == doc.id,
+                        ChunkingJob.generator_id == "B",
+                        ChunkingJob.status.in_(["pending", "processing"]),
+                    ).limit(1)
+                )
+                if existing.scalar_one_or_none() is None:
+                    job = ChunkingJob(
+                        document_id=doc.id,
+                        generator_id="B",
+                        status="pending",
+                        threshold="0.6",
+                        critique_enabled="false",
+                        max_retries=0,
+                        extraction_enabled="false",
+                    )
+                    db.add(job)
+                    await db.commit()
+                    logger.info("Auto-queued Path B for Drive import %s", doc.id)
+            except Exception as chunk_err:
+                logger.warning("Auto-chunk after Drive import failed: %s", chunk_err)
+                await db.rollback()
+
+        results.append({
+            "file_id": file_id,
+            "filename": name,
+            "document_id": str(doc.id),
+            "status": doc.status,
+        })
+
+    return {"results": results}
 
 
 def _scraped_url_to_display_name(url: str) -> str:
@@ -5898,6 +6312,48 @@ async def stop_chunking(document_id: str):
         # Continue anyway - the cancel flag is set
     
     return {"status": "ok", "message": "Stop requested"}
+
+
+@app.post("/documents/{document_id}/chunking/kill-and-reset")
+async def kill_and_reset_chunking(
+    document_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Kill stuck chunking/embedding jobs for this document and set status to idle.
+    Fails any pending/processing chunking_jobs and embedding_jobs, sets ChunkingResult metadata to idle.
+    Use when a document is stuck in extraction or embedding."""
+    from uuid import UUID
+
+    try:
+        doc_uuid = UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID")
+
+    result = await db.execute(select(Document).where(Document.id == doc_uuid))
+    if not result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    _chunking_cancel.add(document_id)
+
+    msg = "Killed and reset via API"
+    await db.execute(
+        update(ChunkingJob)
+        .where(ChunkingJob.document_id == doc_uuid, ChunkingJob.status.in_(["pending", "processing"]))
+        .values(status="failed", worker_id=None, completed_at=None, error_message=msg[:2000])
+    )
+    await db.execute(
+        update(EmbeddingJob)
+        .where(EmbeddingJob.document_id == doc_uuid, EmbeddingJob.status.in_(["pending", "processing"]))
+        .values(status="failed", worker_id=None, started_at=None, completed_at=None, error_message=msg[:2000])
+    )
+    cr_result = await db.execute(select(ChunkingResult).where(ChunkingResult.document_id == doc_uuid))
+    cr = cr_result.scalar_one_or_none()
+    if cr:
+        meta = dict(cr.metadata_ or {})
+        meta["status"] = "idle"
+        cr.metadata_ = meta
+    await db.commit()
+    return {"status": "ok", "document_id": document_id, "message": "Chunking and embedding jobs killed; status set to idle."}
 
 
 @app.get("/config/prompts")

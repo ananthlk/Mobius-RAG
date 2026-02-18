@@ -34,6 +34,19 @@ interface ScraperEvent {
   payload?: Record<string, unknown>
 }
 
+interface DriveFile {
+  id: string
+  name: string
+  mimeType?: string
+  size?: string
+  webViewLink?: string
+}
+
+interface DriveFolder {
+  id: string
+  name: string
+}
+
 export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }: DocumentInputTabProps) {
   const [file, setFile] = useState<File | null>(null)
   const [dragActive, setDragActive] = useState(false)
@@ -73,6 +86,208 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
   const [autoAddToRagWhenComplete, setAutoAddToRagWhenComplete] = useState(false)
   const eventSourceRef = useRef<EventSource | null>(null)
   const autoAddRunForJobRef = useRef<string | null>(null)
+
+  // Google Drive state
+  const [driveConnected, setDriveConnected] = useState(false)
+  const [driveEmail, setDriveEmail] = useState<string | null>(null)
+  const [driveEnabled, setDriveEnabled] = useState(true)
+  const [driveCurrentFolderId, setDriveCurrentFolderId] = useState<string>('root')
+  const [driveBreadcrumb, setDriveBreadcrumb] = useState<{ id: string; name: string }[]>([{ id: 'root', name: 'My Drive' }])
+  const [driveFolders, setDriveFolders] = useState<DriveFolder[]>([])
+  const [driveFiles, setDriveFiles] = useState<DriveFile[]>([])
+  const [driveFolderName, setDriveFolderName] = useState<string>('My Drive')
+  const [driveFilesLoading, setDriveFilesLoading] = useState(false)
+  const [driveError, setDriveError] = useState<string | null>(null)
+  const [selectedDriveFileIds, setSelectedDriveFileIds] = useState<Set<string>>(new Set())
+  const [importingFromDrive, setImportingFromDrive] = useState(false)
+  const [driveConnecting, setDriveConnecting] = useState(false)
+  const [driveFolderLink, setDriveFolderLink] = useState('')
+  const driveSessionIdRef = useRef<string | null>(null)
+
+  const driveFetchOpts = { credentials: 'include' as RequestCredentials }
+
+  const fetchDriveStatus = useCallback(async () => {
+    try {
+      const headers: Record<string, string> = {}
+      if (driveSessionIdRef.current) headers['X-RAG-Session'] = driveSessionIdRef.current
+      const r = await fetch(`${API_BASE}/drive/status`, { ...driveFetchOpts, headers })
+      const data = await r.json()
+      setDriveConnected(!!data.connected)
+      setDriveEmail(data.email || null)
+      setDriveEnabled(data.enabled !== false)
+    } catch {
+      setDriveEnabled(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchDriveStatus()
+  }, [fetchDriveStatus])
+
+  useEffect(() => {
+    const hash = window.location.hash
+    if (hash.includes('drive') && (hash.includes('connected=1') || hash.includes('error='))) {
+      fetchDriveStatus()
+      const base = hash.split('?')[0] || '#/'
+      window.history.replaceState(null, '', window.location.pathname + window.location.search + base)
+    }
+  }, [fetchDriveStatus])
+
+  useEffect(() => {
+    if (driveConnected && !driveFilesLoading) {
+      loadDriveFolder('root', [{ id: 'root', name: 'My Drive' }])
+    }
+  }, [driveConnected])
+
+  const handleDriveConnect = async () => {
+    setDriveError(null)
+    setDriveConnecting(true)
+    try {
+      const r = await fetch(`${API_BASE}/drive/auth-url`, driveFetchOpts)
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}))
+        const msg = typeof err.detail === 'string' ? err.detail : (err.detail?.message || 'Failed to get auth URL')
+        throw new Error(msg)
+      }
+      const { url, session_id } = await r.json()
+      if (session_id) driveSessionIdRef.current = session_id
+      if (url) {
+        window.location.href = url
+      } else {
+        throw new Error('No auth URL returned')
+      }
+    } catch (e) {
+      setDriveError(e instanceof Error ? e.message : 'Connect failed')
+    } finally {
+      setDriveConnecting(false)
+    }
+  }
+
+  const handleDriveDisconnect = async () => {
+    try {
+      const headers: Record<string, string> = {}
+      if (driveSessionIdRef.current) headers['X-RAG-Session'] = driveSessionIdRef.current
+      await fetch(`${API_BASE}/drive/disconnect`, { method: 'DELETE', ...driveFetchOpts, headers })
+      driveSessionIdRef.current = null
+      setDriveConnected(false)
+      setDriveEmail(null)
+      setDriveFolders([])
+      setDriveFiles([])
+      setDriveCurrentFolderId('root')
+      setDriveBreadcrumb([{ id: 'root', name: 'My Drive' }])
+      setSelectedDriveFileIds(new Set())
+      setDriveError(null)
+    } catch (e) {
+      setDriveError(e instanceof Error ? e.message : 'Disconnect failed')
+    }
+  }
+
+  const loadDriveFolder = async (folderId: string, breadcrumb: { id: string; name: string }[]) => {
+    setDriveError(null)
+    setDriveFilesLoading(true)
+    try {
+      const headers: Record<string, string> = {}
+      if (driveSessionIdRef.current) headers['X-RAG-Session'] = driveSessionIdRef.current
+      const r = await fetch(`${API_BASE}/drive/folders/${encodeURIComponent(folderId)}/files`, { ...driveFetchOpts, headers })
+      if (!r.ok) {
+        if (r.status === 401) throw new Error('Connect Google Drive first')
+        const err = await r.json().catch(() => ({}))
+        throw new Error(err.detail || 'Failed to list folder')
+      }
+      const data = await r.json()
+      const folderName = data.folder_name || (folderId === 'root' ? 'My Drive' : '')
+      const crumb = [...breadcrumb]
+      if (crumb.length > 0 && folderName) crumb[crumb.length - 1] = { ...crumb[crumb.length - 1], name: folderName }
+      setDriveCurrentFolderId(folderId)
+      setDriveBreadcrumb(crumb)
+      setDriveFolderName(folderName)
+      setDriveFolders(data.folders || [])
+      setDriveFiles(data.files || [])
+      setSelectedDriveFileIds(new Set())
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'List failed'
+      const hint = msg === 'Failed to fetch'
+        ? 'RAG backend unreachable. Is it running on port 8001?'
+        : msg
+      setDriveError(hint)
+      setDriveFolders([])
+      setDriveFiles([])
+    } finally {
+      setDriveFilesLoading(false)
+    }
+  }
+
+  const handleDriveBrowse = () => loadDriveFolder('root', [{ id: 'root', name: 'My Drive' }])
+
+  const handleDriveNavigateToFolder = (folder: DriveFolder) => {
+    const nextCrumb = [...driveBreadcrumb, { id: folder.id, name: folder.name }]
+    loadDriveFolder(folder.id, nextCrumb)
+  }
+
+  const handleDriveNavigateUp = () => {
+    if (driveBreadcrumb.length <= 1) return
+    const next = driveBreadcrumb.slice(0, -1)
+    const parent = next[next.length - 1]
+    loadDriveFolder(parent.id, next)
+  }
+
+  const handleDriveGoToFolder = async () => {
+    const trimmed = driveFolderLink.trim()
+    if (!trimmed) return
+    const match = trimmed.match(/\/folders\/([a-zA-Z0-9_-]+)/)
+    const fid = match ? match[1] : trimmed
+    loadDriveFolder(fid, [{ id: 'root', name: 'My Drive' }, { id: fid, name: fid }])
+  }
+
+  const handleDriveImport = async () => {
+    const ids = selectedDriveFileIds.size > 0 ? [...selectedDriveFileIds] : driveFiles.map(f => f.id)
+    if (ids.length === 0) return
+    setDriveError(null)
+    setImportingFromDrive(true)
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (driveSessionIdRef.current) headers['X-RAG-Session'] = driveSessionIdRef.current
+      const r = await fetch(`${API_BASE}/documents/import-from-drive`, {
+        method: 'POST',
+        ...driveFetchOpts,
+        headers,
+        body: JSON.stringify({
+          folder_id: driveCurrentFolderId,
+          file_ids: ids,
+          payer: importMetadata.payer?.trim() || undefined,
+          state: importMetadata.state?.trim() || undefined,
+          program: importMetadata.program?.trim() || undefined,
+          authority_level: importMetadata.authority_level?.trim() || undefined,
+        }),
+      })
+      if (!r.ok) {
+        if (r.status === 401) throw new Error('Connect Google Drive first')
+        const err = await r.json().catch(() => ({}))
+        throw new Error(err.detail || 'Import failed')
+      }
+      const data = await r.json()
+      const ok = (data.results || []).filter((x: { status: string }) => x.status === 'completed').length
+      onDocumentAdded?.()
+      setDriveError(null)
+      setSelectedDriveFileIds(new Set())
+      if (ok > 0) setDriveFiles(prev => prev.filter(f => !ids.includes(f.id)))
+    } catch (e) {
+      setDriveError(e instanceof Error ? e.message : 'Import failed')
+    } finally {
+      setImportingFromDrive(false)
+    }
+  }
+
+  const toggleDriveFile = (id: string) => {
+    setSelectedDriveFileIds(prev => {
+      const next = new Set(prev.size === 0 ? driveFiles.map(f => f.id) : prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+  const selectAllDriveFiles = () => setSelectedDriveFileIds(new Set(driveFiles.map(f => f.id)))
+  const clearDriveSelection = () => setSelectedDriveFileIds(new Set())
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -941,15 +1156,163 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
       </details>
 
       <div className="input-methods-top" style={{ marginTop: '1.5rem' }}>
-        {/* Google Drive Method - Coming Soon */}
-        <details className="input-method-card disabled collapsible">
+        {/* Google Drive Method */}
+        <details className={`input-method-card collapsible ${!driveEnabled ? 'disabled' : ''}`} open={driveConnected}>
           <summary className="collapsible-summary">
             <span className="collapsible-title">Google Drive</span>
-            <span className="collapsible-desc">Import documents from Google Drive</span>
-            <span className="collapsible-badge">Coming Soon</span>
+            <span className="collapsible-desc">
+              {driveConnected ? `Connected as ${driveEmail || 'Google account'}` : 'Import documents from Google Drive'}
+            </span>
+            {driveConnected && <span className="collapsible-badge badge-ok">Connected</span>}
+            {!driveEnabled && <span className="collapsible-badge">Not configured</span>}
           </summary>
           <div className="collapsible-content">
-            <div className="coming-soon-badge">Coming Soon</div>
+            {!driveEnabled ? (
+              <p className="upload-hint">Set DRIVE_API_ENABLED=true and OAuth credentials in .env to enable.</p>
+            ) : !driveConnected ? (
+              <div>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={handleDriveConnect}
+                  disabled={driveConnecting}
+                >
+                  {driveConnecting ? 'Redirecting…' : 'Connect Google Drive'}
+                </button>
+                {driveError && (
+                  <div className="error-message" role="alert" style={{ marginTop: '0.5rem' }}>
+                    {driveError}
+                  </div>
+                )}
+                <p className="upload-hint">Sign in with Google to access your Drive. PDFs and Google Docs supported.</p>
+              </div>
+            ) : (
+              <div className="drive-import-section">
+                <div className="drive-toolbar" style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', alignItems: 'center', marginBottom: '0.75rem' }}>
+                  <button type="button" className="btn btn-secondary btn-sm" onClick={handleDriveDisconnect}>
+                    Disconnect
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    onClick={handleDriveBrowse}
+                    disabled={driveFilesLoading}
+                  >
+                    {driveFilesLoading ? 'Loading…' : 'Browse My Drive'}
+                  </button>
+                  {driveBreadcrumb.length > 1 && (
+                    <button type="button" className="btn btn-secondary btn-sm" onClick={handleDriveNavigateUp}>
+                      ↑ Up
+                    </button>
+                  )}
+                </div>
+                <div className="drive-breadcrumb" style={{ fontSize: '0.875rem', marginBottom: '0.5rem', color: 'var(--text-secondary)' }}>
+                  {driveBreadcrumb.map((b, i) => (
+                    <span key={b.id}>
+                      {i > 0 && ' › '}
+                      <button
+                        type="button"
+                        className="drive-breadcrumb-link"
+                        onClick={() => loadDriveFolder(b.id, driveBreadcrumb.slice(0, i + 1))}
+                        style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: 'inherit', textDecoration: 'underline' }}
+                      >
+                        {b.name}
+                      </button>
+                    </span>
+                  ))}
+                </div>
+                <div className="drive-goto" style={{ marginBottom: '0.75rem', display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                  <input
+                    type="text"
+                    placeholder="Or paste folder link to jump"
+                    value={driveFolderLink}
+                    onChange={e => setDriveFolderLink(e.target.value)}
+                    className="scrape-url-input"
+                    style={{ flex: 1, minWidth: 200 }}
+                    disabled={driveFilesLoading}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={handleDriveGoToFolder}
+                    disabled={!driveFolderLink.trim() || driveFilesLoading}
+                  >
+                    Go to folder
+                  </button>
+                </div>
+                {driveError && (
+                  <div className="error-message" role="alert" style={{ marginBottom: '0.5rem' }}>
+                    {driveError}
+                  </div>
+                )}
+                {(driveFolders.length > 0 || driveFiles.length > 0) && (
+                  <div className="drive-files-list" style={{ marginTop: '0.5rem' }}>
+                    {driveFolders.length > 0 && (
+                      <ul className="drive-folders-ul" style={{ listStyle: 'none', padding: 0, margin: '0 0 1rem 0' }}>
+                        {driveFolders.map(f => (
+                          <li key={f.id}>
+                            <button
+                              type="button"
+                              className="drive-folder-item"
+                              onClick={() => handleDriveNavigateToFolder(f)}
+                              style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.35rem 0', background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', fontSize: 'inherit', textAlign: 'left' }}
+                            >
+                              <span style={{ opacity: 0.7 }}>📁</span>
+                              <span>{f.name}</span>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {driveFiles.length > 0 && (
+                      <>
+                        <div className="drive-files-actions" style={{ marginBottom: '0.5rem' }}>
+                          <button type="button" className="btn btn-secondary btn-sm" onClick={selectAllDriveFiles}>
+                            Select all
+                          </button>
+                          <button type="button" className="btn btn-secondary btn-sm" onClick={clearDriveSelection}>
+                            Clear
+                          </button>
+                          <span className="drive-files-count" style={{ marginLeft: '0.5rem', fontSize: '0.875rem' }}>
+                            {selectedDriveFileIds.size || driveFiles.length} selected
+                          </span>
+                        </div>
+                        <ul className="drive-files-ul">
+                          {driveFiles.map(f => (
+                            <li key={f.id} className="drive-file-item">
+                              <label>
+                                <input
+                                  type="checkbox"
+                                  checked={selectedDriveFileIds.size === 0 ? true : selectedDriveFileIds.has(f.id)}
+                                  onChange={() => toggleDriveFile(f.id)}
+                                />
+                                <span className="drive-file-name">{f.name}</span>
+                                {f.mimeType?.includes('document') && <span className="drive-file-type">(Doc)</span>}
+                              </label>
+                            </li>
+                          ))}
+                        </ul>
+                        <button
+                          type="button"
+                          className="btn btn-primary"
+                          onClick={handleDriveImport}
+                          disabled={importingFromDrive}
+                          style={{ marginTop: '0.5rem' }}
+                        >
+                          {importingFromDrive ? 'Importing…' : 'Import selected'}
+                        </button>
+                      </>
+                    )}
+                    {driveFolders.length === 0 && driveFiles.length === 0 && !driveFilesLoading && (
+                      <p className="upload-hint" style={{ margin: 0 }}>This folder is empty or has no PDFs/Google Docs.</p>
+                    )}
+                  </div>
+                )}
+                {driveFolders.length === 0 && driveFiles.length === 0 && !driveFilesLoading && driveCurrentFolderId !== 'root' && (
+                  <p className="upload-hint">No folders or supported files here.</p>
+                )}
+              </div>
+            )}
           </div>
         </details>
 

@@ -87,6 +87,59 @@ async def recover_stale_jobs(
     return len(recovered)
 
 
+async def fail_stale_jobs_for_cleanup(
+    db: AsyncSession,
+    timeout_minutes: float = 30.0,
+) -> tuple[int, int]:
+    """Mark jobs stuck in 'processing' as failed (admin cleanup).
+
+    Use when connection slots are exhausted: fail stuck jobs so you can
+    stop workers and free connections. Unlike recover_stale_jobs, this
+    does NOT reset to pending — jobs stay failed.
+
+    Returns (chunking_failed, embedding_failed).
+    """
+    from datetime import timedelta
+
+    cutoff = _utc_now_naive() - timedelta(minutes=timeout_minutes)
+    msg = f"Admin cleanup: stuck in processing >{timeout_minutes}min"
+
+    chunking_result = await db.execute(
+        update(ChunkingJob)
+        .where(
+            ChunkingJob.status == "processing",
+            ChunkingJob.started_at < cutoff,
+        )
+        .values(
+            status="failed",
+            worker_id=None,
+            completed_at=_utc_now_naive(),
+            error_message=msg[:2000],
+        )
+        .returning(ChunkingJob.id)
+    )
+    chunking_count = len(chunking_result.fetchall())
+
+    embedding_result = await db.execute(
+        update(EmbeddingJob)
+        .where(
+            EmbeddingJob.status == "processing",
+            EmbeddingJob.started_at < cutoff,
+        )
+        .values(
+            status="failed",
+            worker_id=None,
+            completed_at=_utc_now_naive(),
+            error_message=msg[:2000],
+        )
+        .returning(EmbeddingJob.id)
+    )
+    embedding_count = len(embedding_result.fetchall())
+
+    await db.commit()
+    return chunking_count, embedding_count
+
+
 # ---------------------------------------------------------------------------
 # ChunkingResult (progress / status)
 # ---------------------------------------------------------------------------

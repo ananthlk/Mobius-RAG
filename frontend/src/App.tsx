@@ -1226,6 +1226,21 @@ function App() {
     setSelectedJobId(documentId)
   }
 
+  const handleKillAndResetChunking = async (documentId: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/documents/${documentId}/chunking/kill-and-reset`, { method: 'POST' })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        setError(data?.detail || `Kill and reset failed (${res.status})`)
+        return
+      }
+      setError(null)
+      await loadDocuments()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Kill and reset failed')
+    }
+  }
+
   const handleStartEmbedding = async (documentId: string) => {
     try {
       const res = await fetch(`${API_BASE}/documents/${documentId}/embedding/start`, { method: 'POST' })
@@ -1418,6 +1433,7 @@ function App() {
               onRetag={retagDocument}
               onStartEmbedding={handleStartEmbedding}
               onResetEmbedding={handleResetEmbedding}
+              onKillAndResetChunking={handleKillAndResetChunking}
             />
           </TabPanel>
 

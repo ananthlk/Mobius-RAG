@@ -65,6 +65,7 @@ interface DocumentStatusTabProps {
   onStartEmbedding?: (documentId: string) => Promise<void>
   onResetEmbedding?: (documentId: string) => Promise<void>
   onMarkReadyForChunking?: (documentId: string) => Promise<void>
+  onKillAndResetChunking?: (documentId: string) => Promise<void>
 }
 
 export function DocumentStatusTab({ 
@@ -78,6 +79,7 @@ export function DocumentStatusTab({
   onStartEmbedding,
   onResetEmbedding,
   onMarkReadyForChunking,
+  onKillAndResetChunking,
 }: DocumentStatusTabProps) {
   const [documents, setDocuments] = useState<Document[]>([])
   const [loading, setLoading] = useState(false)
@@ -769,7 +771,7 @@ export function DocumentStatusTab({
                           const hasChunkActions =
                             doc.chunking_status === 'idle' || doc.chunking_status === null ||
                             doc.chunking_status === 'in_progress' || doc.chunking_status === 'queued' ||
-                            ((doc.chunking_status === 'stopped' || doc.chunking_status === 'failed') && onRestartChunking) ||
+                            ((doc.chunking_status === 'stopped' || doc.chunking_status === 'failed') && (onRestartChunking || onKillAndResetChunking)) ||
                             (doc.chunking_status === 'completed' && onRetag)
                           if (!hasChunkActions) return null
                           return (
@@ -804,17 +806,39 @@ export function DocumentStatusTab({
                                       >
                                         {chunkStatusLoadingDocId === doc.id ? 'Updating…' : 'Mark chunking complete'}
                                       </button>
+                                      {onKillAndResetChunking && (
+                                        <button
+                                          type="button"
+                                          className="dropdown-item dropdown-item-danger"
+                                          title="Kill stuck chunking/embedding jobs and set status to idle"
+                                          onClick={() => { onKillAndResetChunking(doc.id); setOpenChunkMenuDocId(null) }}
+                                        >
+                                          Kill and reset
+                                        </button>
+                                      )}
                                     </>
                                   ) : doc.chunking_status === 'queued' ? (
-                                    <button
-                                      type="button"
-                                      className="dropdown-item"
-                                      disabled={chunkStatusLoadingDocId === doc.id}
-                                      title="Set chunking status to complete"
-                                      onClick={() => { handleMarkChunkingComplete(doc.id) }}
-                                    >
-                                      {chunkStatusLoadingDocId === doc.id ? 'Updating…' : 'Mark chunking complete'}
-                                    </button>
+                                    <>
+                                      <button
+                                        type="button"
+                                        className="dropdown-item"
+                                        disabled={chunkStatusLoadingDocId === doc.id}
+                                        title="Set chunking status to complete"
+                                        onClick={() => { handleMarkChunkingComplete(doc.id) }}
+                                      >
+                                        {chunkStatusLoadingDocId === doc.id ? 'Updating…' : 'Mark chunking complete'}
+                                      </button>
+                                      {onKillAndResetChunking && (
+                                        <button
+                                          type="button"
+                                          className="dropdown-item dropdown-item-danger"
+                                          title="Kill stuck jobs and set status to idle"
+                                          onClick={() => { onKillAndResetChunking(doc.id); setOpenChunkMenuDocId(null) }}
+                                        >
+                                          Kill and reset
+                                        </button>
+                                      )}
+                                    </>
                                   ) : (
                                     <>
                                       {(doc.chunking_status === 'idle' || doc.chunking_status === null || (doc.chunking_status === 'stopped' || doc.chunking_status === 'failed')) && (
@@ -931,6 +955,16 @@ export function DocumentStatusTab({
                                           onClick={() => { onRestartChunking(doc.id, getChunkOptionsForDoc(doc.id)); setOpenChunkMenuDocId(null) }}
                                         >
                                           Restart chunking
+                                        </button>
+                                      )}
+                                      {((doc.chunking_status === 'stopped' || doc.chunking_status === 'failed') && onKillAndResetChunking) && (
+                                        <button
+                                          type="button"
+                                          className="dropdown-item dropdown-item-danger"
+                                          title="Kill any stuck jobs and set status to idle"
+                                          onClick={() => { onKillAndResetChunking(doc.id); setOpenChunkMenuDocId(null) }}
+                                        >
+                                          Kill and reset
                                         </button>
                                       )}
                                       {(doc.chunking_status === 'completed' && onRetag) && (

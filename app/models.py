@@ -128,6 +128,18 @@ class ChunkingJob(Base):
     chunking_config_snapshot = Column(JSONB, nullable=True)
 
 
+class DriveConnection(Base):
+    """OAuth tokens for Google Drive access, keyed by session."""
+    __tablename__ = "drive_connections"
+
+    session_id = Column(String(64), primary_key=True)
+    access_token = Column(Text, nullable=False)
+    refresh_token = Column(Text, nullable=True)
+    expires_at = Column(DateTime, nullable=True)
+    email = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class ChunkingEvent(Base):
     """Events generated during chunking - stored in database for SSE streaming."""
     __tablename__ = "chunking_events"

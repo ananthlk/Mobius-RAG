@@ -17,6 +17,8 @@ dependencies = [
     "json-repair",
     "pyyaml",
     "beautifulsoup4",
+    "google-api-python-client",
+    "google-auth-oauthlib",
 ]
 
 [project.optional-dependencies]
