@@ -6,14 +6,13 @@ load_dotenv()
 # Environment
 ENV = os.getenv("ENV", "dev")  # dev or prod
 
-# Database
-if ENV == "prod":
-    DATABASE_URL = os.getenv("DATABASE_URL")  # e.g., postgresql+asyncpg://user:pass@host/db
-else:
-    # Dev defaults
-    DATABASE_URL = os.getenv(
-        "DATABASE_URL",
-        "postgresql+asyncpg://postgres:postgres@localhost:5432/mobius_rag"
+# Database — Cloud SQL only; no localhost fallback.
+# Set DATABASE_URL in .env (e.g. postgresql+asyncpg://postgres:PASSWORD@34.135.72.145:5432/mobius_rag)
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise ValueError(
+        "DATABASE_URL is required. Point to Cloud SQL (e.g. postgresql+asyncpg://postgres:PASSWORD@34.135.72.145:5432/mobius_rag). "
+        "See docs/MIGRATE_LOCAL_TO_CLOUD.md"
     )
 
 # GCS

@@ -157,12 +157,13 @@
   background: var(--mobius-bg-card);
   border: 1px solid var(--mobius-border);
   border-radius: var(--mobius-radius-md);
-  overflow: hidden;
+  overflow-x: auto;
   box-shadow: var(--mobius-shadow-sm);
 }
 
 .status-table {
   width: 100%;
+  min-width: 1100px;
   border-collapse: collapse;
   font-size: 0.9375rem;
 }

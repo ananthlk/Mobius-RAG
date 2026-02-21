@@ -2,7 +2,7 @@
 """Check if a document landed in the published vector table (rag_published_embeddings).
 Usage: python scripts/check_published_document.py [name_substring]
 Example: python scripts/check_published_document.py SH-PRO-BH-General
-Uses DATABASE_URL from env (default dev: postgresql+asyncpg://postgres:postgres@localhost:5432/mobius_rag).
+Uses DATABASE_URL from env (Cloud SQL required; see docs/MIGRATE_LOCAL_TO_CLOUD.md).
 """
 import asyncio
 import sys

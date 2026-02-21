@@ -54,7 +54,11 @@ else
     source .env
     set +a
   fi
-  DB_URL="${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@localhost:5432/mobius_rag}"
+  DB_URL="${SOURCE_DATABASE_URL:-${DATABASE_URL}}"
+  if [[ -z "$DB_URL" ]]; then
+    echo "Set SOURCE_DATABASE_URL or DATABASE_URL to dump from (e.g. postgresql://postgres:pass@localhost:5432/mobius_rag)"
+    exit 1
+  fi
   # pg_dump expects postgresql:// (not postgresql+asyncpg)
   PG_URL="${DB_URL/postgresql+asyncpg/postgresql}"
   pg_dump "$PG_URL" --no-owner --no-acl --clean --if-exists > "$DUMP_FILE"
