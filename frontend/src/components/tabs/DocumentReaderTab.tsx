@@ -125,7 +125,7 @@ interface Document {
 interface DocumentReaderTabProps {
   documents: Document[]
   selectedDocumentId?: string | null
-  navigateToRead?: { documentId: string; pageNumber?: number; factId?: string } | null
+  navigateToRead?: { documentId: string; pageNumber?: number; factId?: string; citeText?: string } | null
   onNavigateToReadConsumed?: () => void
   onDocumentSelect?: (documentId: string) => void
 }
@@ -633,6 +633,10 @@ export function DocumentReaderTab({
   const originalFileUrl = hasOriginalFile && selectedDocumentId
     ? `${API_BASE}/documents/${selectedDocumentId}/file`
     : undefined
+  const textDerivedPdfDownloadUrl =
+    selectedDocumentId && !hasOriginalFile
+      ? `${API_BASE}/documents/${selectedDocumentId}/download/pdf`
+      : undefined
   const markdownDownloadUrl = selectedDocumentId
     ? `${API_BASE}/documents/${selectedDocumentId}/download/markdown`
     : undefined
@@ -729,12 +733,20 @@ export function DocumentReaderTab({
         initialPage={navigateToRead?.pageNumber}
         navigateTo={
           navigateToRead && navigateToRead.documentId === selectedDocumentId
-            ? { pageNumber: navigateToRead.pageNumber, highlightId: navigateToRead.factId }
+            ? {
+                pageNumber: navigateToRead.pageNumber,
+                highlightId: navigateToRead.factId,
+                scrollToText:
+                  navigateToRead.factId || !navigateToRead.citeText?.trim()
+                    ? undefined
+                    : navigateToRead.citeText,
+              }
             : null
         }
         onNavigateConsumed={onNavigateToReadConsumed}
         hasOriginalFile={hasOriginalFile}
         originalFileUrl={originalFileUrl}
+        textDerivedPdfDownloadUrl={textDerivedPdfDownloadUrl}
         markdownDownloadUrl={markdownDownloadUrl}
         interaction={interaction}
         onPageChange={() => {}}

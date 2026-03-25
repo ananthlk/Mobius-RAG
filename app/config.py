@@ -1,7 +1,10 @@
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load .env from mobius-rag root so DATABASE_URL is correct even if shell already set it (e.g. $ in password).
+_env_path = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(_env_path, override=True)
 
 # Environment
 ENV = os.getenv("ENV", "dev")  # dev or prod

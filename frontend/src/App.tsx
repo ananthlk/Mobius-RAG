@@ -92,7 +92,12 @@ function App() {
   const [_loadingDocuments, setLoadingDocuments] = useState(false)
   const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null)
   const [_selectedDocument, setSelectedDocument] = useState<any | null>(null)
-  const [navigateToRead, setNavigateToRead] = useState<{ documentId: string; pageNumber?: number; factId?: string } | null>(null)
+  const [navigateToRead, setNavigateToRead] = useState<{
+    documentId: string
+    pageNumber?: number
+    factId?: string
+    citeText?: string
+  } | null>(null)
   
   // Chunking state
   const [chunkingActive, setChunkingActive] = useState(false)
@@ -214,9 +219,11 @@ function App() {
     if (docId) {
       setSelectedDocumentId(docId)
       if (tab === 'read') {
+        const citeRaw = params.get('citeText')
         setNavigateToRead({
           documentId: docId,
           pageNumber: pageNum ? parseInt(pageNum, 10) : undefined,
+          citeText: citeRaw && citeRaw.trim() ? citeRaw : undefined,
         })
       }
     }

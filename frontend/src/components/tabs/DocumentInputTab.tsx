@@ -95,7 +95,7 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
   const [driveBreadcrumb, setDriveBreadcrumb] = useState<{ id: string; name: string }[]>([{ id: 'root', name: 'My Drive' }])
   const [driveFolders, setDriveFolders] = useState<DriveFolder[]>([])
   const [driveFiles, setDriveFiles] = useState<DriveFile[]>([])
-  const [driveFolderName, setDriveFolderName] = useState<string>('My Drive')
+  const [, setDriveFolderName] = useState<string>('My Drive')
   const [driveFilesLoading, setDriveFilesLoading] = useState(false)
   const [driveError, setDriveError] = useState<string | null>(null)
   const [selectedDriveFileIds, setSelectedDriveFileIds] = useState<Set<string>>(new Set())

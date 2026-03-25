@@ -1544,6 +1544,69 @@ async def download_document_markdown(
     )
 
 
+@app.get("/documents/{document_id}/download/pdf")
+async def download_document_pdf(
+    document_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate a PDF from all pages' markdown/text (for scraped / text-only docs without a GCS original)."""
+    from uuid import UUID as _UUID
+
+    from app.services.markdown_to_pdf import markdown_to_pdf_bytes, safe_pdf_filename
+
+    try:
+        doc_uuid = _UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID")
+
+    result = await db.execute(select(Document).where(Document.id == doc_uuid))
+    document = result.scalar_one_or_none()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    pages_result = await db.execute(
+        select(DocumentPage)
+        .where(DocumentPage.document_id == doc_uuid)
+        .order_by(DocumentPage.page_number)
+    )
+    pages = pages_result.scalars().all()
+
+    if not pages:
+        raise HTTPException(status_code=404, detail="No pages found for this document")
+
+    parts: list[str] = []
+    for p in pages:
+        text = getattr(p, "text_markdown", None) or p.text or ""
+        if text.strip():
+            parts.append(f"## Page {p.page_number}\n\n{text.strip()}")
+
+    markdown_content = "\n\n---\n\n".join(parts)
+    if not markdown_content.strip():
+        raise HTTPException(status_code=404, detail="No text content to render as PDF")
+
+    title = (document.display_name or document.filename or "Document").strip()
+    try:
+        pdf_bytes = markdown_to_pdf_bytes(markdown_content, title=title)
+    except RuntimeError as e:
+        logger.error("PDF generation failed for document %s: %s", document_id, e)
+        raise HTTPException(
+            status_code=500,
+            detail="Could not build PDF from document text. Try download/markdown or contact support.",
+        ) from e
+    except Exception as e:
+        logger.exception("Unexpected PDF error for document %s", document_id)
+        raise HTTPException(status_code=500, detail=f"PDF error: {e}") from e
+
+    fname = safe_pdf_filename(document.display_name or document.filename or "document")
+    return StreamingResponse(
+        iter([pdf_bytes]),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{fname}"',
+        },
+    )
+
+
 @app.get("/documents/{document_id}/status")
 async def get_document_status(
     document_id: str,
