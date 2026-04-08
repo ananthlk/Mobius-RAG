@@ -205,20 +205,29 @@ function App() {
     }
   }
 
+  // Embed mode: render only the DocumentReaderTab (no header, no tabs)
+  // Used by chat and other consumers via iframe: ?embed=true&documentId=...&pageNumber=...
+  const [embedMode, setEmbedMode] = useState(false)
+
   // Load documents on mount + handle deep-link URL params from cross-module links
   // (e.g. mobius-chat opens ?tab=read&documentId=...&pageNumber=...)
   useEffect(() => {
     loadDocuments()
     const params = new URLSearchParams(window.location.search)
+    const embed = params.get('embed') === 'true'
     const tab = params.get('tab')
     const docId = params.get('documentId')
     const pageNum = params.get('pageNumber')
+    if (embed) {
+      setEmbedMode(true)
+      setActiveTab('read')
+    }
     if (tab && ['input', 'status', 'live', 'read', 'review', 'detail', 'database', 'errors'].includes(tab)) {
       setActiveTab(tab as typeof activeTab)
     }
     if (docId) {
       setSelectedDocumentId(docId)
-      if (tab === 'read') {
+      if (tab === 'read' || embed) {
         const citeRaw = params.get('citeText')
         setNavigateToRead({
           documentId: docId,
@@ -228,7 +237,8 @@ function App() {
       }
     }
     // Clean URL params after consumption so they don't persist on refresh
-    if (params.toString()) {
+    // (skip in embed mode — parent controls the URL)
+    if (params.toString() && !embed) {
       window.history.replaceState({}, '', window.location.pathname)
     }
   }, [])
@@ -1382,13 +1392,28 @@ function App() {
     return () => clearInterval(interval)
   }, [activeTab, selectedJobId, documents])
 
+  // ─── Embed mode: just the reader, no chrome ───
+  if (embedMode) {
+    return (
+      <div className="app app--embed" style={{ padding: 0 }}>
+        <DocumentReaderTab
+          documents={documents}
+          selectedDocumentId={selectedDocumentId}
+          navigateToRead={navigateToRead}
+          onNavigateToReadConsumed={() => setNavigateToRead(null)}
+          onDocumentSelect={(id) => setSelectedDocumentId(id)}
+        />
+      </div>
+    )
+  }
+
   return (
     <div className="app">
       <Header
         defaultLlmConfigVersion={defaultLlmConfigVersion}
         onDefaultLlmConfigVersionChange={setDefaultLlmConfigVersion}
       />
-      
+
       <Tabs
         activeTab={activeTab}
         onTabChange={(tabId: string) => setActiveTab(tabId as typeof activeTab)}
