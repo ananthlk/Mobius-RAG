@@ -35,6 +35,23 @@ def start_worker():
     logger.info("RAG embedding worker started in background thread")
 
 
+@app.on_event("shutdown")
+def stop_worker():
+    """Cloud Run SIGTERM drain hook. See worker_server_chunking.py
+    for the full rationale; same pattern applies here.
+    """
+    try:
+        from app.worker.shutdown import request_shutdown
+        request_shutdown(source="fastapi-shutdown")
+        logger.info("Shutdown requested; waiting up to 10s for worker to drain")
+        if _worker_thread:
+            _worker_thread.join(timeout=10)
+            if _worker_thread.is_alive():
+                logger.warning("Worker did not drain within 10s — Cloud Run will SIGKILL")
+    except Exception as e:
+        logger.warning("Shutdown hook failed (non-fatal): %s", e)
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "mobius-rag-embedding-worker"}

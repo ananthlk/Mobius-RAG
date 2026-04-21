@@ -257,8 +257,14 @@ async def process_embedding_job(job: EmbeddingJob, db: AsyncSession) -> None:
 
 
 async def worker_task(worker_id: int) -> None:
-    """Single worker: poll and process embedding jobs."""
-    while True:
+    """Single worker: poll and process embedding jobs.
+
+    Exits cleanly when ``is_shutting_down()`` returns True.
+    An embedding job in progress finishes naturally; on the next
+    loop iteration the guard breaks the loop.
+    """
+    from app.worker.shutdown import is_shutting_down, sleep_or_shutdown
+    while not is_shutting_down():
         try:
             async with AsyncSessionLocal() as db:
                 result = await db.execute(
@@ -273,14 +279,18 @@ async def worker_task(worker_id: int) -> None:
                     logger.info("[Worker %d] Processing job %s for document %s", worker_id, job.id, job.document_id)
                     await process_embedding_job(job, db)
                 else:
-                    await asyncio.sleep(2)
+                    await sleep_or_shutdown(2)
         except Exception as e:
             logger.error("[Worker %d] Error: %s", worker_id, e, exc_info=True)
-            await asyncio.sleep(5)
+            await sleep_or_shutdown(5)
+    logger.info("[Worker %d] exited cleanly", worker_id)
 
 
 async def worker_loop() -> None:
     """Main loop: N workers processing embedding jobs."""
+    from app.worker.shutdown import install_handlers
+    install_handlers(worker_name="embedding-worker")
+
     logger.info("Embedding worker %s starting (concurrency=%d)", WORKER_ID, EMBEDDING_WORKER_CONCURRENCY)
     try:
         from app.migrations.add_embedding_tables import migrate as migrate_embedding_tables
@@ -293,6 +303,7 @@ async def worker_loop() -> None:
         for i in range(EMBEDDING_WORKER_CONCURRENCY)
     ]
     await asyncio.gather(*workers)
+    logger.info("All embedding workers exited. Shutdown complete.")
 
 
 def main():

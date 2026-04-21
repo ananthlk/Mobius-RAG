@@ -187,7 +187,20 @@ async def process_job(job: ChunkingJob, db: AsyncSession, *, worker_cfg: WorkerC
 # ---------------------------------------------------------------------------
 
 async def worker_loop():
-    """Main worker loop — polls for pending jobs and processes them."""
+    """Main worker loop — polls for pending jobs and processes them.
+
+    Graceful shutdown: installs SIGTERM/SIGINT handlers on start;
+    the loop polls ``is_shutting_down()`` between iterations so
+    in-flight jobs complete naturally before exit. DB rows locked
+    by a half-finished session release automatically on rollback —
+    the stale-recovery sweep (already running as the first step of
+    each iteration) picks them up on restart.
+    """
+    from app.worker.shutdown import (
+        install_handlers, is_shutting_down, sleep_or_shutdown,
+    )
+    install_handlers(worker_name="chunking-worker")
+
     cfg = load_worker_config()
     logger.info("Worker %s starting...", WORKER_ID)
 
@@ -208,7 +221,7 @@ async def worker_loop():
             logger.warning("Startup migration (%s) skipped/failed: %s", label, migrate_err)
 
     poll_count = 0
-    while True:
+    while not is_shutting_down():
         try:
             # ── Periodic stale-job recovery ──────────────────────────────
             if poll_count % cfg.stale_recovery_interval_polls == 0:
@@ -243,10 +256,15 @@ async def worker_loop():
                     poll_count += 1
                     if poll_count % 10 == 0:
                         logger.debug("No pending jobs (poll #%s)", poll_count)
-                    await asyncio.sleep(cfg.poll_interval_seconds)
+                    # Shutdown-aware sleep: returns immediately on
+                    # SIGTERM so drain latency is ~100ms, not the
+                    # full poll interval (typically 5-10s).
+                    await sleep_or_shutdown(cfg.poll_interval_seconds)
         except Exception as e:
             logger.error("Error in worker loop: %s", e, exc_info=True)
-            await asyncio.sleep(cfg.error_sleep_seconds)
+            await sleep_or_shutdown(cfg.error_sleep_seconds)
+
+    logger.info("Worker %s shutting down cleanly — loop exited.", WORKER_ID)
 
 
 # ---------------------------------------------------------------------------

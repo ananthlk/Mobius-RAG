@@ -35,6 +35,32 @@ def start_worker():
     logger.info("RAG chunking worker started in background thread")
 
 
+@app.on_event("shutdown")
+def stop_worker():
+    """Cloud Run SIGTERM drain hook.
+
+    Signal handlers installed by the worker's own thread don't fire
+    on process SIGTERM (signal.signal is main-thread only), so
+    FastAPI's shutdown lifecycle — which runs on the main thread —
+    bridges via request_shutdown(). The worker loop's
+    ``while not is_shutting_down():`` guard breaks on its next
+    iteration, and any in-flight chunking job finishes naturally
+    within Cloud Run's 10s drain window (DB row FOR UPDATE lock
+    releases on session rollback if SIGKILL lands mid-job, and
+    stale-recovery picks up the job on the next worker start).
+    """
+    try:
+        from app.worker.shutdown import request_shutdown
+        request_shutdown(source="fastapi-shutdown")
+        logger.info("Shutdown requested; waiting up to 10s for worker to drain")
+        if _worker_thread:
+            _worker_thread.join(timeout=10)
+            if _worker_thread.is_alive():
+                logger.warning("Worker did not drain within 10s — Cloud Run will SIGKILL")
+    except Exception as e:
+        logger.warning("Shutdown hook failed (non-fatal): %s", e)
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "mobius-rag-chunking-worker"}
