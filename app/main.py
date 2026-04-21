@@ -58,7 +58,15 @@ app = FastAPI(title="Mobius RAG", version="0.1.0")
 
 @app.on_event("startup")
 async def run_startup_migrations():
-    """Schedule migrations in background so the server binds to PORT immediately (Cloud Run)."""
+    """Schedule migrations in background so the server binds to PORT immediately (Cloud Run).
+
+    Before scheduling anything, run ``assert_hosted_config`` synchronously
+    so misconfigured prod/staging deploys refuse to boot instead of binding
+    to PORT and silently failing on first LLM call. No-op in ENV=dev.
+    """
+    from app.config import assert_hosted_config
+    assert_hosted_config()
+
     asyncio.create_task(_run_startup_migrations_background())
 
 
