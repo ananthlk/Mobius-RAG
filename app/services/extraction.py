@@ -162,9 +162,6 @@ async def extract_facts(
     Returns:
         Dict with 'summary' and 'facts' keys
     """
-    if llm is None:
-        llm = get_llm_provider()
-
     block = _paragraph_block(paragraph_text, section_path)
     if critique_feedback:
         template = retry_extraction_prompt_body if retry_extraction_prompt_body else RETRY_EXTRACTION_PROMPT
@@ -177,7 +174,19 @@ async def extract_facts(
         template = extraction_prompt_body if extraction_prompt_body else EXTRACTION_PROMPT
         prompt = _safe_format(template, paragraph_block=block)
     try:
-        response = await llm.generate(prompt)
+        # Default path: route through chat's LLM Manager so Thompson-
+        # bandit stats cover rag. Callers that pass an explicit ``llm``
+        # (tests, legacy direct paths) keep working against the old
+        # provider interface.
+        if llm is None:
+            from app.services import llm_manager_client
+            response, _usage = await llm_manager_client.generate(
+                user=prompt,
+                stage="rag_extraction",
+                max_tokens=4096,
+            )
+        else:
+            response = await llm.generate(prompt)
         result = parse_json_response(response)
         if "summary" not in result:
             result["summary"] = ""
@@ -217,8 +226,6 @@ async def stream_extract_facts(
 
     Optional: extraction_prompt_body, retry_extraction_prompt_body, llm (provider instance).
     """
-    if llm is None:
-        llm = get_llm_provider()
     block = _paragraph_block(paragraph_text, section_path)
     if critique_feedback:
         template = retry_extraction_prompt_body if retry_extraction_prompt_body else RETRY_EXTRACTION_PROMPT
@@ -230,12 +237,28 @@ async def stream_extract_facts(
     else:
         template = extraction_prompt_body if extraction_prompt_body else EXTRACTION_PROMPT
         prompt = _safe_format(template, paragraph_block=block)
-    
-    # Stream response and collect
+
+    # 2026-04-21: default path is now the shared LLM Manager proxy
+    # (non-streaming — chat's /internal/skill-llm returns the full
+    # text). Callers that pass an explicit ``llm`` keep the streaming
+    # contract for legacy direct-provider paths.
+    #
+    # Streaming UX (token-by-token to SSE) is lost here. Tradeoff: we
+    # gain unified Thompson-bandit data + consistent model selection
+    # across chat and rag. When streaming matters enough, add a
+    # streaming variant to chat's manager proxy.
     try:
-        async for chunk in llm.stream_generate(prompt):
-            yield chunk
+        if llm is None:
+            from app.services import llm_manager_client
+            text, _usage = await llm_manager_client.generate(
+                user=prompt,
+                stage="rag_extraction",
+                max_tokens=4096,
+            )
+            yield text
+        else:
+            async for chunk in llm.stream_generate(prompt):
+                yield chunk
     except Exception as e:
         logger.error(f"Error in stream_extract_facts: {e}", exc_info=True)
-        # Yield error message as chunk so caller can handle it
         yield f'\n{{"error": "Stream failed: {str(e)}"}}'

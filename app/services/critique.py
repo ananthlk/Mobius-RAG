@@ -147,9 +147,6 @@ async def critique_extraction(
     Returns:
         Dict with 'pass', 'feedback', 'issues', 'confidence'
     """
-    if llm is None:
-        llm = get_llm_provider()
-
     facts_list = _format_facts_list(extraction_result)
     template = critique_prompt_body if critique_prompt_body else CRITIQUE_PROMPT
     prompt = _safe_format(template,
@@ -159,7 +156,17 @@ async def critique_extraction(
     )
 
     try:
-        response = await llm.generate(prompt)
+        # Default: route via shared LLM Manager. Callers passing
+        # ``llm`` keep the legacy direct-provider path (tests + etc.).
+        if llm is None:
+            from app.services import llm_manager_client
+            response, _usage = await llm_manager_client.generate(
+                user=prompt,
+                stage="rag_critique",
+                max_tokens=2048,
+            )
+        else:
+            response = await llm.generate(prompt)
         result = parse_json_response(response)
         return normalize_critique_result(result)
     except json.JSONDecodeError as e:
@@ -192,10 +199,11 @@ async def stream_critique(
 ):
     """
     Stream critique response. Optional: critique_prompt_body, llm (provider instance).
-    """
-    if llm is None:
-        llm = get_llm_provider()
 
+    2026-04-21: default path routes through chat's LLM Manager
+    (non-streaming — yields the full response as one chunk).
+    Explicit ``llm`` keeps the streaming contract for legacy callers.
+    """
     facts_list = _format_facts_list(extraction_result)
     template = critique_prompt_body if critique_prompt_body else CRITIQUE_PROMPT
     prompt = _safe_format(template,
@@ -203,8 +211,23 @@ async def stream_critique(
         summary=extraction_result.get("summary", ""),
         facts_list="\n".join(facts_list) if facts_list else "No facts extracted"
     )
-    
-    # Stream response
+
+    if llm is None:
+        try:
+            from app.services import llm_manager_client
+            text, _usage = await llm_manager_client.generate(
+                user=prompt,
+                stage="rag_critique",
+                max_tokens=2048,
+            )
+            yield text
+            return
+        except Exception as e:
+            logger.error(f"stream_critique manager path failed: {e}", exc_info=True)
+            yield f'\n{{"error": "Critique stream failed: {str(e)}"}}'
+            return
+
+    # Stream response (legacy direct-provider path)
     try:
         async for chunk in llm.stream_generate(prompt):
             yield chunk
