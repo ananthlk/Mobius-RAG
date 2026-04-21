@@ -5156,12 +5156,18 @@ async def get_policy_lexicon_stats(
 
     tag_expr = "policy_lines.p_tags" if kind_norm == "p" else ("COALESCE(policy_lines.inferred_d_tags, policy_lines.d_tags)" if use_inferred_d else "policy_lines.d_tags")
 
+    # 2026-04-21: added ``jsonb_typeof = 'object'`` guard. Some rows
+    # store JSON scalars or arrays in tag-columns (legacy migration
+    # artifacts); without the guard ``jsonb_each_text`` raises
+    # "cannot call jsonb_each_text on a non-object" and the whole
+    # endpoint returns HTTP 500.
     base_sql = f"""
         WITH base AS (
             SELECT policy_lines.document_id AS document_id, {tag_expr} AS tag_map
             FROM policy_lines
             WHERE policy_lines.is_atomic = TRUE
               AND {tag_expr} IS NOT NULL
+              AND jsonb_typeof({tag_expr}) = 'object'
         ),
         kv AS (
             SELECT document_id, (e.key)::text AS tag, (e.value)::float AS score
@@ -5189,6 +5195,7 @@ async def get_policy_lexicon_stats(
                 FROM policy_lines
                 WHERE policy_lines.is_atomic = TRUE
                   AND {tag_expr} IS NOT NULL
+                  AND jsonb_typeof({tag_expr}) = 'object'
             ),
             kv AS (
                 SELECT document_id, (e.key)::text AS tag, (e.value)::float AS score
@@ -5236,12 +5243,16 @@ async def get_policy_lexicon_document_stats(
         raise HTTPException(status_code=400, detail="kind must be p or d")
 
     tag_expr = "policy_lines.p_tags" if kind_norm == "p" else ("COALESCE(policy_lines.inferred_d_tags, policy_lines.d_tags)" if use_inferred_d else "policy_lines.d_tags")
+    # Same ``jsonb_typeof = 'object'`` guard as the other stats endpoints
+    # (4893, 4998, 5041, 5163). Without it, rows with scalar/array
+    # tag-maps cause jsonb_each_text to raise InvalidParameterValueError.
     sql = f"""
         WITH base AS (
             SELECT policy_lines.document_id AS document_id, {tag_expr} AS tag_map
             FROM policy_lines
             WHERE policy_lines.is_atomic = TRUE
               AND {tag_expr} IS NOT NULL
+              AND jsonb_typeof({tag_expr}) = 'object'
         ),
         kv AS (
             SELECT document_id, (e.key)::text AS tag, (e.value)::float AS score
