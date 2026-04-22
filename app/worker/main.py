@@ -352,7 +352,12 @@ async def _resolve_llm(job: ChunkingJob, db: AsyncSession):
             from app.services.llm_provider import get_llm_provider
             llm = get_llm_provider()
         except Exception as e:
-            logger.error("[JOB %s] get_llm_provider failed: %s", job.id, e, exc_info=True)
+            # Non-fatal: extraction.py / critique.py fall through to the
+            # shared llm_manager_client (chat's /internal/skill-llm) when
+            # llm is None. The direct Vertex SDK is now a dev-only fallback
+            # and may legitimately be absent locally.
+            logger.info("[JOB %s] Direct LLM provider unavailable (%s); routing through shared LLM Manager",
+                        job.id, e.__class__.__name__)
             return None
     return llm
 

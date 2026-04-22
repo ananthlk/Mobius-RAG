@@ -416,6 +416,40 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def _admin_auth_middleware(request: Request, call_next):
+    """Gate /admin/* behind ADMIN_API_KEY.
+
+    * Hosted (ENV in {prod, staging}):
+        - ADMIN_API_KEY unset → /admin/* returns 503 (fail-closed; the
+          gate is explicit so an unconfigured deploy cannot silently
+          expose cleanup/db endpoints).
+        - ADMIN_API_KEY set → require X-Admin-Key header to match.
+    * Dev: if ADMIN_API_KEY is set, enforce it (so devs can rehearse
+      the hosted flow locally); otherwise bypass.
+    """
+    path = request.url.path
+    if path.startswith("/admin/"):
+        from app.config import ADMIN_API_KEY, ENV as _ENV
+        is_hosted = _ENV.strip().lower() in ("prod", "staging")
+        if is_hosted and not ADMIN_API_KEY:
+            return JSONResponse(
+                {"error": "admin_disabled",
+                 "detail": "ADMIN_API_KEY not configured; /admin/* is disabled in hosted mode."},
+                status_code=503,
+            )
+        if ADMIN_API_KEY:
+            presented = request.headers.get("x-admin-key") or ""
+            # constant-time compare
+            import hmac as _hmac
+            if not _hmac.compare_digest(presented, ADMIN_API_KEY):
+                return JSONResponse(
+                    {"error": "unauthorized", "detail": "invalid or missing X-Admin-Key"},
+                    status_code=401,
+                )
+    return await call_next(request)
+
+
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
@@ -2006,9 +2040,29 @@ async def upload_file(
 
     try:
         logger.info(f"Starting upload for file: {file.filename}")
-        
-        # Read file contents
-        contents = await file.read()
+
+        # Enforce upload size cap BEFORE buffering the full body into
+        # memory. Streams the SpooledTemporaryFile 1 MB at a time so a
+        # 10 GB adversarial POST trips the limit after ~100 MB instead
+        # of OOMing the process.
+        from app.config import MAX_UPLOAD_SIZE_BYTES, MAX_UPLOAD_SIZE_MB
+        buf = bytearray()
+        chunk_size = 1024 * 1024
+        while True:
+            chunk = await file.read(chunk_size)
+            if not chunk:
+                break
+            buf.extend(chunk)
+            if len(buf) > MAX_UPLOAD_SIZE_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail={
+                        "error": "file_too_large",
+                        "message": f"Upload exceeds {MAX_UPLOAD_SIZE_MB} MB limit.",
+                        "limit_mb": MAX_UPLOAD_SIZE_MB,
+                    },
+                )
+        contents = bytes(buf)
         logger.info(f"File read, size: {len(contents)} bytes")
         
         # Compute SHA-256 hash

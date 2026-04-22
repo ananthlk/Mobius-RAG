@@ -72,6 +72,22 @@ VERTEX_MODEL = os.getenv("VERTEX_MODEL", "gemini-2.5-flash")
 # User can override via ?threshold=.
 CRITIQUE_RETRY_THRESHOLD = float(os.getenv("CRITIQUE_RETRY_THRESHOLD", "0.6"))
 
+# ── Uploads ──────────────────────────────────────────────────────────
+# Hard cap on single-file upload size. Enforced in /upload before we
+# allocate a full in-memory read. Default 100 MB — large enough for a
+# multi-hundred-page provider manual PDF, small enough to keep a single
+# Cloud Run instance from OOM on adversarial traffic.
+MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "100"))
+MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
+
+# ── Admin auth ───────────────────────────────────────────────────────
+# All /admin/* routes require X-Admin-Key to match this value in hosted
+# mode. If unset in hosted mode, /admin/* is blocked entirely (503) —
+# the whole point is that prod without a key configured should be safer
+# than prod with an open admin surface. Dev (ENV=dev) bypasses the
+# check unless ADMIN_API_KEY is explicitly set.
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY")
+
 # ── Embeddings ───────────────────────────────────────────────────────
 # Defaults to Vertex when VERTEX_PROJECT_ID is set. OpenAI path kept
 # as an alternative; no Ollama fallback. Must stay at 1536 dims to
