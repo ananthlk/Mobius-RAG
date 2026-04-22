@@ -35,15 +35,51 @@ ENV = os.getenv("ENV", "dev")  # dev | prod
 _IS_HOSTED = ENV.strip().lower() in ("prod", "staging")
 
 # ── Database ─────────────────────────────────────────────────────────
-# Cloud SQL only; no localhost fallback. Set DATABASE_URL in .env:
-# postgresql+asyncpg://postgres:PASSWORD@<host>:5432/mobius_rag
-DATABASE_URL = os.getenv("DATABASE_URL")
+# Cloud SQL only; no localhost fallback.
+#
+# URL precedence matches chat's db_client.py so both services read the
+# same env in the same order:
+#     CHAT_RAG_DATABASE_URL  (preferred — names the target DB explicitly)
+#   > RAG_DATABASE_URL       (legacy)
+#   > DATABASE_URL           (oldest rag-only name; still accepted)
+DATABASE_URL = (
+    os.getenv("CHAT_RAG_DATABASE_URL")
+    or os.getenv("RAG_DATABASE_URL")
+    or os.getenv("DATABASE_URL")
+)
 if not DATABASE_URL:
     raise ValueError(
-        "DATABASE_URL is required. Point to Cloud SQL "
+        "No database URL set. Set one of CHAT_RAG_DATABASE_URL, "
+        "RAG_DATABASE_URL, or DATABASE_URL to the Cloud SQL instance "
         "(e.g. postgresql+asyncpg://postgres:PASSWORD@34.135.72.145:5432/mobius_rag). "
         "See docs/MIGRATE_LOCAL_TO_CLOUD.md"
     )
+
+# ── Database pool + server-side timeouts ─────────────────────────────
+# Pool sizing: the old pool_size=1/max_overflow=2 was so tight that a
+# running chunking worker starved the API of fresh connections, causing
+# TimeoutErrors on /documents during ingestion. Bump to comfortable
+# shared pool; Cloud SQL db-custom-2-7680 supports 100 conns, so 5+10
+# per service instance leaves plenty of headroom.
+DB_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "5"))
+DB_MAX_OVERFLOW = int(os.getenv("DB_MAX_OVERFLOW", "10"))
+
+# Server-side per-statement timeout (ms). Kills runaway queries (e.g.
+# DELETE against a locked row holding the entire queue hostage) after
+# this deadline. 10 minutes is generous for the heaviest chunking
+# operations (clear_policy_data on a 100+ page doc) while still
+# short enough that a crashed backend holding a transaction unblocks
+# the queue within a bounded window instead of "25 hours" (see tonight's
+# dev-smoke incident 2026-04-21).
+DB_STATEMENT_TIMEOUT_MS = int(os.getenv("DB_STATEMENT_TIMEOUT_MS", "600000"))
+
+# Server-side idle-in-transaction timeout (ms). If a backend begins a
+# transaction and then stops sending anything — the canonical orphan
+# case when a worker process is SIGKILLed mid-job — Postgres auto-
+# aborts the session after this idle window, releasing every lock it
+# held. 5 minutes is well past any legitimate "finish this chunk" pause
+# but short enough that orphans don't accumulate across a workday.
+DB_IDLE_IN_TXN_TIMEOUT_MS = int(os.getenv("DB_IDLE_IN_TXN_TIMEOUT_MS", "300000"))
 
 # ── GCS ──────────────────────────────────────────────────────────────
 GCS_BUCKET = os.getenv("GCS_BUCKET", "mobius-rag-uploads-mobiusos")
