@@ -269,8 +269,30 @@ async def clear_policy_for_document(db: AsyncSession, doc_uuid: UUID) -> None:
     aborted, commands ignored`` errors that then crash the whole job
     and force stale-recovery (observed in dev-smoke 2026-04-23).
     """
-    batch_size = 5000
+    # Batch size tuned for the worst case: a 200K-row delete on a
+    # table with 3 indexes and residual row locks from prior crashed
+    # workers. 500 rows per batch finishes in well under a second even
+    # under heavy lock contention, so we never burn a full 10-min
+    # statement_timeout on a single statement.
+    batch_size = 500
     try:
+        # Pre-check: if no rows exist for this doc, skip all DELETE
+        # work. Cheap index lookup, and avoids hundreds of no-op
+        # batch DELETEs on re-runs where a prior coordinator already
+        # cleared everything before crashing mid-chunking.
+        existing = await db.execute(
+            text("SELECT 1 FROM policy_lines WHERE document_id = :doc_id LIMIT 1"),
+            {"doc_id": str(doc_uuid)},
+        )
+        if existing.first() is None:
+            logger.info("[db] clear_policy_for_document: %s already empty, skip", doc_uuid)
+            # Still clear paragraphs (sibling table) — usually tiny.
+            res2 = await db.execute(
+                delete(PolicyParagraph).where(PolicyParagraph.document_id == doc_uuid)
+            )
+            await db.commit()
+            return
+
         # Delete policy_lines in batches using ctid for efficient paging
         # (works even when (document_id) index is skewed).
         deleted_lines = 0
