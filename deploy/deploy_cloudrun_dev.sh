@@ -31,7 +31,7 @@ CHAT_INTERNAL_LLM_URL="https://mobius-chat-ortabkknqa-uc.a.run.app/internal/skil
 # uses `postgres@` (no password) with the auth-proxy; rag historically
 # uses `mobius_app` with a password. Keep the latter for parity with
 # staging.
-DB_USER="mobius_app"
+DB_USER="postgres"
 DB_PASS_SECRET="db-password"  # Secret Manager secret that has the rag DB password
 # Read the password so we can inline it (gcloud run deploy doesn't
 # support --set-secrets for URL-embedded passwords).
