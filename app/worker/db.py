@@ -255,14 +255,58 @@ async def write_event(
 # ---------------------------------------------------------------------------
 
 async def clear_policy_for_document(db: AsyncSession, doc_uuid: UUID) -> None:
-    """Delete existing PolicyLine + PolicyParagraph rows for *doc_uuid*."""
+    """Delete existing PolicyLine + PolicyParagraph rows for *doc_uuid*.
+
+    Batched delete so a doc with hundreds of thousands of policy_lines
+    fits comfortably under the server-side statement_timeout (10 min).
+    Each batch commits on its own; if we're interrupted mid-way, a
+    subsequent retry of ``clear_policy_for_document`` just continues
+    from the remaining rows.
+
+    On ANY failure we MUST rollback — leaving the session in an
+    "InFailedSQLTransaction" state poisons every subsequent statement
+    in this worker's session, manifesting as ``current transaction is
+    aborted, commands ignored`` errors that then crash the whole job
+    and force stale-recovery (observed in dev-smoke 2026-04-23).
+    """
+    batch_size = 5000
     try:
-        await db.execute(delete(PolicyLine).where(PolicyLine.document_id == doc_uuid))
-        await db.execute(delete(PolicyParagraph).where(PolicyParagraph.document_id == doc_uuid))
-        await db.flush()
-        logger.info("[db] Cleared policy paragraphs/lines for %s", doc_uuid)
+        # Delete policy_lines in batches using ctid for efficient paging
+        # (works even when (document_id) index is skewed).
+        deleted_lines = 0
+        while True:
+            res = await db.execute(
+                text(
+                    "DELETE FROM policy_lines WHERE ctid IN ("
+                    "SELECT ctid FROM policy_lines "
+                    "WHERE document_id = :doc_id LIMIT :lim)"
+                ),
+                {"doc_id": str(doc_uuid), "lim": batch_size},
+            )
+            await db.commit()
+            n = res.rowcount or 0
+            deleted_lines += n
+            if n < batch_size:
+                break
+
+        # policy_paragraphs is a much smaller sibling; do it unbatched.
+        res2 = await db.execute(
+            delete(PolicyParagraph).where(PolicyParagraph.document_id == doc_uuid)
+        )
+        await db.commit()
+        logger.info(
+            "[db] Cleared policy rows for %s: %d lines, %d paragraphs",
+            doc_uuid, deleted_lines, res2.rowcount or 0,
+        )
     except Exception as exc:
-        logger.warning("[db] clear_policy_for_document (non-fatal): %s", exc)
+        # Critical: rollback BEFORE returning so the caller's session
+        # is usable. Previously we only logged and the next statement
+        # hit InFailedSQLTransactionError (see git blame).
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        logger.warning("[db] clear_policy_for_document (non-fatal, rolled back): %s", exc)
 
 
 # ---------------------------------------------------------------------------
