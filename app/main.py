@@ -35,8 +35,9 @@ from app.services.critique import stream_critique, critique_extraction, normaliz
 from app.services.utils import parse_json_response, default_termination_date, sanitize_text_for_db
 from app.services.publish import publish_document, PublishResult
 
-# Set up logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# Set up logging (JSON to stderr in hosted; pretty in dev)
+from app.logging_setup import configure_logging
+configure_logging("mobius-rag-api", level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 # Set specific loggers to appropriate levels
 logging.getLogger('sqlalchemy.engine').setLevel(logging.WARNING)  # Reduce SQLAlchemy verbosity
@@ -453,6 +454,101 @@ async def _admin_auth_middleware(request: Request, call_next):
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
+
+@app.get("/health/deep")
+async def health_deep(db: AsyncSession = Depends(get_db)):
+    """Deep health check for autoscaler + alerting.
+
+    Returns 200 when all invariants hold; 503 with a detailed body
+    when any invariant is violated. Cloud Run's startup/liveness
+    probes should hit ``/health`` (cheap), and the alerting
+    uptime-check should hit this endpoint.
+
+    Invariants checked (all cheap — each query uses indexed columns):
+
+    * ``chunking_jobs`` in ``processing`` for >30 min WITHOUT a
+      heartbeat in the last 5 min (same gate as stale-recovery) —
+      proxy for "hung worker, operator needs to look".
+    * ``embedding_jobs`` in ``processing`` for >15 min — embeddings
+      are fast (typically <2 min even for a 200-chunk doc), so
+      anything >15 min means the embedding worker is wedged.
+    * Recent ``documents.has_errors`` critical count — spike
+      indicates an ingestion regression.
+
+    The endpoint never 5xx's by itself; DB unreachability returns
+    503 with a db_unreachable message so the uptime check shows the
+    real cause. Per-check latency budget is ~1 second total; if this
+    is slow, the autoscaler metric will be noisy.
+    """
+    from sqlalchemy import text
+    problems: list[dict] = []
+    try:
+        # Stuck chunking jobs — match the stale-recovery heartbeat gate.
+        r = await db.execute(text(
+            """
+            SELECT count(*) FROM chunking_jobs j
+            WHERE j.status = 'processing'
+              AND j.started_at < now() - interval '30 minutes'
+              AND NOT EXISTS (
+                  SELECT 1 FROM chunking_events e
+                  WHERE e.document_id = j.document_id
+                    AND e.created_at > now() - interval '5 minutes'
+              )
+            """
+        ))
+        n_stuck_chunk = r.scalar() or 0
+        if n_stuck_chunk > 0:
+            problems.append({
+                "check": "stuck_chunking_jobs",
+                "count": n_stuck_chunk,
+                "detail": "chunking_jobs in 'processing' >30min with no heartbeat in last 5min",
+            })
+
+        # Stuck embedding jobs (simpler — embeddings don't heartbeat).
+        r2 = await db.execute(text(
+            """
+            SELECT count(*) FROM embedding_jobs
+            WHERE status = 'processing'
+              AND started_at < now() - interval '15 minutes'
+            """
+        ))
+        n_stuck_embed = r2.scalar() or 0
+        if n_stuck_embed > 0:
+            problems.append({
+                "check": "stuck_embedding_jobs",
+                "count": n_stuck_embed,
+                "detail": "embedding_jobs in 'processing' >15min",
+            })
+
+        # Critical-error spike in the last hour.
+        r3 = await db.execute(text(
+            """
+            SELECT count(*) FROM processing_errors
+            WHERE severity = 'critical'
+              AND created_at > now() - interval '1 hour'
+            """
+        ))
+        n_critical = r3.scalar() or 0
+        if n_critical > 10:
+            problems.append({
+                "check": "critical_error_spike",
+                "count": n_critical,
+                "detail": ">10 critical errors logged in last hour",
+            })
+
+    except Exception as exc:
+        return JSONResponse(
+            {"status": "unhealthy", "error": "db_unreachable", "detail": str(exc)[:500]},
+            status_code=503,
+        )
+
+    if problems:
+        return JSONResponse(
+            {"status": "unhealthy", "problems": problems},
+            status_code=503,
+        )
+    return {"status": "ok", "checks": ["stuck_chunking_jobs", "stuck_embedding_jobs", "critical_error_spike"]}
 
 
 @app.post("/admin/cleanup-stale-jobs")

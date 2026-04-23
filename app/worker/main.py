@@ -30,10 +30,11 @@ from app.worker.db import (
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - [WORKER] - %(levelname)s - %(message)s",
-)
+# Logging is configured lazily from ``worker_loop`` / ``main`` so that
+# merely importing ``app.worker.shutdown`` (which pulls this module via
+# the package __init__ re-exports) does NOT reconfigure the root logger
+# of a different entrypoint — previously this clobbered the embedding
+# worker's JSON service name.
 logger = logging.getLogger(__name__)
 
 
@@ -196,6 +197,9 @@ async def worker_loop():
     the stale-recovery sweep (already running as the first step of
     each iteration) picks them up on restart.
     """
+    from app.logging_setup import configure_logging
+    configure_logging("mobius-rag-chunker")
+
     from app.worker.shutdown import (
         install_handlers, is_shutting_down, sleep_or_shutdown,
     )
@@ -211,6 +215,7 @@ async def worker_loop():
         ("embeddable_units", "app.migrations.add_embeddable_units"),
         ("document_tags", "app.migrations.add_document_tags"),
         ("fix_offset_type", "app.migrations.fix_policy_lines_offset_type"),
+        ("policy_lines_autovacuum", "app.migrations.tune_policy_lines_autovacuum"),
     ]
     for label, mod_path in _run_startup_migrations_sync:
         try:

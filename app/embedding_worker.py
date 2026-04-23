@@ -20,10 +20,9 @@ from app.models import HierarchicalChunk, ExtractedFact, EmbeddingJob, ChunkEmbe
 from app.services.embedding_provider import get_embedding_provider, embed_async
 from app.services.vector_store import get_vector_store
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - [EMBED-WORKER] - %(levelname)s - %(message)s",
-)
+# Logging configured lazily in ``worker_loop`` so importing this module
+# doesn't override another entrypoint's log config (see parallel note
+# in app/worker/main.py).
 logger = logging.getLogger(__name__)
 
 WORKER_ID = f"embed-worker-{os.getpid()}-{datetime.now(timezone.utc).isoformat()}"
@@ -288,6 +287,9 @@ async def worker_task(worker_id: int) -> None:
 
 async def worker_loop() -> None:
     """Main loop: N workers processing embedding jobs."""
+    from app.logging_setup import configure_logging
+    configure_logging("mobius-rag-embedder")
+
     from app.worker.shutdown import install_handlers
     install_handlers(worker_name="embedding-worker")
 

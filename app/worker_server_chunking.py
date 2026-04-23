@@ -8,10 +8,8 @@ import threading
 
 from fastapi import FastAPI
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - [CHUNK-WORKER] - %(levelname)s - %(message)s",
-)
+from app.logging_setup import configure_logging
+configure_logging("mobius-rag-chunker")
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Mobius RAG Chunking Worker", version="0.1.0")

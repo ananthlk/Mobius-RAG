@@ -47,42 +47,79 @@ async def recover_stale_jobs(
     db: AsyncSession,
     timeout_minutes: float = 10.0,
     worker_id: str | None = None,
+    heartbeat_timeout_minutes: float | None = None,
 ) -> int:
-    """Reset jobs stuck in 'processing' for longer than *timeout_minutes*.
+    """Reset jobs stuck in 'processing' whose worker appears dead.
 
-    This catches jobs whose workers died (crash, restart, OOM) without
-    transitioning the job to ``failed``.  Resets them to ``pending`` so
-    a healthy worker can pick them up.
+    Heartbeat-aware: a job is only reset if it meets BOTH conditions:
+
+    1. ``started_at`` is older than ``timeout_minutes`` (default 10).
+    2. No ``chunking_events`` row has been emitted for that document
+       in the last ``heartbeat_timeout_minutes`` (default 5).
+
+    The second gate matters because legitimate long runs (e.g. a
+    100-page PDF that takes 20+ min under Path B lexicon tagging)
+    previously got reset mid-run — wiping the in-flight ``_run_job``
+    closure, so the post-coordinator ``enqueue_embedding_job`` call
+    never ran. Doc ended up with ``chunking_status=completed`` but
+    no embedding job, invisible until someone notices weeks later.
+    (Observed dev-smoke 2026-04-23.)
+
+    ``chunking_events`` is written by ``ctx.emit`` after every
+    paragraph + progress tick. A live worker under any real workload
+    emits far more often than once per 5 minutes; 5 minutes of
+    silence means the worker process is actually dead.
 
     Returns the number of recovered jobs.
     """
     from datetime import timedelta
 
-    cutoff = _utc_now_naive() - timedelta(minutes=timeout_minutes)
+    if heartbeat_timeout_minutes is None:
+        heartbeat_timeout_minutes = max(5.0, timeout_minutes / 2)
 
-    stmt = (
-        update(ChunkingJob)
-        .where(
-            ChunkingJob.status == "processing",
-            ChunkingJob.started_at < cutoff,
-        )
-        .values(
-            status="pending",
-            worker_id=None,
-            started_at=None,
-            error_message=f"Auto-recovered: stuck in processing >{timeout_minutes}min (by {worker_id or 'unknown'})",
-        )
-        .returning(ChunkingJob.id, ChunkingJob.document_id)
+    started_cutoff = _utc_now_naive() - timedelta(minutes=timeout_minutes)
+    heartbeat_cutoff = _utc_now_naive() - timedelta(minutes=heartbeat_timeout_minutes)
+
+    # Use a raw-SQL CTE because SQLAlchemy Core's NOT EXISTS subquery
+    # syntax across an update...returning path on the same table is
+    # ugly; the SQL is clearer as a statement.
+    stmt = text(
+        """
+        UPDATE chunking_jobs AS j
+        SET status = 'pending',
+            worker_id = NULL,
+            started_at = NULL,
+            error_message = :msg
+        WHERE j.status = 'processing'
+          AND j.started_at < :started_cutoff
+          AND NOT EXISTS (
+              SELECT 1 FROM chunking_events e
+              WHERE e.document_id = j.document_id
+                AND e.created_at > :heartbeat_cutoff
+          )
+        RETURNING j.id, j.document_id
+        """
     )
-
-    result = await db.execute(stmt)
+    msg = (
+        f"Auto-recovered: started >{timeout_minutes}min ago AND no heartbeat "
+        f"in last {heartbeat_timeout_minutes}min (by {worker_id or 'unknown'})"
+    )
+    result = await db.execute(
+        stmt,
+        {
+            "msg": msg,
+            "started_cutoff": started_cutoff,
+            "heartbeat_cutoff": heartbeat_cutoff,
+        },
+    )
     recovered = result.fetchall()
     await db.commit()
 
     for job_id, doc_id in recovered:
         logger.warning(
-            "[stale-recovery] Reset job %s (doc %s) from processing -> pending",
-            job_id, doc_id,
+            "[stale-recovery] Reset job %s (doc %s) — no heartbeat "
+            "in %.0fmin, started >%0.fmin ago",
+            job_id, doc_id, heartbeat_timeout_minutes, timeout_minutes,
         )
     return len(recovered)
 
