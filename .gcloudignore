@@ -1,0 +1,36 @@
+# Don't upload these to Cloud Build context
+.git
+.gitignore
+.venv
+.env
+.env.*
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.ruff_cache
+*.egg-info
+
+# Node: ship the built dist, never node_modules or source-only tooling
+frontend/node_modules
+frontend/src
+frontend/.vite
+frontend/eslint.config.js
+frontend/tsconfig*.json
+frontend/vite.config.*
+
+# Local databases / data
+*.sqlite
+*.db
+data/
+
+# Logs
+logs/
+*.log
+
+# Documentation and test artifacts — not needed in the container
+docs/
+tests/
+scripts/
