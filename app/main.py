@@ -1423,13 +1423,34 @@ async def update_document_metadata(
     doc = result.scalar_one_or_none()
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
+
+    # Canonicalize controlled fields so case typos ("Sunshine health" vs
+    # "Sunshine Health") don't drift the row out of payer/state/program-
+    # filtered retrieval downstream. Filters in Chroma + chat Postgres
+    # are exact-match string compares — one PATCH with bad case poisons
+    # every subsequent search until manually patched in 4 stores. See
+    # app/services/metadata_canonical.py for the canonical lists.
+    from app.services.metadata_canonical import (
+        canonical_payer, canonical_state, canonical_program,
+        canonical_authority_level,
+    )
+    _CANON: dict = {
+        "payer":           canonical_payer,
+        "state":           canonical_state,
+        "program":         canonical_program,
+        "authority_level": canonical_authority_level,
+    }
+
     for key in ("display_name", "payer", "state", "program", "authority_level", "effective_date", "termination_date"):
         if key in body:
             val = body[key]
             if val is None or (isinstance(val, str) and val.strip() == ""):
                 setattr(doc, key, None)
             else:
-                setattr(doc, key, val if isinstance(val, str) else str(val))
+                str_val = val if isinstance(val, str) else str(val)
+                if key in _CANON:
+                    str_val = _CANON[key](str_val)
+                setattr(doc, key, str_val)
     # Allow setting status to "completed" for uploaded docs (e.g. scraped pages) so chunking can start
     if body.get("status") == "completed" and doc.status == "uploaded":
         pages_result = await db.execute(select(DocumentPage).where(DocumentPage.document_id == doc_uuid))
@@ -2133,6 +2154,18 @@ async def upload_file(
 ):
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided")
+
+    # Normalize controlled metadata fields BEFORE the row is created.
+    # Keeps "Sunshine health" / "sunshine healthcare" / "Sunshine" all
+    # collapsed to the canonical "Sunshine Health" the chat retrieval
+    # filters expect (case-sensitive exact match in Chroma + Postgres).
+    # See app/services/metadata_canonical.py for rationale.
+    from app.services.metadata_canonical import (
+        canonical_payer, canonical_state, canonical_program,
+    )
+    payer = canonical_payer(payer)
+    state = canonical_state(state)
+    program = canonical_program(program)
 
     try:
         logger.info(f"Starting upload for file: {file.filename}")
