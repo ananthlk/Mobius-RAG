@@ -41,7 +41,11 @@ if [[ -z "$DB_PASS" ]]; then
   exit 1
 fi
 # urlencode the '$' in the password manually; we know the password shape.
-DB_URL="postgresql+asyncpg://${DB_USER}:${DB_PASS}@/mobius_rag?host=%2Fcloudsql%2F${PROJECT_ID}%3A${REGION}%3A${CLOUD_SQL_INSTANCE}"
+# URL-encode the password for safe embedding in connection strings
+# (the dev password contains a ``$`` that would otherwise break
+# shell expansion on the other side of the wire).
+DB_PASS_ENC=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$DB_PASS")
+DB_URL="postgresql+asyncpg://${DB_USER}:${DB_PASS_ENC}@/mobius_rag?host=%2Fcloudsql%2F${PROJECT_ID}%3A${REGION}%3A${CLOUD_SQL_INSTANCE}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
