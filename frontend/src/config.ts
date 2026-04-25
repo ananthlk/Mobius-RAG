@@ -21,6 +21,13 @@ export const API_BASE: string =
  * Web scraper API base URL. For "Scrape from URL" in Document Input.
  * - VITE_SCRAPER_API_BASE: e.g. http://localhost:8002
  */
+// Prefer build-arg `VITE_SCRAPER_API_BASE`. Fallback is empty string in
+// hosted mode — same anti-localhost pattern as ``API_BASE`` (commit
+// c49407d). Hosted deploys must pass the scraper URL at Docker build
+// (Cloud Build --build-arg) since scraper is on a separate Cloud Run
+// service, not same-origin. Local dev hits :8002 via vite proxy or
+// explicit env.
 const scraperBase = import.meta.env?.VITE_SCRAPER_API_BASE as string | undefined
+const isDev = import.meta.env?.DEV === true
 export const SCRAPER_API_BASE: string =
-  scraperBase !== undefined ? scraperBase : 'http://localhost:8002'
+  scraperBase !== undefined ? scraperBase : isDev ? 'http://localhost:8002' : ''
