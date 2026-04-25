@@ -2308,6 +2308,10 @@ class ImportFromGcsRequest(BaseModel):
     state: Optional[str] = None
     program: Optional[str] = None
     authority_level: Optional[str] = None
+    # Optional. Scraper auto-add passes this so we can infer payer
+    # from the hostname when the scraper doesn't know it (and the
+    # frontend doesn't surface a payer picker for scrape flows).
+    source_url: Optional[str] = None
 
 
 @app.post("/documents/import-from-gcs")
@@ -2329,6 +2333,35 @@ async def import_document_from_gcs(
     payer_val = body.payer if body.payer is not None else payer
     state_val = body.state if body.state is not None else state
     program_val = body.program if body.program is not None else program
+
+    # If the caller didn't provide a payer (common on scraper auto-add —
+    # the scraper doesn't know the payer canonical name), infer from the
+    # source URL host when available. "sunshinehealth.com" → "Sunshine
+    # Health" via the canonical-lookup table. Prevents anonymous blob
+    # uploads from landing without a payer filter and silently dropping
+    # out of every chat retrieval.
+    if not payer_val:
+        try:
+            source_url = getattr(body, "source_url", None)
+            if source_url:
+                from urllib.parse import urlparse
+                host = urlparse(source_url).netloc.lower()
+                # strip common prefixes + .com/.org etc.
+                host = host.removeprefix("www.").rsplit(".", 1)[0]
+                # e.g. "sunshinehealth" → canonicalize
+                from app.services.metadata_canonical import canonical_payer
+                payer_val = canonical_payer(host)
+                logger.info("[import-from-gcs] inferred payer=%r from source_url=%r", payer_val, source_url)
+        except Exception as inf_err:
+            logger.debug("[import-from-gcs] payer inference skipped: %s", inf_err)
+
+    # Canonicalize what we have (works regardless of inference path).
+    from app.services.metadata_canonical import (
+        canonical_payer, canonical_state, canonical_program,
+    )
+    payer_val = canonical_payer(payer_val) if payer_val else None
+    state_val = canonical_state(state_val) if state_val else None
+    program_val = canonical_program(program_val) if program_val else None
 
     try:
         # Compute hash from GCS object
