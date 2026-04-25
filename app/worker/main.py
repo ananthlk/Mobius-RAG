@@ -47,6 +47,154 @@ WORKER_ID = f"worker-{os.getpid()}-{_utc_now_naive().isoformat()}"
 
 
 # ---------------------------------------------------------------------------
+# Atomic finalize + zombie recovery
+# ---------------------------------------------------------------------------
+
+
+async def _finalize_job_atomic(
+    job_id,
+    document_id,
+    *,
+    success: bool,
+    generator_id: str | None,
+    skip_embed: bool,
+    error_message: str | None,
+) -> None:
+    """Mark a chunking_job row completed/failed in a fresh session, with retries.
+
+    The coordinator's primary session may be poisoned (InFailedSQLTransaction
+    after a mid-coordinator commit failure) by the time we reach finalize.
+    A fresh session sidesteps that. If even the fresh session fails, retry
+    with exponential backoff up to 5 attempts over ~30s.
+
+    Embedding enqueue is best-effort; a failure logs WARNING but doesn't
+    block job-status finalization.
+    """
+    from sqlalchemy import update
+    from app.models import ChunkingJob
+
+    final_status = "completed" if success else "failed"
+    backoff = 1.0
+    last_err: Exception | None = None
+
+    for attempt in range(1, 6):
+        try:
+            async with AsyncSessionLocal() as fresh_db:
+                values: dict = {
+                    "status": final_status,
+                    "completed_at": _utc_now_naive(),
+                }
+                if error_message:
+                    values["error_message"] = error_message[:2000]
+                result = await fresh_db.execute(
+                    update(ChunkingJob).where(ChunkingJob.id == job_id).values(**values)
+                )
+                # Embedding enqueue (only for successful chunking, not retag)
+                if success and not skip_embed:
+                    try:
+                        enqueued = await enqueue_embedding_job(fresh_db, document_id, generator_id)
+                        if enqueued:
+                            logger.info("[JOB %s] Enqueued embedding job", job_id)
+                    except Exception as enq_err:
+                        logger.warning(
+                            "[JOB %s] Failed to enqueue embedding (non-fatal): %s",
+                            job_id, enq_err,
+                        )
+                await fresh_db.commit()
+                if (result.rowcount or 0) > 0 or attempt > 1:
+                    return
+                # rowcount=0 on first try means the row didn't exist or
+                # was already in target state — also a success outcome.
+                logger.info("[JOB %s] finalize touched 0 rows (already finalized?)", job_id)
+                return
+        except Exception as exc:
+            last_err = exc
+            logger.warning(
+                "[JOB %s] finalize attempt %d/5 failed: %s",
+                job_id, attempt, exc,
+            )
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 15.0)
+
+    # All retries exhausted. Don't crash the worker — log loudly so
+    # the startup recovery sweep picks it up next boot.
+    logger.error(
+        "[JOB %s] finalize FAILED after 5 attempts; row left at 'processing'. "
+        "Startup recovery sweep will catch it next worker boot. Last error: %s",
+        job_id, last_err,
+    )
+
+
+async def recover_finalized_zombies() -> int:
+    """Find chunking_jobs stuck at 'processing' even though their work
+    was actually written, and finalize them.
+
+    A "zombie" here is a row whose:
+      * status='processing' and started_at is older than 30 minutes
+      * AND the document already has policy_lines OR hierarchical_chunks
+        written (i.e. the coordinator legitimately completed)
+      * AND no chunking_events have arrived in the last 10 minutes
+        (so it's not actively being worked on)
+
+    We mark such rows 'completed' and (for non-retag jobs) enqueue
+    their embedding. Returns the number recovered.
+
+    This is the safety net for the atomic-finalize retry loop above —
+    when the retries truly run out (or the worker crashed before
+    finalize started), the next worker boot picks up the cleanup.
+    """
+    from sqlalchemy import text
+
+    try:
+        async with AsyncSessionLocal() as db:
+            # Grab candidate zombies + the work-evidence in one query so
+            # we don't double-touch the row.
+            r = await db.execute(text("""
+                SELECT j.id::text AS job_id, j.document_id::text AS doc_id,
+                       j.skip_embedding, j.generator_id,
+                       (SELECT count(*) FROM policy_lines pl WHERE pl.document_id = j.document_id) AS pl_count,
+                       (SELECT count(*) FROM hierarchical_chunks hc WHERE hc.document_id = j.document_id) AS hc_count
+                FROM chunking_jobs j
+                WHERE j.status = 'processing'
+                  AND j.started_at < now() - interval '30 minutes'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM chunking_events e
+                      WHERE e.document_id = j.document_id
+                        AND e.created_at > now() - interval '10 minutes'
+                  )
+            """))
+            candidates = list(r.mappings())
+            recovered = 0
+            for row in candidates:
+                if (row["pl_count"] or 0) == 0 and (row["hc_count"] or 0) == 0:
+                    # No evidence the coordinator did anything; let the
+                    # heartbeat-aware stale-recovery reset to pending
+                    # instead. Don't mark as completed.
+                    continue
+                logger.warning(
+                    "[zombie-finalize] Recovering job=%s doc=%s "
+                    "(policy_lines=%s hierarchical_chunks=%s)",
+                    row["job_id"], row["doc_id"], row["pl_count"], row["hc_count"],
+                )
+                await _finalize_job_atomic(
+                    row["job_id"], row["doc_id"],
+                    success=True,
+                    generator_id=row["generator_id"],
+                    skip_embed=(row["skip_embedding"] == "true"),
+                    error_message=(
+                        "Auto-recovered: coordinator wrote work to DB but "
+                        "job-finalize commit never succeeded; recovered on "
+                        "worker startup sweep"
+                    ),
+                )
+                recovered += 1
+            return recovered
+    except Exception as exc:
+        logger.warning("[zombie-finalize] sweep failed (non-fatal): %s", exc)
+        return 0
+
+
+# ---------------------------------------------------------------------------
 # process_job
 # ---------------------------------------------------------------------------
 
@@ -144,28 +292,30 @@ async def process_job(job: ChunkingJob, db: AsyncSession, *, worker_cfg: WorkerC
         await db.commit()
 
         # --- Finalise job ---
+        # Atomic + retried, in a FRESH session.
+        #
+        # Why fresh: ``db`` may be in InFailedSQLTransaction state from a
+        # late mid-coordinator commit failure (DB failover, connection
+        # pool blip). If we reuse it, the .commit() below silently leaves
+        # the row at status='processing' and we get the zombie pattern
+        # observed 4× across 2026-04-23/24 (FL-Care, 74973950, d9721756).
+        #
+        # Why retry: the same DB blip class is transient; one retry with
+        # backoff usually lands. We try up to 5 times over ~30s.
         job_duration = (_utc_now_naive() - job_start_time).total_seconds()
+        skip_embed = getattr(job, "skip_embedding", None) == "true"
         if success:
-            job.status = "completed"
-            job.completed_at = _utc_now_naive()
             logger.info("[JOB %s] Completed in %.2fs", job.id, job_duration)
-            # Skip embedding enqueue for retag jobs (lexicon-only re-tagging)
-            if getattr(job, "skip_embedding", None) == "true":
-                logger.info("[JOB %s] skip_embedding=true – skipping embedding enqueue", job.id)
-            else:
-                try:
-                    enqueued = await enqueue_embedding_job(db, job.document_id, getattr(job, "generator_id", None))
-                    if enqueued:
-                        logger.info("[JOB %s] Enqueued embedding job", job.id)
-                except Exception as enq_err:
-                    logger.warning("[JOB %s] Failed to enqueue embedding: %s", job.id, enq_err, exc_info=True)
         else:
-            job.status = "failed"
-            job.error_message = "Chunking loop returned False"
             logger.warning("[JOB %s] Failed after %.2fs", job.id, job_duration)
-
-        await db.commit()
-        logger.info("[JOB %s] Final status: %s", job.id, job.status)
+        await _finalize_job_atomic(
+            job.id, job.document_id,
+            success=success,
+            generator_id=getattr(job, "generator_id", None),
+            skip_embed=skip_embed,
+            error_message=None if success else "Chunking loop returned False",
+        )
+        logger.info("[JOB %s] Final status: %s", job.id, "completed" if success else "failed")
 
     except Exception as e:
         job_duration = (_utc_now_naive() - job_start_time).total_seconds()
@@ -224,6 +374,23 @@ async def worker_loop():
             await m.migrate()
         except Exception as migrate_err:
             logger.warning("Startup migration (%s) skipped/failed: %s", label, migrate_err)
+
+    # Zombie-finalize sweep: catches any "processing" rows where the
+    # coordinator legitimately wrote work but the finalize commit never
+    # landed (DB blip, OOM, crash mid-finalize). Runs once per worker
+    # boot, before the polling loop, so a fresh instance immediately
+    # cleans up its predecessor's leftovers instead of waiting for
+    # heartbeat-stale-recovery (which would reset to pending and
+    # redo the work from scratch — wasteful when the work IS done).
+    try:
+        recovered_zombies = await recover_finalized_zombies()
+        if recovered_zombies:
+            logger.warning(
+                "[zombie-finalize] Recovered %d completed-but-unmarked job(s) at startup",
+                recovered_zombies,
+            )
+    except Exception as zexc:
+        logger.warning("[zombie-finalize] startup sweep failed (non-fatal): %s", zexc)
 
     poll_count = 0
     while not is_shutting_down():
