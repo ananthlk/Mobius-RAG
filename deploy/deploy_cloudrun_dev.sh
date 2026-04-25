@@ -69,6 +69,14 @@ gcloud builds submit --project="$PROJECT_ID" --tag="$IMAGE" .
 
 # Common env + flag shape shared by all three services
 # NOTE: LLM_PROVIDER removed (Phase 1 gate rejects it as stale).
+#
+# Chroma + chat Postgres are wired so the publish endpoint can sync
+# directly into chat's retrieval stores (see
+# app/services/publish_sync.py). Without these, publish still
+# succeeds but downstream chat retrieval never sees the doc.
+# Contract reference: mobius-chat/docs/rag_population_agent_setup.md.
+CHAT_DB_URL_FOR_RAG="postgresql+psycopg2://postgres:${DB_PASS_ENC}@/mobius_chat?host=%2Fcloudsql%2F${PROJECT_ID}%3A${REGION}%3A${CLOUD_SQL_INSTANCE}"
+
 COMMON_ENV=(
   "ENV=staging"
   "DATABASE_URL=${DB_URL}"
@@ -78,11 +86,18 @@ COMMON_ENV=(
   "VERTEX_MODEL=gemini-2.5-flash"
   "EMBEDDING_PROVIDER=vertex"
   "CHAT_INTERNAL_LLM_URL=${CHAT_INTERNAL_LLM_URL}"
+  # Chroma (chat's vector store on the GCE VM at 34.170.243.161)
+  "CHROMA_HOST=34.170.243.161"
+  "CHROMA_PORT=8000"
+  "CHROMA_SSL=0"
+  # chat Postgres (same Cloud SQL instance, mobius_chat database)
+  "CHAT_DATABASE_URL=${CHAT_DB_URL_FOR_RAG}"
 )
 
 COMMON_SECRETS=(
   "MOBIUS_SKILL_LLM_INTERNAL_KEY=mobius-skill-llm-internal-key:latest"
   "ADMIN_API_KEY=rag-admin-api-key:latest"
+  "CHROMA_AUTH_TOKEN=chroma-auth-token:latest"
 )
 
 join_with() { local IFS="$1"; shift; echo "$*"; }

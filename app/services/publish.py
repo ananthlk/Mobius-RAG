@@ -252,8 +252,44 @@ async def publish_document(document_id: UUID, db: AsyncSession, generator_id: st
                 verification_message=f"Spot-check failed: embedding null for id {row.id}",
             )
 
+    # ── Best-effort sync to retrieval stores ───────────────────────
+    # Writes to Chroma + chat's Postgres ``published_rag_metadata`` so
+    # chat can actually retrieve this document. Env-gated; no-ops if
+    # CHROMA_HOST or CHAT_DATABASE_URL aren't set (test envs, early dev).
+    # Errors are logged and surfaced in the result message but do NOT
+    # fail the publish — the rag-side mart row is already committed,
+    # downstream sync is recoverable via backfill_published_to_chat.py.
+    sync_summary: str | None = None
+    try:
+        from app.services.publish_sync import sync_document_to_retrieval_stores
+        sync_res = await sync_document_to_retrieval_stores(document_id, db)
+        sync_summary = (
+            f"sync: chunks={sync_res.chunks_synced} "
+            f"chroma={sync_res.chroma_status} "
+            f"chat_pg={sync_res.chat_pg_status} "
+            f"({sync_res.duration_s}s)"
+        )
+        if not sync_res.ok:
+            # publish itself succeeded; flag the partial sync in the
+            # response so the caller can decide whether to retry.
+            return PublishResult(
+                rows_written=expected_count,
+                verification_passed=True,
+                verification_message=(
+                    f"published OK but downstream sync incomplete — {sync_summary}; "
+                    f"chroma_msg={sync_res.chroma_message!r} chat_msg={sync_res.chat_pg_message!r}"
+                ),
+            )
+    except Exception as sync_exc:
+        # Defensive: a bug in sync code path must not fail publish.
+        import logging as _logging
+        _logging.getLogger(__name__).exception(
+            "[publish] sync_document_to_retrieval_stores raised; publish kept",
+        )
+        sync_summary = f"sync: raised {type(sync_exc).__name__}"
+
     return PublishResult(
         rows_written=expected_count,
         verification_passed=True,
-        verification_message=None,
+        verification_message=sync_summary,
     )
