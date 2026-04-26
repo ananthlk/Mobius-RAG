@@ -264,17 +264,22 @@ def _format_table(table: Tag) -> list[str]:
         if is_header_row and not headers:
             headers = cell_texts
             continue
-        # Body row — render with header context if available.
+        # Body row — render with header context if available. Skip
+        # any cell whose value is empty/whitespace-only — those add
+        # no information and produce ugly 'Note: |' fragments that
+        # confuse downstream chunkers.
         if headers:
             pairs = []
             for i, val in enumerate(cell_texts):
+                if not val or not val.strip():
+                    continue
                 if i < len(headers) and headers[i]:
                     pairs.append(f"{headers[i]}: {val}")
                 else:
                     pairs.append(val)
-            line = " | ".join(p for p in pairs if p.strip(": "))
+            line = " | ".join(pairs)
         else:
-            line = " | ".join(c for c in cell_texts if c)
+            line = " | ".join(c for c in cell_texts if c and c.strip())
         if line:
             out.append(line)
     return out
