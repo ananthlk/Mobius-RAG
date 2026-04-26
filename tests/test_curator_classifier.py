@@ -152,3 +152,37 @@ def test_classify_url_query_string_doesnt_affect_kind():
     out = classify_url("https://ahca.myflorida.com/content/download/x/file/foo.pdf?version=2")
     assert out["content_kind"] == "doc"
     assert out["extension"] == "pdf"
+
+
+def test_classify_url_path_with_dot_in_slug_not_treated_as_extension():
+    """AHCA rule URLs have dots inside path slugs (e.g. 'rule-59g-4.002')
+    — those dots are NOT extension markers. Without guarding, we'd
+    pull a 54-char 'extension' and blow VARCHAR(20) at insert time.
+    """
+    out = classify_url(
+        "https://ahca.myflorida.com/medicaid/rules/"
+        "rule-59g-4.002-provider-reimbursement-schedules-and-billing-codes"
+    )
+    # No real file extension → treated as page, ext is None
+    assert out["extension"] is None
+    assert out["content_kind"] == "page"
+
+
+def test_classify_url_extension_must_be_short_and_alphanumeric():
+    """Belt-and-suspenders for extension detection: only treat as
+    extension if 1-8 chars AND alphanumeric. URL slugs with hyphens
+    or that are too long are NOT extensions.
+    """
+    # 9+ chars: not an extension
+    out = classify_url("https://x.com/foo.something_extralong")
+    assert out["extension"] is None
+    # Has a hyphen: not an extension
+    out = classify_url("https://x.com/foo.has-hyphen")
+    assert out["extension"] is None
+    # Short alphanum: real extension
+    out = classify_url("https://x.com/foo.PDF")
+    assert out["extension"] == "pdf"
+    out = classify_url("https://x.com/foo.html")
+    assert out["extension"] == "html"
+    out = classify_url("https://x.com/sheet.xlsx")
+    assert out["extension"] == "xlsx"

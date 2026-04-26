@@ -126,8 +126,17 @@ def classify_url(url: str) -> dict:
     p = urlparse(url)
     path = p.path or "/"
     ext = ""
-    if "." in path.rsplit("/", 1)[-1]:
-        ext = path.rsplit(".", 1)[-1].lower()
+    last_seg = path.rsplit("/", 1)[-1]
+    if "." in last_seg:
+        candidate = last_seg.rsplit(".", 1)[-1].lower()
+        # Only treat as a real file extension if it looks like one:
+        # short (1-8 chars) and alphanumeric. Otherwise it's a slug
+        # like ``rule-59g-4.002-provider-reimbursement-schedules`` where
+        # the dot is just part of the path name, not a type marker.
+        # Without this guard we'd pull a 54-char "extension" out of
+        # AHCA's rule URLs and overflow extension VARCHAR(20).
+        if 1 <= len(candidate) <= 8 and candidate.isalnum():
+            ext = candidate
 
     payer, state = infer_payer(p.netloc)
     return {
