@@ -277,6 +277,15 @@ async def _run_startup_migrations_background():
             except Exception as migrate_err:
                 logger.warning(f"Startup migration (discovered_sources) skipped: {migrate_err}")
             try:
+                # Phase 13.5d — BM25-style relevance ranking on the
+                # registry. Adds a GENERATED tsvector column + GIN
+                # index so /sources/search?q=... ranks by relevance
+                # without requiring exact topic_tags matches.
+                from app.migrations.add_discovered_sources_search_vector import migrate as migrate_ds_search_vector
+                await migrate_ds_search_vector()
+            except Exception as migrate_err:
+                logger.warning(f"Startup migration (discovered_sources.search_vector) skipped: {migrate_err}")
+            try:
                 from app.migrations.add_document_display_name import migrate as migrate_document_display_name
                 await migrate_document_display_name()
             except Exception as migrate_err:

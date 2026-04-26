@@ -150,6 +150,7 @@ async def search_sources(
     program: str | None = None,
     authority_level: str | None = None,
     topic: str | None = None,
+    q: str | None = None,
     curation_status: str | None = None,
     ingested: bool | None = None,
     only_reachable: bool = True,
@@ -157,14 +158,28 @@ async def search_sources(
 ) -> Sequence[DiscoveredSource]:
     """Search the discovered_sources registry.
 
-    Default behavior (``only_reachable=True``) excludes 404/403/etc.
-    rows — ReAct should never recommend a URL it knows is broken.
-    Operators can flip the flag for triage views.
+    Two retrieval modes, can be combined:
 
-    Ranking (PostgreSQL ORDER BY):
-      1. curation_status='canonical' first (operator-vetted)
-      2. ingested=true second (already in corpus, cheaper)
-      3. last_seen_at DESC as tiebreak (freshness preference)
+    * **Filter mode** — exact predicates on payer/state/program/
+      authority_level/topic_tags. Returns rows that strictly match.
+
+    * **Relevance mode** (Phase 13.5d) — when ``q`` is set, ranks
+      results by Postgres ``ts_rank`` over the GIN-indexed
+      ``search_vector`` column. The vector covers payer, state,
+      program, host, path slugs, authority levels, topic_tags, and
+      curation_notes — so a planner can pass ``q="dental plan
+      transition"`` and surface URLs whose path contains those tokens
+      WITHOUT needing topic_tags pre-populated.
+
+    Combining both is the common case: ``payer="Sunshine Health"``
+    narrows the candidate set, ``q="medicare preauth"`` ranks them.
+
+    Default behavior (``only_reachable=True``) excludes 404/403 rows —
+    ReAct should never recommend a URL it knows is broken.
+
+    Ranking precedence:
+      * If ``q`` set: ts_rank DESC, then ingested DESC, last_seen DESC
+      * Else: canonical DESC, ingested DESC, last_seen DESC
     """
     conds: list = []
     if payer:
@@ -189,7 +204,9 @@ async def search_sources(
         conds.append(DiscoveredSource.ingested == ingested)
     if topic:
         # JSONB array contains topic — uses the GIN index from the
-        # migration.
+        # migration. Only matches when topic_tags has been populated
+        # (LLM categorization or manual curation). Use ``q=`` for
+        # imperfect-match fallback.
         conds.append(DiscoveredSource.topic_tags.contains([topic]))
     if only_reachable:
         # Treat -1 (network error) and 4xx as unreachable. Allow
@@ -203,15 +220,34 @@ async def search_sources(
             ),
         ))
 
-    stmt = (
-        select(DiscoveredSource)
-        .where(and_(*conds) if conds else True)
-        .order_by(
-            # Canonical first via CASE expression
+    # Relevance mode: build ts_query, AND it into the WHERE, ORDER by rank
+    if q and q.strip():
+        # plainto_tsquery is permissive: handles arbitrary user text
+        # without requiring boolean operators. Stop words dropped
+        # automatically; common-stem matching via the english config.
+        ts_query = func.plainto_tsquery("english", q.strip())
+        # Use literal column reference since search_vector is a
+        # generated column not declared in the SQLAlchemy model.
+        from sqlalchemy import literal_column
+        sv = literal_column("search_vector")
+        conds.append(sv.op("@@")(ts_query))
+        rank = func.ts_rank(sv, ts_query)
+        order_clauses = [
+            rank.desc(),
+            DiscoveredSource.ingested.desc(),
+            DiscoveredSource.last_seen_at.desc(),
+        ]
+    else:
+        order_clauses = [
             (DiscoveredSource.curation_status == "canonical").desc(),
             DiscoveredSource.ingested.desc(),
             DiscoveredSource.last_seen_at.desc(),
-        )
+        ]
+
+    stmt = (
+        select(DiscoveredSource)
+        .where(and_(*conds) if conds else True)
+        .order_by(*order_clauses)
         .limit(limit)
     )
     result = await db.execute(stmt)

@@ -214,7 +214,17 @@ async def search_endpoint(
     state: Optional[str] = Query(None),
     program: Optional[str] = Query(None),
     authority_level: Optional[str] = Query(None),
-    topic: Optional[str] = Query(None, description="Match against topic_tags array"),
+    topic: Optional[str] = Query(None, description="Exact match against topic_tags JSONB array"),
+    q: Optional[str] = Query(
+        None,
+        description=(
+            "Free-text relevance query (Phase 13.5d). Ranked by Postgres "
+            "ts_rank over the search_vector index covering payer/state/host/"
+            "path-slugs/authority/notes. Use this when the planner has a "
+            "topic keyword that may not exactly match a populated tag. "
+            "Combinable with the exact filters above."
+        ),
+    ),
     curation_status: Optional[str] = Query(None),
     ingested: Optional[bool] = Query(None),
     only_reachable: bool = Query(True, description="Hide 404/403/etc."),
@@ -231,6 +241,7 @@ async def search_endpoint(
         program=program,
         authority_level=authority_level,
         topic=topic,
+        q=q,
         curation_status=curation_status,
         ingested=ingested,
         only_reachable=only_reachable,
