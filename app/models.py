@@ -582,3 +582,86 @@ class PolicyLexiconCandidateCatalog(Base):
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+# ── Curator (Phase 13.2) ─────────────────────────────────────────────
+#
+# Durable registry of every URL the curator has ever seen — visited or
+# just discovered. Survives scrape job retention. Two channels write
+# rows:
+#
+#   * sitemap parser   → publishes one row per <loc> entry
+#   * BFS link extract → publishes one row per page/doc link found
+#
+# Most rows are NOT ingested (HTML pages we haven't pulled into rag,
+# blocked PDFs, stale URLs). Those that ARE ingested have
+# ``ingested=True`` and an FK to ``documents.id``.
+#
+# Drives chat ReAct's ``lookup_authoritative_sources`` tool: given a
+# (payer, state, topic) the curator returns canonical URLs with
+# their ingestion status, so ReAct can decide whether to cite from
+# the indexed corpus or offer to ``ingest_url(url)`` for a missing one.
+#
+# Freshness model (see scripts/curator/SCHEMA.md): a daily worker
+# re-fetches canonical URLs, hash-diffs the body, and re-imports +
+# notifies on change.
+class DiscoveredSource(Base):
+    __tablename__ = "discovered_sources"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    # Identity. URL is the natural key; we enforce UNIQUE so upserts
+    # by URL are O(1) and we never double-row the same source.
+    url = Column(Text, nullable=False, unique=True, index=True)
+    host = Column(String(255), nullable=False, index=True)
+    path = Column(Text, nullable=False)
+
+    # Classification — set on insert from inference, mutable via
+    # ``/sources/{id}/curate`` for human override.
+    payer = Column(String(100), nullable=True, index=True)
+    state = Column(String(2), nullable=True, index=True)
+    program = Column(String(100), nullable=True)
+    inferred_authority_level = Column(String(100), nullable=True)
+    curated_authority_level = Column(String(100), nullable=True)  # NULL = use inferred
+    topic_tags = Column(JSONB, nullable=True)  # list[str]; gin-indexed below
+    content_kind = Column(String(10), nullable=False)  # 'doc' | 'page'
+    extension = Column(String(20), nullable=True)
+
+    # Liveness — every fetch attempt updates these.
+    first_seen_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_seen_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_fetch_status = Column(Integer, nullable=True)  # 200 | 403 | 404 | 451 | -1
+    last_fetch_at = Column(DateTime, nullable=True)
+    fetch_attempt_count = Column(Integer, default=0, nullable=False)
+
+    # Content fingerprinting. Only populated when status=200 and we
+    # actually GET the body. Hash diff drives freshness re-import.
+    content_type = Column(String(255), nullable=True)
+    content_length = Column(BigInteger, nullable=True)
+    content_hash = Column(String(64), nullable=True)  # sha256 hex
+    content_changed_at = Column(DateTime, nullable=True)
+
+    # Ingestion linkage to the existing documents table. Most rows
+    # are not ingested; those that are point at the doc that was
+    # produced from this URL.
+    ingested = Column(Boolean, default=False, nullable=False, index=True)
+    ingested_doc_id = Column(UUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL"), nullable=True)
+    ingested_at = Column(DateTime, nullable=True)
+
+    # Discovery provenance — who told us this URL exists?
+    discovered_via = Column(String(20), nullable=True)  # 'sitemap'|'bfs_link'|'manual'|'curator'
+    seed_url = Column(Text, nullable=True)
+    depth_from_seed = Column(Integer, nullable=True)
+    scrape_job_id = Column(String(64), nullable=True, index=True)
+
+    # Curation. Default 'auto' = unreviewed. Operators promote to
+    # 'canonical' to opt the URL into freshness re-fetch + ReAct
+    # surfacing. 'noise' suppresses from search. 'stale' = 404'd.
+    # 'needs_auth' = 403 / login wall, signal user to upload manually.
+    curation_status = Column(String(20), default="auto", nullable=False, index=True)
+    curated_by = Column(String(255), nullable=True)
+    curation_notes = Column(Text, nullable=True)
+    curated_at = Column(DateTime, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
