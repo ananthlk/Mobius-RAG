@@ -56,6 +56,15 @@ _drive_oauth_state: dict[str, tuple[str, float]] = {}
 
 app = FastAPI(title="Mobius RAG", version="0.1.0")
 
+# ── Curator (Phase 13.2/13.3) ────────────────────────────────────────
+# Mounts /sources/* — the URL registry that survives scrape job
+# retention, drives ReAct lookup_authoritative_sources, and feeds the
+# freshness re-fetch loop. Lives inside rag (not a separate skill)
+# because it shares the documents.id FK and reuses the import pipeline
+# on hash-change re-imports. See app/curator/__init__.py.
+from app.curator.routes import router as curator_router  # noqa: E402
+app.include_router(curator_router)
+
 
 @app.on_event("startup")
 async def run_startup_migrations():
@@ -260,6 +269,13 @@ async def _run_startup_migrations_background():
                 await migrate_document_effective_termination_dates()
             except Exception as migrate_err:
                 logger.warning(f"Startup migration (document effective_date/termination_date) skipped: {migrate_err}")
+            try:
+                # Phase 13.2 — discovered_sources table for the curator.
+                # See app/curator/__init__.py and scripts/curator/SCHEMA.md.
+                from app.migrations.add_discovered_sources import migrate as migrate_discovered_sources
+                await migrate_discovered_sources()
+            except Exception as migrate_err:
+                logger.warning(f"Startup migration (discovered_sources) skipped: {migrate_err}")
             try:
                 from app.migrations.add_document_display_name import migrate as migrate_document_display_name
                 await migrate_document_display_name()
