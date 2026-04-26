@@ -1,0 +1,450 @@
+# Authoritative source registry — Mobius's master list
+#
+# Drives the curator pre-seed: every source listed here gets one
+# discovered_sources row created (or refreshed) on each backfill run.
+# Add a source here, run backfill, and it shows up in the registry
+# AND in chat's lookup_authoritative_sources tool.
+#
+# Field reference:
+#   payer            — canonical payer name (matches metadata_canonical.py)
+#   state            — 2-letter; null for federal/national
+#   tier             — P0 (must-have for FL behavioral health Medicaid)
+#                      P1 (adjacent / commercial / professional)
+#                      P2 (nice-to-have / standards)
+#   scope            — payer | state_agency | federal_agency
+#                      | professional_org | accreditor | coding_standard
+#   bot_policy       — open | per_path_block | full_bot_wall | needs_auth
+#                      open            — robots-friendly, scrape works
+#                      per_path_block  — most paths fine, some 403 (Sunshine pattern)
+#                      full_bot_wall   — Akamai/Cloudflare on everything (Aetna, Molina)
+#                      needs_auth      — provider-portal credentials required
+#   ingest_strategy  — scrape | sitemap_only | state_mirror | partner_feed | manual_upload
+#                      scrape          — full BFS, default approach
+#                      sitemap_only    — sitemap parse, no BFS (sites that block crawl but publish sitemap)
+#                      state_mirror    — get from state agency (AHCA, etc.) instead
+#                      partner_feed    — request data feed via partnership
+#                      manual_upload   — operator drops PDFs into UI
+#   home_url         — top-level URL we point the scraper at
+#   sitemap_url      — explicit sitemap if not at /sitemap.xml
+#   known_subtrees   — preconfigured high-value paths to scrape from
+#                      (used when sitemap is incomplete or to focus the BFS)
+#   notes            — operator-readable rationale / caveats
+#
+# ─────────────────────────────────────────────────────────────────────
+
+
+sources:
+
+  # ════════════════════════════════════════════════════════════════
+  # FEDERAL AGENCIES (P0–P1)
+  # National authority — many MCO and state policies reference / adopt
+  # CMS LCDs, SAMHSA guidance, HRSA program rules, etc. Federal sources
+  # are universally bot-friendly and the bedrock of every answer.
+  # ════════════════════════════════════════════════════════════════
+
+  - id: cms
+    name: Centers for Medicare & Medicaid Services
+    payer: CMS
+    state: null
+    tier: P0
+    scope: federal_agency
+    bot_policy: open
+    ingest_strategy: scrape
+    home_url: https://www.cms.gov/
+    sitemap_url: https://www.cms.gov/sitemap.xml
+    known_subtrees:
+      - https://www.cms.gov/medicare-coverage-database
+      - https://www.cms.gov/medicaid-chip
+      - https://www.cms.gov/regulations-and-guidance
+      - https://www.cms.gov/medicare/coverage
+    notes: |
+      The federal floor for Medicare/Medicaid coverage policy. Most MCO
+      clinical policies reference an LCD/NCD here. Big corpus (~100k
+      pages); tier the BFS by program area.
+
+  - id: medicaid_gov
+    name: Medicaid.gov
+    payer: CMS
+    state: null
+    tier: P0
+    scope: federal_agency
+    bot_policy: open
+    ingest_strategy: scrape
+    home_url: https://www.medicaid.gov/
+    known_subtrees:
+      - https://www.medicaid.gov/medicaid/benefits
+      - https://www.medicaid.gov/medicaid/managed-care
+      - https://www.medicaid.gov/medicaid/quality-of-care
+
+  - id: samhsa
+    name: Substance Abuse and Mental Health Services Administration
+    payer: SAMHSA
+    state: null
+    tier: P0
+    scope: federal_agency
+    bot_policy: open
+    ingest_strategy: scrape
+    home_url: https://www.samhsa.gov/
+    known_subtrees:
+      - https://www.samhsa.gov/find-help/national-helpline
+      - https://www.samhsa.gov/grants
+      - https://www.samhsa.gov/data
+      - https://www.samhsa.gov/medication-assisted-treatment
+    notes: |
+      Behavioral health authority for treatment guidelines, grant-funded
+      programs, MAT (medication-assisted treatment), 988 suicide line.
+      Many state behavioral health Medicaid policies cite SAMHSA TIP
+      (Treatment Improvement Protocols) and TAP (Technical Assistance
+      Publications) directly.
+
+  - id: hrsa
+    name: Health Resources and Services Administration
+    payer: HRSA
+    state: null
+    tier: P1
+    scope: federal_agency
+    bot_policy: open
+    ingest_strategy: scrape
+    home_url: https://www.hrsa.gov/
+    known_subtrees:
+      - https://www.hrsa.gov/behavioral-health
+      - https://www.hrsa.gov/grants
+
+  - id: nimh
+    name: National Institute of Mental Health
+    payer: NIMH
+    state: null
+    tier: P1
+    scope: federal_agency
+    bot_policy: open
+    ingest_strategy: scrape
+    home_url: https://www.nimh.nih.gov/
+
+  - id: cdc
+    name: Centers for Disease Control and Prevention
+    payer: CDC
+    state: null
+    tier: P1
+    scope: federal_agency
+    bot_policy: open
+    ingest_strategy: scrape
+    home_url: https://www.cdc.gov/
+    known_subtrees:
+      - https://www.cdc.gov/mentalhealth
+      - https://www.cdc.gov/drugoverdose
+
+
+  # ════════════════════════════════════════════════════════════════
+  # FLORIDA STATE AGENCIES (P0)
+  # The MCOs are contractors; the state defines what they MUST cover.
+  # AHCA in particular mirrors the criteria used by Sunshine, Aetna,
+  # Molina — making it the single best source for FL Medicaid policy.
+  # ════════════════════════════════════════════════════════════════
+
+  - id: ahca
+    name: Florida Agency for Health Care Administration
+    payer: AHCA
+    state: FL
+    tier: P0
+    scope: state_agency
+    bot_policy: open  # robots.txt: search=yes, ai-train=no, Allow: /
+    ingest_strategy: scrape
+    home_url: https://ahca.myflorida.com/
+    sitemap_url: https://ahca.myflorida.com/sitemap.xml
+    known_subtrees:
+      - https://ahca.myflorida.com/medicaid
+      - https://ahca.myflorida.com/medicaid/managed-care
+      - https://ahca.myflorida.com/medicaid/recipient
+      - https://ahca.myflorida.com/medicaid/recent_presentations
+      - https://ahca.myflorida.com/content/dam
+    notes: |
+      The single highest-leverage source for FL Medicaid behavioral
+      health. Mirrors Sunshine + Aetna + Molina policies via 59G-*
+      coverage rules. We've already ingested ~350 docs from here
+      (commit dba72756 batch). robots.txt explicitly allows search/RAG
+      indexing while forbidding AI training — Mobius is RAG, not
+      training, so we're in the clean lane.
+
+  - id: dcf
+    name: Florida Department of Children and Families
+    payer: DCF
+    state: FL
+    tier: P0
+    scope: state_agency
+    bot_policy: open
+    ingest_strategy: scrape
+    home_url: https://www.myflfamilies.com/
+    known_subtrees:
+      - https://www.myflfamilies.com/services/mental-health
+      - https://www.myflfamilies.com/services/substance-abuse
+      - https://www.myflfamilies.com/services/child-welfare
+    notes: |
+      DCF runs Florida's behavioral health managing entities (MEs) and
+      contracts with FBHA member organizations. Source of truth for
+      child-welfare-adjacent BH policy + Baker Act / Marchman Act
+      operational guidance.
+
+  - id: doh_fl
+    name: Florida Department of Health
+    payer: DOH-FL
+    state: FL
+    tier: P1
+    scope: state_agency
+    bot_policy: open
+    ingest_strategy: scrape
+    home_url: https://www.floridahealth.gov/
+
+  - id: flmmis
+    name: Florida Medicaid Management Information System
+    payer: AHCA
+    state: FL
+    tier: P0
+    scope: state_agency
+    bot_policy: per_path_block  # provider portal sections need auth
+    ingest_strategy: sitemap_only
+    home_url: https://portal.flmmis.com/
+    notes: |
+      Provider portal with claim/billing operational rules. Most useful
+      content sits behind login — operators with credentials can
+      manual-upload. Public sections (forms, fee schedules) scrape OK.
+
+
+  # ════════════════════════════════════════════════════════════════
+  # FLORIDA MEDICAID MMA PLANS (P0)
+  # Statewide Medicaid Managed Care contractors. Sunshine is in;
+  # the rest are the next sprint.
+  # ════════════════════════════════════════════════════════════════
+
+  - id: sunshine_health
+    name: Sunshine Health
+    payer: Sunshine Health
+    state: FL
+    tier: P0
+    scope: payer
+    bot_policy: per_path_block  # /providers/ landing 403s, deep paths OK
+    ingest_strategy: scrape
+    home_url: https://www.sunshinehealth.com/
+    sitemap_url: https://www.sunshinehealth.com/sitemap.xml
+    known_subtrees:
+      - https://www.sunshinehealth.com/providers/utilization-management/clinical-payment-policies.html
+      - https://www.sunshinehealth.com/providers/Billing-manual.html
+      - https://www.sunshinehealth.com/providers/preauth-check.html
+      - https://www.sunshinehealth.com/providers/resources.html
+    notes: |
+      Status: ~570 docs in corpus, 226 URLs in registry. Done.
+
+  - id: humana_healthy_horizons_fl
+    name: Humana Healthy Horizons Florida
+    payer: Humana Healthy Horizons
+    state: FL
+    tier: P0
+    scope: payer
+    bot_policy: full_bot_wall  # Akamai / strong bot detection
+    ingest_strategy: state_mirror  # AHCA mirrors most criteria
+    home_url: https://www.humana.com/medicaid/florida
+    notes: |
+      Akamai bot wall on the public site. Get criteria from AHCA
+      mirrors; provider-specific operational docs via partner channel
+      or operator manual upload.
+
+  - id: aetna_better_health_fl
+    name: Aetna Better Health of Florida
+    payer: Aetna Better Health
+    state: FL
+    tier: P0
+    scope: payer
+    bot_policy: full_bot_wall
+    ingest_strategy: state_mirror
+    home_url: https://www.aetnabetterhealth.com/florida/
+    notes: |
+      Same shape as Humana — Akamai bot wall. AHCA + manual upload
+      for provider-specific docs. Partnership conversation could open
+      a data feed but engineering can't solve alone.
+
+  - id: molina_fl
+    name: Molina Healthcare of Florida
+    payer: Molina Healthcare
+    state: FL
+    tier: P0
+    scope: payer
+    bot_policy: full_bot_wall
+    ingest_strategy: state_mirror
+    home_url: https://www.molinahealthcare.com/members/fl/en-us/
+
+  - id: simply_healthcare
+    name: Simply Healthcare
+    payer: Simply Healthcare
+    state: FL
+    tier: P0
+    scope: payer
+    bot_policy: per_path_block  # Anthem/Elevance subsidiary, similar to Sunshine
+    ingest_strategy: scrape
+    home_url: https://www.simplyhealthcareplans.com/
+
+  - id: uhc_community_plan_fl
+    name: UnitedHealthcare Community Plan of Florida
+    payer: United Healthcare
+    state: FL
+    tier: P0
+    scope: payer
+    bot_policy: per_path_block
+    ingest_strategy: scrape
+    home_url: https://www.uhccommunityplan.com/fl
+    notes: |
+      Next up after Sunshine — user's explicit Day 2 priority.
+
+  - id: cms_kids_fl
+    name: Children's Medical Services Health Plan
+    payer: Children's Medical Services
+    state: FL
+    tier: P0
+    scope: payer
+    bot_policy: open
+    ingest_strategy: scrape
+    home_url: https://www.cms-kids.com/
+    notes: |
+      DCF-administered specialty plan for children with serious medical
+      conditions. Different policy shape than the adult MMA plans.
+
+  - id: vivida_health
+    name: Vivida Health
+    payer: Vivida Health
+    state: FL
+    tier: P1
+    scope: payer
+    bot_policy: open
+    ingest_strategy: scrape
+    home_url: https://www.vividahealth.com/
+
+  - id: wellcare_fl
+    name: WellCare of Florida
+    payer: WellCare
+    state: FL
+    tier: P1
+    scope: payer
+    bot_policy: per_path_block
+    ingest_strategy: scrape
+    home_url: https://www.wellcare.com/florida
+
+
+  # ════════════════════════════════════════════════════════════════
+  # PROFESSIONAL ASSOCIATIONS (P0–P1)
+  # Define standards of care, ethics, treatment protocols. Many
+  # MCO criteria reference these by name.
+  # ════════════════════════════════════════════════════════════════
+
+  - id: national_council_mental_wellbeing
+    name: National Council for Mental Wellbeing
+    payer: National Council for Mental Wellbeing
+    state: null
+    tier: P0
+    scope: professional_org
+    bot_policy: open
+    ingest_strategy: scrape
+    home_url: https://www.thenationalcouncil.org/
+    known_subtrees:
+      - https://www.thenationalcouncil.org/resources
+      - https://www.thenationalcouncil.org/program
+    notes: |
+      Largest US association for community mental health and substance
+      use providers. Authoritative for CCBHC (Certified Community
+      Behavioral Health Clinic) standards, MAT integration, peer
+      support workforce policy. User-named priority.
+
+  - id: fbha
+    name: Florida Behavioral Health Association
+    payer: FBHA
+    state: FL
+    tier: P0
+    scope: professional_org
+    bot_policy: open
+    ingest_strategy: scrape
+    home_url: https://www.fbha.org/
+    notes: |
+      State affiliate of the National Council. Member orgs are FL's
+      community behavioral health providers — exactly Mobius's
+      customer base. User-named priority.
+
+  - id: apa
+    name: American Psychological Association
+    payer: APA
+    state: null
+    tier: P1
+    scope: professional_org
+    bot_policy: open
+    ingest_strategy: scrape
+    home_url: https://www.apa.org/
+
+  - id: nasw
+    name: National Association of Social Workers
+    payer: NASW
+    state: null
+    tier: P1
+    scope: professional_org
+    bot_policy: open
+    ingest_strategy: scrape
+    home_url: https://www.socialworkers.org/
+
+  - id: aafp
+    name: American Academy of Family Physicians
+    payer: AAFP
+    state: null
+    tier: P2
+    scope: professional_org
+    bot_policy: open
+    ingest_strategy: scrape
+    home_url: https://www.aafp.org/
+
+  - id: acog
+    name: American College of Obstetricians and Gynecologists
+    payer: ACOG
+    state: null
+    tier: P2
+    scope: professional_org
+    bot_policy: open
+    ingest_strategy: scrape
+    home_url: https://www.acog.org/
+
+
+  # ════════════════════════════════════════════════════════════════
+  # ACCREDITORS (P1)
+  # Define the operational standards Mobius's customers must meet.
+  # ════════════════════════════════════════════════════════════════
+
+  - id: carf
+    name: CARF International
+    payer: CARF
+    state: null
+    tier: P1
+    scope: accreditor
+    bot_policy: open
+    ingest_strategy: scrape
+    home_url: https://www.carf.org/
+
+  - id: joint_commission
+    name: The Joint Commission
+    payer: Joint Commission
+    state: null
+    tier: P1
+    scope: accreditor
+    bot_policy: open
+    ingest_strategy: scrape
+    home_url: https://www.jointcommission.org/
+
+
+  # ════════════════════════════════════════════════════════════════
+  # CODING / STANDARDS (P2)
+  # Reference data the chat occasionally needs to ground answers.
+  # Lower priority because authoritative copies live elsewhere
+  # (search_corpus already has many CPT/ICD references via doc text).
+  # ════════════════════════════════════════════════════════════════
+
+  - id: bacb
+    name: Behavior Analyst Certification Board
+    payer: BACB
+    state: null
+    tier: P2
+    scope: professional_org
+    bot_policy: open
+    ingest_strategy: scrape
+    home_url: https://www.bacb.com/
