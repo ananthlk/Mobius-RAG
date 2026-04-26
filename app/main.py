@@ -2487,6 +2487,222 @@ async def import_document_from_gcs(
 
 
 # ---------------------------------------------------------------------------
+# HTML page import (Phase 13.4)
+# ---------------------------------------------------------------------------
+# A second on-ramp for the rag pipeline: take an HTML page (URL +
+# optional inline body) and run it through the same chunking + embedding
+# + lexicon + publish flow that PDFs go through. Closes the gap that
+# left ~192 reachable HTML pages on Sunshine + AHCA stranded outside
+# the corpus.
+#
+# Design choice: HTML pages are split per heading section so the
+# chunker treats each <h2> region as one "page". One sub-page like
+# /providers/Billing-manual/appeals.html becomes 3-4 page rows
+# (Member appeals / Provider appeals / External review), which gives
+# better retrieval relevance than a single 5KB blob.
+#
+# The Document.file_path is set to the source URL (no GCS object) so
+# downstream code that wants to fetch the source can do so via HTTP.
+# DocumentPage rows are created exactly the same shape PDF extraction
+# produces — chunking pipeline doesn't know or care about the inlet.
+#
+# Curator linkage: if a discovered_sources row exists for this URL,
+# we mark it ingested + linked to this document.id. If not, we silently
+# skip — back-compat for callers that don't go through the curator yet.
+
+class ImportFromHtmlRequest(BaseModel):
+    """Request to import an HTML page into rag.
+
+    Either ``html`` is provided inline (preferred — saves a fetch),
+    OR we fetch the URL ourselves. ``payer``/``state``/``program``/
+    ``authority_level`` mirror the PDF import; if absent we infer
+    from the URL host via the curator classifier.
+    """
+    url: str
+    html: str | None = None      # inline HTML body; if None, we GET
+    title: str | None = None     # override; if None, derive from <h1> or <title>
+    payer: str | None = None
+    state: str | None = None
+    program: str | None = None
+    authority_level: str | None = None
+
+
+@app.post("/documents/import-from-html")
+async def import_document_from_html(
+    body: ImportFromHtmlRequest = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Import an HTML page (URL + optional inline body) into rag.
+
+    Pipeline:
+      1. fetch HTML if not provided inline
+      2. derive title (h1 → <title> → URL fallback)
+      3. compute file_hash from HTML content (dedupe key)
+      4. classify URL via curator classifier (payer/state/authority hints)
+      5. create Document row (file_path=URL, no GCS)
+      6. extract HTML → sections via html_extractor.extract_sections
+      7. insert one DocumentPage row per section
+      8. queue Path B chunking job (existing pipeline takes over)
+      9. mark discovered_sources row as ingested if registry has it
+
+    Returns the new document_id. Same shape as /documents/import-from-gcs.
+    """
+    url = (body.url or "").strip()
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="url must be http:// or https://")
+
+    # ── Fetch HTML if not inline ────────────────────────────────────
+    html_body = body.html
+    if not html_body:
+        try:
+            import httpx
+            async with httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=30,
+                headers={"User-Agent": "Mobius-RAG-HtmlImport/1.0 (+https://github.com/mobius)"},
+            ) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                html_body = resp.text
+        except Exception as fetch_err:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Failed to fetch HTML from {url}: {fetch_err}",
+            )
+
+    if not html_body or not html_body.strip():
+        raise HTTPException(status_code=400, detail="HTML body is empty")
+
+    # ── Title + classification ──────────────────────────────────────
+    from app.services.html_extractor import derive_title, extract_sections
+    from app.curator.classifier import classify_url
+    from app.services.metadata_canonical import (
+        canonical_payer, canonical_state, canonical_program,
+    )
+
+    title = body.title or derive_title(html_body, fallback=url)
+    cls = classify_url(url)
+    payer_val = body.payer or cls["payer"]
+    state_val = body.state or cls["state"]
+    program_val = body.program or None
+    authority_val = body.authority_level or cls["inferred_authority_level"]
+
+    # Canonicalize hints (same path as PDF import)
+    payer_val = canonical_payer(payer_val) if payer_val else None
+    state_val = canonical_state(state_val) if state_val else None
+    program_val = canonical_program(program_val) if program_val else None
+
+    # ── Hash + dedupe ───────────────────────────────────────────────
+    file_hash = hashlib.sha256(html_body.encode("utf-8", errors="replace")).hexdigest()
+    result = await db.execute(select(Document).where(Document.file_hash == file_hash))
+    existing_doc = result.scalar_one_or_none()
+    if existing_doc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "duplicate_html",
+                "message": "An HTML page with identical content has already been imported.",
+                "original_filename": existing_doc.filename,
+                "document_id": str(existing_doc.id),
+            },
+        )
+
+    # ── Create Document row ─────────────────────────────────────────
+    document = Document(
+        filename=title[:240],
+        file_hash=file_hash,
+        file_path=url,  # Source URL stands in for the GCS path
+        payer=payer_val,
+        state=state_val,
+        program=program_val,
+        authority_level=authority_val,
+        termination_date=default_termination_date(),
+        status="uploaded",
+    )
+    db.add(document)
+    await db.commit()
+    await db.refresh(document)
+
+    # ── Extract → DocumentPage rows ────────────────────────────────
+    try:
+        document.status = "extracting"
+        await db.commit()
+
+        sections = extract_sections(html_body, source_url=url)
+        for sec in sections:
+            page = DocumentPage(
+                document_id=document.id,
+                page_number=sec["page_number"],
+                text=sanitize_text_for_db(sec.get("text") or "") or "",
+                # For HTML, raw text doubles as markdown — chunker
+                # doesn't need a separate raw_page_to_markdown pass
+                # because the extractor already produces clean
+                # paragraph-separated output with ## h3 prefixes.
+                text_markdown=sanitize_text_for_db(sec.get("text") or "") or None,
+                extraction_status=sec.get("extraction_status", "success"),
+                extraction_error=sec.get("extraction_error"),
+                text_length=sec.get("text_length", 0),
+            )
+            db.add(page)
+
+        # If any section actually has content, the doc is "completed";
+        # otherwise mark "completed_with_errors" so the UI flags it
+        # but downstream still proceeds (consistent with the
+        # extracted-zero-content pattern PDF imports use).
+        any_text = any((s.get("text_length") or 0) > 0 for s in sections)
+        document.status = "completed" if any_text else "completed_with_errors"
+        await db.commit()
+    except Exception as extract_err:
+        document.status = "failed"
+        await db.commit()
+        logger.warning("HTML extraction failed for %s: %s", url, extract_err)
+
+    # ── Auto-queue chunking (Path B) ───────────────────────────────
+    if document.status in ("completed", "completed_with_errors"):
+        try:
+            existing = await db.execute(
+                select(ChunkingJob).where(
+                    ChunkingJob.document_id == document.id,
+                    ChunkingJob.generator_id == "B",
+                    ChunkingJob.status.in_(["pending", "processing"]),
+                ).limit(1)
+            )
+            if existing.scalar_one_or_none() is None:
+                job = ChunkingJob(
+                    document_id=document.id,
+                    generator_id="B",
+                    status="pending",
+                    threshold="0.6",
+                    critique_enabled="false",
+                    max_retries=0,
+                    extraction_enabled="false",  # we already extracted
+                )
+                db.add(job)
+                await db.commit()
+                logger.info("Auto-queued Path B chunking job %s for HTML doc %s", job.id, document.id)
+        except Exception as chunk_err:
+            logger.warning("Auto-chunk after import-from-html failed (non-fatal): %s", chunk_err)
+
+    # ── Mark discovered_sources row as ingested if curator knows it ─
+    try:
+        from app.curator import service as curator_service
+        await curator_service.mark_ingested(db, url=url, document_id=document.id)
+        await db.commit()
+    except Exception as cur_err:
+        # Don't fail the import if the curator linkage fails — back-compat
+        # for callers that pre-date the curator.
+        logger.debug("curator mark_ingested skipped for %s: %s", url, cur_err)
+
+    return {
+        "url": url,
+        "title": title,
+        "document_id": str(document.id),
+        "status": document.status,
+        "sections": len(sections) if document.status != "failed" else 0,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Google Drive OAuth and import
 # ---------------------------------------------------------------------------
 
