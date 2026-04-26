@@ -172,6 +172,10 @@ def _split_by_major_headings(root: Tag) -> Iterable[HtmlSection]:
         page_number += 1
         return sec
 
+    # Track tables we've already consumed wholesale via _format_table
+    # so the per-cell branch below doesn't double-emit each <td>/<th>.
+    consumed_tables: set[int] = set()
+
     # Iterate descendants in document order. Skip nested matches by
     # tracking when we're inside a heading we've already consumed.
     for elem in root.descendants:
@@ -184,13 +188,37 @@ def _split_by_major_headings(root: Tag) -> Iterable[HtmlSection]:
             current_title = _normalize_whitespace(elem.get_text(" ", strip=True)) or "(unnamed section)"
             current_buf = []
             continue
+
+        # Tables: emit ONE block per row with header context preserved
+        # (instead of fanning every <td>/<th> into its own paragraph,
+        # which destroys the row semantics — see Phase 13.4 dental-plan
+        # bug where 'REGION', 'COUNTIES', '1', 'Escambia...' all became
+        # separate trivial chunks). Real-world tables (fee schedules,
+        # transition dates, criteria matrices) only make sense row-by-row.
+        if elem.name == "table" and id(elem) not in consumed_tables:
+            consumed_tables.add(id(elem))
+            for row_text in _format_table(elem):
+                if row_text:
+                    current_buf.append(row_text)
+            continue
+
+        # If we're inside an already-consumed table, skip.
+        in_consumed_table = False
+        for ancestor in elem.parents:
+            if id(ancestor) in consumed_tables:
+                in_consumed_table = True
+                break
+        if in_consumed_table:
+            continue
+
         # Paragraph-y tags whose direct text we capture. We don't
         # capture nested <p> twice because we check `.parent.name` —
         # only the outermost paragraph contributes text. <li> we
-        # handle similarly.
-        if elem.name in ("p", "li", "td", "th", "blockquote", "pre", "h3", "h4", "h5", "h6"):
+        # handle similarly. <td>/<th> are NOT in this list anymore —
+        # tables are handled wholesale above.
+        if elem.name in ("p", "li", "blockquote", "pre", "h3", "h4", "h5", "h6"):
             t = _normalize_whitespace(elem.get_text(" ", strip=True))
-            if t and (not elem.parent or elem.parent.name not in ("p", "li", "td", "th")):
+            if t and (not elem.parent or elem.parent.name not in ("p", "li")):
                 # h3+ headings get inlined as bold-ish prefix so they're
                 # not lost — they signal sub-topics inside an h2 section.
                 if elem.name in ("h3", "h4", "h5", "h6"):
@@ -201,6 +229,55 @@ def _split_by_major_headings(root: Tag) -> Iterable[HtmlSection]:
     last = _flush()
     if last is not None:
         yield last
+
+
+def _format_table(table: Tag) -> list[str]:
+    """Render a <table> as a list of row-paragraphs with header context.
+
+    Strategy:
+    * First <tr> with <th> cells → headers
+    * Each subsequent <tr> → one paragraph: "header1: cell1 | header2: cell2"
+    * If a row has more cells than headers, extras are appended without keys
+    * If no <th> headers exist, fall back to "cell1 | cell2 | ..." per row
+
+    Why row-paragraphs rather than one giant table-paragraph: chunker
+    splits at paragraph boundaries, so each row becomes one chunk.
+    Row chunks carry enough context (header keys) to be useful in
+    isolation — perfect for "what's the rate for Region 5?" queries.
+    """
+    rows = table.find_all("tr")
+    if not rows:
+        return []
+
+    headers: list[str] = []
+    out: list[str] = []
+    for ri, row in enumerate(rows):
+        cells = row.find_all(["td", "th"])
+        if not cells:
+            continue
+        cell_texts = [
+            _normalize_whitespace(c.get_text(" ", strip=True))
+            for c in cells
+        ]
+        # Detect header row: ALL cells are <th>
+        is_header_row = all(c.name == "th" for c in cells)
+        if is_header_row and not headers:
+            headers = cell_texts
+            continue
+        # Body row — render with header context if available.
+        if headers:
+            pairs = []
+            for i, val in enumerate(cell_texts):
+                if i < len(headers) and headers[i]:
+                    pairs.append(f"{headers[i]}: {val}")
+                else:
+                    pairs.append(val)
+            line = " | ".join(p for p in pairs if p.strip(": "))
+        else:
+            line = " | ".join(c for c in cell_texts if c)
+        if line:
+            out.append(line)
+    return out
 
 
 def _join_paragraphs(parts: list[str]) -> str:

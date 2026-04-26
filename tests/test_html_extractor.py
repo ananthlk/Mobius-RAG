@@ -193,8 +193,14 @@ def test_list_items_captured():
     assert "Form C" in text
 
 
-def test_table_cells_captured():
-    """Fee schedule tables — common in AHCA pages."""
+def test_table_rows_captured_with_header_context():
+    """Fee schedule tables — common in AHCA pages.
+
+    Each body row should become ONE paragraph with header context
+    preserved (NOT one paragraph per cell, which destroys row
+    semantics — the bug that wrecked the dental-plan-transition
+    page in Phase 13.4).
+    """
     html = """
     <body>
       <h1>Reimbursement rates</h1>
@@ -207,9 +213,90 @@ def test_table_cells_captured():
     """
     sections = extract_sections(html)
     text = sections[0]["text"]
+    # Both data points present
     assert "Office visit" in text
     assert "$75.00" in text
     assert "Lab panel" in text
+    # And the header context binds them together row-by-row
+    assert "Service: Office visit | Rate: $75.00" in text
+    assert "Service: Lab panel | Rate: $120.00" in text
+
+
+def test_table_without_th_falls_back_to_pipe_separated():
+    """Tables that don't have a <th> header row still produce one
+    paragraph per data row (just without the 'header: ' prefix).
+    """
+    html = """
+    <body>
+      <h1>Plain table</h1>
+      <table>
+        <tr><td>A</td><td>B</td><td>C</td></tr>
+        <tr><td>D</td><td>E</td><td>F</td></tr>
+      </table>
+    </body>
+    """
+    sections = extract_sections(html)
+    text = sections[0]["text"]
+    assert "A | B | C" in text
+    assert "D | E | F" in text
+
+
+def test_table_complex_dental_transition_shape():
+    """Recreates the Sunshine dental-plan-transition-dates page shape:
+    multi-column table where each row is a region/county/effective-date
+    triple. We expect each row chunked separately with header keys so
+    queries like 'what's the transition date for Region 5?' actually
+    surface the right row."""
+    html = """
+    <body>
+      <h1>Dental Plan Transition Dates</h1>
+      <table>
+        <tr>
+          <th>REGION</th><th>COUNTIES</th>
+          <th>OLD PLAN EFFECTIVE</th><th>NEW PLAN EFFECTIVE DATE</th>
+        </tr>
+        <tr>
+          <td>1</td><td>Escambia, Walton</td>
+          <td>Jan 1 2014 to Jan 30 2019</td><td>February 1, 2019</td>
+        </tr>
+        <tr>
+          <td>5</td><td>Pasco, Pinellas</td>
+          <td>Jan 1 2014 to Dec 31 2018</td><td>January 1, 2019</td>
+        </tr>
+      </table>
+    </body>
+    """
+    sections = extract_sections(html)
+    text = sections[0]["text"]
+    # Each row binds its data with the header keys — chunker can
+    # split at the paragraph boundary and each row stays self-contained.
+    assert "REGION: 1" in text
+    assert "COUNTIES: Escambia, Walton" in text
+    assert "NEW PLAN EFFECTIVE DATE: February 1, 2019" in text
+    assert "REGION: 5" in text
+    assert "COUNTIES: Pasco, Pinellas" in text
+    assert "NEW PLAN EFFECTIVE DATE: January 1, 2019" in text
+
+
+def test_table_does_not_double_emit_cells():
+    """Regression for the Phase 13.4 bug: <td>/<th> were being captured
+    BOTH wholesale via the table path AND individually via the per-cell
+    branch, producing duplicate trivial chunks. Make sure each cell
+    appears exactly once in the output text.
+    """
+    html = """
+    <body>
+      <table>
+        <tr><th>X</th><th>Y</th></tr>
+        <tr><td>foo</td><td>bar</td></tr>
+      </table>
+    </body>
+    """
+    sections = extract_sections(html)
+    text = sections[0]["text"]
+    # 'foo' appears in the row paragraph 'X: foo | Y: bar' — exactly once.
+    assert text.count("foo") == 1
+    assert text.count("bar") == 1
 
 
 def test_dedupes_repeated_breadcrumb_text():
