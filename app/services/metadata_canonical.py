@@ -49,6 +49,7 @@ _PAYER_CANONICAL: dict[str, str] = {
     "sunshine health": "Sunshine Health",
     "sunshine healthcare": "Sunshine Health",
     "sunshine":       "Sunshine Health",
+    "sunshinehealth": "Sunshine Health",  # URL-derived host (sunshinehealth.com → stripped TLD)
     "humana":         "Humana",
     "humana healthy horizons": "Humana Healthy Horizons",
     "united healthcare": "United Healthcare",
