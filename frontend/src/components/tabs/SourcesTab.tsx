@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { API_BASE } from '../../config'
 import { SourceTreeView } from './sources/SourceTreeView'
+import { AddSourceDialog } from './sources/AddSourceDialog'
 import type { SourceRow } from './sources/treeBuilder'
 import './SourcesTab.css'
 
@@ -53,6 +54,10 @@ export function SourcesTab() {
   // mean "live in the corpus", not "queued for processing".
   const [autoPublish, setAutoPublish] = useState(true)
 
+  // "+ Add new source" wizard
+  const [addDialogOpen, setAddDialogOpen] = useState(false)
+  const [refreshTick, setRefreshTick] = useState(0)
+
   // Free-text search (List view)
   const [query, setQuery] = useState('')
   const [searchResults, setSearchResults] = useState<SourceRow[]>([])
@@ -98,7 +103,7 @@ export function SourcesTab() {
       })
     return () => { cancelled = true }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [refreshTick])
 
 
   // ── Load rows for selected host ────────────────────────────────
@@ -212,21 +217,36 @@ export function SourcesTab() {
     <div className="sources-tab">
       <div className="sources-header">
         <h2>Sources Registry</h2>
-        <div className="view-toggle">
+        <div className="header-actions">
           <button
-            className={view === 'tree' ? 'view-btn-active' : 'view-btn'}
-            onClick={() => setView('tree')}
+            className="add-source-btn"
+            onClick={() => setAddDialogOpen(true)}
           >
-            Tree view
+            + Add new source
           </button>
-          <button
-            className={view === 'list' ? 'view-btn-active' : 'view-btn'}
-            onClick={() => setView('list')}
-          >
-            Search (BM25)
-          </button>
+          <div className="view-toggle">
+            <button
+              className={view === 'tree' ? 'view-btn-active' : 'view-btn'}
+              onClick={() => setView('tree')}
+            >
+              Tree view
+            </button>
+            <button
+              className={view === 'list' ? 'view-btn-active' : 'view-btn'}
+              onClick={() => setView('list')}
+            >
+              Search (BM25)
+            </button>
+          </div>
         </div>
       </div>
+
+      {addDialogOpen && (
+        <AddSourceDialog
+          onClose={() => setAddDialogOpen(false)}
+          onAdded={() => setRefreshTick(t => t + 1)}
+        />
+      )}
 
       {statsError && (
         <div className="error-banner">Failed to load stats: {statsError}</div>

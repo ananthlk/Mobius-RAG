@@ -285,6 +285,148 @@ async def stats_endpoint(db: AsyncSession = Depends(_get_db)):
     return await curator_service.stats(db)
 
 
+@router.get("/classify")
+async def classify_endpoint(
+    url: str = Query(..., description="URL to classify"),
+):
+    """Run the URL classifier without persisting. Used by the
+    "Add new source" wizard in the Sources UI to auto-fill
+    payer/state/authority/kind fields the moment the operator
+    pastes a URL.
+    """
+    from app.curator.classifier import classify_url
+    return classify_url(url)
+
+
+# ── Probe (Phase 13.x — Add Source wizard) ───────────────────────────
+
+
+class ProbeRequest(BaseModel):
+    url: str
+
+
+_DEFAULT_UA = "Mobius-WebScraper/1.0 (+https://github.com/mobius)"
+
+
+def _suggest_strategy(fetch_status: int, sitemap_status: int, sitemap_count: int) -> tuple[str, str]:
+    """Decide ingest_strategy + a one-line reason from probe results."""
+    if fetch_status >= 200 and fetch_status < 400:
+        if sitemap_count > 0:
+            return ("scrape", f"Site is reachable + publishes a sitemap ({sitemap_count} URLs).")
+        return ("scrape", "Site is reachable. No sitemap; scraper will BFS from the seed URL.")
+    if 400 <= fetch_status < 500:
+        if sitemap_status >= 200 and sitemap_status < 400 and sitemap_count > 0:
+            return ("sitemap_only",
+                    f"Front door {fetch_status} but sitemap is open with {sitemap_count} URLs — "
+                    "register URLs without crawling.")
+        return ("state_mirror",
+                f"Site bot-walled ({fetch_status}). Recommend state agency mirror (e.g. AHCA "
+                "for FL Medicaid plans) since direct scrape will fail.")
+    return ("manual_upload",
+            f"Site unreachable ({fetch_status}). Operator should upload PDFs manually.")
+
+
+@router.post("/probe")
+async def probe_endpoint(body: ProbeRequest):
+    """Probe a URL/domain to determine ingest_strategy.
+
+    Returns:
+      * fetch.status — HEAD/GET on the URL
+      * sitemap — sitemap.xml availability + URL count
+      * robots — robots.txt status + first 500 chars
+      * classifier — payer/state/authority inferred from the URL
+      * recommended_strategy + reason — operator can override
+
+    Used by the Sources tab's "Add new source" wizard so the operator
+    sees "is this scrapable, blocked, or partially-open" in one click
+    instead of trial-and-error.
+    """
+    from urllib.parse import urlparse
+    import httpx
+    from app.curator.classifier import classify_url
+
+    url = body.url.strip()
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="url must be http:// or https://")
+
+    parsed = urlparse(url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    headers = {"User-Agent": _DEFAULT_UA}
+
+    # Fetch the URL itself (HEAD then GET fallback if HEAD blocked)
+    fetch_status = -1
+    fetch_content_type = None
+    fetch_redirected_to = None
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=15, headers=headers) as client:
+            resp = await client.head(url)
+            if resp.status_code in (405, 501):
+                # Some sites refuse HEAD — fallback to GET
+                resp = await client.get(url)
+            fetch_status = resp.status_code
+            fetch_content_type = (resp.headers.get("content-type") or "").split(";")[0].strip() or None
+            if str(resp.url) != url:
+                fetch_redirected_to = str(resp.url)
+    except Exception as exc:
+        fetch_content_type = f"_err:{type(exc).__name__}"
+
+    # Sitemap probe
+    sitemap_status = -1
+    sitemap_count = 0
+    sitemap_sample: list[str] = []
+    sitemap_url = origin + "/sitemap.xml"
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=15, headers=headers) as client:
+            resp = await client.get(sitemap_url)
+            sitemap_status = resp.status_code
+            if resp.status_code == 200:
+                import re
+                locs = re.findall(r"<loc>([^<]+)</loc>", resp.text)
+                locs = [u.strip() for u in locs if u.strip().startswith(("http://", "https://"))]
+                sitemap_count = len(locs)
+                sitemap_sample = locs[:5]
+    except Exception:
+        pass
+
+    # robots.txt probe
+    robots_status = -1
+    robots_preview = ""
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=10, headers=headers) as client:
+            resp = await client.get(origin + "/robots.txt")
+            robots_status = resp.status_code
+            if resp.status_code == 200:
+                robots_preview = (resp.text or "")[:500]
+    except Exception:
+        pass
+
+    cls = classify_url(url)
+    strategy, reason = _suggest_strategy(fetch_status, sitemap_status, sitemap_count)
+
+    return {
+        "url": url,
+        "host": parsed.netloc.lower(),
+        "fetch": {
+            "status": fetch_status,
+            "content_type": fetch_content_type,
+            "redirected_to": fetch_redirected_to,
+        },
+        "sitemap": {
+            "url": sitemap_url,
+            "status": sitemap_status,
+            "url_count": sitemap_count,
+            "sample": sitemap_sample,
+        },
+        "robots": {
+            "status": robots_status,
+            "preview": robots_preview,
+        },
+        "classifier": cls,
+        "recommended_strategy": strategy,
+        "recommended_reason": reason,
+    }
+
+
 @router.get("/corpus_by_host")
 async def corpus_by_host_endpoint(db: AsyncSession = Depends(_get_db)):
     """Count documents in the corpus, grouped by host extracted from
