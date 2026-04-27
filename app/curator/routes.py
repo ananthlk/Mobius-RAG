@@ -300,25 +300,37 @@ async def corpus_by_host_endpoint(db: AsyncSession = Depends(_get_db)):
     from sqlalchemy import func, text
     # Use raw SQL: extract the host from file_path (URL or GCS path)
     # via regexp_substr. Cheap aggregate across <2000 docs at v1 scale.
-    # ``published_at`` is computed (lives in publish_events / rag_published_embeddings),
-    # not a column on documents. We approximate by counting docs that
-    # have at least one rag_published_embeddings row — that's what
-    # makes a doc actually queryable in chat.
+    # Host source priority:
+    #   1. file_path if it's a URL (HTML imports — file_path = source URL)
+    #   2. source_metadata->>'source_url' (PDF imports — scraper put URL here)
+    #   3. NULL otherwise (manual UI uploads have no URL provenance)
+    #
+    # ``published_at`` is computed (lives in publish_events /
+    # rag_published_embeddings), not a column on documents. EXISTS
+    # subquery against rag_published_embeddings — that's what gates
+    # "queryable in chat" anyway.
     sql = text("""
+        WITH docs AS (
+            SELECT
+                d.id,
+                COALESCE(
+                    CASE WHEN d.file_path LIKE 'http%'
+                         THEN substring(d.file_path FROM '^https?://([^/]+)')
+                    END,
+                    substring(d.source_metadata->>'source_url' FROM '^https?://([^/]+)')
+                ) AS host
+            FROM documents d
+        )
         SELECT
-            CASE
-                WHEN d.file_path LIKE 'http%'
-                    THEN substring(d.file_path FROM '^https?://([^/]+)')
-                ELSE NULL
-            END AS host,
+            host,
             COUNT(*) AS doc_count,
             SUM(
                 CASE WHEN EXISTS (
                     SELECT 1 FROM rag_published_embeddings rpe
-                    WHERE rpe.document_id = d.id
+                    WHERE rpe.document_id = docs.id
                 ) THEN 1 ELSE 0 END
             ) AS published_count
-        FROM documents d
+        FROM docs
         GROUP BY host
         ORDER BY doc_count DESC
     """)
