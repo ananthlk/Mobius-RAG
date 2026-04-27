@@ -37,6 +37,11 @@ vertex = [
 ]
 chroma = [
     "chromadb>=0.4.0",
+    # publish_sync._chat_pg_upsert_batch uses psycopg2 to write the
+    # mobius_chat.published_rag_metadata row (sync lib, offloaded via
+    # asyncio.to_thread). asyncpg can't talk to that DB because chat
+    # owns the sync Alembic schema there.
+    "psycopg2-binary>=2.9",
 ]
 
 [build-system]

@@ -43,7 +43,9 @@ CHROMA_PORT = int(os.environ.get("CHROMA_PORT", "8000") or "8000")
 CHROMA_TOKEN = os.environ.get("CHROMA_AUTH_TOKEN", "")
 CHROMA_SSL = (os.environ.get("CHROMA_SSL", "0") or "0").strip().lower() in ("1", "true", "yes")
 
-PAGE_SIZE = 5000
+PAGE_SIZE = 2000
+HTTP_TIMEOUT = 240
+DEFAULT_COLLECTION_FILTER: set[str] = {"published_rag"}  # smaller; chat-side. Pass --all to also clean chunk_embeddings.
 
 
 def _chroma_base() -> str:
@@ -74,7 +76,7 @@ async def collection_doc_ids(client: httpx.AsyncClient, coll_id: str) -> set[str
         body = {"limit": PAGE_SIZE, "offset": offset, "include": ["metadatas"]}
         r = await client.post(
             f"{_chroma_base()}/collections/{coll_id}/get",
-            headers=_headers(), json=body, timeout=120,
+            headers=_headers(), json=body, timeout=HTTP_TIMEOUT,
         )
         r.raise_for_status()
         data = r.json()
@@ -111,7 +113,7 @@ async def delete_chroma_rows_by_doc(client: httpx.AsyncClient, coll_id: str, doc
         body = {"where": {"document_id": {"$in": batch}}}
         r = await client.post(
             f"{_chroma_base()}/collections/{coll_id}/delete",
-            headers=_headers(), json=body, timeout=120,
+            headers=_headers(), json=body, timeout=HTTP_TIMEOUT,
         )
         r.raise_for_status()
         deleted += len(batch)
@@ -119,7 +121,7 @@ async def delete_chroma_rows_by_doc(client: httpx.AsyncClient, coll_id: str, doc
     return deleted
 
 
-async def main(dry_run: bool) -> int:
+async def main(dry_run: bool, all_collections: bool) -> int:
     if not CHROMA_HOST:
         log.error("CHROMA_HOST not set")
         return 2
@@ -150,6 +152,9 @@ async def main(dry_run: bool) -> int:
             if name in ("chat_answer_cache",):
                 # Cache table — never tied to documents. Skip.
                 continue
+            if not all_collections and name not in DEFAULT_COLLECTION_FILTER:
+                log.info("=== Skipping %s (use --all to include) ===", name)
+                continue
             log.info("=== Collection: %s (%s) ===", name, cid)
 
             doc_ids = await collection_doc_ids(client, cid)
@@ -176,5 +181,6 @@ async def main(dry_run: bool) -> int:
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--dry-run", action="store_true", help="Count phantoms without deleting")
+    p.add_argument("--all", action="store_true", help="Clean ALL collections (default: published_rag only)")
     args = p.parse_args()
-    sys.exit(asyncio.run(main(dry_run=args.dry_run)))
+    sys.exit(asyncio.run(main(dry_run=args.dry_run, all_collections=args.all)))
