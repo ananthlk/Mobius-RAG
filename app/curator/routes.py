@@ -308,6 +308,40 @@ class ProbeRequest(BaseModel):
 _DEFAULT_UA = "Mobius-WebScraper/1.0 (+https://github.com/mobius)"
 
 
+def _suggest_mirror(classifier: dict | None) -> dict | None:
+    """For bot-walled FL Medicaid payer sites, point the operator at the
+    AHCA-hosted mirror. Returns a {suggested_url, search_url, help} dict
+    when the classifier matches a known FL SMMC plan, else None.
+
+    No single per-plan mirror URL is canonical — AHCA reorganizes its
+    SMMC handbook pages periodically — so we return the SMMC index page
+    as the landing target plus a Google site-search URL pre-populated
+    with the payer name. The operator clicks one, finds the right
+    handbook PDF, pastes its URL into the Mirror URL input.
+    """
+    if not classifier:
+        return None
+    payer = (classifier.get("payer") or "").strip()
+    state = (classifier.get("state") or "").strip().upper()
+    # Only FL Medicaid plans have AHCA mirrors. Sunshine + AHCA are
+    # already open so no mirror redirect needed.
+    if state != "FL" or not payer or payer in {"AHCA", "Sunshine Health"}:
+        return None
+    smmc_index = "https://ahca.myflorida.com/medicaid/statewide_mc"
+    from urllib.parse import quote_plus
+    search_q = f"{payer} member handbook site:ahca.myflorida.com"
+    return {
+        "suggested_url": smmc_index,
+        "search_url": f"https://www.google.com/search?q={quote_plus(search_q)}",
+        "help": (
+            f"AHCA hosts FL Medicaid plan handbooks at the SMMC page. "
+            f"Browse {smmc_index} to find {payer}'s current handbook, "
+            f"or use the search link to locate the exact PDF, then "
+            f"paste its URL into the Mirror URL input below."
+        ),
+    }
+
+
 def _suggest_strategy(
     fetch_status: int,
     sitemap_status: int,
@@ -423,6 +457,9 @@ async def probe_endpoint(body: ProbeRequest):
 
     cls = classify_url(url)
     strategy, reason = _suggest_strategy(fetch_status, sitemap_status, sitemap_count, cls)
+    # Only attach mirror_suggestion when the chosen strategy is state_mirror.
+    # No need to confuse the operator with a mirror hint on open sites.
+    mirror = _suggest_mirror(cls) if strategy == "state_mirror" else None
 
     return {
         "url": url,
@@ -445,6 +482,7 @@ async def probe_endpoint(body: ProbeRequest):
         "classifier": cls,
         "recommended_strategy": strategy,
         "recommended_reason": reason,
+        "mirror_suggestion": mirror,
     }
 
 

@@ -1,0 +1,593 @@
+/* ═══════════════════════════════════════════════════════════════
+   UploadTab — left: New upload (file + URL). Right: in-flight queue.
+   ═══════════════════════════════════════════════════════════════ */
+
+.upload-tab {
+  padding: var(--mobius-space-md);
+  width: 100%;
+}
+
+.upload-tab-grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: var(--mobius-space-md);
+  align-items: start;
+}
+
+@media (max-width: 1024px) {
+  .upload-tab-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.upload-card,
+.upload-queue-card {
+  background: var(--mobius-bg-card);
+  border: 1px solid var(--mobius-border);
+  border-radius: var(--mobius-radius-md);
+  padding: var(--mobius-space-md);
+  box-shadow: var(--mobius-shadow-sm);
+}
+
+.upload-card-title {
+  margin: 0 0 var(--mobius-space-md) 0;
+  font-size: var(--mobius-text-lg);
+  color: var(--mobius-text-primary);
+}
+
+.upload-queue-count {
+  color: var(--mobius-text-secondary);
+  font-weight: 400;
+  font-size: var(--mobius-text-sm);
+}
+
+.upload-section {
+  margin-bottom: var(--mobius-space-lg);
+  padding-bottom: var(--mobius-space-md);
+  border-bottom: 1px dashed var(--mobius-border);
+}
+
+.upload-section:last-child {
+  border-bottom: none;
+}
+
+.upload-section-title {
+  margin: 0 0 var(--mobius-space-sm) 0;
+  font-size: var(--mobius-text-base);
+  color: var(--mobius-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.upload-url-form {
+  display: flex;
+  gap: var(--mobius-space-sm);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.upload-url-input {
+  flex: 1;
+  min-width: 240px;
+  padding: 0.5rem 0.7rem;
+  border-radius: var(--mobius-radius-sm);
+  border: 1px solid var(--mobius-border);
+  background: var(--mobius-bg-card);
+  color: var(--mobius-text-primary);
+  font-family: var(--mobius-font-sans);
+  font-size: var(--mobius-text-sm);
+}
+
+.upload-probe-result {
+  margin-top: var(--mobius-space-sm);
+  padding: var(--mobius-space-sm);
+  background: var(--mobius-bg-secondary);
+  border-radius: var(--mobius-radius-sm);
+  font-size: var(--mobius-text-sm);
+  color: var(--mobius-text-primary);
+}
+
+.upload-probe-rec {
+  margin-top: 0.4rem;
+  color: var(--mobius-text-secondary);
+}
+
+.upload-submit-msg {
+  margin-top: var(--mobius-space-sm);
+  padding: var(--mobius-space-sm);
+  border-radius: var(--mobius-radius-sm);
+  font-size: var(--mobius-text-sm);
+}
+
+.upload-submit-msg.ok {
+  background: var(--mobius-success-bg, #e8f5ee);
+  color: var(--mobius-success-text, #1d5631);
+}
+
+.upload-submit-msg.err {
+  background: var(--mobius-error-bg, #fbeaea);
+  color: var(--mobius-error-text, #802626);
+}
+
+/* ── Queue card ─────────────────────────────────────────────── */
+.upload-queue-empty {
+  font-size: var(--mobius-text-sm);
+  color: var(--mobius-text-secondary);
+  padding: var(--mobius-space-md) 0;
+}
+
+.upload-queue-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--mobius-space-sm);
+}
+
+.upload-queue-row {
+  padding: var(--mobius-space-sm);
+  border: 1px solid var(--mobius-border);
+  border-radius: var(--mobius-radius-sm);
+  background: var(--mobius-bg-secondary);
+}
+
+.upload-queue-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--mobius-space-sm);
+  margin-bottom: 0.4rem;
+}
+
+.upload-queue-name {
+  font-size: var(--mobius-text-sm);
+  font-weight: 600;
+  color: var(--mobius-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.upload-queue-pill {
+  font-size: var(--mobius-text-xs);
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  background: var(--mobius-bg-tertiary, var(--mobius-bg-card));
+  color: var(--mobius-text-secondary);
+  text-transform: lowercase;
+  flex-shrink: 0;
+}
+
+.upload-queue-pill.stage-extracting,
+.upload-queue-pill.stage-chunking,
+.upload-queue-pill.stage-embedding {
+  background: var(--mobius-info-bg, #eaf2ff);
+  color: var(--rag-accent, var(--mobius-accent-blue));
+}
+
+.upload-queue-pill.stage-completed {
+  background: var(--mobius-success-bg, #e8f5ee);
+  color: var(--mobius-success-text, #1d5631);
+}
+
+.upload-queue-pill.stage-failed {
+  background: var(--mobius-error-bg, #fbeaea);
+  color: var(--mobius-error-text, #802626);
+}
+
+.upload-queue-progress {
+  width: 100%;
+  height: 4px;
+  background: var(--mobius-bg-card);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-bottom: 0.3rem;
+}
+
+.upload-queue-progress-bar {
+  height: 100%;
+  background: var(--rag-accent, var(--mobius-accent-blue));
+  transition: width 0.2s;
+}
+
+.upload-queue-meta {
+  font-size: var(--mobius-text-xs);
+  color: var(--mobius-text-secondary);
+}
+
+/* ── Source selector (segmented control) ──────────────────── */
+.upload-source-selector {
+  display: inline-flex;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  background: var(--mobius-bg-secondary);
+  border: 1px solid var(--mobius-border);
+  border-radius: var(--mobius-radius-full);
+  margin-bottom: var(--mobius-space-md);
+}
+
+.upload-source-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  height: 36px;
+  padding: 0 0.9rem;
+  border: none;
+  background: transparent;
+  color: var(--mobius-text-muted);
+  font-size: var(--mobius-text-sm);
+  font-weight: 500;
+  border-radius: var(--mobius-radius-full);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.upload-source-btn:hover {
+  color: var(--mobius-text-primary);
+}
+
+.upload-source-btn.active {
+  background: var(--mobius-bg-card);
+  color: var(--mobius-text-primary);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+.upload-source-icon {
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.upload-source-panel {
+  display: block;
+}
+
+.upload-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mobius-space-md);
+}
+
+/* ── Computer (file dropzone) ─────────────────────────────── */
+.upload-dropzone {
+  border: 2px dashed var(--mobius-border);
+  border-radius: var(--mobius-radius-base);
+  padding: var(--mobius-space-xl);
+  background: var(--mobius-bg-secondary);
+  text-align: center;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.upload-dropzone.drag-active {
+  border-color: var(--mobius-accent);
+  background: var(--mobius-bg-card);
+}
+
+.upload-dropzone-input {
+  display: none;
+}
+
+.upload-dropzone-label {
+  display: inline-block;
+  padding: 0.55rem 1.1rem;
+  background: var(--mobius-bg-card);
+  border: 1px solid var(--mobius-border);
+  border-radius: var(--mobius-radius-base);
+  cursor: pointer;
+  font-size: var(--mobius-text-sm);
+  color: var(--mobius-text-primary);
+  margin-bottom: var(--mobius-space-sm);
+  transition: border-color 0.15s ease;
+}
+
+.upload-dropzone-label:hover {
+  border-color: var(--mobius-accent);
+}
+
+.upload-dropzone-info {
+  font-size: var(--mobius-text-xs);
+  color: var(--mobius-text-muted);
+  margin-bottom: var(--mobius-space-sm);
+}
+
+.upload-dropzone-btn {
+  width: 100%;
+}
+
+.upload-hint {
+  margin: 0;
+  font-size: var(--mobius-text-xs);
+  color: var(--mobius-text-muted);
+}
+
+/* ── URL panel ────────────────────────────────────────────── */
+.upload-fieldset {
+  border: 1px solid var(--mobius-border);
+  border-radius: var(--mobius-radius-base);
+  padding: var(--mobius-space-sm) var(--mobius-space-md) var(--mobius-space-md);
+  margin: 0;
+}
+
+.upload-fieldset-legend {
+  padding: 0 0.4rem;
+  font-size: var(--mobius-text-xs);
+  font-weight: 600;
+  color: var(--mobius-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.upload-strategy-radios {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.upload-strategy-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: var(--mobius-radius-sm);
+  font-size: var(--mobius-text-sm);
+  color: var(--mobius-text-primary);
+  cursor: pointer;
+}
+
+.upload-strategy-row.selected {
+  background: var(--mobius-bg-secondary);
+}
+
+.upload-advanced {
+  border: 1px solid var(--mobius-border);
+  border-radius: var(--mobius-radius-base);
+  padding: var(--mobius-space-sm) var(--mobius-space-md);
+}
+
+.upload-advanced summary {
+  cursor: pointer;
+  font-size: var(--mobius-text-sm);
+  font-weight: 600;
+  color: var(--mobius-text-secondary);
+}
+
+.upload-advanced-grid,
+.upload-metadata-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--mobius-space-sm);
+  margin-top: var(--mobius-space-sm);
+}
+
+.upload-advanced-grid label,
+.upload-metadata-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: var(--mobius-text-xs);
+  color: var(--mobius-text-secondary);
+}
+
+.upload-advanced-grid input,
+.upload-metadata-grid input,
+.upload-metadata-grid select {
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--mobius-border);
+  border-radius: var(--mobius-radius-sm);
+  background: var(--mobius-bg-card);
+  color: var(--mobius-text-primary);
+  font-size: var(--mobius-text-sm);
+}
+
+.upload-advanced-content-mode {
+  display: flex;
+  align-items: center;
+  gap: var(--mobius-space-md);
+  margin-top: var(--mobius-space-sm);
+  font-size: var(--mobius-text-sm);
+  color: var(--mobius-text-primary);
+}
+
+.upload-advanced-content-mode-label {
+  font-weight: 600;
+  color: var(--mobius-text-secondary);
+  font-size: var(--mobius-text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.upload-advanced-content-mode label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  cursor: pointer;
+}
+
+.upload-autopublish {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: var(--mobius-text-sm);
+  color: var(--mobius-text-primary);
+}
+
+.upload-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.upload-probe-classifier {
+  margin-top: 0.3rem;
+  font-size: var(--mobius-text-xs);
+  color: var(--mobius-text-muted);
+}
+
+/* ── Drive panel ──────────────────────────────────────────── */
+.upload-drive-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--mobius-space-sm);
+  font-size: var(--mobius-text-sm);
+  color: var(--mobius-text-secondary);
+}
+
+.upload-drive-email {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload-drive-breadcrumb {
+  font-size: var(--mobius-text-sm);
+  color: var(--mobius-text-muted);
+}
+
+.upload-drive-breadcrumb-link {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--mobius-accent);
+  font: inherit;
+}
+
+.upload-drive-goto {
+  display: flex;
+  gap: var(--mobius-space-sm);
+  align-items: center;
+}
+
+.upload-drive-list {
+  border: 1px solid var(--mobius-border);
+  border-radius: var(--mobius-radius-base);
+  padding: var(--mobius-space-sm);
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.upload-drive-folders,
+.upload-drive-files {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.upload-drive-folders {
+  margin-bottom: var(--mobius-space-sm);
+}
+
+.upload-drive-folder-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.4rem;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--mobius-text-primary);
+  font: inherit;
+  text-align: left;
+  width: 100%;
+  border-radius: var(--mobius-radius-sm);
+}
+
+.upload-drive-folder-item:hover {
+  background: var(--mobius-bg-secondary);
+}
+
+.upload-drive-files li label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0.4rem;
+  font-size: var(--mobius-text-sm);
+  color: var(--mobius-text-primary);
+  cursor: pointer;
+}
+
+.upload-drive-file-tag {
+  font-size: var(--mobius-text-xs);
+  color: var(--mobius-text-muted);
+}
+
+.upload-drive-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--mobius-space-sm);
+  margin-bottom: var(--mobius-space-sm);
+}
+
+.upload-drive-count {
+  font-size: var(--mobius-text-xs);
+  color: var(--mobius-text-muted);
+}
+
+/* Mirror-URL input that appears when state_mirror strategy is selected */
+.upload-mirror-url {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  background: var(--mobius-bg-secondary);
+  border: 1px solid var(--mobius-border);
+  border-radius: var(--mobius-radius-base);
+}
+.upload-mirror-url label {
+  font-size: var(--mobius-text-sm);
+  font-weight: 500;
+  color: var(--mobius-text-primary);
+}
+.upload-mirror-url input {
+  padding: 0.5rem 0.625rem;
+  border: 1px solid var(--mobius-border);
+  border-radius: var(--mobius-radius-base);
+  font-size: var(--mobius-text-sm);
+  background: var(--mobius-bg-card);
+  color: var(--mobius-text-primary);
+}
+.upload-mirror-url input:focus {
+  outline: 2px solid var(--mobius-accent);
+  outline-offset: -1px;
+  border-color: transparent;
+}
+.upload-help-text {
+  font-size: var(--mobius-text-xs);
+  color: var(--mobius-text-muted);
+  line-height: 1.4;
+}
+
+.upload-mirror-help {
+  margin-top: 0.25rem;
+  padding: 0.625rem 0.75rem;
+  background: rgba(59, 130, 246, 0.06);
+  border: 1px solid rgba(59, 130, 246, 0.18);
+  border-radius: var(--mobius-radius-base);
+  font-size: var(--mobius-text-sm);
+  color: var(--mobius-text-secondary);
+}
+.upload-mirror-help p {
+  margin: 0 0 0.5rem 0;
+  line-height: 1.4;
+}
+.upload-mirror-help-links {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.upload-mirror-help-links a {
+  color: var(--mobius-accent);
+  text-decoration: none;
+  font-weight: 500;
+  font-size: var(--mobius-text-xs);
+}
+.upload-mirror-help-links a:hover {
+  text-decoration: underline;
+}
