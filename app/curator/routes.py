@@ -308,20 +308,41 @@ class ProbeRequest(BaseModel):
 _DEFAULT_UA = "Mobius-WebScraper/1.0 (+https://github.com/mobius)"
 
 
-def _suggest_strategy(fetch_status: int, sitemap_status: int, sitemap_count: int) -> tuple[str, str]:
-    """Decide ingest_strategy + a one-line reason from probe results."""
-    if fetch_status >= 200 and fetch_status < 400:
+def _suggest_strategy(
+    fetch_status: int,
+    sitemap_status: int,
+    sitemap_count: int,
+    classifier: dict | None = None,
+) -> tuple[str, str]:
+    """Decide ingest_strategy + a one-line reason from probe results.
+
+    `state_mirror` is reserved for sites that have an AHCA-mandated
+    mirror — i.e. **FL Medicaid payer plans** whose handbooks are
+    legally also published on ahca.myflorida.com. For any other
+    bot-walled site (advocacy non-profit, association, research org)
+    no state mirror exists, so we recommend ``manual_upload`` instead.
+    """
+    if 200 <= fetch_status < 400:
         if sitemap_count > 0:
             return ("scrape", f"Site is reachable + publishes a sitemap ({sitemap_count} URLs).")
         return ("scrape", "Site is reachable. No sitemap; scraper will BFS from the seed URL.")
     if 400 <= fetch_status < 500:
-        if sitemap_status >= 200 and sitemap_status < 400 and sitemap_count > 0:
+        if 200 <= sitemap_status < 400 and sitemap_count > 0:
             return ("sitemap_only",
                     f"Front door {fetch_status} but sitemap is open with {sitemap_count} URLs — "
                     "register URLs without crawling.")
-        return ("state_mirror",
-                f"Site bot-walled ({fetch_status}). Recommend state agency mirror (e.g. AHCA "
-                "for FL Medicaid plans) since direct scrape will fail.")
+        # Bot-walled — distinguish FL Medicaid payers (AHCA mirror exists)
+        # from generic advocacy / association sites (no mirror).
+        cls = classifier or {}
+        payer = (cls.get("payer") or "").strip()
+        state = (cls.get("state") or "").strip().upper()
+        if payer and state == "FL":
+            return ("state_mirror",
+                    f"Site bot-walled ({fetch_status}). {payer} is a FL Medicaid plan — "
+                    "register the AHCA mirror URL instead.")
+        return ("manual_upload",
+                f"Site bot-walled ({fetch_status}) and no FL Medicaid payer match — "
+                "operator will need to upload PDFs by hand.")
     return ("manual_upload",
             f"Site unreachable ({fetch_status}). Operator should upload PDFs manually.")
 
@@ -401,7 +422,7 @@ async def probe_endpoint(body: ProbeRequest):
         pass
 
     cls = classify_url(url)
-    strategy, reason = _suggest_strategy(fetch_status, sitemap_status, sitemap_count)
+    strategy, reason = _suggest_strategy(fetch_status, sitemap_status, sitemap_count, cls)
 
     return {
         "url": url,
