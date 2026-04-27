@@ -2481,6 +2481,27 @@ async def import_document_from_gcs(
                 logger.warning("Auto-chunk after import-from-gcs failed (non-fatal): %s", chunk_err)
                 await db.rollback()
 
+        # Phase 13.3c (2026-04-26) — link this document to its
+        # discovered_sources row when source_url was provided. Closes
+        # the gap that left ingested PDFs disconnected from the URL
+        # registry, surfacing as ingested=false in chat ReAct's
+        # lookup_authoritative_sources tool. Best-effort: a missing
+        # registry row is fine (back-compat for callers that don't
+        # pass source_url; the doc still imports).
+        source_url = getattr(body, "source_url", None)
+        if source_url:
+            try:
+                from app.curator import service as curator_service
+                await curator_service.mark_ingested(
+                    db, url=source_url, document_id=document.id,
+                )
+                await db.commit()
+            except Exception as cur_err:
+                logger.debug(
+                    "import-from-gcs curator linkage skipped for %s: %s",
+                    source_url, cur_err,
+                )
+
         return {
             "filename": filename,
             "gcs_path": gcs_path,
