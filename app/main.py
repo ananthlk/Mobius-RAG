@@ -2403,6 +2403,26 @@ async def import_document_from_gcs(
         result = await db.execute(select(Document).where(Document.file_hash == file_hash))
         existing_doc = result.scalar_one_or_none()
         if existing_doc:
+            # Phase 13.3c follow-up: even on dedupe-hit, link the URL the
+            # caller pushed (typically from a fresh scrape) into the
+            # registry so /sources/search shows ingested=true. Without
+            # this the URL stays orphaned even though the bytes are in
+            # the corpus — confusing to the operator looking at the
+            # tree view. Best-effort; failure must NOT shadow the 409.
+            body_source_url = getattr(body, "source_url", None)
+            if body_source_url:
+                try:
+                    from app.curator import service as curator_service
+                    await curator_service.mark_ingested(
+                        db, url=body_source_url, document_id=existing_doc.id,
+                    )
+                    await db.commit()
+                except Exception as cur_err:
+                    logger.debug(
+                        "import-from-gcs duplicate-branch curator linkage skipped for %s: %s",
+                        body_source_url, cur_err,
+                    )
+                    await db.rollback()
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -2643,6 +2663,22 @@ async def import_document_from_html(
     result = await db.execute(select(Document).where(Document.file_hash == file_hash))
     existing_doc = result.scalar_one_or_none()
     if existing_doc:
+        # Phase 13.3c follow-up: re-scraping a URL whose body matches an
+        # existing doc by content hash should still flip the registry's
+        # ingested flag for the URL the caller passed — otherwise a fresh
+        # scrape can leave the URL orphaned in the tree view. Best-effort.
+        try:
+            from app.curator import service as curator_service
+            await curator_service.mark_ingested(
+                db, url=url, document_id=existing_doc.id,
+            )
+            await db.commit()
+        except Exception as cur_err:
+            logger.debug(
+                "import-from-html duplicate-branch curator linkage skipped for %s: %s",
+                url, cur_err,
+            )
+            await db.rollback()
         raise HTTPException(
             status_code=409,
             detail={
