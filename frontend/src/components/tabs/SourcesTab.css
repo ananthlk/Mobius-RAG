@@ -1,0 +1,238 @@
+/* Curator UI — SourcesTab styles. Lightweight, leans on the
+   existing Mobius design tokens (fonts/colors via index.css). */
+
+.sources-tab {
+  padding: 16px;
+  font-size: 14px;
+  color: var(--mobius-text, #1a1a1a);
+}
+
+.sources-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.sources-header h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.view-toggle { display: inline-flex; gap: 4px; }
+.view-btn,
+.view-btn-active {
+  padding: 6px 12px;
+  border: 1px solid #d0d0d8;
+  background: #f7f7fa;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.view-btn-active { background: #2563eb; color: white; border-color: #2563eb; }
+
+.error-banner { background: #fee; color: #800; padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; }
+.loading, .empty { padding: 24px; color: #777; text-align: center; }
+
+/* ── Entity selector ──────────────────────────────────── */
+.entity-selector { margin-bottom: 16px; font-size: 13px; }
+.entity-selector select {
+  padding: 6px 10px;
+  border: 1px solid #d0d0d8;
+  border-radius: 4px;
+  font-size: 13px;
+  min-width: 320px;
+}
+
+/* ── Tree view: entity header + coverage ──────────────── */
+.entity-header { margin-bottom: 16px; }
+.entity-name {
+  margin: 0 0 6px 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+.entity-host { font-weight: 400; color: #777; margin-left: 6px; font-size: 13px; }
+
+.entity-stats { display: flex; gap: 8px; margin-bottom: 8px; }
+.stat-pill {
+  padding: 3px 10px;
+  border-radius: 12px;
+  background: #eef0f3;
+  font-size: 12px;
+  font-weight: 500;
+}
+.stat-indexed { background: #d1fae5; color: #065f46; }
+.stat-coverage.cov-full { background: #d1fae5; color: #065f46; }
+.stat-coverage.cov-high { background: #ddd6fe; color: #4c1d95; }
+.stat-coverage.cov-mid  { background: #fef3c7; color: #92400e; }
+.stat-coverage.cov-low  { background: #fee2e2; color: #991b1b; }
+
+.coverage-bar {
+  width: 100%;
+  height: 6px;
+  background: #eef0f3;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.coverage-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #2563eb, #14b8a6);
+  transition: width 200ms ease;
+}
+
+/* ── Biggest gaps callout ─────────────────────────────── */
+.gaps-callout {
+  background: #fffbeb;
+  border-left: 3px solid #f59e0b;
+  padding: 8px 12px;
+  margin-bottom: 16px;
+  font-size: 12px;
+  border-radius: 4px;
+}
+.gap-chip {
+  display: inline-block;
+  padding: 2px 8px;
+  background: #fed7aa;
+  color: #9a3412;
+  border-radius: 10px;
+  margin: 2px 4px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 11px;
+}
+
+/* ── Tree rows ────────────────────────────────────────── */
+.tree-root { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; }
+.tree-row { margin: 1px 0; }
+.tree-row-line { display: flex; align-items: center; gap: 6px; padding: 2px 4px; }
+.tree-row-line:hover { background: #f5f7fa; border-radius: 3px; }
+
+.tree-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  width: 16px;
+  font-size: 10px;
+  color: #555;
+  padding: 0;
+}
+.tree-toggle:disabled { cursor: default; color: #ccc; }
+
+.tree-segment { font-weight: 600; color: #2563eb; }
+.tree-counts { color: #777; font-size: 11px; margin-left: 6px; }
+.tree-status {
+  margin-left: auto;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 500;
+}
+.tree-status-done { background: #d1fae5; color: #065f46; }
+.tree-status-cov.cov-full { background: #d1fae5; color: #065f46; }
+.tree-status-cov.cov-high { background: #ddd6fe; color: #4c1d95; }
+.tree-status-cov.cov-mid  { background: #fef3c7; color: #92400e; }
+.tree-status-cov.cov-low  { background: #fee2e2; color: #991b1b; }
+
+/* ── Leaf rows (actual URLs) ──────────────────────────── */
+.leaf-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 4px;
+  font-size: 12px;
+}
+.leaf-row:hover { background: #f5f7fa; border-radius: 3px; }
+.leaf-marker { width: 14px; text-align: center; color: #999; }
+.leaf-indexed .leaf-marker { color: #16a34a; font-weight: bold; }
+.leaf-not-indexed .leaf-marker { color: #94a3b8; }
+
+.leaf-url {
+  color: #1f2937;
+  text-decoration: none;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 600px;
+}
+.leaf-url:hover { text-decoration: underline; color: #2563eb; }
+
+.leaf-auth {
+  font-size: 10px;
+  color: #6b7280;
+  background: #f3f4f6;
+  padding: 1px 6px;
+  border-radius: 8px;
+}
+
+.leaf-status {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-weight: 500;
+}
+.leaf-status-indexed { background: #d1fae5; color: #065f46; }
+.leaf-status-blocked { background: #fee2e2; color: #991b1b; }
+.leaf-status-stale   { background: #fef3c7; color: #92400e; }
+
+.leaf-ingest-btn {
+  padding: 2px 10px;
+  border: 1px solid #2563eb;
+  background: white;
+  color: #2563eb;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 11px;
+}
+.leaf-ingest-btn:hover:not(:disabled) {
+  background: #2563eb;
+  color: white;
+}
+.leaf-ingest-btn:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+/* ── List view ─────────────────────────────────────── */
+.search-bar { display: flex; gap: 8px; margin-bottom: 16px; }
+.search-bar input {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid #d0d0d8;
+  border-radius: 6px;
+  font-size: 13px;
+}
+.search-bar button {
+  padding: 8px 16px;
+  background: #2563eb;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.search-bar button:disabled { opacity: 0.6; cursor: wait; }
+
+.search-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid #f0f0f4;
+  font-size: 12px;
+}
+
+/* ── Ingest log ────────────────────────────────────── */
+.ingest-log {
+  margin-top: 24px;
+  padding: 12px;
+  background: #f7f7fa;
+  border-radius: 6px;
+  font-size: 12px;
+}
+.ingest-log h4 { margin: 0 0 8px 0; font-size: 13px; }
+.log-ok, .log-err { display: flex; gap: 8px; padding: 2px 0; }
+.log-icon { width: 14px; }
+.log-ok .log-icon { color: #16a34a; }
+.log-err .log-icon { color: #dc2626; }
+.log-msg { font-weight: 500; min-width: 240px; }
+.log-url { color: #6b7280; overflow: hidden; text-overflow: ellipsis; }

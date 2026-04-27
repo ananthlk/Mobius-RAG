@@ -11,6 +11,7 @@ import { ReviewFactsTab } from './components/tabs/ReviewFactsTab'
 import { DatabaseLayerTab } from './components/tabs/DatabaseLayerTab'
 import { ErrorReviewTab } from './components/tabs/ErrorReviewTab'
 import { DocumentDetailTab } from './components/tabs/DocumentDetailTab'
+import { SourcesTab } from './components/tabs/SourcesTab'
 
 interface UploadResponse {
   filename: string
@@ -73,7 +74,7 @@ interface ParagraphState {
 
 function App() {
   // Tab state
-  const [activeTab, setActiveTab] = useState<'input' | 'status' | 'live' | 'read' | 'review' | 'detail' | 'database' | 'errors'>('input')
+  const [activeTab, setActiveTab] = useState<'input' | 'status' | 'live' | 'read' | 'review' | 'detail' | 'database' | 'errors' | 'sources'>('input')
   const [detailDocumentId, setDetailDocumentId] = useState<string | null>(null)
   
   // Upload state
@@ -1443,6 +1444,9 @@ function App() {
           <Tab id="errors" isActive={activeTab === 'errors'} onClick={() => setActiveTab('errors')}>
             Error Review
           </Tab>
+          <Tab id="sources" isActive={activeTab === 'sources'} onClick={() => setActiveTab('sources')}>
+            Sources
+          </Tab>
         </TabList>
 
         <TabPanels>
@@ -1517,6 +1521,10 @@ function App() {
 
           <TabPanel id="errors" isActive={activeTab === 'errors'}>
             <ErrorReviewTab />
+          </TabPanel>
+
+          <TabPanel id="sources" isActive={activeTab === 'sources'}>
+            <SourcesTab />
           </TabPanel>
         </TabPanels>
       </Tabs>

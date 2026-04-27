@@ -28,6 +28,6 @@ export const API_BASE: string =
 // service, not same-origin. Local dev hits :8002 via vite proxy or
 // explicit env.
 const scraperBase = import.meta.env?.VITE_SCRAPER_API_BASE as string | undefined
-const isDev = import.meta.env?.DEV === true
+// (``isDev`` already declared above for API_BASE — reuse it.)
 export const SCRAPER_API_BASE: string =
   scraperBase !== undefined ? scraperBase : isDev ? 'http://localhost:8002' : ''
