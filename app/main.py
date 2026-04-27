@@ -9193,6 +9193,77 @@ async def delete_document_cascade(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/admin/vector_search")
+async def admin_vector_search(
+    q: str = Query(..., description="Text to embed and search for"),
+    store: str = Query("pgvector", regex="^(pgvector|chroma)$", description="Backend to query"),
+    k: int = Query(8, ge=1, le=100, description="Number of results to return"),
+    payer: str | None = Query(None, description="Filter on document_payer"),
+    state: str | None = Query(None, description="Filter on document_state (2-letter)"),
+    authority_level: str | None = Query(None, description="Filter on document_authority_level"),
+    document_id: str | None = Query(None, description="Restrict to a single document"),
+):
+    """Embed ``q`` and return top-k nearest rows from the chosen vector store.
+
+    Used by the chat agent in Step 4 to verify recall parity between
+    Chroma (legacy) and pgvector (new). Read-only — no writes happen
+    here. Gated by the ``/admin/`` middleware (X-Admin-Key).
+    """
+    from app.services.embedding_provider import embed_async, get_embedding_provider
+    from app.services.vector_store import (
+        ChromaVectorStore,
+        PgVectorStore,
+    )
+
+    text_q = (q or "").strip()
+    if not text_q:
+        raise HTTPException(status_code=400, detail="q must be non-empty")
+
+    try:
+        provider = get_embedding_provider()
+        vectors = await embed_async([text_q], provider=provider)
+    except Exception as e:
+        logger.error("admin_vector_search: embed failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"embed failed: {e}") from e
+    if not vectors or not vectors[0]:
+        raise HTTPException(status_code=500, detail="embed returned empty vector")
+    embedding = vectors[0]
+
+    filters = {
+        "payer": payer,
+        "state": state,
+        "authority_level": authority_level,
+        "document_id": document_id,
+    }
+    filters = {k_: v for k_, v in filters.items() if v}
+
+    if store == "pgvector":
+        backend = PgVectorStore()
+        results = await backend.asearch(embedding, k=k, filters=filters)
+    else:
+        # Chroma path: ABC search() only supports document_id; the
+        # other filters are silently dropped here. The chat agent
+        # uses pgvector for parity testing — this branch is mainly
+        # for sanity-checking against the legacy store.
+        backend = ChromaVectorStore()
+        try:
+            results = await asyncio.to_thread(
+                backend.search, embedding, k, filters.get("document_id")
+            )
+        except Exception as e:
+            logger.error("admin_vector_search: chroma search failed: %s", e, exc_info=True)
+            raise HTTPException(status_code=502, detail=f"chroma unreachable: {e}") from e
+
+    return {
+        "store": store,
+        "k": k,
+        "query": text_q,
+        "filters": filters,
+        "results": results,
+        "count": len(results),
+    }
+
+
 @app.post("/documents/{document_id}/retag")
 async def retag_document(
     document_id: str,
