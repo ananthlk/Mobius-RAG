@@ -58,6 +58,10 @@ export function SourcesTab() {
   const [addDialogOpen, setAddDialogOpen] = useState(false)
   const [refreshTick, setRefreshTick] = useState(0)
 
+  // Filters for the tree view
+  const [filterStatus, setFilterStatus] = useState<'all' | 'not_indexed' | 'indexed' | 'blocked'>('all')
+  const [filterSearch, setFilterSearch] = useState('')
+
   // Free-text search (List view)
   const [query, setQuery] = useState('')
   const [searchResults, setSearchResults] = useState<SourceRow[]>([])
@@ -304,6 +308,52 @@ export function SourcesTab() {
             )
           })()}
 
+          {/* Filters row — narrow the tree by status + free-text */}
+          {!hostLoading && hostRows.length > 0 && (
+            <div className="filters-row">
+              <label>Show:</label>
+              {([
+                ['all', 'All'],
+                ['not_indexed', '○ Not indexed'],
+                ['indexed', '✓ Indexed'],
+                ['blocked', '⊘ Blocked / stale'],
+              ] as const).map(([val, label]) => (
+                <button
+                  key={val}
+                  className={`filter-pill ${filterStatus === val ? 'selected' : ''}`}
+                  onClick={() => setFilterStatus(val)}
+                >
+                  {label}
+                </button>
+              ))}
+              <input
+                type="text"
+                className="filter-search"
+                placeholder="Filter URLs by substring…"
+                value={filterSearch}
+                onChange={e => setFilterSearch(e.target.value)}
+              />
+              {(() => {
+                // Compute non-indexed urls in current filtered set
+                // for the "Ingest all" button label.
+                const filtered = filteredRows(hostRows, filterStatus, filterSearch)
+                const ingestable = filtered
+                  .filter(r => !r.ingested && (r.last_fetch_status ?? 0) < 400)
+                  .map(r => r.url)
+                if (ingestable.length < 2) return null
+                return (
+                  <button
+                    className="ingest-all-btn"
+                    onClick={() => handleBulkIngest(ingestable)}
+                    title={`Ingest all ${ingestable.length} non-indexed URLs visible after filters`}
+                  >
+                    ▶ Ingest all {ingestable.length}
+                  </button>
+                )
+              })()}
+            </div>
+          )}
+
           {hostLoading && <div className="loading">Loading tree…</div>}
           {!hostLoading && selectedHost && hostRows.length === 0 && (
             <div className="empty">
@@ -317,7 +367,7 @@ export function SourcesTab() {
             <SourceTreeView
               host={selectedHost}
               payerLabel={hostRows[0]?.payer || null}
-              rows={hostRows}
+              rows={filteredRows(hostRows, filterStatus, filterSearch)}
               onIngest={handleIngest}
               onBulkIngest={handleBulkIngest}
               ingestingUrls={ingestingUrls}
@@ -374,6 +424,7 @@ export function SourcesTab() {
         </div>
       )}
 
+      {/* (helper defined below) */}
       {/* ── Recent ingest log ────────────────────────────────── */}
       {ingestLog.length > 0 && (
         <div className="ingest-log">
@@ -389,4 +440,25 @@ export function SourcesTab() {
       )}
     </div>
   )
+}
+
+
+/* ── Filtering helper ────────────────────────────────────── */
+
+function filteredRows(
+  rows: SourceRow[],
+  status: 'all' | 'not_indexed' | 'indexed' | 'blocked',
+  search: string,
+): SourceRow[] {
+  const q = search.trim().toLowerCase()
+  return rows.filter(r => {
+    if (status === 'indexed' && !r.ingested) return false
+    if (status === 'not_indexed' && r.ingested) return false
+    const fetchStatus = r.last_fetch_status ?? 0
+    const blocked = fetchStatus >= 400
+    if (status === 'blocked' && !blocked) return false
+    if (status === 'not_indexed' && blocked) return false  // hide blocked from ingestable view
+    if (q && !r.url.toLowerCase().includes(q)) return false
+    return true
+  })
 }

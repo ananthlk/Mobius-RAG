@@ -2748,21 +2748,32 @@ async def import_document_from_html(
         import asyncio as _asyncio
         deadline = datetime.utcnow() + timedelta(seconds=body.auto_publish_timeout_s)
         try:
-            # Poll until embedding completes or deadline hits.
+            # Poll the EmbeddingJob row for this doc until it completes
+            # or the deadline hits. embedding_status lives on
+            # EmbeddingJob, NOT Document — earlier version of this code
+            # tried Document.embedding_status which is computed via
+            # join in the /documents listing endpoint and doesn't exist
+            # as a column. Result: every auto_publish=true ingest
+            # AttributeError'd in the worker logs (visible to operators
+            # in the Sources tab "Recent ingests" panel).
+            embedding_done = False
             while datetime.utcnow() < deadline:
-                doc_check = await db.execute(
-                    select(Document).where(Document.id == document.id)
+                ej = await db.execute(
+                    select(EmbeddingJob)
+                    .where(EmbeddingJob.document_id == document.id)
+                    .order_by(EmbeddingJob.created_at.desc())
+                    .limit(1)
                 )
-                fresh = doc_check.scalar_one_or_none()
-                if fresh and fresh.embedding_status == "completed":
+                ej_row = ej.scalar_one_or_none()
+                if ej_row and ej_row.status == "completed":
+                    embedding_done = True
                     break
-                if fresh and fresh.embedding_status == "failed":
-                    publish_summary = {"ok": False, "reason": "embedding failed"}
+                if ej_row and ej_row.status == "failed":
+                    publish_summary = {"ok": False, "reason": f"embedding failed: {ej_row.error_message or 'unknown'}"}
                     break
                 await db.commit()  # release connection so worker can write
                 await _asyncio.sleep(2)
-            else:
-                # Loop exited via deadline (Python while-else)
+            if not embedding_done and publish_summary is None:
                 publish_summary = {"ok": False, "reason": "timeout waiting for embedding"}
 
             # Fire publish if we got here cleanly
