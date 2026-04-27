@@ -234,6 +234,29 @@ async def process_embedding_job(job: EmbeddingJob, db: AsyncSession) -> None:
         duration = (job.completed_at - job_start).total_seconds()
         logger.info("[JOB %s] Completed in %.2fs: %d embeddings stored", job.id, duration, total_embedded)
 
+        # Phase 13.8 (2026-04-27 evening) — auto-publish-on-embed,
+        # env-gated. When AUTO_PUBLISH_ON_EMBED=1, fires
+        # publish_document() right after embedding completes so the
+        # doc is queryable in chat without an operator manually
+        # clicking publish or running a sweep script.
+        #
+        # Best-effort + fail-soft: any error logged but doesn't fail
+        # the job (embedding succeeded; publish can be retried).
+        if os.environ.get("AUTO_PUBLISH_ON_EMBED", "").strip() in ("1", "true", "yes"):
+            try:
+                from app.services.publish import publish_document
+                pres = await publish_document(UUID(str(job.document_id)), db)
+                logger.info(
+                    "[JOB %s] auto-published: rows_written=%d ok=%s msg=%s",
+                    job.id, pres.rows_written, pres.verification_passed,
+                    (pres.verification_message or "")[:200],
+                )
+            except Exception as pub_err:
+                logger.warning(
+                    "[JOB %s] auto-publish-on-embed failed (non-fatal): %s",
+                    job.id, pub_err,
+                )
+
     except Exception as e:
         logger.error("[JOB %s] Failed: %s", job.id, e, exc_info=True)
         await db.rollback()
