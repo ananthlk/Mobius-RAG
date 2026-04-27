@@ -151,6 +151,7 @@ async def search_sources(
     authority_level: str | None = None,
     topic: str | None = None,
     q: str | None = None,
+    host: str | None = None,
     curation_status: str | None = None,
     ingested: bool | None = None,
     only_reachable: bool = True,
@@ -182,6 +183,10 @@ async def search_sources(
       * Else: canonical DESC, ingested DESC, last_seen DESC
     """
     conds: list = []
+    if host:
+        # Exact host match. Used by the Sources UI tree view to scope
+        # the per-entity render. Cheap (host has its own index).
+        conds.append(DiscoveredSource.host == host)
     if payer:
         conds.append(DiscoveredSource.payer == payer)
     if state:

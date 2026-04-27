@@ -89,16 +89,14 @@ export function SourcesTab() {
     if (!selectedHost || view !== 'tree') return
     let cancelled = false
     setHostLoading(true)
-    // Fetch all rows for the host. /sources/search supports host
-    // filter via... hm, we may need to filter client-side from a
-    // payer-scoped query. For v0.1 use the highest limit and rely
-    // on most tenants having <500 URLs per host.
-    fetch(`${API_BASE}/sources/search?only_reachable=false&limit=500`)
+    // Server-side host filter (added 2026-04-26 — Phase 13.x). Earlier
+    // version filtered client-side from a 500-row capped fetch which
+    // couldn't surface all of SAMHSA's 1000 URLs.
+    fetch(`${API_BASE}/sources/search?host=${encodeURIComponent(selectedHost)}&only_reachable=false&limit=500`)
       .then(r => r.json() as Promise<SourceRow[]>)
       .then(rows => {
         if (cancelled) return
-        // Client-side filter to selected host
-        setHostRows(rows.filter(r => r.host === selectedHost))
+        setHostRows(rows)
         setHostLoading(false)
       })
       .catch(_e => {

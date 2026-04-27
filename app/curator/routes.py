@@ -215,6 +215,7 @@ async def search_endpoint(
     program: Optional[str] = Query(None),
     authority_level: Optional[str] = Query(None),
     topic: Optional[str] = Query(None, description="Exact match against topic_tags JSONB array"),
+    host: Optional[str] = Query(None, description="Exact host match (e.g. www.samhsa.gov). Used by Sources UI tree view."),
     q: Optional[str] = Query(
         None,
         description=(
@@ -242,6 +243,7 @@ async def search_endpoint(
         authority_level=authority_level,
         topic=topic,
         q=q,
+        host=host,
         curation_status=curation_status,
         ingested=ingested,
         only_reachable=only_reachable,
