@@ -2413,6 +2413,15 @@ async def import_document_from_gcs(
                 }
             )
 
+        # Store source_url in source_metadata so future host-attribution
+        # queries can resolve the doc back to its origin URL. Historic
+        # imports won't have this; the corpus_by_host endpoint also
+        # falls back to a discovered_sources join via ingested_doc_id.
+        meta_dict: dict | None = None
+        body_source_url = getattr(body, "source_url", None)
+        if body_source_url:
+            meta_dict = {"source_url": body_source_url}
+
         document = Document(
             filename=filename,
             file_hash=file_hash,
@@ -2423,6 +2432,7 @@ async def import_document_from_gcs(
             authority_level=body.authority_level,
             termination_date=default_termination_date(),
             status="uploaded",
+            source_metadata=meta_dict,
         )
         db.add(document)
         await db.commit()

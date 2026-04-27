@@ -309,6 +309,14 @@ async def corpus_by_host_endpoint(db: AsyncSession = Depends(_get_db)):
     # rag_published_embeddings), not a column on documents. EXISTS
     # subquery against rag_published_embeddings — that's what gates
     # "queryable in chat" anyway.
+    # Three-way URL-source priority for host extraction:
+    #   1. file_path if it's a URL (HTML imports — file_path = source URL)
+    #   2. source_metadata->>'source_url' (PDF imports going forward — set on import)
+    #   3. discovered_sources.host where ingested_doc_id = d.id
+    #      (recovers historic PDFs imported BEFORE we stored source_url
+    #       in source_metadata; works as long as the curator has a
+    #       row pointing at the doc, which mark_ingested guarantees
+    #       for new imports + most existing scrape-driven docs)
     sql = text("""
         WITH docs AS (
             SELECT
@@ -317,7 +325,9 @@ async def corpus_by_host_endpoint(db: AsyncSession = Depends(_get_db)):
                     CASE WHEN d.file_path LIKE 'http%'
                          THEN substring(d.file_path FROM '^https?://([^/]+)')
                     END,
-                    substring(d.source_metadata->>'source_url' FROM '^https?://([^/]+)')
+                    substring(d.source_metadata->>'source_url' FROM '^https?://([^/]+)'),
+                    (SELECT ds.host FROM discovered_sources ds
+                     WHERE ds.ingested_doc_id = d.id LIMIT 1)
                 ) AS host
             FROM documents d
         )
@@ -332,7 +342,7 @@ async def corpus_by_host_endpoint(db: AsyncSession = Depends(_get_db)):
             ) AS published_count
         FROM docs
         GROUP BY host
-        ORDER BY doc_count DESC
+        ORDER BY doc_count DESC NULLS LAST
     """)
     result = await db.execute(sql)
     rows = result.all()
