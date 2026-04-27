@@ -26,6 +26,11 @@ class Document(Base):
     error_count = Column(Integer, default=0, nullable=False)
     critical_error_count = Column(Integer, default=0, nullable=False)
     review_status = Column(String(20), default="pending", nullable=False)  # pending, approved, rejected, reprocessing
+    # Provenance for scraped/imported docs. Set by import-from-gcs +
+    # import-from-html paths to record source_url so corpus_by_host
+    # can attribute docs to a host without joining through the
+    # discovered_sources FK. Migration: add_document_source_metadata.py.
+    source_metadata = Column(JSONB, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
