@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import select, delete, func
+from sqlalchemy import select, delete, func, text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -210,6 +210,39 @@ async def publish_document(document_id: UUID, db: AsyncSession, generator_id: st
     for row in rows:
         db.add(row)
     await db.flush()
+
+    # Step 5 of the Chroma → pgvector migration: populate the typed
+    # ``embedding_vec vector(1536)`` column alongside the JSONB
+    # ``embedding`` column. Done via raw UPDATE because the ORM model
+    # intentionally does not declare ``embedding_vec`` (the
+    # ``pgvector.sqlalchemy.Vector`` adapter is not a runtime dep —
+    # see pyproject.toml). Same text-form cast as the migration
+    # backfill uses (app/migrations/add_pgvector_columns.py).
+    for row in rows:
+        emb = row.embedding
+        if not isinstance(emb, list) or not emb:
+            continue
+        try:
+            text_form = "[" + ",".join(repr(float(x)) for x in emb) + "]"
+        except (TypeError, ValueError):
+            continue
+        try:
+            await db.execute(
+                sa_text(
+                    "UPDATE rag_published_embeddings "
+                    "SET embedding_vec = CAST(:vec AS vector) "
+                    "WHERE id = CAST(:id AS uuid)"
+                ),
+                {"vec": text_form, "id": str(row.id)},
+            )
+        except Exception:
+            # Best-effort: JSONB write already succeeded; retrieval
+            # filters out rows where embedding_vec IS NULL, so a
+            # missed row just sits out until the next publish.
+            import logging as _logging
+            _logging.getLogger(__name__).exception(
+                "[publish] embedding_vec UPDATE failed for id=%s; JSONB row kept", row.id,
+            )
 
     # Integrity check: count rows in rag_published_embeddings for this document
     expected_count = len(rows)

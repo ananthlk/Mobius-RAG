@@ -125,11 +125,16 @@ class PgVectorStore(VectorStore):
     durable retrieval store after the 2026-04-27 mobius-chroma VM
     outage.
 
-    Read-only in Step 3 — ``add()`` / ``delete_by_document()`` raise
-    ``NotImplementedError`` here. The embedding worker still writes
-    JSONB to ``rag_published_embeddings.embedding`` and Chroma in
-    parallel. Step 5 will add a typed-vector write path inside
-    ``publish_sync.py`` and wire up these mutators.
+    As of Step 5, ``add()`` / ``delete_by_document()`` are intentional
+    no-ops: when ``VECTOR_STORE=pgvector``, the embedding worker writes
+    both ``embedding`` (JSONB) and ``embedding_vec`` (typed vector) on
+    the same ORM row in a single transaction (see
+    ``app/embedding_worker.py``). The DELETE side is already covered by
+    the worker's ``DELETE FROM chunk_embeddings WHERE document_id = ...``
+    that runs before re-embedding. There is no separate vector store to
+    keep in sync — the typed column lives on the same Postgres row as
+    the JSONB. We keep the ABC-required methods as no-ops so callers
+    (the worker) don't need to special-case the store type.
 
     The ``search()`` return shape matches ``ChromaVectorStore.search()``
     so callers don't change. One field differs by name only:
@@ -160,12 +165,18 @@ class PgVectorStore(VectorStore):
         self._table = table_name
 
     def add(self, ids: list[str], embeddings: list[list[float]], metadata: list[dict]) -> None:
-        # Step 5 will implement the write path; for now writes still
-        # land via the existing Chroma + JSONB path in publish_sync.
-        raise NotImplementedError("PgVectorStore.add() lands in Step 5 (parallel write).")
+        # No-op: the embedding worker writes the typed ``embedding_vec``
+        # column on the same row as the JSONB ``embedding`` (see
+        # ``embedding_worker._upsert_embedding_vec_batch``). There is
+        # no out-of-band vector store to populate.
+        return None
 
     def delete_by_document(self, document_id: str) -> None:
-        raise NotImplementedError("PgVectorStore.delete_by_document() lands in Step 5.")
+        # No-op: ``DELETE FROM chunk_embeddings WHERE document_id = ...``
+        # runs in the worker before re-embedding; that one DELETE clears
+        # both ``embedding`` and ``embedding_vec`` because they live on
+        # the same row.
+        return None
 
     def search(
         self,

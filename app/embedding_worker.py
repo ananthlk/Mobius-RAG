@@ -50,6 +50,50 @@ async def _pg_notify_event(db: AsyncSession, event: ChunkingEvent) -> None:
         logger.debug("[embed] pg_notify failed (non-fatal): %s", exc)
 
 
+def _embedding_to_pgvector_text(emb: list[float]) -> str:
+    """Format a python list[float] as pgvector's canonical text input
+    form ``'[f1,f2,...]'``. We use the text form rather than the
+    ``pgvector`` Python adapter because the adapter is not a runtime
+    dependency (see pyproject.toml — only ``chromadb`` + ``psycopg2``
+    are pulled in by the optional ``[chroma]`` extra). The text form
+    is what ``app/migrations/add_pgvector_columns.py`` already uses
+    for backfill, so behavior is consistent across write paths.
+    """
+    return "[" + ",".join(repr(float(x)) for x in emb) + "]"
+
+
+async def _upsert_embedding_vec_batch(
+    db: AsyncSession,
+    pairs: list[tuple[str, list[float]]],
+) -> None:
+    """Populate ``chunk_embeddings.embedding_vec`` for the given (id, embedding)
+    pairs. Called by the worker right after the ORM batch flush so the
+    typed-vector column lands in the same transaction as the JSONB column.
+
+    Done via raw SQL because the SQLAlchemy ORM model intentionally does
+    not declare ``embedding_vec`` (the ``pgvector.sqlalchemy.Vector``
+    adapter is not a runtime dep). The cast ``$1::vector`` is the same
+    form the migration backfill uses.
+    """
+    if not pairs:
+        return
+    for ce_id, emb in pairs:
+        try:
+            await db.execute(
+                text("UPDATE chunk_embeddings SET embedding_vec = CAST(:vec AS vector) WHERE id = CAST(:id AS uuid)"),
+                {"vec": _embedding_to_pgvector_text(emb), "id": ce_id},
+            )
+        except Exception as exc:
+            # Don't fail the worker over a single row's typed-vector
+            # write — the JSONB column was written successfully by the
+            # ORM insert, so retrieval (when running pgvector) just
+            # misses this row until the next backfill. Log and continue.
+            logger.warning(
+                "[embed] embedding_vec UPDATE failed for id=%s: %s (non-fatal)",
+                ce_id, exc,
+            )
+
+
 def _build_text_for_chunk(chunk: HierarchicalChunk) -> str:
     """Build text to embed for a hierarchical chunk. Plan: text or summary + text if present."""
     if chunk.summary and chunk.text:
@@ -190,6 +234,15 @@ async def process_embedding_job(job: EmbeddingJob, db: AsyncSession) -> None:
                 })
 
             vector_store.add(ids_to_store, embeddings_to_store, metadata_to_store)
+            # Step 5: populate the typed pgvector column on the same
+            # rows the ORM just inserted. Must happen before commit so
+            # the row is durable with both columns set atomically.
+            # Flush first so the INSERTs are visible to the UPDATEs.
+            await db.flush()
+            await _upsert_embedding_vec_batch(
+                db,
+                list(zip(ids_to_store, embeddings_to_store)),
+            )
             await db.commit()
 
             total_embedded += len(ids_to_store)

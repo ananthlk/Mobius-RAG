@@ -99,6 +99,14 @@ async def sync_document_to_retrieval_stores(
     started = time.monotonic()
     result = SyncResult()
 
+    # Step 5 of Chroma → pgvector migration: when VECTOR_STORE=pgvector,
+    # chat reads from rag_published_embeddings.embedding_vec directly
+    # via its own PgVectorStore client — there's no Chroma to keep in
+    # sync. Gate the Chroma upsert behind the env so the codepath stays
+    # intact for emergency rollback. Step 7 deletes the gated branch.
+    vector_store_mode = (os.environ.get("VECTOR_STORE") or "chroma").strip().lower()
+    chroma_disabled_for_pgvector = vector_store_mode == "pgvector"
+
     chroma_host = _env_or_none("CHROMA_HOST")
     chroma_port = int(_env_or_none("CHROMA_PORT") or "8000")
     chroma_ssl_str = (_env_or_none("CHROMA_SSL") or "0").strip().lower()
@@ -106,7 +114,16 @@ async def sync_document_to_retrieval_stores(
     chroma_token = _env_or_none("CHROMA_AUTH_TOKEN")
     chat_db_url = _env_or_none("CHAT_DATABASE_URL")
 
-    if not chroma_host:
+    if chroma_disabled_for_pgvector:
+        result.chroma_status = "skipped"
+        result.skipped_reasons.append("VECTOR_STORE=pgvector (Chroma write gated off)")
+        logger.info(
+            "[publish_sync] %s: skipping Chroma upsert (VECTOR_STORE=pgvector)",
+            document_id,
+        )
+        # Force-clear chroma_host so the upsert branch below is skipped.
+        chroma_host = None
+    elif not chroma_host:
         result.chroma_status = "skipped"
         result.skipped_reasons.append("CHROMA_HOST unset")
     if not chat_db_url:
