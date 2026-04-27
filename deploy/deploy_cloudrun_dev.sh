@@ -66,8 +66,22 @@ gcloud artifacts repositories describe mobius-rag \
     --project="$PROJECT_ID" --location="$REGION" \
     --repository-format=docker --description="Mobius RAG container images" --quiet
 
-# 2. Build image via Cloud Build (uses mobius-rag/.gcloudignore to avoid
-#    pushing 1GB of pycache/node_modules).
+# 2a. Frontend: rebuild dist before docker build. The Dockerfile expects
+#     ``frontend/dist`` to be present (no node toolchain inside the
+#     image to keep size down). Operators were forgetting this step
+#     and shipping with stale UI bundles — the 'wizard not visible'
+#     debug session on 2026-04-27 was exactly this.
+if [[ -d frontend ]] && [[ -f frontend/package.json ]]; then
+  echo "--- building frontend dist ---"
+  (cd frontend && npm run build) || {
+    echo "ERROR: frontend build failed; aborting deploy" >&2
+    exit 1
+  }
+  echo "--- frontend dist hash: $(ls frontend/dist/assets/index-*.js 2>/dev/null | head -1) ---"
+fi
+
+# 2b. Build image via Cloud Build (uses mobius-rag/.gcloudignore to avoid
+#     pushing 1GB of pycache/node_modules).
 echo "--- building $IMAGE ---"
 gcloud builds submit --project="$PROJECT_ID" --tag="$IMAGE" .
 
