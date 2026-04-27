@@ -9196,7 +9196,15 @@ async def delete_document_cascade(
 @app.get("/admin/vector_search")
 async def admin_vector_search(
     q: str = Query(..., description="Text to embed and search for"),
-    store: str = Query("pgvector", regex="^(pgvector|chroma)$", description="Backend to query"),
+    store: str = Query(
+        "pgvector",
+        regex="^(pgvector|chroma|chroma_filtered)$",
+        description=(
+            "Backend to query. ``chroma_filtered`` is Chroma minus phantom "
+            "rows whose document_id no longer exists in Postgres documents — "
+            "use it as the apples-to-apples baseline against ``pgvector``."
+        ),
+    ),
     k: int = Query(8, ge=1, le=100, description="Number of results to return"),
     payer: str | None = Query(None, description="Filter on document_payer"),
     state: str | None = Query(None, description="Filter on document_state (2-letter)"),
@@ -9240,19 +9248,38 @@ async def admin_vector_search(
     if store == "pgvector":
         backend = PgVectorStore()
         results = await backend.asearch(embedding, k=k, filters=filters)
-    else:
+    elif store in ("chroma", "chroma_filtered"):
         # Chroma path: ABC search() only supports document_id; the
-        # other filters are silently dropped here. The chat agent
-        # uses pgvector for parity testing — this branch is mainly
-        # for sanity-checking against the legacy store.
+        # other filters are silently dropped here. ``chroma_filtered``
+        # over-fetches and drops rows whose document_id is no longer
+        # in Postgres documents — those are phantoms left over from
+        # delete-cascades that didn't propagate to Chroma.
         backend = ChromaVectorStore()
+        fetch_k = k * 5 if store == "chroma_filtered" else k
         try:
-            results = await asyncio.to_thread(
-                backend.search, embedding, k, filters.get("document_id")
+            raw = await asyncio.to_thread(
+                backend.search, embedding, fetch_k, filters.get("document_id")
             )
         except Exception as e:
             logger.error("admin_vector_search: chroma search failed: %s", e, exc_info=True)
             raise HTTPException(status_code=502, detail=f"chroma unreachable: {e}") from e
+
+        if store == "chroma_filtered" and raw:
+            # Existence check via documents table — drop phantoms whose
+            # parent document was deleted from Postgres.
+            doc_ids = list({r["document_id"] for r in raw if r.get("document_id")})
+            if doc_ids:
+                async with AsyncSessionLocal() as session:
+                    res = await session.execute(
+                        text("SELECT id::text FROM documents WHERE id::text = ANY(:ids)"),
+                        {"ids": doc_ids},
+                    )
+                    alive = {row[0] for row in res.fetchall()}
+                results = [r for r in raw if r.get("document_id") in alive][:k]
+            else:
+                results = []
+        else:
+            results = raw[:k]
 
     return {
         "store": store,
