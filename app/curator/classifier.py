@@ -43,6 +43,14 @@ _HOST_PAYER: dict[str, tuple[str | None, str | None]] = {
     "humana.com":              ("Humana",          None),
     "molinahealthcare.com":    ("Molina Healthcare", None),
     "aetna.com":               ("Aetna",           None),
+    # FL Medicaid managed-care plan-specific hosts. State defaults to FL
+    # because these are state-mandated SMMC plans — when bot-walled,
+    # AHCA hosts the mirror handbook and that's what state_mirror keys
+    # off. Adding a new SMMC plan = one line here.
+    "aetnabetterhealth.com":   ("Aetna",           "FL"),
+    "simplyhealthcare.com":    ("Simply Healthcare", "FL"),
+    "clearhealthalliance.com": ("Clear Health Alliance", "FL"),
+    "humanahealthyhorizons.com": ("Humana",        "FL"),
     "uhc.com":                 ("United Healthcare", None),
     "uhccommunityplan.com":    ("United Healthcare", None),
 }
@@ -139,6 +147,22 @@ def classify_url(url: str) -> dict:
             ext = candidate
 
     payer, state = infer_payer(p.netloc)
+    # Path-based state hint: payer hosts that serve multiple states often
+    # use ``/<state-name>/`` as the first segment (e.g. wellcare.com/florida,
+    # humana.com/florida). When the path has a state segment AND the host's
+    # default state is None, lift the path's state into the classifier so
+    # state_mirror can fire correctly.
+    if not state:
+        path_lower = path.lower()
+        for needle, code in (
+            ("/florida/", "FL"), ("/fl/", "FL"),
+            ("/texas/", "TX"), ("/tx/", "TX"),
+            ("/california/", "CA"), ("/ca/", "CA"),
+            ("/georgia/", "GA"), ("/ga/", "GA"),
+        ):
+            if path_lower.startswith(needle) or f"/{path_lower.strip('/').split('/')[0]}/" == needle:
+                state = code
+                break
     return {
         "host":                     p.netloc.lower(),
         "path":                     path,
