@@ -67,9 +67,22 @@ interface QueueRow {
   id: string
   filename: string
   status: string
-  stage: 'extracting' | 'chunking' | 'embedding' | 'completed' | 'failed' | 'pending'
+  stage: 'scraping' | 'extracting' | 'chunking' | 'embedding' | 'completed' | 'failed' | 'pending'
   progressPct: number
   recentlyCompleted: boolean
+  meta?: string
+}
+
+interface ScrapeJob {
+  job_id: string
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  url?: string | null
+  pages_scraped?: number
+  max_pages?: number | null
+  documents_count?: number
+  started_at?: number | null
+  finished_at?: number | null
+  error?: string | null
 }
 
 const ONE_HOUR_MS = 60 * 60 * 1000
@@ -83,6 +96,51 @@ type SourceType = 'computer' | 'url' | 'drive'
 // the state agency's mirror, e.g. AHCA for FL Medicaid plans) when
 // the original site is bot-walled.
 type Strategy = 'scrape' | 'sitemap_only' | 'state_mirror' | 'manual_upload'
+
+/** Derive queue rows from active scrape jobs (scraper-side). */
+function scrapeJobsToRows(jobs: ScrapeJob[]): QueueRow[] {
+  const now = Date.now()
+  const rows: QueueRow[] = []
+  for (const j of jobs) {
+    const isActive = j.status === 'pending' || j.status === 'running'
+    const finished = j.finished_at ? j.finished_at * 1000 : 0
+    const recent = !isActive && finished > 0 && now - finished < ONE_HOUR_MS
+    if (!isActive && !recent) continue
+
+    let pct = 0
+    if (j.max_pages && j.pages_scraped != null) {
+      pct = Math.min(100, Math.round((j.pages_scraped / j.max_pages) * 100))
+    } else if (!isActive) {
+      pct = 100
+    }
+
+    let host = ''
+    try {
+      if (j.url) host = new URL(j.url).hostname.replace(/^www\./, '')
+    } catch {
+      // ignore — fall back to raw url
+    }
+    const filename = host || j.url || j.job_id.slice(0, 8)
+
+    rows.push({
+      id: `scrape:${j.job_id}`,
+      filename: `Scrape · ${filename}`,
+      status: j.status,
+      stage:
+        j.status === 'failed' ? 'failed' :
+        isActive ? 'scraping' :
+        'completed',
+      progressPct: pct,
+      recentlyCompleted: recent,
+      meta:
+        j.status === 'failed' ? (j.error || 'failed') :
+        isActive
+          ? `${j.pages_scraped || 0}${j.max_pages ? ` / ${j.max_pages}` : ''} pages`
+          : `${j.pages_scraped || 0} pages · ${j.documents_count || 0} docs`,
+    })
+  }
+  return rows
+}
 
 /** Derive the in-flight queue from the documents list. */
 function deriveQueue(documents: DocLike[]): QueueRow[] {
@@ -146,7 +204,32 @@ function deriveQueue(documents: DocLike[]): QueueRow[] {
 export function UploadTab({ documents, onUpload, uploading, error, onDocumentAdded }: Props) {
   const [sourceType, setSourceType] = useState<SourceType>('computer')
 
-  const queue = useMemo(() => deriveQueue(documents), [documents])
+  // Poll scraper-side active jobs so the in-flight queue surfaces
+  // running scrapes (otherwise they'd be invisible until the downstream
+  // chunk/embed jobs land in /documents). 5s cadence — cheap.
+  const [scrapeJobs, setScrapeJobs] = useState<ScrapeJob[]>([])
+  useEffect(() => {
+    let cancelled = false
+    const fetchActive = async () => {
+      if (!SCRAPER_API_BASE) return
+      try {
+        const r = await fetch(`${SCRAPER_API_BASE}/jobs/active`)
+        if (!r.ok) return
+        const data = await r.json() as { jobs: ScrapeJob[] }
+        if (!cancelled) setScrapeJobs(data.jobs || [])
+      } catch {
+        // Silent — scraper unreachable shouldn't break the Upload tab.
+      }
+    }
+    fetchActive()
+    const interval = setInterval(fetchActive, 5000)
+    return () => { cancelled = true; clearInterval(interval) }
+  }, [])
+
+  const queue = useMemo(() => {
+    // Scrape jobs first (they're upstream of doc rows), then doc-stage rows.
+    return [...scrapeJobsToRows(scrapeJobs), ...deriveQueue(documents)]
+  }, [scrapeJobs, documents])
 
   return (
     <div className="upload-tab">
@@ -228,6 +311,7 @@ export function UploadTab({ documents, onUpload, uploading, error, onDocumentAdd
                   </div>
                   <div className="upload-queue-meta">
                     {row.progressPct > 0 ? `${row.progressPct}%` : row.stage}
+                    {row.meta && ` · ${row.meta}`}
                     {row.recentlyCompleted && ' · just completed'}
                   </div>
                 </li>

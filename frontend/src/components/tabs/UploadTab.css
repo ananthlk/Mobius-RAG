@@ -160,11 +160,12 @@
   flex-shrink: 0;
 }
 
+.upload-queue-pill.stage-scraping,
 .upload-queue-pill.stage-extracting,
 .upload-queue-pill.stage-chunking,
 .upload-queue-pill.stage-embedding {
   background: var(--mobius-info-bg, #eaf2ff);
-  color: var(--rag-accent, var(--mobius-accent-blue));
+  color: var(--mobius-accent);
 }
 
 .upload-queue-pill.stage-completed {
