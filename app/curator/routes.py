@@ -300,16 +300,25 @@ async def corpus_by_host_endpoint(db: AsyncSession = Depends(_get_db)):
     from sqlalchemy import func, text
     # Use raw SQL: extract the host from file_path (URL or GCS path)
     # via regexp_substr. Cheap aggregate across <2000 docs at v1 scale.
+    # ``published_at`` is computed (lives in publish_events / rag_published_embeddings),
+    # not a column on documents. We approximate by counting docs that
+    # have at least one rag_published_embeddings row — that's what
+    # makes a doc actually queryable in chat.
     sql = text("""
         SELECT
             CASE
-                WHEN file_path LIKE 'http%'
-                    THEN substring(file_path FROM '^https?://([^/]+)')
+                WHEN d.file_path LIKE 'http%'
+                    THEN substring(d.file_path FROM '^https?://([^/]+)')
                 ELSE NULL
             END AS host,
             COUNT(*) AS doc_count,
-            SUM(CASE WHEN published_at IS NOT NULL THEN 1 ELSE 0 END) AS published_count
-        FROM documents
+            SUM(
+                CASE WHEN EXISTS (
+                    SELECT 1 FROM rag_published_embeddings rpe
+                    WHERE rpe.document_id = d.id
+                ) THEN 1 ELSE 0 END
+            ) AS published_count
+        FROM documents d
         GROUP BY host
         ORDER BY doc_count DESC
     """)
