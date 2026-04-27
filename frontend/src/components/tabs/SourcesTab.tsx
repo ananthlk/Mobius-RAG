@@ -75,7 +75,10 @@ export function SourcesTab() {
     Promise.all([
       fetch(`${API_BASE}/sources/stats`).then(r => r.json() as Promise<StatsResponse>),
       fetch(`${API_BASE}/sources/corpus_by_host`).then(r => r.json() as Promise<CorpusByHost>)
-        .catch(() => ({ by_host: {} })),  // back-compat: old rag deploys lack this endpoint
+        // back-compat: old rag deploys lack this endpoint. Explicit
+        // type annotation needed so the index `[host]` below isn't
+        // inferred as `any` and TS rejects it with TS7053.
+        .catch((): CorpusByHost => ({ by_host: {} })),
     ])
       .then(([s, c]) => {
         if (cancelled) return
@@ -206,14 +209,73 @@ export function SourcesTab() {
   // ── Bulk ingest all non-indexed URLs in a sub-tree ─────────────
   // Sequential, not parallel — chunking workers are single-instance,
   // hammering them in parallel just queues anyway.
+  //
+  // Differs from per-row handleIngest in three ways:
+  //   * Skips per-call entries in the ingest log; pushes ONE summary
+  //     at the end. (Per-call log spam was overwhelming during
+  //     multi-hundred-URL bulk ops, especially when most return 409
+  //     "already in corpus" — operator's eye glazes over.)
+  //   * Auto-retries on 502 (single retry, 2s wait). Cloud Run
+  //     transient gateway blips at single-instance scale.
+  //   * Disables auto_publish during bulk to keep per-URL latency low
+  //     (publish queue can drain in the background; operator clicks
+  //     "Publish all" later or auto-publish-on-embed handles it).
+  //     Note: per-row handleIngest still uses autoPublish toggle.
   const handleBulkIngest = useCallback(async (urls: string[]) => {
+    let imported = 0
+    let already = 0
+    let retried = 0
+    let failed = 0
+    const failedUrls: string[] = []
+
+    const tryOnce = async (url: string): Promise<number> => {
+      const resp = await fetch(`${API_BASE}/documents/import-from-html`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url, auto_publish: false }),
+      })
+      return resp.status
+    }
+
     for (const url of urls) {
       if (ingestingUrls.has(url)) continue
-      // Reuse handleIngest's promise; it manages state correctly.
-      // eslint-disable-next-line no-await-in-loop
-      await handleIngest(url)
+      setIngestingUrls(prev => new Set(prev).add(url))
+      try {
+        let status = await tryOnce(url)
+        if (status === 502 || status === 503 || status === 504) {
+          // Transient — single retry after short wait
+          await new Promise(r => setTimeout(r, 2000))
+          status = await tryOnce(url)
+          retried += 1
+        }
+        if (status === 200) {
+          imported += 1
+          // Optimistic UI: mark this row as ingested in the tree
+          setHostRows(rows => rows.map(r => r.url === url ? { ...r, ingested: true } : r))
+        } else if (status === 409) {
+          already += 1
+          // Already in corpus — also flip the row's ingested flag
+          setHostRows(rows => rows.map(r => r.url === url ? { ...r, ingested: true } : r))
+        } else {
+          failed += 1
+          failedUrls.push(url)
+        }
+      } catch {
+        failed += 1
+        failedUrls.push(url)
+      } finally {
+        setIngestingUrls(prev => {
+          const next = new Set(prev)
+          next.delete(url)
+          return next
+        })
+      }
     }
-  }, [handleIngest, ingestingUrls])
+
+    // ONE summary log entry instead of N per-call rows.
+    const summary = `Bulk: ${imported} new, ${already} already in corpus, ${retried} retried, ${failed} failed${failedUrls.length ? ` (first: ${failedUrls[0]?.slice(0, 60)}…)` : ''}`
+    setIngestLog(log => [{ url: `${urls.length} URLs`, ok: failed === 0, msg: summary }, ...log].slice(0, 10))
+  }, [ingestingUrls])
 
 
   // ── Render ─────────────────────────────────────────────────────
