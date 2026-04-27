@@ -287,11 +287,21 @@ sources:
     state: FL
     tier: P0
     scope: payer
-    bot_policy: per_path_block
-    ingest_strategy: scrape
+    bot_policy: full_bot_wall  # 2026-04-26 probe: 403 on every URL
+    ingest_strategy: state_mirror
     home_url: https://www.uhccommunityplan.com/fl
     notes: |
-      Next up after Sunshine — user's explicit Day 2 priority.
+      2026-04-26 probe: BOTH www.uhccommunityplan.com AND its redirect
+      target www.uhc.com/communityplan return 403 from CloudFront for
+      EVERY path including /robots.txt itself. Original tag of
+      bot_policy=per_path_block was wrong. UHC has the same hard wall
+      Aetna/Humana/Molina have.
+
+      Same play: pull UHC's FL Medicaid criteria from AHCA, where
+      they're republished by state law. AHCA mirror already gives us
+      most of UHC's FL Medicaid clinical policy via 59G-* coverage
+      rules. UHC-specific operational docs need partner channel or
+      operator manual upload.
 
   - id: cms_kids_fl
     name: Children's Medical Services Health Plan
