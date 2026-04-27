@@ -19,12 +19,15 @@ import './SourcesTab.css'
  * 2026-04-26 v0.1 — read + ingest. Curate / add new source come next.
  */
 
-interface HostStat { host: string; count: number }
+interface HostStat { host: string; count: number; corpusDocs: number; corpusPublished: number }
 interface StatsResponse {
   by_host: Record<string, number>
   by_curation_status: Record<string, number>
   by_content_kind: Record<string, number>
   by_ingested: Record<string, number>
+}
+interface CorpusByHost {
+  by_host: Record<string, { docs: number; published: number }>
 }
 
 
@@ -44,6 +47,11 @@ export function SourcesTab() {
   // Ingest in flight
   const [ingestingUrls, setIngestingUrls] = useState<Set<string>>(new Set())
   const [ingestLog, setIngestLog] = useState<{url: string; ok: boolean; msg: string}[]>([])
+  // Auto-publish toggle — when on, ingest waits for chunk+embed+publish
+  // and the doc becomes queryable in chat in one button-press. Default
+  // ON because that's the operator's mental model: "ingest" should
+  // mean "live in the corpus", not "queued for processing".
+  const [autoPublish, setAutoPublish] = useState(true)
 
   // Free-text search (List view)
   const [query, setQuery] = useState('')
@@ -51,24 +59,33 @@ export function SourcesTab() {
   const [searchLoading, setSearchLoading] = useState(false)
 
 
-  // ── Load aggregate stats on mount ──────────────────────────────
+  // ── Load aggregate stats + corpus counts on mount ──────────────
   useEffect(() => {
     let cancelled = false
     setStatsLoading(true)
-    fetch(`${API_BASE}/sources/stats`)
-      .then(r => {
-        if (!r.ok) throw new Error(`stats ${r.status}`)
-        return r.json() as Promise<StatsResponse>
-      })
-      .then(s => {
+    Promise.all([
+      fetch(`${API_BASE}/sources/stats`).then(r => r.json() as Promise<StatsResponse>),
+      fetch(`${API_BASE}/sources/corpus_by_host`).then(r => r.json() as Promise<CorpusByHost>)
+        .catch(() => ({ by_host: {} })),  // back-compat: old rag deploys lack this endpoint
+    ])
+      .then(([s, c]) => {
         if (cancelled) return
-        // Sort hosts by URL count desc; drop the test stub
-        const hostList = Object.entries(s.by_host || {})
-          .filter(([h]) => !h.includes('test.example.com'))
-          .map(([host, count]) => ({ host, count }))
-          .sort((a, b) => b.count - a.count)
+        const corpusByHost = c.by_host || {}
+        // Build host list: every host that appears in registry OR corpus.
+        const allHosts = new Set<string>([
+          ...Object.keys(s.by_host || {}),
+          ...Object.keys(corpusByHost),
+        ])
+        const hostList: HostStat[] = Array.from(allHosts)
+          .filter(h => !h.includes('test.example.com') && h !== '(no_host)')
+          .map(host => ({
+            host,
+            count: s.by_host?.[host] ?? 0,
+            corpusDocs: corpusByHost[host]?.docs ?? 0,
+            corpusPublished: corpusByHost[host]?.published ?? 0,
+          }))
+          .sort((a, b) => (b.count + b.corpusDocs) - (a.count + a.corpusDocs))
         setHosts(hostList)
-        // Auto-select biggest entity if none yet
         if (hostList.length > 0 && !selectedHost) {
           setSelectedHost(hostList[0].host)
         }
@@ -137,15 +154,30 @@ export function SourcesTab() {
       const resp = await fetch(`${API_BASE}/documents/import-from-html`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url }),
+        body: JSON.stringify({
+          url,
+          auto_publish: autoPublish,
+          auto_publish_timeout_s: 180,
+        }),
       })
       const ok = resp.ok || resp.status === 409   // 409 = already imported
       const body = await resp.json().catch(() => ({}))
-      const msg = ok
-        ? (resp.status === 409
-            ? 'Already in corpus'
-            : `Imported (doc=${(body as {document_id?: string}).document_id?.slice(0, 8)})`)
-        : `Failed: HTTP ${resp.status}`
+      const docId = (body as {document_id?: string}).document_id
+      const pub = (body as {auto_publish?: {ok: boolean; rows_written?: number; reason?: string}}).auto_publish
+      let msg: string
+      if (resp.status === 409) {
+        msg = 'Already in corpus'
+      } else if (ok) {
+        if (autoPublish && pub) {
+          msg = pub.ok
+            ? `✓ Live in chat (${pub.rows_written} chunks published)`
+            : `Imported but publish ${pub.reason || 'failed'}`
+        } else {
+          msg = `Imported (doc=${docId?.slice(0, 8)}, queued for chunking)`
+        }
+      } else {
+        msg = `Failed: HTTP ${resp.status}`
+      }
       setIngestLog(log => [{ url, ok, msg }, ...log].slice(0, 10))
       // Optimistic: mark this row as ingested in the tree
       setHostRows(rows => rows.map(r =>
@@ -160,7 +192,19 @@ export function SourcesTab() {
         return next
       })
     }
-  }, [ingestingUrls])
+  }, [ingestingUrls, autoPublish])
+
+  // ── Bulk ingest all non-indexed URLs in a sub-tree ─────────────
+  // Sequential, not parallel — chunking workers are single-instance,
+  // hammering them in parallel just queues anyway.
+  const handleBulkIngest = useCallback(async (urls: string[]) => {
+    for (const url of urls) {
+      if (ingestingUrls.has(url)) continue
+      // Reuse handleIngest's promise; it manages state correctly.
+      // eslint-disable-next-line no-await-in-loop
+      await handleIngest(url)
+    }
+  }, [handleIngest, ingestingUrls])
 
 
   // ── Render ─────────────────────────────────────────────────────
@@ -191,24 +235,63 @@ export function SourcesTab() {
       {/* ── Tree view ─────────────────────────────────────────── */}
       {view === 'tree' && (
         <div className="view-tree">
-          <div className="entity-selector">
-            <label>Entity:&nbsp;</label>
-            <select
-              value={selectedHost}
-              onChange={e => setSelectedHost(e.target.value)}
-              disabled={statsLoading}
-            >
-              {hosts.map(({ host, count }) => (
-                <option key={host} value={host}>
-                  {host} ({count} URLs)
-                </option>
-              ))}
-            </select>
+          <div className="toolbar">
+            <div className="toolbar-left">
+              <label>Entity:&nbsp;</label>
+              <select
+                value={selectedHost}
+                onChange={e => setSelectedHost(e.target.value)}
+                disabled={statsLoading}
+              >
+                {hosts.map(({ host, count, corpusDocs }) => (
+                  <option key={host} value={host}>
+                    {host} — {count} URLs · {corpusDocs} docs in corpus
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="toolbar-right">
+              <label className="autopub-toggle" title="When on, ingest waits for chunk + embed + publish so the doc is queryable in chat in one step. When off, ingest just queues processing — doc lands in chat after manual /publish.">
+                <input
+                  type="checkbox"
+                  checked={autoPublish}
+                  onChange={e => setAutoPublish(e.target.checked)}
+                />
+                <span>Auto-publish (live in chat in one step)</span>
+              </label>
+            </div>
           </div>
+
+          {/* Corpus banner — shows what's already indexed even when
+              registry shows 0% (registry covers sitemap URLs; corpus
+              has docs from other paths like /content/dam/*). */}
+          {selectedHost && (() => {
+            const hostStat = hosts.find(h => h.host === selectedHost)
+            if (!hostStat) return null
+            const { corpusDocs, corpusPublished } = hostStat
+            if (corpusDocs === 0) return null
+            return (
+              <div className="corpus-banner">
+                <strong>{corpusDocs}</strong> docs from this host already in corpus
+                {' · '}
+                <strong>{corpusPublished}</strong> published &amp; queryable in chat
+                {corpusDocs > corpusPublished && (
+                  <span className="corpus-banner-warn">
+                    {' '}({corpusDocs - corpusPublished} embedded but not yet published)
+                  </span>
+                )}
+              </div>
+            )
+          })()}
 
           {hostLoading && <div className="loading">Loading tree…</div>}
           {!hostLoading && selectedHost && hostRows.length === 0 && (
-            <div className="empty">No rows for {selectedHost} (yet).</div>
+            <div className="empty">
+              No URLs in registry for <code>{selectedHost}</code>.
+              {hosts.find(h => h.host === selectedHost)?.corpusDocs ? (
+                <> But {hosts.find(h => h.host === selectedHost)?.corpusDocs} docs from this host are in the corpus (came in via paths the sitemap doesn't enumerate).</>
+              ) : null}
+            </div>
           )}
           {!hostLoading && hostRows.length > 0 && (
             <SourceTreeView
@@ -216,6 +299,7 @@ export function SourcesTab() {
               payerLabel={hostRows[0]?.payer || null}
               rows={hostRows}
               onIngest={handleIngest}
+              onBulkIngest={handleBulkIngest}
               ingestingUrls={ingestingUrls}
             />
           )}

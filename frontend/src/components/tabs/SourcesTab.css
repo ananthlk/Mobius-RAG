@@ -34,14 +34,80 @@
 .error-banner { background: #fee; color: #800; padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; }
 .loading, .empty { padding: 24px; color: #777; text-align: center; }
 
-/* ── Entity selector ──────────────────────────────────── */
-.entity-selector { margin-bottom: 16px; font-size: 13px; }
-.entity-selector select {
+/* ── Toolbar (entity selector + auto-publish toggle) ───── */
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  background: #f7f7fa;
+  border-radius: 6px;
+  font-size: 13px;
+}
+.toolbar-left { display: flex; align-items: center; gap: 8px; flex: 1; }
+.toolbar-right { display: flex; align-items: center; gap: 8px; }
+.toolbar select {
   padding: 6px 10px;
   border: 1px solid #d0d0d8;
   border-radius: 4px;
   font-size: 13px;
-  min-width: 320px;
+  min-width: 480px;
+  background: white;
+}
+.autopub-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  font-weight: 500;
+}
+.autopub-toggle input { cursor: pointer; }
+
+/* ── Corpus banner ─────────────────────────────────────── */
+.corpus-banner {
+  background: #ecfdf5;
+  border-left: 3px solid #16a34a;
+  padding: 8px 12px;
+  margin-bottom: 14px;
+  border-radius: 4px;
+  font-size: 13px;
+  color: #065f46;
+}
+.corpus-banner-warn {
+  color: #92400e;
+  font-style: italic;
+  font-size: 12px;
+}
+
+.empty code {
+  background: #f3f4f6;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+
+/* ── Bulk ingest button (per-node) ─────────────────────── */
+.bulk-ingest-btn {
+  margin-left: 8px;
+  padding: 2px 10px;
+  background: linear-gradient(135deg, #2563eb, #1e40af);
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 500;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+}
+.bulk-ingest-btn:hover:not(:disabled) {
+  background: linear-gradient(135deg, #1e40af, #1e3a8a);
+}
+.bulk-ingest-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
 }
 
 /* ── Tree view: entity header + coverage ──────────────── */

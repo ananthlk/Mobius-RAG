@@ -14,6 +14,7 @@ interface Props {
   payerLabel: string | null
   rows: SourceRow[]
   onIngest: (url: string) => Promise<void>
+  onBulkIngest?: (urls: string[]) => Promise<void>
   ingestingUrls: Set<string>
 }
 
@@ -28,7 +29,7 @@ interface Props {
  * are collapsed to keep the page scannable. Operator clicks ▶ to
  * drill in.
  */
-export function SourceTreeView({ host, payerLabel, rows, onIngest, ingestingUrls }: Props) {
+export function SourceTreeView({ host, payerLabel, rows, onIngest, onBulkIngest, ingestingUrls }: Props) {
   const root = buildTree(rows)
   const cov = coverage(root)
   const gaps = topGaps(root, 5)
@@ -77,6 +78,7 @@ export function SourceTreeView({ host, payerLabel, rows, onIngest, ingestingUrls
             node={child}
             depth={0}
             onIngest={onIngest}
+            onBulkIngest={onBulkIngest}
             ingestingUrls={ingestingUrls}
           />
         ))}
@@ -86,18 +88,37 @@ export function SourceTreeView({ host, payerLabel, rows, onIngest, ingestingUrls
 }
 
 
+/** Walk a sub-tree and collect every leaf URL where ingested=false
+ *  AND status looks reachable (not 4xx). Used by the per-node
+ *  "Ingest all N" bulk button. */
+function collectIngestableUrls(node: TreeNode): string[] {
+  const out: string[] = []
+  function walk(n: TreeNode) {
+    for (const r of n.rows) {
+      const blocked = (r.last_fetch_status ?? 0) >= 400
+      if (!r.ingested && !blocked) out.push(r.url)
+    }
+    for (const c of n.children.values()) walk(c)
+  }
+  walk(node)
+  return out
+}
+
+
 /* ── Recursive tree row ────────────────────────────────────────────── */
 
 interface TreeRowProps {
   node: TreeNode
   depth: number
   onIngest: (url: string) => Promise<void>
+  onBulkIngest?: (urls: string[]) => Promise<void>
   ingestingUrls: Set<string>
 }
 
-function TreeRow({ node, depth, onIngest, ingestingUrls }: TreeRowProps) {
+function TreeRow({ node, depth, onIngest, onBulkIngest, ingestingUrls }: TreeRowProps) {
   // Default-expand depth 0; collapse below.
   const [expanded, setExpanded] = useState(depth === 0)
+  const [bulkInFlight, setBulkInFlight] = useState(false)
   const children = sortedChildren(node)
   const hasChildren = children.length > 0
   const isLeaf = node.rows.length > 0
@@ -107,6 +128,21 @@ function TreeRow({ node, depth, onIngest, ingestingUrls }: TreeRowProps) {
   const toggle = useCallback(() => {
     if (hasChildren) setExpanded(e => !e)
   }, [hasChildren])
+
+  // How many ingestable (non-indexed, non-blocked) URLs in this sub-tree?
+  // Used to decide whether to show "Ingest all N" button.
+  const ingestable = isLeaf || hasChildren ? collectIngestableUrls(node) : []
+  const showBulk = ingestable.length >= 2 && onBulkIngest && !fullyIndexed
+
+  const handleBulk = async () => {
+    if (!onBulkIngest || bulkInFlight) return
+    setBulkInFlight(true)
+    try {
+      await onBulkIngest(ingestable)
+    } finally {
+      setBulkInFlight(false)
+    }
+  }
 
   return (
     <div className="tree-row" style={{ paddingLeft: `${depth * 16}px` }}>
@@ -136,6 +172,17 @@ function TreeRow({ node, depth, onIngest, ingestingUrls }: TreeRowProps) {
             {cov}%
           </span>
         )}
+
+        {showBulk && (
+          <button
+            className="bulk-ingest-btn"
+            onClick={handleBulk}
+            disabled={bulkInFlight}
+            title={`Ingest the ${ingestable.length} non-indexed URLs in this sub-tree (sequential — chunking workers are single-instance)`}
+          >
+            {bulkInFlight ? 'Ingesting…' : `▶ Ingest all ${ingestable.length}`}
+          </button>
+        )}
       </div>
 
       {/* Leaf rows attached to this node (not just nested children) */}
@@ -156,6 +203,7 @@ function TreeRow({ node, depth, onIngest, ingestingUrls }: TreeRowProps) {
           node={child}
           depth={depth + 1}
           onIngest={onIngest}
+          onBulkIngest={onBulkIngest}
           ingestingUrls={ingestingUrls}
         />
       ))}

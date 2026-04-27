@@ -11,7 +11,7 @@ from sqlalchemy import select, delete, update, func, text, bindparam, and_, or_,
 from sqlalchemy.orm import defer
 from google.cloud import storage
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import deque
 from asyncio import Lock
 import asyncio
@@ -2555,6 +2555,12 @@ class ImportFromHtmlRequest(BaseModel):
     state: str | None = None
     program: str | None = None
     authority_level: str | None = None
+    # Phase 13.8 (2026-04-26) — chain ingest → chunk → embed → publish
+    # in one synchronous call when auto_publish=true. Caller blocks
+    # for ~10-60s (depends on doc size) instead of needing to poll
+    # /status and call /publish separately. Default false for back-compat.
+    auto_publish: bool = False
+    auto_publish_timeout_s: int = 120  # max seconds to wait for embedding
 
 
 @app.post("/documents/import-from-html")
@@ -2723,12 +2729,53 @@ async def import_document_from_html(
         # for callers that pre-date the curator.
         logger.debug("curator mark_ingested skipped for %s: %s", url, cur_err)
 
+    # ── Phase 13.8: auto-publish on completion ─────────────────────
+    # Wait for chunking + embedding + publish, return when live in
+    # Chroma + chat_pg. Bounded by auto_publish_timeout_s (default 120s)
+    # so the HTTP request can't hang forever.
+    publish_summary: dict | None = None
+    if body.auto_publish and document.status in ("completed", "completed_with_errors"):
+        import asyncio as _asyncio
+        deadline = datetime.utcnow() + timedelta(seconds=body.auto_publish_timeout_s)
+        try:
+            # Poll until embedding completes or deadline hits.
+            while datetime.utcnow() < deadline:
+                doc_check = await db.execute(
+                    select(Document).where(Document.id == document.id)
+                )
+                fresh = doc_check.scalar_one_or_none()
+                if fresh and fresh.embedding_status == "completed":
+                    break
+                if fresh and fresh.embedding_status == "failed":
+                    publish_summary = {"ok": False, "reason": "embedding failed"}
+                    break
+                await db.commit()  # release connection so worker can write
+                await _asyncio.sleep(2)
+            else:
+                # Loop exited via deadline (Python while-else)
+                publish_summary = {"ok": False, "reason": "timeout waiting for embedding"}
+
+            # Fire publish if we got here cleanly
+            if publish_summary is None:
+                from app.services.publish import publish_document
+                pres = await publish_document(document.id, db)
+                publish_summary = {
+                    "ok": pres.verification_passed,
+                    "rows_written": pres.rows_written,
+                    "verification_message": pres.verification_message,
+                }
+                await db.commit()
+        except Exception as pub_err:
+            logger.warning("auto-publish failed for %s: %s", document.id, pub_err)
+            publish_summary = {"ok": False, "reason": f"{type(pub_err).__name__}: {pub_err}"}
+
     return {
         "url": url,
         "title": title,
         "document_id": str(document.id),
         "status": document.status,
         "sections": len(sections) if document.status != "failed" else 0,
+        "auto_publish": publish_summary,  # None if auto_publish wasn't requested
     }
 
 

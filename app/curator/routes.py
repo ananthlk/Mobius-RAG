@@ -283,3 +283,44 @@ async def stats_endpoint(db: AsyncSession = Depends(_get_db)):
     Cheap — single query plan, runs in tens of ms on 100k+ rows.
     """
     return await curator_service.stats(db)
+
+
+@router.get("/corpus_by_host")
+async def corpus_by_host_endpoint(db: AsyncSession = Depends(_get_db)):
+    """Count documents in the corpus, grouped by host extracted from
+    Document.file_path or source_metadata.source_url.
+
+    Why this exists: the registry's ingested counter only fires when
+    we have a discovered_sources row matching the URL. Many docs were
+    imported BEFORE the curator existed (manual upload, pre-curator
+    scrape) and don't have registry rows. The Sources UI needs to
+    show "this entity has 700 docs in corpus" alongside "0 in registry"
+    so operators don't see misleading 0% coverage.
+    """
+    from sqlalchemy import func, text
+    # Use raw SQL: extract the host from file_path (URL or GCS path)
+    # via regexp_substr. Cheap aggregate across <2000 docs at v1 scale.
+    sql = text("""
+        SELECT
+            CASE
+                WHEN file_path LIKE 'http%'
+                    THEN substring(file_path FROM '^https?://([^/]+)')
+                ELSE NULL
+            END AS host,
+            COUNT(*) AS doc_count,
+            SUM(CASE WHEN published_at IS NOT NULL THEN 1 ELSE 0 END) AS published_count
+        FROM documents
+        GROUP BY host
+        ORDER BY doc_count DESC
+    """)
+    result = await db.execute(sql)
+    rows = result.all()
+    return {
+        "by_host": {
+            (r.host or "(no_host)"): {
+                "docs": r.doc_count,
+                "published": r.published_count or 0,
+            }
+            for r in rows
+        }
+    }
