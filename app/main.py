@@ -9361,6 +9361,48 @@ def _parse_since(since: str) -> int:
         return 24 * 3600
 
 
+@app.get("/recent_queries")
+async def recent_queries(
+    limit: int = Query(10, ge=1, le=50, description="How many distinct recent queries to return"),
+    since: str = Query("24h", description="Time window: 1h, 24h, 7d. Max 30d."),
+    db: AsyncSession = Depends(get_db),
+):
+    """Public read of recent ``corpus_search`` query strings.
+
+    Powers the "Recent queries" chip list on the Test tab. Returns ONLY
+    distinct raw_query strings — no telemetry, no expansion details, no
+    caller info. Safe for browser to call without admin auth.
+
+    For full event details + lexicon-coaching feed, use
+    ``/admin/search_events`` (admin-gated).
+    """
+    seconds = _parse_since(since)
+    sql = text("""
+        SELECT
+            min(raw_query) AS query,
+            max(created_at) AS last_seen
+          FROM search_events
+         WHERE created_at >= now() - make_interval(secs => :secs)
+           AND raw_query IS NOT NULL
+           AND length(trim(raw_query)) > 0
+         GROUP BY lower(trim(raw_query))
+         ORDER BY last_seen DESC
+         LIMIT :limit
+    """)
+    try:
+        result = await db.execute(sql, {"secs": seconds, "limit": limit})
+        rows = result.mappings().all()
+    except Exception as exc:
+        logger.warning("recent_queries query failed: %s", exc)
+        return {"queries": []}
+    return {
+        "queries": [
+            {"query": r["query"], "last_seen": r["last_seen"].isoformat() if r["last_seen"] else None}
+            for r in rows
+        ]
+    }
+
+
 @app.get("/admin/search_events")
 async def admin_search_events(
     since: str = Query("24h", description="ISO-ish duration: 15m, 1h, 24h, 7d. Max 30d."),

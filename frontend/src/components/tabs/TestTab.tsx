@@ -231,6 +231,28 @@ export function TestTab() {
 
   const inputRef = useRef<HTMLInputElement>(null)
 
+  // ── Recent queries — replaces canned "Try:" list when data exists ──
+  // Hits the public /recent_queries endpoint (no admin auth required;
+  // returns only distinct raw_query strings, no telemetry).
+  const [recentQueries, setRecentQueries] = useState<string[] | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      try {
+        const r = await fetch(`${API_BASE}/recent_queries?since=24h&limit=10`)
+        if (!r.ok) return
+        const j = await r.json() as { queries?: Array<{ query: string }> }
+        if (cancelled) return
+        const uniq = (j.queries ?? []).map((q) => q.query).filter(Boolean).slice(0, 6)
+        setRecentQueries(uniq)
+      } catch {
+        // Endpoint unreachable — fall through to canned examples.
+      }
+    }
+    load()
+    return () => { cancelled = true }
+  }, [chunks])  // refresh after each search lands
+
   // ── Auto-search (400ms debounce) ─────────────────────────────────────────
   useEffect(() => {
     if (!query.trim()) {
@@ -466,14 +488,19 @@ export function TestTab() {
                 appear on the right the moment results land.
               </p>
               <div className="tt-example-queries">
-                <p className="tt-example-label">Try:</p>
-                {[
-                  'prior authorization behavioral health',
-                  'H2019 per diem rate',
-                  'inpatient mental health admission criteria',
-                  'telehealth reimbursement policy',
-                  'credentialing requirements for providers',
-                ].map((q) => (
+                <p className="tt-example-label">
+                  {recentQueries && recentQueries.length > 0 ? 'Recent queries:' : 'Try:'}
+                </p>
+                {(recentQueries && recentQueries.length > 0
+                  ? recentQueries
+                  : [
+                      'prior authorization behavioral health',
+                      'H2019 per diem rate',
+                      'inpatient mental health admission criteria',
+                      'telehealth reimbursement policy',
+                      'credentialing requirements for providers',
+                    ]
+                ).map((q) => (
                   <button
                     key={q}
                     type="button"
