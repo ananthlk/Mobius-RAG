@@ -104,7 +104,12 @@ COMMON_ENV=(
   "VERTEX_MODEL=gemini-2.5-flash"
   "EMBEDDING_PROVIDER=vertex"
   "CHAT_INTERNAL_LLM_URL=${CHAT_INTERNAL_LLM_URL}"
-  # Chroma (chat's vector store on the GCE VM at 34.170.243.161)
+  # Vector store — pgvector is the prod backend post-cutover (2026-04-27).
+  # Without this, vector_store.get_vector_store() falls back to Chroma when
+  # CHROMA_HOST is set, silently re-routing to the unstable Chroma VM.
+  "VECTOR_STORE=pgvector"
+  # Chroma kept as legacy fallback for ad-hoc admin /vector_search?store=chroma
+  # comparisons; ignored at runtime when VECTOR_STORE=pgvector.
   "CHROMA_HOST=34.170.243.161"
   "CHROMA_PORT=8000"
   "CHROMA_SSL=0"

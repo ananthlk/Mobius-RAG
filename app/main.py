@@ -8007,10 +8007,17 @@ async def query_rag(
         return QueryResponse(chunks=[])
     query_embedding = query_embeddings[0]
 
-    # 2. Search vector store (Chroma or Vertex AI Vector Search)
+    # 2. Search vector store (Chroma, pgvector, or Vertex AI Vector Search)
+    # PgVectorStore.search() refuses to run from an async event loop — it
+    # exposes ``asearch`` for FastAPI handlers. Other stores (Chroma, Noop)
+    # only have a sync ``search``; for those we offload to a worker thread
+    # so we don't block the event loop or hit pgvector's RuntimeError.
     vector_store = get_vector_store()
-    results = vector_store.search(query_embedding, k=k)
-    # Note: pgvector fallback removed - embeddings are stored in Vertex AI Vector Search
+    if hasattr(vector_store, "asearch"):
+        results = await vector_store.asearch(query_embedding, k=k)
+    else:
+        import asyncio as _asyncio
+        results = await _asyncio.to_thread(vector_store.search, query_embedding, k=k)
 
     if not results:
         return QueryResponse(chunks=[])
