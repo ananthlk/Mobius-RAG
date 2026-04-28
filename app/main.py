@@ -9335,6 +9335,172 @@ async def admin_vector_search(
     }
 
 
+# ---------------------------------------------------------------------------
+# /admin/search_events  — Phase B lexicon-coaching feed
+# ---------------------------------------------------------------------------
+
+_SINCE_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def _parse_since(since: str) -> int:
+    """Parse an ISO-ish duration like '15m', '24h', '7d', '600s' to seconds.
+
+    Falls back to 24h on parse failure.  Caps at 30 days.
+    """
+    s = (since or "").strip().lower()
+    if not s:
+        return 24 * 3600
+    try:
+        unit = s[-1]
+        if unit in _SINCE_UNIT_SECONDS:
+            n = int(s[:-1])
+            return min(max(n, 1) * _SINCE_UNIT_SECONDS[unit], 30 * 86400)
+        # bare integer = seconds
+        return min(max(int(s), 1), 30 * 86400)
+    except Exception:
+        return 24 * 3600
+
+
+@app.get("/admin/search_events")
+async def admin_search_events(
+    since: str = Query("24h", description="ISO-ish duration: 15m, 1h, 24h, 7d. Max 30d."),
+    caller: str | None = Query(None, description="Exact caller filter (e.g. mobius_chat)"),
+    mode: str | None = Query(None, regex="^(corpus|precision|recall)$"),
+    unmatched: bool = Query(
+        False,
+        description="Restrict to events where the lexicon match was empty — "
+                    "the lexicon-coaching feed.",
+    ),
+    limit: int = Query(100, ge=1, le=1000),
+    db: AsyncSession = Depends(get_db),
+):
+    """Stream recent ``corpus_search`` events with optional filters.
+
+    Gated by ``/admin/`` middleware (X-Admin-Key).  This is the Phase B
+    lexicon-management feeder — set ``?unmatched=true`` to surface
+    queries whose lexicon match was empty (highest-leverage candidates
+    for new lexicon entries).  When ``unmatched`` is set, the response
+    also includes a ``lexicon_coaching`` aggregation grouping the
+    unmatched queries by normalized text within the same time window.
+    """
+    seconds = _parse_since(since)
+
+    where: list[str] = ["created_at >= now() - make_interval(secs => :secs)"]
+    params: dict[str, Any] = {"secs": seconds, "limit": limit}
+
+    if caller:
+        where.append("caller = :caller")
+        params["caller"] = caller
+    if mode:
+        where.append("mode = :mode")
+        params["mode"] = mode
+    if unmatched:
+        where.append("cardinality(matched_codes) = 0")
+
+    where_sql = " AND ".join(where)
+
+    rows_sql = text(f"""
+        SELECT
+            id, created_at, caller, caller_id, mode,
+            COALESCE(raw_query, query) AS raw_query,
+            COALESCE(normalized_query, bm25_normalized_query) AS normalized_query,
+            matched_codes, expansion_phrases, final_tsquery,
+            bm25_hits, vector_hits,
+            COALESCE(total_chunks, returned) AS total_chunks,
+            total_ms, filters,
+            domain_tags, jurisdiction_tags, process_tags,
+            k
+        FROM search_events
+        WHERE {where_sql}
+        ORDER BY created_at DESC
+        LIMIT :limit
+    """)
+
+    try:
+        result = await db.execute(rows_sql, params)
+        rows = result.mappings().all()
+    except Exception as exc:
+        logger.error("admin_search_events: query failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"query failed: {exc}") from exc
+
+    events = []
+    for r in rows:
+        events.append({
+            "id":                str(r["id"]),
+            "created_at":        r["created_at"].isoformat() if r["created_at"] else None,
+            "caller":            r["caller"],
+            "caller_id":         r["caller_id"],
+            "mode":              r["mode"],
+            "raw_query":         r["raw_query"],
+            "normalized_query":  r["normalized_query"],
+            "matched_codes":     list(r["matched_codes"] or []),
+            "expansion_phrases": list(r["expansion_phrases"] or []),
+            "final_tsquery":     r["final_tsquery"],
+            "bm25_hits":         r["bm25_hits"],
+            "vector_hits":       r["vector_hits"],
+            "total_chunks":      r["total_chunks"],
+            "total_ms":          float(r["total_ms"]) if r["total_ms"] is not None else None,
+            "filters":           r["filters"],
+            "domain_tags":       list(r["domain_tags"] or []),
+            "jurisdiction_tags": list(r["jurisdiction_tags"] or []),
+            "process_tags":      list(r["process_tags"] or []),
+            "k":                 r["k"],
+        })
+
+    response: dict[str, Any] = {
+        "events":          events,
+        "total":           len(events),
+        "filters_applied": {
+            "since":     since,
+            "caller":    caller,
+            "mode":      mode,
+            "unmatched": unmatched,
+            "limit":     limit,
+        },
+    }
+
+    # ── Lexicon-coaching aggregation (only when unmatched=true) ──────────
+    if unmatched:
+        coach_where = ["created_at >= now() - make_interval(secs => :secs)",
+                       "cardinality(matched_codes) = 0"]
+        coach_params: dict[str, Any] = {"secs": seconds}
+        if caller:
+            coach_where.append("caller = :caller")
+            coach_params["caller"] = caller
+        if mode:
+            coach_where.append("mode = :mode")
+            coach_params["mode"] = mode
+
+        coach_sql = text(f"""
+            SELECT
+                lower(trim(COALESCE(normalized_query, raw_query, query))) AS phrase,
+                count(*)::int                                              AS cnt,
+                (array_agg(id ORDER BY created_at DESC))[1]                AS sample_id
+            FROM search_events
+            WHERE {' AND '.join(coach_where)}
+              AND COALESCE(normalized_query, raw_query, query) IS NOT NULL
+              AND length(trim(COALESCE(normalized_query, raw_query, query))) > 0
+            GROUP BY 1
+            ORDER BY cnt DESC, phrase ASC
+            LIMIT 10
+        """)
+        try:
+            coach_rows = (await db.execute(coach_sql, coach_params)).mappings().all()
+            response["lexicon_coaching"] = [
+                {
+                    "phrase":           row["phrase"],
+                    "count":            int(row["cnt"]),
+                    "sample_query_id":  str(row["sample_id"]) if row["sample_id"] else None,
+                }
+                for row in coach_rows
+            ]
+        except Exception as exc:
+            logger.warning("admin_search_events: coaching aggregation failed: %s", exc)
+            response["lexicon_coaching"] = []
+
+    return response
+
+
 @app.post("/documents/{document_id}/retag")
 async def retag_document(
     document_id: str,

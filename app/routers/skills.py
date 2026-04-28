@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -32,6 +32,8 @@ router = APIRouter(prefix="/api/skills/v1", tags=["skills"])
 async def skill_corpus_search(
     body: CorpusSearchRequest,
     db: AsyncSession = Depends(get_db),
+    x_caller: str | None = Header(default=None, alias="X-Caller"),
+    x_caller_id: str | None = Header(default=None, alias="X-Caller-Id"),
 ) -> CorpusSearchResponse:
     """Run BM25 / semantic / hybrid corpus search and return ranked chunks.
 
@@ -53,7 +55,11 @@ async def skill_corpus_search(
         raise HTTPException(status_code=400, detail="query must be non-empty")
 
     try:
-        return await corpus_search(db, body)
+        return await corpus_search(
+            db, body,
+            caller=(x_caller or "api").strip()[:64] or "api",
+            caller_id=(x_caller_id or None),
+        )
     except Exception as exc:
         logger.error("skill_corpus_search: unhandled error: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
