@@ -594,6 +594,115 @@ async def health_deep(db: AsyncSession = Depends(get_db)):
     return {"status": "ok", "checks": ["stuck_chunking_jobs", "stuck_embedding_jobs", "critical_error_spike"]}
 
 
+async def _cascade_delete_document(db: AsyncSession, doc_uuid) -> None:
+    """Drop a document row + every child table that references it.
+
+    Mirrors the inline DELETE chain in
+    ``/admin/db/documents/{document_id}/delete-cascade`` so the
+    cleanup-cron and the operator UI agree on what "delete" means.
+    Caller is responsible for db.commit() so multiple deletes in one
+    request can be rolled back atomically on failure.
+    """
+    from sqlalchemy import text as _text
+    for stmt in (
+        "DELETE FROM chunking_events WHERE document_id = :doc_id",
+        "DELETE FROM chunking_jobs WHERE document_id = :doc_id",
+        "DELETE FROM embedding_jobs WHERE document_id = :doc_id",
+        "DELETE FROM processing_errors WHERE document_id = :doc_id",
+        "DELETE FROM extracted_facts WHERE document_id = :doc_id",
+        "DELETE FROM hierarchical_chunks WHERE document_id = :doc_id",
+        "DELETE FROM chunking_results WHERE document_id = :doc_id",
+        "DELETE FROM chunk_embeddings WHERE document_id = :doc_id",
+        "DELETE FROM rag_published_embeddings WHERE document_id = :doc_id",
+        "DELETE FROM publish_events WHERE document_id = :doc_id",
+        "DELETE FROM document_pages WHERE document_id = :doc_id",
+        "DELETE FROM documents WHERE id = :doc_id",
+    ):
+        await db.execute(_text(stmt), {"doc_id": doc_uuid})
+
+
+@app.post("/admin/cleanup_expired_documents")
+async def cleanup_expired_documents(
+    payload: dict | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Drop documents whose ``expires_at`` has passed.
+
+    Admin-gated (``X-Admin-Key`` middleware). Body (all optional):
+
+        {
+          "dry_run": false,   # if true, list what would be deleted
+                              # without touching anything
+          "limit": 100        # cap per request; protects against a
+                              # runaway TTL backfill nuking the corpus
+        }
+
+    Returns ``{deleted, document_ids}`` (always uses ``deleted`` for
+    the count, even on dry_run; in dry_run it's the would-be count).
+    """
+    from sqlalchemy import text as _text
+
+    body = payload if isinstance(payload, dict) else {}
+    dry_run = bool(body.get("dry_run") or False)
+    try:
+        limit = int(body.get("limit") or 100)
+    except (TypeError, ValueError):
+        limit = 100
+    if limit < 1:
+        limit = 1
+    if limit > 1000:
+        limit = 1000
+
+    rows = await db.execute(
+        _text(
+            "SELECT id, filename FROM documents "
+            "WHERE expires_at IS NOT NULL AND expires_at < now() "
+            "ORDER BY expires_at ASC LIMIT :lim"
+        ),
+        {"lim": limit},
+    )
+    candidates = [(r[0], r[1]) for r in rows.fetchall()]
+    document_ids = [str(d[0]) for d in candidates]
+
+    if dry_run or not candidates:
+        return {
+            "dry_run": dry_run,
+            "deleted": 0 if not dry_run else len(candidates),
+            "would_delete": len(candidates) if dry_run else 0,
+            "document_ids": document_ids,
+        }
+
+    deleted = 0
+    failed: list[dict] = []
+    for doc_id, _filename in candidates:
+        try:
+            await _cascade_delete_document(db, doc_id)
+            await db.commit()
+            try:
+                from app.services.vector_store import get_vector_store
+                get_vector_store().delete_by_document(str(doc_id))
+            except Exception as vec_err:
+                logger.warning(
+                    "cleanup_expired: vector_store delete failed for %s: %s",
+                    doc_id, vec_err,
+                )
+            deleted += 1
+        except Exception as exc:
+            await db.rollback()
+            logger.error(
+                "cleanup_expired: cascade delete failed for %s: %s",
+                doc_id, exc,
+            )
+            failed.append({"document_id": str(doc_id), "error": str(exc)[:200]})
+
+    return {
+        "dry_run": False,
+        "deleted": deleted,
+        "document_ids": document_ids,
+        "failed": failed,
+    }
+
+
 @app.post("/admin/cleanup-stale-jobs")
 async def cleanup_stale_jobs(
     timeout_minutes: float = Query(30.0, ge=1, le=1440, description="Mark jobs stuck in processing for this many minutes as failed"),
@@ -1852,6 +1961,20 @@ async def get_document_status(
         if p.extraction_status != "success"
     ]
     
+    # Surface ``published_at`` so chat-side polling can wait for the
+    # full pipeline (extract → chunk → embed → publish) to complete,
+    # not just text extraction. Consumers that previously ignored the
+    # field continue to work — this is purely additive. Added 2026-04-27
+    # alongside the chat→rag /upload consolidation.
+    last_publish_event = await db.execute(
+        select(PublishEvent)
+        .where(PublishEvent.document_id == doc_uuid)
+        .order_by(PublishEvent.published_at.desc())
+        .limit(1)
+    )
+    pub_ev = last_publish_event.scalar_one_or_none()
+    published_at_iso = pub_ev.published_at.isoformat() if pub_ev else None
+
     return {
         "document_id": str(document.id),
         "filename": document.filename,
@@ -1865,6 +1988,8 @@ async def get_document_status(
         },
         "problematic_pages": problematic_pages,
         "created_at": document.created_at.isoformat(),
+        "published_at": published_at_iso,
+        "expires_at": document.expires_at.isoformat() if document.expires_at else None,
     }
 
 
@@ -2193,8 +2318,21 @@ async def upload_file(
     payer: str = None,
     state: str = None,
     program: str = None,
+    ttl_days: int | None = None,
+    agent_scope: str | None = None,
     db: AsyncSession = Depends(get_db)
 ):
+    # ``ttl_days`` / ``agent_scope`` (2026-04-27): added so mobius-chat
+    # can route document uploads through this canonical pipeline (was
+    # going through mobius-skills/instant-rag, which bypassed lexicon
+    # expansion + hybrid retrieval + rerank). Both are optional —
+    # omitting them preserves the durable rag-UI upload behaviour.
+    #   * ``ttl_days``  → sets ``documents.expires_at = now() + N days``
+    #     so the /admin/cleanup_expired_documents cron drops the row
+    #     after the chat-side retention window.
+    #   * ``agent_scope`` → stored in ``source_metadata.agent_scope``
+    #     for cross-system attribution. Recommended values: "chat",
+    #     "agent", "operator".
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided")
 
@@ -2269,7 +2407,18 @@ async def upload_file(
             raise
         
         gcs_path = f"gs://{GCS_BUCKET}/{file.filename}"
-        
+
+        # Compute ephemeral fields (TTL + agent attribution). When the
+        # caller is the rag UI Upload tab, both will be None and the
+        # row matches the legacy durable shape exactly.
+        from datetime import timedelta as _timedelta
+        expires_at_value = None
+        if ttl_days is not None and ttl_days > 0:
+            expires_at_value = datetime.utcnow() + _timedelta(days=int(ttl_days))
+        source_metadata_value: dict | None = None
+        if agent_scope:
+            source_metadata_value = {"agent_scope": str(agent_scope)}
+
         # Save to database with status "uploaded"
         document = Document(
             filename=file.filename,
@@ -2280,6 +2429,8 @@ async def upload_file(
             program=program,
             termination_date=default_termination_date(),
             status="uploaded",
+            expires_at=expires_at_value,
+            source_metadata=source_metadata_value,
         )
         db.add(document)
         await db.commit()

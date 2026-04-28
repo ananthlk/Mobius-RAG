@@ -32,6 +32,11 @@ class Document(Base):
     # discovered_sources FK. Migration: add_document_source_metadata.py.
     source_metadata = Column(JSONB, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # TTL for ephemeral chat/agent uploads. NULL = durable (rag-UI
+    # uploads, scraped corpus). Non-NULL rows are dropped by the
+    # /admin/cleanup_expired_documents cron once now() > expires_at.
+    # Migration: add_documents_expires_at.py.
+    expires_at = Column(DateTime, nullable=True)
 
 
 class DocumentPage(Base):
