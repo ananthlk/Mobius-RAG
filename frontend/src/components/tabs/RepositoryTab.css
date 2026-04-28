@@ -1,0 +1,1455 @@
+/* ═══════════════════════════════════════════════════════════════
+   RepositoryTab v2 — left sidebar + main panel + inline reader.
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── Top-level 2-column grid ─────────────────────────────────── */
+.repository-tab-v2 {
+  --sidebar-w: 260px;
+  display: grid;
+  grid-template-columns: var(--sidebar-w) 1fr;
+  gap: 0;
+  width: 100%;
+  height: calc(100vh - 56px);   /* fill viewport below tab bar */
+  overflow: hidden;
+  background: var(--mobius-bg-primary);
+}
+
+.repository-tab-v2.sidebar-collapsed {
+  --sidebar-w: 52px;
+}
+
+/* ── Left sidebar ────────────────────────────────────────────── */
+.repo-sidebar {
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--mobius-border);
+  background: var(--mobius-bg-card);
+  overflow: hidden;
+  transition: width 0.15s ease;
+}
+
+.repo-sidebar--collapsed {
+  overflow: hidden;
+}
+
+.repo-sidebar-toggle {
+  background: none;
+  border: none;
+  color: var(--mobius-text-secondary);
+  cursor: pointer;
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 0.25rem 0.4rem;
+  border-radius: var(--mobius-radius-sm);
+  flex-shrink: 0;
+}
+.repo-sidebar-toggle:hover {
+  background: var(--mobius-bg-secondary);
+  color: var(--mobius-text-primary);
+}
+
+/* collapsed state — vertical stack of colored dots */
+.repo-sidebar--collapsed {
+  align-items: center;
+  padding: 0.5rem 0;
+}
+.repo-sidebar-dots {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.4rem;
+  overflow: hidden;
+  padding: 0.25rem 0;
+}
+.repo-sidebar-dot-btn {
+  background: none;
+  border: none;
+  padding: 0.2rem;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.repo-sidebar-dot-btn.active {
+  background: var(--mobius-bg-secondary);
+}
+
+/* expanded header */
+.repo-sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6rem 0.75rem 0.4rem;
+  flex-shrink: 0;
+}
+.repo-sidebar-title {
+  font-size: var(--mobius-text-xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--mobius-text-muted);
+}
+
+/* mini corpus stats strip */
+.repo-sidebar-stats {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.2rem;
+  padding: 0.2rem 0.75rem 0.45rem;
+  font-size: var(--mobius-text-xs);
+  flex-shrink: 0;
+}
+.repo-sidebar-stat {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.repo-sidebar-stat--published { color: var(--mobius-success, #16a34a); font-weight: 600; }
+.repo-sidebar-stat--waiting   { color: var(--rag-accent, var(--mobius-accent-blue)); }
+.repo-sidebar-stat--failed    { color: var(--mobius-error, #dc2626); }
+.repo-sidebar-stat-sep        { color: var(--mobius-border-medium); }
+
+/* search box */
+.repo-sidebar-search-wrap {
+  position: relative;
+  padding: 0 0.6rem 0.45rem;
+  flex-shrink: 0;
+}
+.repo-sidebar-search-icon {
+  position: absolute;
+  left: 1rem;
+  top: 50%;
+  transform: translateY(-60%);
+  color: var(--mobius-text-muted);
+  font-size: 1rem;
+  pointer-events: none;
+}
+.repo-sidebar-search {
+  width: 100%;
+  padding: 0.35rem 0.5rem 0.35rem 1.75rem;
+  border: 1px solid var(--mobius-border);
+  border-radius: var(--mobius-radius-sm);
+  background: var(--mobius-bg-secondary);
+  color: var(--mobius-text-primary);
+  font-size: var(--mobius-text-xs);
+  font-family: var(--mobius-font-sans);
+  box-sizing: border-box;
+}
+.repo-sidebar-search:focus {
+  outline: none;
+  border-color: var(--rag-accent, var(--mobius-accent-blue));
+}
+
+/* domain filter pills */
+.repo-sidebar-domains {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  padding: 0 0.6rem 0.5rem;
+  flex-shrink: 0;
+}
+.repo-domain-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.18rem 0.55rem;
+  border: 1px solid var(--mobius-border);
+  border-radius: 999px;
+  background: none;
+  font-size: 0.68rem;
+  font-family: var(--mobius-font-sans);
+  color: var(--mobius-text-secondary);
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s, color 0.1s;
+}
+.repo-domain-pill:hover {
+  background: var(--mobius-bg-secondary);
+}
+.repo-domain-pill.active {
+  font-weight: 600;
+}
+
+/* entity list */
+.repo-sidebar-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 0.4rem 0.5rem;
+}
+.repo-sidebar-empty {
+  padding: 0.75rem 0.35rem;
+  font-size: var(--mobius-text-xs);
+  color: var(--mobius-text-muted);
+}
+
+/* entity row */
+.repo-sidebar-entity {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.45rem 0.5rem;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--mobius-radius-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+  margin-bottom: 1px;
+}
+.repo-sidebar-entity:hover {
+  background: var(--mobius-bg-secondary);
+}
+.repo-sidebar-entity.selected {
+  background: var(--mobius-bg-secondary);
+  border-color: var(--mobius-border-medium);
+}
+
+.repo-entity-row-top {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+}
+.repo-entity-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--mobius-text-xs);
+  font-weight: 500;
+  color: var(--mobius-text-primary);
+}
+.repo-entity-count {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  flex-shrink: 0;
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+}
+.repo-entity-count--published {
+  color: var(--mobius-success, #16a34a);
+  font-weight: 600;
+}
+.repo-entity-count--staged {
+  color: var(--mobius-text-muted);
+}
+.repo-entity-host {
+  font-size: 0.65rem;
+  color: var(--mobius-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding-left: 0.85rem;
+}
+.repo-entity-bar-track {
+  height: 3px;
+  background: var(--mobius-bg-tertiary, #e2e8f0);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-top: 0.1rem;
+}
+.repo-entity-bar-fill {
+  height: 100%;
+  background: var(--mobius-success, #16a34a);
+  border-radius: 999px;
+  transition: width 0.3s ease;
+}
+
+/* ── Main area ───────────────────────────────────────────────── */
+.repo-main {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+  background: var(--mobius-bg-primary);
+}
+
+/* ── Search bar ──────────────────────────────────────────────── */
+.repo-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid var(--mobius-border);
+  background: var(--mobius-bg-card);
+  flex-shrink: 0;
+}
+
+.repo-search-modes {
+  display: flex;
+  align-items: center;
+  border: 1px solid var(--mobius-border);
+  border-radius: var(--mobius-radius-sm);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.repo-search-mode-btn {
+  padding: 0.3rem 0.7rem;
+  font-size: var(--mobius-text-xs);
+  font-family: var(--mobius-font-sans);
+  font-weight: 500;
+  border: none;
+  background: var(--mobius-bg-card);
+  color: var(--mobius-text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.1s, color 0.1s;
+}
+.repo-search-mode-btn + .repo-search-mode-btn {
+  border-left: 1px solid var(--mobius-border);
+}
+.repo-search-mode-btn.active {
+  background: var(--rag-accent, var(--mobius-accent-blue));
+  color: #fff;
+}
+.repo-search-mode-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.repo-search-field {
+  flex: 1;
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.repo-search-input {
+  width: 100%;
+  padding: 0.35rem 2rem 0.35rem 0.65rem;
+  border: 1px solid var(--mobius-border);
+  border-radius: var(--mobius-radius-sm);
+  background: var(--mobius-bg-secondary);
+  color: var(--mobius-text-primary);
+  font-size: var(--mobius-text-sm);
+  font-family: var(--mobius-font-sans);
+  box-sizing: border-box;
+}
+.repo-search-input:focus {
+  outline: none;
+  border-color: var(--rag-accent, var(--mobius-accent-blue));
+}
+.repo-search-spin,
+.repo-search-clear {
+  position: absolute;
+  right: 0.5rem;
+  background: none;
+  border: none;
+  color: var(--mobius-text-muted);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0.1rem 0.2rem;
+}
+.repo-search-spin {
+  animation: spin 0.8s linear infinite;
+  cursor: default;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Content area: entity + reader ──────────────────────────── */
+.repo-content-area {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.repo-entity-area {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--mobius-space-md);
+  min-width: 0;
+  transition: flex 0.2s ease, max-width 0.2s ease;
+}
+
+/* Reader open: pin entity panel to narrow column, reader takes the rest */
+.repo-content-area.reader-open .repo-entity-area {
+  flex: 0 0 240px;
+  min-width: 160px;
+  max-width: 240px;
+  padding: var(--mobius-space-sm);
+}
+
+.repo-reader-pane {
+  flex: 0 0 420px;
+  border-left: 1px solid var(--mobius-border);
+  background: var(--mobius-bg-card);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  transition: flex-basis 0.2s ease;
+}
+
+/* Reader open: reader expands to fill remaining space (~80% of page) */
+.repo-content-area.reader-open .repo-reader-pane {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.repo-empty,
+.repo-loading {
+  padding: var(--mobius-space-lg) var(--mobius-space-md);
+  color: var(--mobius-text-muted);
+  font-size: var(--mobius-text-sm);
+}
+
+/* ── Search results ──────────────────────────────────────────── */
+.repo-search-status {
+  padding: var(--mobius-space-md);
+  color: var(--mobius-text-muted);
+  font-size: var(--mobius-text-sm);
+}
+
+.repo-search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.repo-search-results-hdr {
+  padding: 0.5rem 0.5rem 0.6rem;
+  font-size: var(--mobius-text-xs);
+  color: var(--mobius-text-secondary);
+  border-bottom: 1px solid var(--mobius-border);
+  margin-bottom: 0.25rem;
+}
+.repo-search-results-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.repo-search-result-item {
+  border-radius: var(--mobius-radius-sm);
+}
+.repo-search-result-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.5rem;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--mobius-radius-sm);
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--mobius-font-sans);
+  font-size: var(--mobius-text-xs);
+  color: var(--mobius-text-primary);
+  transition: background 0.1s, border-color 0.1s;
+}
+.repo-search-result-btn:hover {
+  background: var(--mobius-bg-secondary);
+  border-color: var(--mobius-border);
+}
+.repo-search-result-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--mobius-border-medium);
+  flex-shrink: 0;
+}
+.repo-search-result-dot.ingested {
+  background: var(--mobius-success, #16a34a);
+}
+.repo-search-result-url {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mobius-font-mono, monospace);
+  font-size: 0.72rem;
+  color: var(--rag-accent, var(--mobius-accent-blue));
+}
+.repo-search-result-meta {
+  font-size: 0.68rem;
+  color: var(--mobius-text-muted);
+  white-space: nowrap;
+}
+.repo-search-result-tag {
+  font-size: 0.65rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  background: var(--mobius-bg-secondary);
+  color: var(--mobius-text-muted);
+  white-space: nowrap;
+}
+
+/* ── Legacy layout kept for sub-components ───────────────────── */
+.reader-pane {
+  overflow: auto;
+  background: var(--mobius-bg-card);
+  border-left: 1px solid var(--mobius-border);
+  min-width: 0;
+}
+
+/* ── Splitter ──────────────────────────────────────────────── */
+.repo-splitter {
+  position: relative;
+  width: 4px;
+  background: var(--mobius-border);
+  cursor: col-resize;
+  user-select: none;
+}
+
+.repo-splitter:hover {
+  background: var(--rag-accent, var(--mobius-accent-blue));
+}
+
+.repo-splitter-pill {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 28px;
+  height: 36px;
+  border-radius: var(--mobius-radius-sm);
+  background: var(--mobius-bg-card);
+  border: 1px solid var(--mobius-border);
+  color: var(--mobius-text-primary);
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2;
+  box-shadow: var(--mobius-shadow-sm);
+}
+
+.repo-splitter-pill:hover {
+  background: var(--mobius-bg-secondary);
+}
+
+/* ── Toolbar ───────────────────────────────────────────────── */
+.repository-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--mobius-space-sm);
+  padding: var(--mobius-space-sm) 0 var(--mobius-space-md) 0;
+  margin-bottom: var(--mobius-space-md);
+  border-bottom: 1px solid var(--mobius-border);
+}
+
+.repository-toolbar-label {
+  font-weight: 600;
+  font-size: var(--mobius-text-sm);
+  color: var(--mobius-text-secondary);
+}
+
+.repository-entity-select {
+  padding: 0.4rem 0.6rem;
+  border-radius: var(--mobius-radius-sm);
+  border: 1px solid var(--mobius-border);
+  background: var(--mobius-bg-card);
+  color: var(--mobius-text-primary);
+  font-size: var(--mobius-text-sm);
+  font-family: var(--mobius-font-sans);
+  min-width: 320px;
+  max-width: 100%;
+}
+
+/* ── Rail (wide-reader collapsed state) ─────────────────────── */
+.repository-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--mobius-space-sm);
+  padding: var(--mobius-space-md) 0;
+  font-size: var(--mobius-text-xs);
+  color: var(--mobius-text-secondary);
+}
+
+.repository-rail-dot {
+  font-size: 1rem;
+  color: var(--rag-accent, var(--mobius-accent-blue));
+}
+
+.repository-rail-label {
+  writing-mode: vertical-rl;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-weight: 600;
+}
+
+/* ── Entity area narrow mode (reader open) ───────────────── */
+.repo-content-area.reader-open .entity-card {
+  border: none;
+  box-shadow: none;
+  padding: 0.5rem 0.4rem;
+  border-radius: 0;
+  background: transparent;
+}
+
+.repo-content-area.reader-open .entity-card-header {
+  flex-wrap: wrap;
+  gap: 0.2rem;
+  padding-bottom: 0.35rem;
+  margin-bottom: 0.35rem;
+}
+
+.repo-content-area.reader-open .entity-card-title {
+  font-size: var(--mobius-text-sm);
+}
+
+.repo-content-area.reader-open .entity-card-autopub {
+  display: none;
+}
+
+/* Compress pipeline strip: just show counts, no labels */
+.repo-content-area.reader-open .entity-pipeline {
+  flex-wrap: wrap;
+  gap: 0.2rem;
+  padding: 0.35rem 0.4rem;
+  margin: 0.4rem 0;
+}
+
+.repo-content-area.reader-open .entity-pipeline-label {
+  display: none;
+}
+
+.repo-content-area.reader-open .entity-pipeline-arrow {
+  display: none;
+}
+
+.repo-content-area.reader-open .entity-pipeline-stage {
+  padding: 0.15rem 0.4rem;
+}
+
+/* Compact doc list */
+.repo-content-area.reader-open .ingested-doc-btn {
+  padding: 0.3rem 0.35rem;
+  font-size: 0.72rem;
+}
+
+.repo-content-area.reader-open .ingested-doc-tag {
+  display: none;
+}
+
+/* ── Entity card ───────────────────────────────────────────── */
+.entity-card {
+  background: var(--mobius-bg-card);
+  border: 1px solid var(--mobius-border);
+  border-radius: var(--mobius-radius-md);
+  padding: var(--mobius-space-md);
+  box-shadow: var(--mobius-shadow-sm);
+}
+
+.entity-card-header {
+  display: flex;
+  align-items: center;
+  gap: var(--mobius-space-sm);
+  margin-bottom: var(--mobius-space-md);
+  padding-bottom: var(--mobius-space-sm);
+  border-bottom: 1px solid var(--mobius-border);
+}
+
+.entity-card-title {
+  margin: 0;
+  font-size: var(--mobius-text-lg);
+  color: var(--mobius-text-primary);
+  flex: 1;
+  word-break: break-all;
+}
+
+.entity-card-payer {
+  font-size: var(--mobius-text-xs);
+  color: var(--mobius-text-secondary);
+  background: var(--mobius-bg-secondary);
+  padding: 0.15rem 0.5rem;
+  border-radius: var(--mobius-radius-sm);
+}
+
+.entity-card-autopub {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: var(--mobius-text-xs);
+  color: var(--mobius-text-secondary);
+  cursor: pointer;
+}
+
+.entity-card-tree {
+  margin-bottom: var(--mobius-space-md);
+}
+
+.entity-card-empty {
+  margin-bottom: var(--mobius-space-md);
+}
+
+.entity-card-docs {
+  margin-top: var(--mobius-space-md);
+  padding-top: var(--mobius-space-md);
+  border-top: 1px dashed var(--mobius-border);
+}
+
+.entity-card-docs-title {
+  margin: 0 0 var(--mobius-space-sm) 0;
+  font-size: var(--mobius-text-base);
+  color: var(--mobius-text-primary);
+}
+
+.entity-card-docs-count {
+  color: var(--mobius-text-secondary);
+  font-weight: 400;
+  font-size: var(--mobius-text-sm);
+}
+
+.entity-card-url-hint {
+  margin-top: var(--mobius-space-sm);
+  padding: var(--mobius-space-sm);
+  background: var(--mobius-bg-secondary);
+  border-radius: var(--mobius-radius-sm);
+  font-size: var(--mobius-text-xs);
+  color: var(--mobius-text-secondary);
+  display: flex;
+  align-items: center;
+  gap: var(--mobius-space-sm);
+  flex-wrap: wrap;
+}
+
+/* ── Ingested docs list ─────────────────────────────────────── */
+.ingested-docs-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.ingested-doc-row {
+  border-radius: var(--mobius-radius-sm);
+}
+
+.ingested-doc-row.selected {
+  background: var(--mobius-bg-secondary);
+}
+
+.ingested-doc-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--mobius-space-sm);
+  padding: 0.4rem 0.5rem;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--mobius-radius-sm);
+  color: var(--mobius-text-primary);
+  font-family: var(--mobius-font-sans);
+  font-size: var(--mobius-text-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+}
+
+.ingested-doc-btn:hover {
+  background: var(--mobius-bg-secondary);
+  border-color: var(--mobius-border);
+}
+
+.ingested-doc-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ingested-doc-status {
+  font-size: var(--mobius-text-xs);
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  background: var(--mobius-bg-secondary);
+  color: var(--mobius-text-secondary);
+  text-transform: lowercase;
+}
+
+.ingested-doc-status.status-published {
+  background: var(--mobius-success-bg, #e8f5ee);
+  color: var(--mobius-success-text, #1d5631);
+}
+
+.ingested-doc-status.status-embedded,
+.ingested-doc-status.status-chunked {
+  background: var(--mobius-info-bg, #eaf2ff);
+  color: var(--rag-accent, var(--mobius-accent-blue));
+}
+
+.ingested-doc-status.status-failed {
+  background: rgba(220, 38, 38, 0.08);
+  color: var(--mobius-error, #dc2626);
+}
+
+.ingested-docs-empty {
+  padding: var(--mobius-space-md) 0;
+  font-size: var(--mobius-text-sm);
+  color: var(--mobius-text-secondary);
+}
+
+/* ── Reader slide-out ───────────────────────────────────────── */
+.reader-slideout {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.reader-slideout-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.3rem 0.75rem 0.3rem 1rem;
+  border-bottom: 1px solid var(--mobius-border);
+  background: var(--mobius-bg-secondary);
+  min-height: 36px;
+}
+
+.reader-slideout-title {
+  flex: 1;
+  font-size: var(--mobius-text-sm);
+  font-weight: 500;
+  color: var(--mobius-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* no uppercase — show real doc name */
+}
+
+.reader-slideout-close {
+  background: none;
+  border: none;
+  font-size: 1.4rem;
+  line-height: 1;
+  color: var(--mobius-text-secondary);
+  cursor: pointer;
+  padding: 0 0.4rem;
+  border-radius: var(--mobius-radius-sm);
+}
+
+.reader-slideout-close:hover {
+  background: var(--mobius-bg-tertiary);
+  color: var(--mobius-text-primary);
+}
+
+.reader-slideout-body {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* Let the DocumentViewer wrapper fill the slide-out height */
+.reader-slideout-body > div {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* dv-root needs height context to allow internal scroll */
+.reader-slideout-body .dv-root {
+  max-width: none;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.reader-slideout-body .dv-layout {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.reader-slideout-body .dv-content-area {
+  overflow-y: auto;
+}
+
+/* ── Compact DocumentViewer chrome inside the slideout ─────── */
+
+/* Shrink toolbar: was ~52px with padding + border-radius */
+.reader-slideout-body .dv-toolbar {
+  padding: 0.25rem 0.625rem;
+  margin-bottom: 0.25rem;
+  border-radius: 0;
+  border-left: none;
+  border-right: none;
+  border-top: none;
+  box-shadow: none;
+}
+
+/* Tighter toolbar buttons */
+.reader-slideout-body .dv-toolbar-btn {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.78rem;
+}
+
+/* Slim page header: was ~40px, reduce to ~28px */
+.reader-slideout-body .dv-page-header {
+  padding: 0.2rem 0 0.1rem;
+  margin-bottom: 0.25rem;
+}
+.reader-slideout-body .dv-page-header h4 {
+  font-size: 0.78rem;
+  margin: 0;
+  font-weight: 500;
+  color: var(--mobius-text-secondary, #6b7280);
+}
+
+.reader-url-preview {
+  padding: var(--mobius-space-md);
+}
+
+.reader-url-preview-label {
+  margin: 0 0 var(--mobius-space-xs) 0;
+  font-size: var(--mobius-text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--mobius-text-secondary);
+}
+
+.reader-url-preview-link {
+  display: inline-block;
+  word-break: break-all;
+  color: var(--rag-accent, var(--mobius-accent-blue));
+  font-family: var(--mobius-font-mono, monospace);
+  font-size: var(--mobius-text-sm);
+  margin-bottom: var(--mobius-space-md);
+}
+
+.reader-url-preview-actions {
+  margin: var(--mobius-space-md) 0;
+}
+
+.reader-url-preview-already {
+  color: var(--mobius-success-text, #1d5631);
+  font-weight: 600;
+}
+
+.reader-url-preview-hint {
+  font-size: var(--mobius-text-xs);
+  color: var(--mobius-text-secondary);
+}
+
+/* ── Corpus dashboard ─────────────────────────────────────────── */
+.corpus-dashboard {
+  margin-bottom: var(--mobius-space-md);
+  padding: var(--mobius-space-sm) var(--mobius-space-md);
+  background: var(--mobius-bg-card);
+  border: 1px solid var(--mobius-border);
+  border-radius: var(--mobius-radius-md);
+  box-shadow: var(--mobius-shadow-sm);
+}
+
+/* KPI strip */
+.corpus-kpis {
+  display: flex;
+  align-items: baseline;
+  gap: var(--mobius-space-sm);
+  margin-bottom: var(--mobius-space-sm);
+  padding-bottom: var(--mobius-space-sm);
+  border-bottom: 1px solid var(--mobius-border);
+}
+
+.corpus-kpi {
+  display: flex;
+  align-items: baseline;
+  gap: 0.3rem;
+}
+
+.corpus-kpi-value {
+  font-size: var(--mobius-text-lg);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--mobius-text-secondary);
+}
+
+.corpus-kpi-label {
+  font-size: var(--mobius-text-xs);
+  color: var(--mobius-text-muted);
+}
+
+.corpus-kpi--published .corpus-kpi-value {
+  color: var(--mobius-success, #16a34a);
+}
+
+.corpus-kpi--waiting .corpus-kpi-value {
+  color: var(--mobius-accent);
+}
+
+.corpus-kpi--failed .corpus-kpi-value {
+  color: var(--mobius-error, #dc2626);
+}
+
+.corpus-kpi-sep {
+  color: var(--mobius-border-medium);
+  font-size: var(--mobius-text-base);
+  padding: 0 0.15rem;
+}
+
+/* Per-payer breakdown */
+.corpus-payer-breakdown {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.corpus-payer-row {
+  display: grid;
+  grid-template-columns: 11rem 1fr 7rem;
+  align-items: center;
+  gap: var(--mobius-space-sm);
+  min-height: 1.4rem;
+}
+
+.corpus-payer-name {
+  font-size: var(--mobius-text-xs);
+  color: var(--mobius-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.corpus-payer-track {
+  height: 6px;
+  background: var(--mobius-bg-tertiary);
+  border-radius: var(--mobius-radius-full);
+  overflow: hidden;
+}
+
+.corpus-payer-fill {
+  height: 100%;
+  border-radius: var(--mobius-radius-full);
+  transition: width 0.4s ease;
+}
+
+.corpus-payer-fill--total {
+  background: var(--mobius-border-medium);
+  position: relative;
+}
+
+.corpus-payer-fill--published {
+  background: var(--mobius-success, #16a34a);
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+.corpus-payer-counts {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: var(--mobius-text-xs);
+  text-align: right;
+  justify-content: flex-end;
+}
+
+.corpus-payer-count--published {
+  font-weight: 600;
+  color: var(--mobius-success, #16a34a);
+  font-variant-numeric: tabular-nums;
+}
+
+.corpus-payer-count--staged {
+  color: var(--mobius-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.corpus-payer-count--urls {
+  color: var(--mobius-text-muted);
+}
+
+/* ── Entity pipeline status strip ────────────────────────────── */
+.entity-pipeline {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin: 0.875rem 0;
+  padding: 0.625rem 0.75rem;
+  background: var(--mobius-bg-secondary);
+  border: 1px solid var(--mobius-border);
+  border-radius: var(--mobius-radius-base);
+}
+.entity-pipeline-stage-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+.entity-pipeline-stage {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.25rem 0.65rem;
+  background: var(--mobius-bg-card);
+  border: 1px solid var(--mobius-border);
+  border-radius: var(--mobius-radius-full);
+  font-size: var(--mobius-text-xs);
+  color: var(--mobius-text-muted);
+  white-space: nowrap;
+}
+.entity-pipeline-stage.has-count {
+  color: var(--mobius-text-primary);
+  border-color: var(--mobius-border-medium);
+}
+.entity-pipeline-stage.is-terminal.has-count {
+  background: rgba(59, 130, 246, 0.10);
+  border-color: rgba(59, 130, 246, 0.35);
+  color: var(--mobius-accent);
+  font-weight: 500;
+}
+.entity-pipeline-count {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  font-size: var(--mobius-text-sm);
+}
+.entity-pipeline-label {
+  font-size: var(--mobius-text-xs);
+}
+.entity-pipeline-arrow {
+  color: var(--mobius-text-muted);
+  font-size: 0.85rem;
+}
+
+.entity-pipeline-stage.is-failed {
+  background: rgba(220, 38, 38, 0.07);
+  border-color: rgba(220, 38, 38, 0.3);
+  color: var(--mobius-error, #dc2626);
+  font-weight: 500;
+}
+
+/* ── Entity tabs ──────────────────────────────────────────────── */
+.entity-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--mobius-border);
+  margin: 0.75rem 0 0;
+}
+
+.entity-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.9rem;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  font-size: var(--mobius-text-sm);
+  font-family: var(--mobius-font-sans);
+  font-weight: 500;
+  color: var(--mobius-text-secondary);
+  cursor: pointer;
+  transition: color 0.1s, border-color 0.1s;
+}
+.entity-tab:hover {
+  color: var(--mobius-text-primary);
+}
+.entity-tab.active {
+  color: var(--rag-accent, var(--mobius-accent-blue));
+  border-bottom-color: var(--rag-accent, var(--mobius-accent-blue));
+}
+
+.entity-tab-count {
+  font-size: var(--mobius-text-xs);
+  font-weight: 400;
+  color: var(--mobius-text-muted);
+  background: var(--mobius-bg-secondary);
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+}
+.entity-tab.active .entity-tab-count {
+  background: rgba(59, 130, 246, 0.1);
+  color: var(--rag-accent, var(--mobius-accent-blue));
+}
+
+/* ── Tab panel ────────────────────────────────────────────────── */
+.entity-tab-panel {
+  padding-top: 0.6rem;
+}
+
+.entity-tab-empty {
+  padding: var(--mobius-space-md) 0;
+  font-size: var(--mobius-text-sm);
+  color: var(--mobius-text-muted);
+}
+
+/* ── Filter pill row (docs + sitemap) ────────────────────────── */
+.entity-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-bottom: 0.6rem;
+}
+
+.entity-filter-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.6rem;
+  border: 1px solid var(--mobius-border);
+  border-radius: 999px;
+  background: none;
+  font-size: var(--mobius-text-xs);
+  font-family: var(--mobius-font-sans);
+  color: var(--mobius-text-secondary);
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s, color 0.1s;
+}
+.entity-filter-btn:hover {
+  background: var(--mobius-bg-secondary);
+  border-color: var(--mobius-border-medium);
+}
+.entity-filter-btn.active {
+  background: rgba(59, 130, 246, 0.08);
+  border-color: rgba(59, 130, 246, 0.4);
+  color: var(--rag-accent, var(--mobius-accent-blue));
+  font-weight: 600;
+}
+.entity-filter-btn.danger.active {
+  background: rgba(220, 38, 38, 0.07);
+  border-color: rgba(220, 38, 38, 0.35);
+  color: var(--mobius-error, #dc2626);
+}
+
+.entity-filter-count {
+  font-size: 0.65rem;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+}
+
+/* Topic tag filter row */
+.entity-tag-row {
+  margin-top: 0.25rem;
+  padding-top: 0.3rem;
+  border-top: 1px dashed var(--mobius-border);
+}
+
+.entity-filter-label {
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--mobius-text-muted);
+  font-weight: 600;
+  align-self: center;
+  flex-shrink: 0;
+}
+
+.entity-tag-btn {
+  background: var(--mobius-bg-secondary);
+}
+
+.entity-filter-more {
+  font-size: 0.65rem;
+  color: var(--mobius-text-muted);
+  align-self: center;
+  padding: 0 0.25rem;
+}
+
+/* Tag chip on doc row */
+.ingested-doc-tag {
+  font-size: 0.65rem;
+  padding: 0.08rem 0.4rem;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.08);
+  color: var(--rag-accent, var(--mobius-accent-blue));
+  border: 1px solid rgba(59, 130, 246, 0.2);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* ── Corpus search results (skill endpoint) ──────────────────── */
+.repo-corpus-results {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.repo-corpus-results-hdr {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem 0.5rem;
+  font-size: var(--mobius-text-xs);
+  color: var(--mobius-text-secondary);
+  border-bottom: 1px solid var(--mobius-border);
+}
+.repo-corpus-results-meta {
+  font-size: 0.65rem;
+  color: var(--mobius-text-muted);
+  white-space: nowrap;
+}
+.repo-search-telem {
+  font-size: 0.65rem;
+  color: var(--mobius-text-muted);
+}
+
+.repo-corpus-results-list {
+  list-style: none;
+  margin: 0;
+  padding: 0.25rem 0;
+  overflow-y: auto;
+}
+
+.repo-corpus-result-item {
+  border-bottom: 1px solid var(--mobius-border);
+}
+.repo-corpus-result-item:last-child {
+  border-bottom: none;
+}
+
+.repo-corpus-result-btn {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.6rem 0.75rem;
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--mobius-font-sans);
+  transition: background 0.1s;
+}
+.repo-corpus-result-btn:hover {
+  background: var(--mobius-bg-secondary);
+}
+
+.repo-corpus-result-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.repo-corpus-result-docname {
+  font-size: var(--mobius-text-xs);
+  font-weight: 600;
+  color: var(--mobius-text-primary);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.repo-corpus-result-page {
+  font-size: 0.65rem;
+  color: var(--mobius-text-muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.repo-corpus-result-arms {
+  display: flex;
+  gap: 0.2rem;
+  flex-shrink: 0;
+}
+.repo-corpus-arm-badge {
+  font-size: 0.58rem;
+  font-weight: 700;
+  padding: 0.08rem 0.35rem;
+  border-radius: 999px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+.repo-corpus-arm-badge.arm-bm25 {
+  background: rgba(234, 88, 12, 0.08);
+  color: #ea580c;
+  border: 1px solid rgba(234, 88, 12, 0.25);
+}
+.repo-corpus-arm-badge.arm-vector {
+  background: rgba(99, 102, 241, 0.08);
+  color: #6366f1;
+  border: 1px solid rgba(99, 102, 241, 0.25);
+}
+.repo-corpus-confidence {
+  font-size: 0.62rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+
+.repo-corpus-result-snippet {
+  margin: 0;
+  font-size: var(--mobius-text-xs);
+  color: var(--mobius-text-secondary);
+  line-height: 1.55;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.repo-corpus-result-footer {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.repo-corpus-result-payer,
+.repo-corpus-result-auth {
+  font-size: 0.62rem;
+  padding: 0.06rem 0.35rem;
+  border-radius: 999px;
+  background: var(--mobius-bg-secondary);
+  color: var(--mobius-text-muted);
+  border: 1px solid var(--mobius-border);
+}
+
+/* ── Trace toggle button ─────────────────────────────────────────── */
+.repo-corpus-trace-btn {
+  font-size: 0.60rem;
+  font-family: var(--mobius-font-sans);
+  font-weight: 600;
+  padding: 0.15rem 0.55rem;
+  border: 1px solid var(--mobius-border);
+  border-radius: 999px;
+  background: var(--mobius-bg-secondary);
+  color: var(--mobius-text-muted);
+  cursor: pointer;
+  letter-spacing: 0.04em;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+.repo-corpus-trace-btn:hover {
+  background: var(--mobius-bg-primary);
+  border-color: var(--mobius-border-medium);
+  color: var(--mobius-text-secondary);
+}
+.repo-corpus-trace-btn.active {
+  background: rgba(99, 102, 241, 0.07);
+  border-color: rgba(99, 102, 241, 0.3);
+  color: #6366f1;
+}
+
+.repo-corpus-trace-wrap {
+  padding: 0 0.75rem 0.75rem;
+}
+
+/* All 3 mode buttons now active (no disabled state for Semantic) */
+.repo-search-mode-btn {
+  font-size: var(--mobius-text-xs);
+  font-weight: 500;
+  padding: 0.3rem 0.65rem;
+  border-radius: var(--mobius-radius-sm);
+  border: 1px solid var(--mobius-border);
+  background: var(--mobius-bg-card);
+  color: var(--mobius-text-secondary);
+  cursor: pointer;
+  transition: all 0.12s;
+  white-space: nowrap;
+}
+.repo-search-mode-btn:hover:not(:disabled) {
+  background: var(--mobius-bg-secondary);
+  border-color: var(--mobius-border-medium);
+}
+.repo-search-mode-btn.active {
+  background: var(--rag-accent, var(--mobius-accent-blue));
+  border-color: var(--rag-accent, var(--mobius-accent-blue));
+  color: #fff;
+  font-weight: 600;
+}

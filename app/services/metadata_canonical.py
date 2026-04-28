@@ -95,10 +95,15 @@ _STATE_CANONICAL: set[str] = {
 }
 
 _AUTHORITY_LEVEL_CANONICAL: set[str] = {
+    # Reranker-weighted tiers (corpus_search._AUTHORITY_WEIGHTS)
+    "contract_source_of_truth",  # 1.00 — provider manuals, billing manuals, clinical policies, state regs
+    "operational_suggested",      # 0.65 — internal ops guides, suggested workflows
+    "payer_policy",               # 0.50 — payer-published UM policies, fee schedules
+    "fyi_not_citable",            # 0.20 — newsletters, marketing, reference-only
+    # Legacy / ingest-time labels (kept for backward compat; map to 0.10 default in reranker)
     "official",
     "guidance",
     "informational",
-    "contract_source_of_truth",
     "marketing",
     "legacy",
     "draft",

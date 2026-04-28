@@ -65,6 +65,9 @@ app = FastAPI(title="Mobius RAG", version="0.1.0")
 from app.curator.routes import router as curator_router  # noqa: E402
 app.include_router(curator_router)
 
+from app.routers.skills import router as skills_router  # noqa: E402
+app.include_router(skills_router)
+
 
 @app.on_event("startup")
 async def run_startup_migrations():
@@ -345,6 +348,21 @@ async def _run_startup_migrations_background():
                 await migrate_drive_connections()
             except Exception as migrate_err:
                 logger.warning(f"Startup migration (drive_connections) skipped: {migrate_err}")
+            try:
+                from app.migrations.add_rag_published_fts import migrate as migrate_rag_fts
+                await migrate_rag_fts()
+            except Exception as migrate_err:
+                logger.warning(f"Startup migration (rag_published_fts) skipped: {migrate_err}")
+            try:
+                from app.migrations.add_search_events import migrate as migrate_search_events
+                await migrate_search_events()
+            except Exception as migrate_err:
+                logger.warning(f"Startup migration (search_events) skipped: {migrate_err}")
+            try:
+                from app.migrations.add_search_events_normalized_query import migrate as migrate_se_nq
+                await migrate_se_nq()
+            except Exception as migrate_err:
+                logger.warning(f"Startup migration (search_events.bm25_normalized_query) skipped: {migrate_err}")
 
             logger.info("✓ Startup migrations completed successfully")
         except Exception as e:

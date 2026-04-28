@@ -1,0 +1,617 @@
+/* ═══════════════════════════════════════════════════════════════
+   SearchTracePanel — pipeline trace visualizer
+   Prefix: stp-  (search trace panel)
+   ═══════════════════════════════════════════════════════════════ */
+
+.search-trace-panel {
+  border: 1px solid var(--mobius-border);
+  border-radius: var(--mobius-radius-md);
+  background: var(--mobius-bg-card);
+  overflow: hidden;
+  font-size: var(--mobius-text-xs);
+  font-family: var(--mobius-font-sans);
+  margin-top: 0.6rem;
+}
+
+/* ── Panel header ──────────────────────────────────────────────── */
+.stp-hdr {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.4rem 0.75rem;
+  background: var(--mobius-bg-secondary);
+  border-bottom: 1px solid var(--mobius-border);
+  gap: 0.5rem;
+}
+
+.stp-hdr-title {
+  font-size: 0.66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--mobius-text-muted);
+}
+
+.stp-hdr-meta {
+  display: flex;
+  gap: 0.3rem;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.stp-meta-pill {
+  font-size: 0.60rem;
+  font-family: var(--mobius-font-mono, monospace);
+  padding: 0.05rem 0.4rem;
+  background: var(--mobius-bg-primary);
+  border: 1px solid var(--mobius-border);
+  border-radius: 999px;
+  color: var(--mobius-text-muted);
+}
+
+/* ── Collapsible sections ───────────────────────────────────────── */
+.stp-section {
+  border-bottom: 1px solid var(--mobius-border);
+}
+.stp-section:last-child {
+  border-bottom: none;
+}
+
+.stp-section-hdr {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.32rem 0.75rem;
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--mobius-font-sans);
+  transition: background 0.1s;
+}
+.stp-section-hdr:hover {
+  background: var(--mobius-bg-secondary);
+}
+
+.stp-chevron {
+  font-size: 0.55rem;
+  color: var(--mobius-text-muted);
+  flex-shrink: 0;
+  width: 0.75rem;
+  text-align: center;
+}
+
+.stp-section-title {
+  font-size: 0.66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--mobius-text-secondary);
+}
+
+.stp-section-badge {
+  font-size: 0.60rem;
+  color: var(--mobius-text-muted);
+  font-family: var(--mobius-font-mono, monospace);
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.stp-section-body {
+  padding: 0.5rem 0.75rem 0.65rem;
+}
+
+/* ── Timing ─────────────────────────────────────────────────────── */
+.stp-timing-bar {
+  display: flex;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--mobius-bg-tertiary, #e2e8f0);
+  margin-bottom: 0.45rem;
+}
+
+.stp-timing-seg {
+  display: block;
+  height: 100%;
+  flex-shrink: 0;
+}
+
+.stp-timing-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.stp-timing-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.60rem;
+  font-family: var(--mobius-font-mono, monospace);
+  padding: 0.1rem 0.45rem;
+  border: 1px solid;
+  border-radius: 999px;
+  color: var(--mobius-text-secondary);
+  white-space: nowrap;
+}
+
+.stp-timing-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.stp-timing-total {
+  border-color: var(--mobius-border-medium) !important;
+  font-weight: 700;
+  color: var(--mobius-text-primary);
+}
+
+/* ── Retrieval arms grid ─────────────────────────────────────────── */
+.stp-arms-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+}
+
+.stp-arm-col-hdr {
+  font-size: 0.60rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  padding: 0.18rem 0.45rem;
+  border-radius: var(--mobius-radius-sm);
+  margin-bottom: 0.35rem;
+  border: 1px solid;
+}
+
+.stp-arm-col-hdr--bm25 {
+  background: rgba(234, 88, 12, 0.05);
+  color: #ea580c;
+  border-color: rgba(234, 88, 12, 0.2);
+}
+
+.stp-arm-col-hdr--vec {
+  background: rgba(99, 102, 241, 0.05);
+  color: #6366f1;
+  border-color: rgba(99, 102, 241, 0.2);
+}
+
+/* ── Score bar ───────────────────────────────────────────────────── */
+.stp-score-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  vertical-align: middle;
+}
+
+.stp-score-track {
+  display: inline-block;
+  height: 5px;
+  background: var(--mobius-bg-tertiary, #e2e8f0);
+  border-radius: 999px;
+  overflow: hidden;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+
+.stp-score-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+}
+
+.stp-score-val {
+  font-family: var(--mobius-font-mono, monospace);
+  font-size: 0.60rem;
+  color: var(--mobius-text-muted);
+  white-space: nowrap;
+}
+
+/* ── Tables ──────────────────────────────────────────────────────── */
+.stp-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.66rem;
+}
+
+.stp-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--mobius-text-muted);
+  padding: 0.15rem 0.3rem;
+  border-bottom: 1px solid var(--mobius-border);
+  white-space: nowrap;
+  font-size: 0.60rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.stp-table td {
+  padding: 0.2rem 0.3rem;
+  vertical-align: middle;
+  border-bottom: 1px solid var(--mobius-border);
+}
+
+.stp-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.stp-table tbody tr:hover {
+  background: var(--mobius-bg-secondary);
+}
+
+.stp-td-num {
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  color: var(--mobius-text-muted);
+  white-space: nowrap;
+  font-family: var(--mobius-font-mono, monospace);
+}
+
+.stp-td-doc {
+  max-width: 210px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--mobius-text-primary);
+}
+
+.stp-td-arms {
+  white-space: nowrap;
+}
+
+.stp-td-dim {
+  opacity: 0.55;
+}
+
+/* ── Auth / confidence badges ───────────────────────────────────── */
+.stp-auth-badge {
+  font-size: 0.60rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  font-family: var(--mobius-font-mono, monospace);
+}
+
+.stp-conf-badge {
+  font-size: 0.60rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+
+/* ── Arm badges (rerank table) ──────────────────────────────────── */
+.stp-arm-badge {
+  display: inline-flex;
+  font-size: 0.52rem;
+  font-weight: 700;
+  padding: 0.05rem 0.3rem;
+  border-radius: 999px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-right: 0.15rem;
+  border: 1px solid transparent;
+}
+
+.stp-arm-badge--bm25 {
+  background: rgba(234, 88, 12, 0.07);
+  color: #ea580c;
+  border-color: rgba(234, 88, 12, 0.22);
+}
+
+.stp-arm-badge--vector {
+  background: rgba(99, 102, 241, 0.07);
+  color: #6366f1;
+  border-color: rgba(99, 102, 241, 0.22);
+}
+
+.stp-arm-badge--hybrid {
+  background: rgba(16, 185, 129, 0.07);
+  color: #10b981;
+  border-color: rgba(16, 185, 129, 0.22);
+}
+
+.stp-tr--hybrid {
+  background: rgba(16, 185, 129, 0.025);
+}
+
+/* JPD tag badges in scoring trace */
+.stp-jpd-cell {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex-wrap: nowrap;
+}
+
+.stp-jpd-tag {
+  display: inline-block;
+  font-size: 0.58rem;
+  font-weight: 700;
+  font-family: var(--mobius-font-mono, monospace);
+  padding: 0 4px;
+  border-radius: 3px;
+  border: 1px solid;
+  line-height: 1.5;
+  letter-spacing: 0.02em;
+}
+
+.stp-jpd-tag--p {
+  color: #7c3aed;
+  background: rgba(124, 58, 237, 0.08);
+  border-color: rgba(124, 58, 237, 0.25);
+}
+.stp-jpd-tag--j {
+  color: #0369a1;
+  background: rgba(3, 105, 161, 0.08);
+  border-color: rgba(3, 105, 161, 0.25);
+}
+.stp-jpd-tag--d {
+  color: #b45309;
+  background: rgba(180, 83, 9, 0.08);
+  border-color: rgba(180, 83, 9, 0.25);
+}
+.stp-jpd-tag--o {
+  color: #6b7280;
+  background: rgba(107, 114, 128, 0.07);
+  border-color: rgba(107, 114, 128, 0.2);
+}
+
+/* JPD badges on result cards in TestTab */
+
+/* Rerank table: horizontal scroll on small widths */
+.stp-rerank-wrap {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.stp-table--rerank .stp-td-doc {
+  max-width: 160px;
+}
+
+.stp-reranker-label {
+  margin: 0 0 0.2rem;
+  font-size: 0.60rem;
+  font-family: var(--mobius-font-mono, monospace);
+  color: var(--mobius-text-muted);
+}
+
+.stp-reranker-hint {
+  margin: 0 0 0.5rem;
+  font-size: 0.60rem;
+  color: var(--mobius-text-muted);
+  font-style: italic;
+}
+
+/* Expanded row */
+.stp-tr-expand td {
+  background: var(--mobius-bg-secondary);
+  padding: 0.4rem 0.5rem 0.5rem;
+  border-bottom: 1px solid var(--mobius-border);
+}
+
+.stp-expand-body {
+  font-size: 0.64rem;
+}
+
+.stp-expand-signals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.2rem;
+  font-family: var(--mobius-font-mono, monospace);
+  color: var(--mobius-text-secondary);
+  margin-bottom: 0.35rem;
+  padding: 0.3rem 0.4rem;
+  background: var(--mobius-bg-primary);
+  border-radius: var(--mobius-radius-sm);
+  border: 1px solid var(--mobius-border);
+}
+
+.stp-expand-arm-scores {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1rem;
+  font-family: var(--mobius-font-mono, monospace);
+  color: var(--mobius-text-muted);
+  font-size: 0.60rem;
+  margin-bottom: 0.35rem;
+}
+
+.stp-expand-preview {
+  margin: 0;
+  font-size: 0.64rem;
+  color: var(--mobius-text-secondary);
+  line-height: 1.5;
+  font-style: italic;
+  padding-left: 0.4rem;
+  border-left: 2px solid var(--mobius-border-medium);
+}
+
+/* ── Assembly ───────────────────────────────────────────────────── */
+.stp-assembly-meta {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.stp-kv {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.stp-k {
+  font-size: 0.60rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--mobius-text-muted);
+}
+
+.stp-v {
+  font-size: 0.66rem;
+  font-weight: 600;
+  color: var(--mobius-text-primary);
+  font-family: var(--mobius-font-mono, monospace);
+  background: var(--mobius-bg-secondary);
+  padding: 0.05rem 0.35rem;
+  border-radius: 3px;
+}
+
+.stp-ratio-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-bottom: 0.55rem;
+}
+
+.stp-ratio-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.stp-ratio-label {
+  width: 9.5rem;
+  font-size: 0.62rem;
+  color: var(--mobius-text-secondary);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.stp-ratio-track {
+  flex: 1;
+  height: 8px;
+  background: var(--mobius-bg-tertiary, #e2e8f0);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.stp-ratio-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.4s ease;
+}
+
+.stp-ratio-pct {
+  font-size: 0.66rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--mobius-text-secondary);
+  width: 2.4rem;
+  text-align: right;
+  flex-shrink: 0;
+  font-family: var(--mobius-font-mono, monospace);
+}
+
+.stp-tier-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.stp-tier-pill {
+  font-size: 0.60rem;
+  font-weight: 700;
+  padding: 0.08rem 0.45rem;
+  border: 1px solid;
+  border-radius: 999px;
+  letter-spacing: 0.03em;
+}
+
+/* ── Neighbourhood ──────────────────────────────────────────────── */
+.stp-neighbourhood-hint {
+  font-size: 0.64rem;
+  color: var(--mobius-text-muted);
+  background: var(--mobius-bg-secondary);
+  padding: 0.4rem 0.55rem;
+  border-radius: var(--mobius-radius-sm);
+  border: 1px solid var(--mobius-border);
+  margin: 0 0 0.5rem;
+  line-height: 1.5;
+}
+
+.stp-neighbour-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.25rem 0;
+  border-bottom: 1px solid var(--mobius-border);
+  font-size: 0.66rem;
+  gap: 0.5rem;
+}
+
+.stp-neighbour-row:last-child {
+  border-bottom: none;
+}
+
+.stp-neighbour-doc {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--mobius-text-primary);
+}
+
+.stp-neighbour-pages {
+  font-family: var(--mobius-font-mono, monospace);
+  font-size: 0.60rem;
+  color: var(--mobius-text-muted);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* ── Utility ────────────────────────────────────────────────────── */
+.stp-empty {
+  margin: 0;
+  padding: 0.4rem 0;
+  font-size: 0.64rem;
+  color: var(--mobius-text-muted);
+  font-style: italic;
+}
+
+/* ── BM25 query rewrite banner ──────────────────────────────────── */
+.stp-normalized-query {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.6rem;
+  padding: 0.35rem 0.55rem;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 4px;
+  font-size: 0.64rem;
+  line-height: 1.4;
+}
+
+.stp-nq-label {
+  font-weight: 600;
+  color: #92400e;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.stp-nq-original {
+  color: #6b7280;
+  text-decoration: line-through;
+  font-family: var(--mobius-font-mono, monospace);
+  word-break: break-all;
+}
+
+.stp-nq-arrow {
+  color: #d97706;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.stp-nq-normalized {
+  color: #1d4ed8;
+  font-family: var(--mobius-font-mono, monospace);
+  font-weight: 600;
+  word-break: break-all;
+}
