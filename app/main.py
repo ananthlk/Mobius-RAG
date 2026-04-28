@@ -7967,13 +7967,21 @@ class QueryRequest(BaseModel):
 
 
 class ChunkOut(BaseModel):
-    """One retrieved chunk with text and citation info."""
+    """One retrieved chunk with text, citation, and similarity score."""
     text: str
     source_type: str  # 'hierarchical' | 'fact'
     source_id: str
     document_id: str
     document_name: Optional[str] = None
     page_number: Optional[int] = None
+    # ``similarity`` is the cosine similarity (0..1, 1 = identical) — the
+    # value pgvector computes as ``1 - (a <=> b)``. Added 2026-04-27
+    # because chat's confidence-floor filter was dropping every chunk
+    # when this signal was absent (treated as 0.0 → fails 0.30 floor →
+    # integrator runs with zero context). See
+    # docs/CORPUS_RETRIEVAL_SKILL_EXTRACTION_PLAN.md §3 for the
+    # long-term contract this seeds.
+    similarity: Optional[float] = None
 
 
 class QueryResponse(BaseModel):
@@ -8022,12 +8030,22 @@ async def query_rag(
     if not results:
         return QueryResponse(chunks=[])
 
-    # 3. Resolve each result to text (hierarchical chunk or fact)
+    # 3. Resolve each result to text (hierarchical chunk or fact).
+    # ``r["distance"]`` is the field PgVectorStore.asearch / Chroma both
+    # return; under pgvector the value is similarity (1 = identical) —
+    # see vector_store.PgVectorStore._search_async. We propagate it as
+    # ``similarity`` in the response so callers don't have to know about
+    # the Chroma-era field-name lie.
     chunks_out: List[ChunkOut] = []
     for r in results:
         doc_id = r.get("document_id")
         source_type = r.get("source_type") or "hierarchical"
         source_id_raw = r.get("source_id")
+        sim_raw = r.get("similarity", r.get("distance"))
+        try:
+            similarity = float(sim_raw) if sim_raw is not None else None
+        except (TypeError, ValueError):
+            similarity = None
         if not source_id_raw:
             continue
         try:
@@ -8068,6 +8086,7 @@ async def query_rag(
             document_id=str(doc_id) if doc_id else "",
             document_name=document_name,
             page_number=page_number,
+            similarity=similarity,
         ))
     return QueryResponse(chunks=chunks_out)
 
