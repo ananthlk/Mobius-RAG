@@ -231,6 +231,15 @@ export function TestTab() {
 
   const inputRef = useRef<HTMLInputElement>(null)
 
+  // Collapsed-left toggle — gives the trace panel full width.
+  // Persists to localStorage so reload survives.
+  const [leftCollapsed, setLeftCollapsed] = useState<boolean>(() => {
+    try { return localStorage.getItem('tt.leftCollapsed') === '1' } catch { return false }
+  })
+  useEffect(() => {
+    try { localStorage.setItem('tt.leftCollapsed', leftCollapsed ? '1' : '0') } catch { /* ignore */ }
+  }, [leftCollapsed])
+
   // ── Recent queries — replaces canned "Try:" list when data exists ──
   // Hits the public /recent_queries endpoint (no admin auth required;
   // returns only distinct raw_query strings, no telemetry).
@@ -445,7 +454,18 @@ export function TestTab() {
       )}
 
       {/* ── Main split area ──────────────────────────────────────────────── */}
-      <div className="tt-body">
+      <div className={`tt-body ${leftCollapsed ? 'tt-body--left-collapsed' : ''}`}>
+        {/* Collapse-toggle button — sits on the divider between panels */}
+        <button
+          type="button"
+          className={`tt-left-toggle ${leftCollapsed ? 'collapsed' : ''}`}
+          onClick={() => setLeftCollapsed((v) => !v)}
+          aria-label={leftCollapsed ? 'Expand results panel' : 'Collapse results panel for full-width trace'}
+          title={leftCollapsed ? 'Expand results' : 'Hide results — full-width trace'}
+        >
+          {leftCollapsed ? '›' : '‹'}
+        </button>
+
         {/* ── Left: history + results ──────────────────────────────────── */}
         <div className="tt-left">
           {/* Query history */}

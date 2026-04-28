@@ -224,6 +224,48 @@
   grid-template-columns: 380px 1fr;
   overflow: hidden;
   min-height: 0;
+  position: relative;            /* anchor for collapse toggle */
+  transition: grid-template-columns 0.18s ease;
+}
+
+/* Collapsed: left rail goes to 0 width; trace fills full panel. */
+.tt-body--left-collapsed {
+  grid-template-columns: 0 1fr;
+}
+.tt-body--left-collapsed .tt-left {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* Floating collapse-toggle button on the divider seam */
+.tt-left-toggle {
+  position: absolute;
+  top: 12px;
+  left: 380px;                    /* matches the column boundary */
+  transform: translateX(-50%);
+  width: 22px;
+  height: 36px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--mobius-border);
+  border-radius: var(--mobius-radius-base);
+  background: var(--mobius-bg-card);
+  color: var(--mobius-text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+  transition: left 0.18s ease, color 0.15s ease, background 0.15s ease;
+}
+.tt-left-toggle:hover {
+  color: var(--mobius-accent);
+  background: var(--mobius-bg-hover);
+}
+.tt-left-toggle.collapsed {
+  left: 8px;                      /* dock against the left edge when collapsed */
+  transform: none;
 }
 
 /* ── Left: results column ────────────────────────────────────────── */
