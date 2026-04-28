@@ -501,6 +501,46 @@ def _normalize_bm25_query(query: str) -> str:
     return normalized or query  # never return empty — fall back to original
 
 
+# ---------------------------------------------------------------------------
+# tsquery construction helpers
+# ---------------------------------------------------------------------------
+# We use ``to_tsquery`` (not ``plainto_tsquery``) so we can OR-join
+# expansion phrases with raw query tokens.  Input must be carefully
+# sanitized: ``to_tsquery`` is a parser and treats !, &, |, (, ), :, *, '
+# as operators.  We pre-tokenize on alphanumerics so no operator chars
+# can survive into the query string.
+
+def _phrase_to_tsquery_term(phrase: str) -> str:
+    """Convert a phrase like 'durable medical equipment' into '(durable & medical & equipment)'.
+
+    Returns "" for empty input or input with no alphanumeric tokens.
+    Single-word phrases come back as a bare lowercase token (no parens).
+    """
+    tokens = re.findall(r"[a-zA-Z0-9]+", phrase or "")
+    if not tokens:
+        return ""
+    if len(tokens) == 1:
+        return tokens[0].lower()
+    return "(" + " & ".join(t.lower() for t in tokens) + ")"
+
+
+def _build_or_tsquery(*phrases: str) -> str:
+    """Build a ``to_tsquery`` string by OR-joining phrase groups.
+
+    Each phrase becomes an AND-group via ``_phrase_to_tsquery_term``;
+    groups are then joined with ``|``.  Returns ``""`` if every input
+    phrase is empty or non-alphanumeric (caller should fall back).
+    """
+    parts: list[str] = []
+    seen: set[str] = set()
+    for p in phrases:
+        term = _phrase_to_tsquery_term(p)
+        if term and term not in seen:
+            seen.add(term)
+            parts.append(term)
+    return " | ".join(parts) if parts else ""
+
+
 async def _bm25_arm(
     db: AsyncSession,
     query: str,
@@ -508,20 +548,47 @@ async def _bm25_arm(
     filters: CorpusFilters | None,
     include_document_ids: list[str] | None,
     search_id: str = "",
-) -> tuple[list[dict[str, Any]], str | None]:
-    """Full-text BM25 via Postgres tsvector.
+) -> tuple[list[dict[str, Any]], str | None, dict[str, Any]]:
+    """Full-text BM25 via Postgres tsvector with lexicon-driven query expansion.
 
-    Uses the ``search_vec`` GENERATED column + GIN index when available
-    (after ``add_rag_published_fts`` migration).  Falls back to inline
-    ``to_tsvector`` (sequential scan) if the column doesn't exist yet —
-    result is identical, just slower on large tables.
+    Pipeline
+    --------
+    1. Normalize raw query (strip question leads + noise quantifiers).
+    2. Expand via ``policy_lexicon_entries`` — match strong_phrases / aliases
+       and pull their full phrase bag into the expansion.
+    3. Build a ``to_tsquery`` string OR-joining (raw tokens) ∪ (expansion
+       phrases).  Multi-word phrases become AND-groups inside parens.
+       Brand names not in the lexicon (e.g. "Express Scripts") survive as
+       raw tokens because they're always part of the OR.
+    4. Run against the multi-field weighted ``search_vec`` (filename A,
+       summary B, paths C, text D — see migration
+       ``rebuild_rag_published_fts_multifield``).
+
+    Backward-compat fallback: if the lexicon is empty, expansion fails,
+    or the resulting tsquery is empty, we still build an OR over the raw
+    tokens — strictly looser recall than the previous AND-only behaviour.
+
+    Returns ``(chunks, normalized_query_or_None, expansion_meta)`` where
+    ``expansion_meta`` is suitable for embedding directly into telemetry.
     """
-    if not query.strip():
-        return [], None
+    # Lazy import keeps the module loadable in environments without the
+    # lexicon table (e.g. unit tests against a sliced schema).
+    from app.services.corpus_search_lexicon import (
+        LexiconExpansion,
+        expand_query_via_lexicon,
+    )
 
-    # Normalize query before handing to plainto_tsquery.
-    # Natural-language questions contain noise tokens ('mani', 'day', 'file')
-    # that AND-kill results even when the content terms all match.
+    empty_meta: dict[str, Any] = {
+        "matched_codes":           [],
+        "expansion_phrases_count": 0,
+        "final_tsquery":           "",
+        "log":                     [],
+    }
+
+    if not query.strip():
+        return [], None, empty_meta
+
+    # ── 1. Normalize ───────────────────────────────────────────────────
     raw_query = query.strip()
     bm25_query = _normalize_bm25_query(raw_query)
     normalized: str | None = bm25_query if bm25_query != raw_query else None
@@ -529,17 +596,55 @@ async def _bm25_arm(
         _log_stage("bm25_query_normalized", search_id,
                    original=raw_query[:80], normalized=bm25_query[:80])
 
-    params: dict[str, Any] = {"k": k, "query": bm25_query}
+    # ── 2. Lexicon expansion (best-effort; never raises) ───────────────
+    try:
+        expansion: LexiconExpansion = await expand_query_via_lexicon(db, bm25_query)
+    except Exception as exc:
+        logger.warning("corpus_search bm25: lexicon expansion failed (continuing with raw tokens): %s", exc)
+        expansion = LexiconExpansion()
+
+    # ── 3. Build OR-joined tsquery ─────────────────────────────────────
+    # Raw query is split into individual tokens so each becomes its own
+    # OR alternative; expansion phrases keep their multi-word AND-group
+    # structure (e.g. "durable medical equipment" → "(durable & medical
+    # & equipment)").
+    raw_tokens = re.findall(r"[a-zA-Z0-9]+", bm25_query)
+    final_ts = _build_or_tsquery(*raw_tokens, *expansion.expansion_phrases)
+
+    if not final_ts:
+        # All-junk query (no alphanumerics at all).  Nothing to do.
+        return [], normalized, empty_meta
+
+    expansion_meta: dict[str, Any] = {
+        "matched_codes":           list(expansion.matched_codes),
+        "expansion_phrases_count": len(expansion.expansion_phrases),
+        "final_tsquery":           final_ts,
+        "log":                     list(expansion.log),
+        "domain_tags":             list(expansion.domain_tags),
+        "jurisdiction_tags":       list(expansion.jurisdiction_tags),
+        "process_tags":            list(expansion.process_tags),
+    }
+
+    if search_id:
+        _log_stage(
+            "bm25_lexicon_expansion",
+            search_id,
+            matched_codes=expansion.matched_codes,
+            expansion_count=len(expansion.expansion_phrases),
+            final_tsquery=final_ts[:200],
+        )
+
+    params: dict[str, Any] = {"k": k, "query": final_ts}
     filter_sql = _build_filter_clauses(filters, include_document_ids, params)
 
-    # Try GIN-indexed path first
+    # ── 4. Execute against multi-field GIN-indexed search_vec ──────────
     gin_path = True
     try:
         sql = text(f"""
             SELECT {_BM25_COLS},
-                ts_rank_cd(search_vec, plainto_tsquery('english', :query), 32) AS bm25_score
+                ts_rank_cd(search_vec, to_tsquery('english', :query), 32) AS bm25_score
             FROM rag_published_embeddings
-            WHERE search_vec @@ plainto_tsquery('english', :query)
+            WHERE search_vec @@ to_tsquery('english', :query)
               {filter_sql}
             ORDER BY bm25_score DESC
             LIMIT :k
@@ -547,18 +652,19 @@ async def _bm25_arm(
         result = await db.execute(sql, params)
     except Exception as exc:
         if "search_vec" in str(exc):
-            # Migration not yet applied — fall back to inline tsvector
+            # Multi-field migration not yet applied — fall back to inline
+            # to_tsvector over text only.  Identical correctness, slower.
             gin_path = False
             logger.warning("corpus_search bm25: search_vec column missing, using inline tsvector: %s", exc)
             sql = text(f"""
                 SELECT {_BM25_COLS},
                     ts_rank_cd(
                         to_tsvector('english', coalesce(text, '')),
-                        plainto_tsquery('english', :query), 32
+                        to_tsquery('english', :query), 32
                     ) AS bm25_score
                 FROM rag_published_embeddings
                 WHERE to_tsvector('english', coalesce(text, ''))
-                      @@ plainto_tsquery('english', :query)
+                      @@ to_tsquery('english', :query)
                   {filter_sql}
                 ORDER BY bm25_score DESC
                 LIMIT :k
@@ -592,7 +698,7 @@ async def _bm25_arm(
 
     if search_id:
         _log_stage("bm25_arm_summary", search_id, hits=len(out), gin_path=gin_path)
-    return out, normalized
+    return out, normalized, expansion_meta
 
 
 # ---------------------------------------------------------------------------
@@ -1155,12 +1261,20 @@ async def corpus_search(
     vec_chunks:  list[dict[str, Any]] = []
     embed_ms = bm25_ms = vec_ms = 0.0
     bm25_normalized_query: str | None = None   # set when normalizer changed the query
+    bm25_expansion: dict[str, Any] = {
+        "matched_codes":           [],
+        "expansion_phrases_count": 0,
+        "final_tsquery":           "",
+        "log":                     [],
+    }
 
     if mode == "corpus":
         # Schedule BM25 as a background task so it overlaps with the embed call.
         # asyncio tasks interleave at await-points; DB and OpenAI use separate I/O.
         tb = time.monotonic()
-        bm25_task: asyncio.Task[tuple[list[dict[str, Any]], str | None]] = asyncio.create_task(
+        bm25_task: asyncio.Task[
+            tuple[list[dict[str, Any]], str | None, dict[str, Any]]
+        ] = asyncio.create_task(
             _bm25_arm(
                 db, request.query, k * 2,
                 request.filters, request.include_document_ids,
@@ -1172,7 +1286,7 @@ async def corpus_search(
             request.query, search_id
         )
         # BM25 is usually done by now; await completes immediately if so.
-        bm25_chunks, bm25_normalized_query = await bm25_task
+        bm25_chunks, bm25_normalized_query, bm25_expansion = await bm25_task
         bm25_ms = (time.monotonic() - tb) * 1000 - embed_ms  # net DB time
 
         if query_embedding:
@@ -1186,7 +1300,7 @@ async def corpus_search(
 
     elif mode == "precision":
         tb = time.monotonic()
-        bm25_chunks, bm25_normalized_query = await _bm25_arm(
+        bm25_chunks, bm25_normalized_query, bm25_expansion = await _bm25_arm(
             db, request.query, k * 2,
             request.filters, request.include_document_ids,
             search_id=search_id,
@@ -1384,6 +1498,10 @@ async def corpus_search(
         "reranker":              "score+authority+length (phase1)",
         "assembly":              assembly_meta,
         "scoring_trace":         scoring_trace,
+        # Lexicon-driven BM25 query expansion — surfaced for chat-side
+        # SearchTracePanel so reviewers can see what lexicon entries fired
+        # and what tsquery was finally executed.
+        "bm25_expansion":        bm25_expansion,
     }
 
     # Persist pipeline trace (fire-and-forget — never blocks the response)
