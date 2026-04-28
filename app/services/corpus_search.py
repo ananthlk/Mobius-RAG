@@ -1168,7 +1168,6 @@ def _assemble(
 # ---------------------------------------------------------------------------
 
 async def _persist_search_event(
-    db: AsyncSession,
     telemetry: dict[str, Any],
     caller: str = "api",
     caller_id: str | None = None,
@@ -1180,8 +1179,14 @@ async def _persist_search_event(
     bm25_hits, vector_hits, total_chunks, filters, domain/jurisdiction/
     process tags) consumed by the ``/admin/search_events`` feed.
 
+    Opens its OWN session because the caller's session is being torn down
+    by the FastAPI dependency the moment ``corpus_search`` returns —
+    sharing it produces ``cannot perform operation: another operation is
+    in progress`` on asyncpg.
+
     Errors are swallowed — persistence must never block or fail a search.
     """
+    from app.database import AsyncSessionLocal
     try:
         import json as _json
         bm25_expansion: dict[str, Any] = telemetry.get("bm25_expansion") or {}
@@ -1190,62 +1195,63 @@ async def _persist_search_event(
         normalized_query: str | None = telemetry.get("bm25_normalized_query")
         filters_obj = telemetry.get("filters")
 
-        await db.execute(
-            text("""
-                INSERT INTO search_events
-                    (search_id, caller, caller_id,
-                     query, raw_query, bm25_normalized_query, normalized_query,
-                     mode, k, returned, total_chunks,
-                     total_ms, embed_ms, bm25_ms, vec_ms, rerank_ms,
-                     arm_hits, arm_results, scoring_trace, assembly,
-                     matched_codes, expansion_phrases, final_tsquery,
-                     bm25_hits, vector_hits,
-                     filters, domain_tags, jurisdiction_tags, process_tags)
-                VALUES
-                    (:search_id, :caller, :caller_id,
-                     :query, :raw_query, :bm25_normalized_query, :normalized_query,
-                     :mode, :k, :returned, :total_chunks,
-                     :total_ms, :embed_ms, :bm25_ms, :vec_ms, :rerank_ms,
-                     CAST(:arm_hits AS jsonb), CAST(:arm_results AS jsonb),
-                     CAST(:scoring_trace AS jsonb), CAST(:assembly AS jsonb),
-                     :matched_codes, :expansion_phrases, :final_tsquery,
-                     :bm25_hits, :vector_hits,
-                     CAST(:filters AS jsonb),
-                     :domain_tags, :jurisdiction_tags, :process_tags)
-            """),
-            {
-                "search_id":             telemetry.get("search_id", ""),
-                "caller":                caller,
-                "caller_id":             caller_id,
-                "query":                 raw_query,
-                "raw_query":             raw_query,
-                "bm25_normalized_query": normalized_query,
-                "normalized_query":      normalized_query,
-                "mode":                  telemetry.get("mode", "corpus"),
-                "k":                     telemetry.get("k", 10),
-                "returned":              telemetry.get("returned", 0),
-                "total_chunks":          telemetry.get("returned", 0),
-                "total_ms":              telemetry.get("total_ms"),
-                "embed_ms":              telemetry.get("embed_ms"),
-                "bm25_ms":               telemetry.get("bm25_ms"),
-                "vec_ms":                telemetry.get("vec_ms"),
-                "rerank_ms":             telemetry.get("rerank_ms"),
-                "arm_hits":              _json.dumps(arm_hits),
-                "arm_results":           _json.dumps(telemetry.get("arm_results")),
-                "scoring_trace":         _json.dumps(telemetry.get("scoring_trace")),
-                "assembly":              _json.dumps(telemetry.get("assembly")),
-                "matched_codes":         list(bm25_expansion.get("matched_codes") or []),
-                "expansion_phrases":     list(bm25_expansion.get("expansion_phrases") or []),
-                "final_tsquery":         bm25_expansion.get("final_tsquery"),
-                "bm25_hits":             int(arm_hits.get("bm25") or 0),
-                "vector_hits":           int(arm_hits.get("vector") or 0),
-                "filters":               _json.dumps(filters_obj) if filters_obj else None,
-                "domain_tags":           list(bm25_expansion.get("domain_tags") or []),
-                "jurisdiction_tags":     list(bm25_expansion.get("jurisdiction_tags") or []),
-                "process_tags":          list(bm25_expansion.get("process_tags") or []),
-            },
-        )
-        await db.commit()
+        async with AsyncSessionLocal() as db:
+            await db.execute(
+                text("""
+                    INSERT INTO search_events
+                        (search_id, caller, caller_id,
+                         query, raw_query, bm25_normalized_query, normalized_query,
+                         mode, k, returned, total_chunks,
+                         total_ms, embed_ms, bm25_ms, vec_ms, rerank_ms,
+                         arm_hits, arm_results, scoring_trace, assembly,
+                         matched_codes, expansion_phrases, final_tsquery,
+                         bm25_hits, vector_hits,
+                         filters, domain_tags, jurisdiction_tags, process_tags)
+                    VALUES
+                        (:search_id, :caller, :caller_id,
+                         :query, :raw_query, :bm25_normalized_query, :normalized_query,
+                         :mode, :k, :returned, :total_chunks,
+                         :total_ms, :embed_ms, :bm25_ms, :vec_ms, :rerank_ms,
+                         CAST(:arm_hits AS jsonb), CAST(:arm_results AS jsonb),
+                         CAST(:scoring_trace AS jsonb), CAST(:assembly AS jsonb),
+                         :matched_codes, :expansion_phrases, :final_tsquery,
+                         :bm25_hits, :vector_hits,
+                         CAST(:filters AS jsonb),
+                         :domain_tags, :jurisdiction_tags, :process_tags)
+                """),
+                {
+                    "search_id":             telemetry.get("search_id", ""),
+                    "caller":                caller,
+                    "caller_id":             caller_id,
+                    "query":                 raw_query,
+                    "raw_query":             raw_query,
+                    "bm25_normalized_query": normalized_query,
+                    "normalized_query":      normalized_query,
+                    "mode":                  telemetry.get("mode", "corpus"),
+                    "k":                     telemetry.get("k", 10),
+                    "returned":              telemetry.get("returned", 0),
+                    "total_chunks":          telemetry.get("returned", 0),
+                    "total_ms":              telemetry.get("total_ms"),
+                    "embed_ms":              telemetry.get("embed_ms"),
+                    "bm25_ms":               telemetry.get("bm25_ms"),
+                    "vec_ms":                telemetry.get("vec_ms"),
+                    "rerank_ms":             telemetry.get("rerank_ms"),
+                    "arm_hits":              _json.dumps(arm_hits),
+                    "arm_results":           _json.dumps(telemetry.get("arm_results")),
+                    "scoring_trace":         _json.dumps(telemetry.get("scoring_trace")),
+                    "assembly":              _json.dumps(telemetry.get("assembly")),
+                    "matched_codes":         list(bm25_expansion.get("matched_codes") or []),
+                    "expansion_phrases":     list(bm25_expansion.get("expansion_phrases") or []),
+                    "final_tsquery":         bm25_expansion.get("final_tsquery"),
+                    "bm25_hits":             int(arm_hits.get("bm25") or 0),
+                    "vector_hits":           int(arm_hits.get("vector") or 0),
+                    "filters":               _json.dumps(filters_obj) if filters_obj else None,
+                    "domain_tags":           list(bm25_expansion.get("domain_tags") or []),
+                    "jurisdiction_tags":     list(bm25_expansion.get("jurisdiction_tags") or []),
+                    "process_tags":          list(bm25_expansion.get("process_tags") or []),
+                },
+            )
+            await db.commit()
     except Exception as exc:
         logger.warning("search_events write failed (non-fatal): %s", exc)
 
@@ -1551,9 +1557,11 @@ async def corpus_search(
         "filters":               request.filters.model_dump() if request.filters else None,
     }
 
-    # Persist pipeline trace (fire-and-forget — never blocks the response)
+    # Persist pipeline trace (fire-and-forget — never blocks the response).
+    # Uses its OWN session inside _persist_search_event because the caller's
+    # ``db`` is being torn down by the FastAPI dependency.
     asyncio.create_task(
-        _persist_search_event(db, telemetry, caller=caller, caller_id=caller_id)
+        _persist_search_event(telemetry, caller=caller, caller_id=caller_id)
     )
 
     return CorpusSearchResponse(chunks=chunks_out, telemetry=telemetry)
