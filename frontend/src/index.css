@@ -18,11 +18,13 @@ html {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 
-  /* RAG module accent — a distinctive teal-blue */
-  --rag-accent: #0ea5e9;
-  --rag-accent-hover: #0284c7;
-  --rag-accent-light: rgba(14, 165, 233, 0.08);
-  --rag-accent-border: rgba(14, 165, 233, 0.25);
+  /* RAG module accent — aliased to Mobius brand blue for suite
+     consistency (was a one-off teal #0ea5e9). Anything that needs a
+     RAG-specific tint can use a status color (status-success etc.). */
+  --rag-accent: var(--mobius-accent);
+  --rag-accent-hover: var(--mobius-accent-hover);
+  --rag-accent-light: rgba(59, 130, 246, 0.08);
+  --rag-accent-border: rgba(59, 130, 246, 0.25);
 
   /* Aliases from mobius-design tokens */
   --bg-primary: var(--mobius-bg-primary);

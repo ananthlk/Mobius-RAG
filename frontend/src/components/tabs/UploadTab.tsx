@@ -16,6 +16,9 @@ interface DocLike {
   chunking_total_pages?: number
   chunking_current_page?: number
   published_at?: string | null
+  // Used to group docs under their parent scrape host in the queue.
+  gcs_path?: string | null
+  source_metadata?: { source_url?: string | null; scrape_job_id?: string | null } | null
 }
 
 interface ProbeResult {
@@ -71,6 +74,8 @@ interface QueueRow {
   progressPct: number
   recentlyCompleted: boolean
   meta?: string
+  /** Optional child rows (per-doc detail when this row is a host group). */
+  children?: QueueRow[]
 }
 
 interface ScrapeJob {
@@ -142,58 +147,171 @@ function scrapeJobsToRows(jobs: ScrapeJob[]): QueueRow[] {
   return rows
 }
 
-/** Derive the in-flight queue from the documents list. */
-function deriveQueue(documents: DocLike[]): QueueRow[] {
+/**
+ * Infer the host a document came from. Order:
+ *  1. source_metadata.source_url (set by import-from-gcs / -html)
+ *  2. gcs_path (web URL for HTML imports, gs:// for scrape PDFs)
+ *  3. '(uploaded)' bucket for hand-uploaded files
+ */
+function docHost(d: DocLike): string {
+  const sm = d.source_metadata?.source_url
+  if (sm) {
+    try { return new URL(sm).hostname.replace(/^www\./, '') } catch { /* fall through */ }
+  }
+  const gp = d.gcs_path || ''
+  if (gp.startsWith('http')) {
+    try { return new URL(gp).hostname.replace(/^www\./, '') } catch { /* fall through */ }
+  }
+  if (gp.startsWith('gs://')) return '(uploaded · gcs)'
+  return '(uploaded)'
+}
+
+/** Per-doc stage classification, separated so the group view can re-use it. */
+function docStage(d: DocLike): { stage: QueueRow['stage']; active: boolean; pct: number; recent: boolean } {
   const now = Date.now()
-  const rows: QueueRow[] = []
+  const ext = d.extraction_status || 'pending'
+  const chk = d.chunking_status || 'idle'
+  const emb = d.embedding_status || 'idle'
+
+  let stage: QueueRow['stage'] = 'pending'
+  let pct = 0
+  let active = false
+
+  if (ext === 'extracting' || ext === 'pending') {
+    stage = 'extracting'
+    active = true
+  } else if (emb === 'processing' || emb === 'pending') {
+    stage = 'embedding'
+    active = true
+    const total = d.chunking_total_paragraphs ?? 0
+    const done = d.chunking_completed_paragraphs ?? 0
+    pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0
+  } else if (chk === 'in_progress' || chk === 'pending') {
+    stage = 'chunking'
+    active = true
+    const total = d.chunking_total_paragraphs ?? 0
+    const done = d.chunking_completed_paragraphs ?? 0
+    pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0
+  } else if (emb === 'completed' || chk === 'completed' || ext === 'completed') {
+    stage = 'completed'
+    pct = 100
+  } else if (chk === 'failed' || emb === 'failed' || ext === 'failed') {
+    stage = 'failed'
+  }
+
+  let recent = false
+  if (stage === 'completed' && d.created_at) {
+    const ts = Date.parse(d.created_at)
+    if (!Number.isNaN(ts) && now - ts < ONE_HOUR_MS) recent = true
+  }
+  return { stage, active, pct, recent }
+}
+
+/** Stage priority for "what's the most-active stage in this group". */
+const STAGE_RANK: Record<QueueRow['stage'], number> = {
+  extracting: 5,
+  chunking: 4,
+  embedding: 3,
+  scraping: 2, // unused at doc level but here for type completeness
+  pending: 1,
+  failed: 6,
+  completed: 0,
+}
+
+/**
+ * Derive the in-flight queue from the documents list.
+ *
+ * Rather than one row per doc (a humana scrape produces 100s of rows
+ * which floods the panel), collapse active/recent docs by host. Each
+ * group surfaces the dominant active stage + counts of docs in each
+ * stage. Hand-uploaded files (no source URL) bucket into '(uploaded)'.
+ */
+function deriveQueue(documents: DocLike[]): QueueRow[] {
+  // Bucket by host
+  const groups = new Map<string, { host: string; docs: DocLike[]; stages: Map<QueueRow['stage'], number>; active: number; recent: number }>()
+
   for (const d of documents) {
-    const ext = d.extraction_status || 'pending'
-    const chk = d.chunking_status || 'idle'
-    const emb = d.embedding_status || 'idle'
+    const info = docStage(d)
+    if (!info.active && !info.recent) continue
+    const host = docHost(d)
+    let g = groups.get(host)
+    if (!g) {
+      g = { host, docs: [], stages: new Map(), active: 0, recent: 0 }
+      groups.set(host, g)
+    }
+    g.docs.push(d)
+    g.stages.set(info.stage, (g.stages.get(info.stage) || 0) + 1)
+    if (info.active) g.active++
+    if (info.recent) g.recent++
+  }
 
-    let stage: QueueRow['stage'] = 'pending'
-    let pct = 0
-    let active = false
+  const rows: QueueRow[] = []
+  for (const g of groups.values()) {
+    // Pick the dominant stage = the highest-rank stage present
+    let topStage: QueueRow['stage'] = 'completed'
+    let topRank = -1
+    for (const [stage, count] of g.stages.entries()) {
+      if (!count) continue
+      const rank = STAGE_RANK[stage] ?? 0
+      if (rank > topRank) {
+        topRank = rank
+        topStage = stage
+      }
+    }
+    // Aggregate progress = mean of contributing docs' pct
+    let pctSum = 0
+    let pctN = 0
+    for (const d of g.docs) {
+      const { active, pct } = docStage(d)
+      if (active && pct > 0) { pctSum += pct; pctN++ }
+    }
+    const aggPct = pctN > 0 ? Math.round(pctSum / pctN) : (g.active === 0 ? 100 : 0)
 
-    if (ext === 'extracting' || ext === 'pending') {
-      stage = 'extracting'
-      active = true
-    } else if (emb === 'processing' || emb === 'pending') {
-      stage = 'embedding'
-      active = true
-      const total = d.chunking_total_paragraphs ?? 0
-      const done = d.chunking_completed_paragraphs ?? 0
-      pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0
-    } else if (chk === 'in_progress' || chk === 'pending') {
-      stage = 'chunking'
-      active = true
-      const total = d.chunking_total_paragraphs ?? 0
-      const done = d.chunking_completed_paragraphs ?? 0
-      pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0
-    } else if (emb === 'completed' || chk === 'completed' || ext === 'completed') {
-      stage = 'completed'
-      pct = 100
-    } else if (chk === 'failed' || emb === 'failed' || ext === 'failed') {
-      stage = 'failed'
+    // Compose meta string showing per-stage counts
+    const parts: string[] = []
+    for (const stage of ['extracting', 'chunking', 'embedding', 'completed', 'failed'] as const) {
+      const n = g.stages.get(stage) || 0
+      if (n > 0) parts.push(`${n} ${stage}`)
     }
 
-    let recent = false
-    if (stage === 'completed' && d.created_at) {
-      const ts = Date.parse(d.created_at)
-      if (!Number.isNaN(ts) && now - ts < ONE_HOUR_MS) recent = true
-    }
-
-    if (active || recent) {
-      rows.push({
+    // Per-doc child rows so the operator can drill in.
+    const children: QueueRow[] = g.docs.map((d) => {
+      const info = docStage(d)
+      return {
         id: d.id,
         filename: d.display_name?.trim() || d.filename,
-        status: stage === 'completed' ? 'completed' : stage,
-        stage,
-        progressPct: pct,
-        recentlyCompleted: recent,
-      })
-    }
+        status: info.stage,
+        stage: info.stage,
+        progressPct: info.pct || (info.stage === 'completed' ? 100 : 0),
+        recentlyCompleted: info.recent && !info.active,
+      }
+    })
+    // Sort children: active first, then completed
+    children.sort((a, b) => {
+      const aDone = a.stage === 'completed' || a.stage === 'failed'
+      const bDone = b.stage === 'completed' || b.stage === 'failed'
+      if (aDone !== bDone) return aDone ? 1 : -1
+      return a.filename.localeCompare(b.filename)
+    })
+
+    rows.push({
+      id: `host:${g.host}`,
+      filename: g.host,
+      status: topStage,
+      stage: topStage,
+      progressPct: aggPct,
+      recentlyCompleted: g.active === 0 && g.recent > 0,
+      meta: `${g.docs.length} ${g.docs.length === 1 ? 'doc' : 'docs'} · ${parts.join(' · ')}`,
+      children,
+    })
   }
+  // Active groups first
+  rows.sort((a, b) => {
+    const aActive = a.stage !== 'completed' && a.stage !== 'failed'
+    const bActive = b.stage !== 'completed' && b.stage !== 'failed'
+    if (aActive !== bActive) return aActive ? -1 : 1
+    return 0
+  })
   return rows
 }
 
@@ -296,25 +414,7 @@ export function UploadTab({ documents, onUpload, uploading, error, onDocumentAdd
           ) : (
             <ul className="upload-queue-list">
               {queue.map((row) => (
-                <li key={row.id} className="upload-queue-row">
-                  <div className="upload-queue-row-head">
-                    <span className="upload-queue-name" title={row.filename}>
-                      {row.filename}
-                    </span>
-                    <span className={`upload-queue-pill stage-${row.stage}`}>{row.stage}</span>
-                  </div>
-                  <div className="upload-queue-progress">
-                    <div
-                      className="upload-queue-progress-bar"
-                      style={{ width: `${row.progressPct}%` }}
-                    />
-                  </div>
-                  <div className="upload-queue-meta">
-                    {row.progressPct > 0 ? `${row.progressPct}%` : row.stage}
-                    {row.meta && ` · ${row.meta}`}
-                    {row.recentlyCompleted && ' · just completed'}
-                  </div>
-                </li>
+                <QueueRowView key={row.id} row={row} />
               ))}
             </ul>
           )}
@@ -325,6 +425,67 @@ export function UploadTab({ documents, onUpload, uploading, error, onDocumentAdd
 }
 
 /* ───────────────────── Computer panel ─────────────────────── */
+/* ───────────────────── Queue row (collapsible) ─────────────────────── */
+function QueueRowView({ row }: { row: QueueRow }) {
+  const [expanded, setExpanded] = useState(false)
+  const hasChildren = !!row.children && row.children.length > 0
+
+  return (
+    <li className="upload-queue-row">
+      <div
+        className={`upload-queue-row-head ${hasChildren ? 'upload-queue-row-head--toggle' : ''}`}
+        onClick={() => hasChildren && setExpanded((v) => !v)}
+        role={hasChildren ? 'button' : undefined}
+        tabIndex={hasChildren ? 0 : undefined}
+        onKeyDown={(e) => {
+          if (hasChildren && (e.key === 'Enter' || e.key === ' ')) {
+            e.preventDefault()
+            setExpanded((v) => !v)
+          }
+        }}
+      >
+        {hasChildren && (
+          <span className="upload-queue-toggle" aria-hidden>
+            {expanded ? '▾' : '▸'}
+          </span>
+        )}
+        <span className="upload-queue-name" title={row.filename}>
+          {row.filename}
+        </span>
+        <span className={`upload-queue-pill stage-${row.stage}`}>{row.stage}</span>
+      </div>
+      <div className="upload-queue-progress">
+        <div
+          className="upload-queue-progress-bar"
+          style={{ width: `${row.progressPct}%` }}
+        />
+      </div>
+      <div className="upload-queue-meta">
+        {row.progressPct > 0 ? `${row.progressPct}%` : row.stage}
+        {row.meta && ` · ${row.meta}`}
+        {row.recentlyCompleted && ' · just completed'}
+      </div>
+
+      {expanded && hasChildren && (
+        <ul className="upload-queue-children">
+          {row.children!.map((c) => (
+            <li key={c.id} className="upload-queue-child">
+              <span className="upload-queue-child-name" title={c.filename}>
+                {c.filename}
+              </span>
+              <span className={`upload-queue-pill stage-${c.stage}`}>{c.stage}</span>
+              {c.progressPct > 0 && c.progressPct < 100 && (
+                <span className="upload-queue-child-pct">{c.progressPct}%</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </li>
+  )
+}
+
+
 function ComputerPanel({
   onUpload,
   uploading,

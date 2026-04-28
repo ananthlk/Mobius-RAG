@@ -128,6 +128,10 @@ interface DocumentReaderTabProps {
   navigateToRead?: { documentId: string; pageNumber?: number; factId?: string; citeText?: string } | null
   onNavigateToReadConsumed?: () => void
   onDocumentSelect?: (documentId: string) => void
+  /** Whether the sections sidebar starts open. @default true */
+  initialSidebarOpen?: boolean
+  /** Suppress the "Document:" selector row (use when the parent already shows the doc name). @default false */
+  hideDocumentSelector?: boolean
 }
 
 /* ─── Component ─── */
@@ -137,6 +141,8 @@ export function DocumentReaderTab({
   navigateToRead,
   onNavigateToReadConsumed,
   onDocumentSelect,
+  initialSidebarOpen = true,
+  hideDocumentSelector = false,
 }: DocumentReaderTabProps) {
   const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(
     selectedDocumentIdProp ?? null,
@@ -691,8 +697,9 @@ export function DocumentReaderTab({
   }
 
   return (
-    <div>
-      {/* Document selector header */}
+    <div className="drt-viewer-wrapper">
+      {/* Document selector header — hidden in slideout context (parent shows doc name) */}
+      {!hideDocumentSelector && (
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.5rem' }}>
         <label htmlFor="dv-doc-select-active" style={{ fontWeight: 500, fontSize: '0.9375rem' }}>
           Document:
@@ -724,6 +731,7 @@ export function DocumentReaderTab({
           ))}
         </select>
       </div>
+      )}
 
       <DocumentViewer
         documentId={selectedDocumentId}
@@ -731,6 +739,7 @@ export function DocumentReaderTab({
         loading={loading}
         highlights={highlights}
         initialPage={navigateToRead?.pageNumber}
+        initialSidebarOpen={initialSidebarOpen}
         navigateTo={
           navigateToRead && navigateToRead.documentId === selectedDocumentId
             ? {

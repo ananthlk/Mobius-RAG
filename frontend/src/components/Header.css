@@ -1,8 +1,11 @@
 /* ── Mobius RAG Header ─────────────────────────────────────────── */
+/* Light theme aligned with the rest of the Mobius suite (Chat,
+   Strategy, Roster). Was a dark navy gradient that made RAG look
+   like a separate product. */
 
 .app-header {
-  background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: var(--mobius-bg-card);
+  border-bottom: 1px solid var(--mobius-border);
   padding: 0;
   margin-bottom: 0;
   position: relative;
@@ -13,11 +16,15 @@
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
-  padding: 1rem 1.5rem;
+  padding: 0.875rem 1.5rem;
 }
 
 .app-header-left {
   flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
 }
 
 .app-header-hub-link {
@@ -26,15 +33,14 @@
   gap: 0.3rem;
   font-size: var(--mobius-text-xs);
   font-weight: 500;
-  color: rgba(255, 255, 255, 0.45);
+  color: var(--mobius-text-muted);
   text-decoration: none;
-  margin-bottom: 0.5rem;
   transition: color 0.15s;
   letter-spacing: 0.02em;
 }
 
 .app-header-hub-link:hover {
-  color: rgba(255, 255, 255, 0.8);
+  color: var(--mobius-text-primary);
   text-decoration: none;
 }
 
@@ -47,28 +53,27 @@
 .app-header-logo {
   flex-shrink: 0;
   display: block;
-  filter: brightness(1.1);
 }
 
 .app-header h1 {
   font-family: var(--mobius-font-sans);
-  font-size: 1.375rem;
+  font-size: 1.25rem;
   font-weight: 700;
-  color: #ffffff;
+  color: var(--mobius-text-primary);
   letter-spacing: -0.025em;
   margin: 0;
 }
 
-/* RAG module badge inside h1 */
+/* Module badge — uses Mobius brand blue, not custom teal */
 .app-header h1 .header-module-badge {
   display: inline-block;
   font-size: 0.6875rem;
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: #0ea5e9;
-  background: rgba(14, 165, 233, 0.12);
-  border: 1px solid rgba(14, 165, 233, 0.25);
+  color: var(--mobius-accent);
+  background: rgba(59, 130, 246, 0.10);
+  border: 1px solid rgba(59, 130, 246, 0.22);
   padding: 0.15rem 0.5rem;
   border-radius: var(--mobius-radius-full);
   margin-left: 0.5rem;
@@ -78,11 +83,10 @@
 }
 
 .app-header .subtitle {
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--mobius-text-muted);
   font-size: var(--mobius-text-sm);
   font-weight: 400;
-  margin-top: 0.25rem;
-  margin-bottom: 0;
+  margin: 0;
   letter-spacing: 0.01em;
 }
 
@@ -97,18 +101,18 @@
   width: 36px;
   height: 36px;
   padding: 0;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--mobius-border);
   border-radius: var(--mobius-radius-base);
-  background: rgba(255, 255, 255, 0.06);
-  color: rgba(255, 255, 255, 0.6);
+  background: var(--mobius-bg-card);
+  color: var(--mobius-text-muted);
   cursor: pointer;
   transition: background 0.2s, border-color 0.2s, color 0.2s;
 }
 
 .header-settings-btn:hover {
-  background: rgba(255, 255, 255, 0.12);
-  border-color: rgba(255, 255, 255, 0.2);
-  color: rgba(255, 255, 255, 0.9);
+  background: var(--mobius-bg-hover);
+  border-color: var(--mobius-border-medium);
+  color: var(--mobius-text-primary);
 }
 
 .header-settings-icon {

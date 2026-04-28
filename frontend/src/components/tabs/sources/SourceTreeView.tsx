@@ -1,5 +1,4 @@
 import { useState, useCallback } from 'react'
-import { API_BASE } from '../../../config'
 import {
   type SourceRow,
   type TreeNode,
@@ -16,6 +15,10 @@ interface Props {
   onIngest: (url: string) => Promise<void>
   onBulkIngest?: (urls: string[]) => Promise<void>
   ingestingUrls: Set<string>
+  /** Start all tree nodes collapsed (user expands manually). Default: false. */
+  defaultCollapsed?: boolean
+  /** Suppress the entity name / coverage header (use when the parent already shows it). */
+  hideHeader?: boolean
 }
 
 /**
@@ -29,54 +32,63 @@ interface Props {
  * are collapsed to keep the page scannable. Operator clicks ▶ to
  * drill in.
  */
-export function SourceTreeView({ host, payerLabel, rows, onIngest, onBulkIngest, ingestingUrls }: Props) {
+export function SourceTreeView({
+  host,
+  payerLabel,
+  rows,
+  onIngest,
+  onBulkIngest,
+  ingestingUrls,
+  defaultCollapsed = false,
+  hideHeader = false,
+}: Props) {
   const root = buildTree(rows)
   const cov = coverage(root)
   const gaps = topGaps(root, 5)
 
   return (
     <div className="source-tree-view">
-      {/* ── Entity header + coverage ───────────────────────────── */}
-      <div className="entity-header">
-        <h3 className="entity-name">
-          {payerLabel || host}
-          <span className="entity-host">({host})</span>
-        </h3>
-        <div className="entity-stats">
-          <span className="stat-pill">{root.urlCount} URLs</span>
-          <span className={`stat-pill stat-indexed`}>{root.indexedCount} ✓ indexed</span>
-          <span className={`stat-pill stat-coverage cov-${bucket(cov)}`}>
-            {cov}% coverage
-          </span>
-        </div>
-        {/* Coverage bar */}
-        <div className="coverage-bar" title={`${root.indexedCount} of ${root.urlCount} URLs indexed`}>
-          <div
-            className="coverage-fill"
-            style={{ width: `${cov}%` }}
-          />
-        </div>
-      </div>
+      {/* ── Entity header + coverage (optional) ───────────────── */}
+      {!hideHeader && (
+        <>
+          <div className="entity-header">
+            <h3 className="entity-name">
+              {payerLabel || host}
+              <span className="entity-host">({host})</span>
+            </h3>
+            <div className="entity-stats">
+              <span className="stat-pill">{root.urlCount} URLs</span>
+              <span className="stat-pill stat-indexed">{root.indexedCount} ✓ indexed</span>
+              <span className={`stat-pill stat-coverage cov-${bucket(cov)}`}>
+                {cov}% coverage
+              </span>
+            </div>
+            <div className="coverage-bar" title={`${root.indexedCount} of ${root.urlCount} URLs indexed`}>
+              <div className="coverage-fill" style={{ width: `${cov}%` }} />
+            </div>
+          </div>
 
-      {/* ── Biggest gaps callout ───────────────────────────────── */}
-      {gaps.length > 0 && root.indexedCount < root.urlCount && (
-        <div className="gaps-callout">
-          <strong>Biggest gaps:</strong>{' '}
-          {gaps.map(({ node, gap }) => (
-            <span key={node.fullPath} className="gap-chip">
-              {node.fullPath} ({gap} URLs)
-            </span>
-          ))}
-        </div>
+          {gaps.length > 0 && root.indexedCount < root.urlCount && (
+            <div className="gaps-callout">
+              <strong>Biggest gaps:</strong>{' '}
+              {gaps.map(({ node, gap }) => (
+                <span key={node.fullPath} className="gap-chip">
+                  {node.fullPath} ({gap} URLs)
+                </span>
+              ))}
+            </div>
+          )}
+        </>
       )}
 
       {/* ── Tree ─────────────────────────────────────────────────── */}
       <div className="tree-root">
-        {sortedChildren(root).map(child => (
+        {sortedChildren(root).map((child) => (
           <TreeRow
             key={child.fullPath}
             node={child}
             depth={0}
+            defaultCollapsed={defaultCollapsed}
             onIngest={onIngest}
             onBulkIngest={onBulkIngest}
             ingestingUrls={ingestingUrls}
@@ -110,14 +122,15 @@ function collectIngestableUrls(node: TreeNode): string[] {
 interface TreeRowProps {
   node: TreeNode
   depth: number
+  defaultCollapsed: boolean
   onIngest: (url: string) => Promise<void>
   onBulkIngest?: (urls: string[]) => Promise<void>
   ingestingUrls: Set<string>
 }
 
-function TreeRow({ node, depth, onIngest, onBulkIngest, ingestingUrls }: TreeRowProps) {
-  // Default-expand depth 0; collapse below.
-  const [expanded, setExpanded] = useState(depth === 0)
+function TreeRow({ node, depth, defaultCollapsed, onIngest, onBulkIngest, ingestingUrls }: TreeRowProps) {
+  // Expand depth-0 by default unless defaultCollapsed is set.
+  const [expanded, setExpanded] = useState(!defaultCollapsed && depth === 0)
   const [bulkInFlight, setBulkInFlight] = useState(false)
   const children = sortedChildren(node)
   const hasChildren = children.length > 0
@@ -197,11 +210,12 @@ function TreeRow({ node, depth, onIngest, onBulkIngest, ingestingUrls }: TreeRow
       ))}
 
       {/* Recurse into children */}
-      {expanded && children.map(child => (
+      {expanded && children.map((child) => (
         <TreeRow
           key={child.fullPath}
           node={child}
           depth={depth + 1}
+          defaultCollapsed={defaultCollapsed}
           onIngest={onIngest}
           onBulkIngest={onBulkIngest}
           ingestingUrls={ingestingUrls}

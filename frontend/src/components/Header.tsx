@@ -39,14 +39,20 @@ export function Header({
     <header className="app-header">
       <div className="app-header-inner">
         <div className="app-header-left">
-          <a className="app-header-hub-link" href="http://localhost:3999/" title="Back to Module Hub">
-            {'\u2190'} Module Hub
-          </a>
           <div className="app-header-brand">
-            <img src="/logo.svg" alt="Mobius" className="app-header-logo" width={32} height={32} />
+            <img src="/logo.svg" alt="Mobius" className="app-header-logo" width={28} height={28} />
             <h1>Mobius<span className="header-module-badge">RAG</span></h1>
           </div>
-          <p className="subtitle">Document Processing & Fact Extraction</p>
+          <p className="subtitle">Document Processing &amp; Fact Extraction</p>
+          {(import.meta.env?.VITE_MODULE_HUB_URL as string | undefined) && (
+            <a
+              className="app-header-hub-link"
+              href={import.meta.env.VITE_MODULE_HUB_URL as string}
+              title="Back to Module Hub"
+            >
+              {'\u2190'} Module Hub
+            </a>
+          )}
         </div>
         <div className="app-header-right">
           <button

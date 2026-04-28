@@ -12,6 +12,9 @@ import { DatabaseLayerTab } from './components/tabs/DatabaseLayerTab'
 import { ErrorReviewTab } from './components/tabs/ErrorReviewTab'
 import { DocumentDetailTab } from './components/tabs/DocumentDetailTab'
 import { SourcesTab } from './components/tabs/SourcesTab'
+import { UploadTab } from './components/tabs/UploadTab'
+import { RepositoryTab } from './components/tabs/RepositoryTab'
+import { TestTab } from './components/tabs/TestTab'
 
 interface UploadResponse {
   filename: string
@@ -209,6 +212,11 @@ function App() {
   // Embed mode: render only the DocumentReaderTab (no header, no tabs)
   // Used by chat and other consumers via iframe: ?embed=true&documentId=...&pageNumber=...
   const [embedMode, setEmbedMode] = useState(false)
+  // Legacy mode: ?legacy=1 keeps the old 9-tab shell. Default is the
+  // new 2-tab Upload + Repository shell (Stage A of the IA refactor).
+  const [legacyMode, setLegacyMode] = useState(false)
+  // Stage A: new shell uses just two tabs.
+  const [shellTab, setShellTab] = useState<'upload' | 'repository' | 'test'>('repository')
 
   // Load documents on mount + handle deep-link URL params from cross-module links
   // (e.g. mobius-chat opens ?tab=read&documentId=...&pageNumber=...)
@@ -216,6 +224,8 @@ function App() {
     loadDocuments()
     const params = new URLSearchParams(window.location.search)
     const embed = params.get('embed') === 'true'
+    const legacy = params.get('legacy') === '1'
+    if (legacy) setLegacyMode(true)
     const tab = params.get('tab')
     const docId = params.get('documentId')
     const pageNum = params.get('pageNumber')
@@ -1408,6 +1418,70 @@ function App() {
     )
   }
 
+  // ─── Stage A default shell: 2 tabs (Upload + Repository) ───
+  if (!legacyMode) {
+    return (
+      <div className="app">
+        <Header
+          defaultLlmConfigVersion={defaultLlmConfigVersion}
+          onDefaultLlmConfigVersionChange={setDefaultLlmConfigVersion}
+        />
+        <Tabs
+          activeTab={shellTab}
+          onTabChange={(tabId: string) => setShellTab(tabId as typeof shellTab)}
+        >
+          <TabList>
+            <Tab id="upload" isActive={shellTab === 'upload'} onClick={() => setShellTab('upload')}>
+              Upload
+            </Tab>
+            <Tab id="repository" isActive={shellTab === 'repository'} onClick={() => setShellTab('repository')}>
+              Repository
+            </Tab>
+            <Tab id="test" isActive={shellTab === 'test'} onClick={() => setShellTab('test')}>
+              Test
+            </Tab>
+          </TabList>
+          <TabPanels>
+            <TabPanel id="upload" isActive={shellTab === 'upload'}>
+              <UploadTab
+                documents={documents}
+                onUpload={handleUpload}
+                uploading={uploading}
+                error={error}
+                onDocumentAdded={loadDocuments}
+              />
+            </TabPanel>
+            <TabPanel id="repository" isActive={shellTab === 'repository'}>
+              <RepositoryTab
+                documents={documents}
+                selectedDocumentId={selectedDocumentId}
+                navigateToRead={navigateToRead}
+                onNavigateToReadConsumed={() => setNavigateToRead(null)}
+                onDocumentSelect={(docId: string) => {
+                  const doc = documents.find((d: { id: string }) => d.id === docId)
+                  if (doc) {
+                    selectDocument(docId, doc)
+                  } else {
+                    setSelectedDocumentId(docId)
+                  }
+                }}
+              />
+            </TabPanel>
+            <TabPanel id="test" isActive={shellTab === 'test'}>
+              <TestTab />
+            </TabPanel>
+          </TabPanels>
+        </Tabs>
+        {error && (
+          <div className="error-banner">
+            {error}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  // ─── Legacy 9-tab shell (?legacy=1) ───
   return (
     <div className="app">
       <Header
