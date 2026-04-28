@@ -66,12 +66,26 @@ interface AssemblyInfo {
   total_selected: number
 }
 
+/** Lexicon-driven BM25 query expansion (Phase A of BM25 quality work).
+ *  Surfaces what the user typed → what actually ran against the corpus. */
+export interface Bm25Expansion {
+  matched_codes: string[]              // ['d:benefits.dme', 'j:state.florida']
+  expansion_phrases: string[]          // dedup'd alias bag
+  expansion_phrases_count: number
+  final_tsquery: string                // what postgres actually ran
+  log: string[]                        // ["matched 'DME' → benefits.dme", ...]
+  domain_tags: string[]
+  jurisdiction_tags: string[]
+  process_tags: string[]
+}
+
 export interface SearchTelemetry {
   search_id: string
   mode: string
   k: number
   query?: string
   bm25_normalized_query?: string | null
+  bm25_expansion?: Bm25Expansion | null
   embed_ms: number
   bm25_ms: number
   vec_ms: number
@@ -254,6 +268,94 @@ function TimingBar({ t }: { t: SearchTelemetry }) {
 }
 
 // ── Stage 2: Arm tables ───────────────────────────────────────────────────────
+
+function BM25ExpansionView({
+  e,
+  originalQuery,
+  normalizedQuery,
+}: {
+  e: Bm25Expansion
+  originalQuery: string
+  normalizedQuery: string | null
+}) {
+  const noMatch = e.matched_codes.length === 0
+  return (
+    <div className="stp-expansion">
+      {/* Original → Normalized → Final tsquery */}
+      <div className="stp-expansion-rewrite">
+        <div className="stp-rewrite-row">
+          <span className="stp-rewrite-label">user typed</span>
+          <code className="stp-rewrite-text">{originalQuery || '(empty)'}</code>
+        </div>
+        {normalizedQuery && normalizedQuery !== originalQuery && (
+          <div className="stp-rewrite-row">
+            <span className="stp-rewrite-label">stripped to</span>
+            <code className="stp-rewrite-text">{normalizedQuery}</code>
+          </div>
+        )}
+        <div className="stp-rewrite-row">
+          <span className="stp-rewrite-label stp-rewrite-label--final">tsquery run</span>
+          <code className="stp-rewrite-text stp-rewrite-text--final" title={e.final_tsquery}>
+            {e.final_tsquery || '(empty)'}
+          </code>
+        </div>
+      </div>
+
+      {/* Matched lexicon codes split by kind */}
+      {!noMatch && (
+        <div className="stp-expansion-codes">
+          {e.domain_tags.length > 0 && (
+            <div className="stp-codes-row">
+              <span className="stp-codes-kind stp-codes-kind--d">domain</span>
+              {e.domain_tags.map((c) => (
+                <span key={c} className="stp-code-pill stp-code-pill--d">{c}</span>
+              ))}
+            </div>
+          )}
+          {e.jurisdiction_tags.length > 0 && (
+            <div className="stp-codes-row">
+              <span className="stp-codes-kind stp-codes-kind--j">jurisdiction</span>
+              {e.jurisdiction_tags.map((c) => (
+                <span key={c} className="stp-code-pill stp-code-pill--j">{c}</span>
+              ))}
+            </div>
+          )}
+          {e.process_tags.length > 0 && (
+            <div className="stp-codes-row">
+              <span className="stp-codes-kind stp-codes-kind--p">process</span>
+              {e.process_tags.map((c) => (
+                <span key={c} className="stp-code-pill stp-code-pill--p">{c}</span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Expansion phrases — what got OR-ed in beyond raw query tokens */}
+      {e.expansion_phrases.length > 0 && (
+        <div className="stp-expansion-phrases">
+          <div className="stp-phrases-label">
+            +{e.expansion_phrases.length} expansion phrases
+          </div>
+          <div className="stp-phrases-cloud">
+            {e.expansion_phrases.map((p) => (
+              <span key={p} className="stp-phrase-chip">{p}</span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Lexicon-coaching hint */}
+      {noMatch && (
+        <div className="stp-expansion-hint">
+          ⚠ No lexicon entry matched — falling back to OR-joined raw tokens.
+          This query is a candidate for the lexicon.
+        </div>
+      )}
+    </div>
+  )
+}
+
 
 function ArmTable({
   items,
@@ -644,7 +746,22 @@ export function SearchTracePanel({ telemetry: t }: Props) {
         <TimingBar t={t} />
       </Section>
 
-      {/* ── 2. Retrieval arms ────────────────────────────────────── */}
+      {/* ── 2. Query Rewrite (lexicon-driven BM25 expansion) ────── */}
+      {t.bm25_expansion && (
+        <Section
+          title="Query Rewrite"
+          badge={
+            t.bm25_expansion.matched_codes.length > 0
+              ? `${t.bm25_expansion.matched_codes.length} lex hit · +${t.bm25_expansion.expansion_phrases_count} phrases`
+              : 'no lexicon match (raw fallback)'
+          }
+          defaultOpen
+        >
+          <BM25ExpansionView e={t.bm25_expansion} originalQuery={t.query ?? ''} normalizedQuery={t.bm25_normalized_query ?? null} />
+        </Section>
+      )}
+
+      {/* ── 3. Retrieval arms ────────────────────────────────────── */}
       <Section
         title="Retrieval"
         badge={`BM25 ${armHits.bm25} · Vec ${armHits.vector}`}
