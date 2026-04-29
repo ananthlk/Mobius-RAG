@@ -2312,6 +2312,18 @@ async def check_file(filename: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _estimate_processing_seconds(ext: str, size_bytes: int, page_count: int) -> int:
+    """4s/page for PDFs (chunking + embedding dominates), with overhead.
+    Caps at 30 min. Reasonable for the v1 chat-side ETA — refine when
+    we have telemetry from chunking_jobs.completed_at - started_at."""
+    if ext == "pdf":
+        return min(max(60, page_count * 4 + 30), 30 * 60)
+    elif ext in ("docx", "html", "htm"):
+        return min(max(45, int(size_bytes / 100_000) * 5 + 20), 10 * 60)
+    else:
+        return min(max(30, int(size_bytes / 200_000) * 3 + 15), 5 * 60)
+
+
 @app.post("/upload")
 async def upload_file(
     file: UploadFile,
@@ -2333,6 +2345,13 @@ async def upload_file(
     #   * ``agent_scope`` → stored in ``source_metadata.agent_scope``
     #     for cross-system attribution. Recommended values: "chat",
     #     "agent", "operator".
+    #
+    # Unified-flow rationale (2026-04-27 update): every successful
+    # extraction auto-queues Path B chunking — rag UI, chat, agents
+    # all flow extract → chunk → embed → publish identically. The
+    # ``agent_scope`` flag is metadata-only attribution, NOT a pipeline
+    # gate. Previously rag-UI uploads stalled at extracted-but-unchunked
+    # because the auto-chunk only fired when agent_scope was set.
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided")
 
@@ -2438,6 +2457,7 @@ async def upload_file(
 
         # Start text extraction (async in background)
         # For now, do it synchronously but could be moved to background task
+        page_count = 0
         try:
             # Update status to extracting
             document.status = "extracting"
@@ -2445,7 +2465,8 @@ async def upload_file(
             
             # Extract text from PDF
             pages = await extract_text_from_gcs(gcs_path)
-            
+            page_count = len(pages) if pages else 0
+
             # Save pages to database with error tracking (raw + markdown for reader)
             from app.services.page_to_markdown import raw_page_to_markdown
             for page_data in pages:
@@ -2473,18 +2494,19 @@ async def upload_file(
         except Exception as e:
             # Mark as failed
             document.status = "failed"
+            page_count = 0
             await db.commit()
             # Don't raise - return success but with failed status
             # Frontend can check status endpoint
 
-        # Auto-chain to chunking + embedding when the caller is the chat
-        # upload path (or any other agent-driven upload). Without this,
-        # extraction completes but the doc sits idle until somebody calls
-        # /documents/{id}/chunking/start manually. Closes the loop so
-        # mobius-chat can poll /documents/{id}/status and see the doc go
-        # extracted → chunked → embedded → published in one shot.
+        # Auto-chain to chunking + embedding for ANY successful extraction.
+        # Path B (chunk → embed → publish) runs uniformly for rag UI uploads,
+        # chat uploads, and agent uploads. ``agent_scope`` is metadata-only
+        # attribution — NOT a pipeline gate (was previously gated on
+        # agent_scope being set, which left rag-UI uploads stuck at
+        # extracted-but-unchunked).
         # AUTO_PUBLISH_ON_EMBED on the embedding worker handles publish.
-        if agent_scope and document.status == "completed":
+        if document.status == "completed":
             try:
                 from datetime import datetime as _dt
                 auto_job = ChunkingJob(
@@ -2501,7 +2523,7 @@ async def upload_file(
                 db.add(auto_job)
                 await db.commit()
                 logger.info(
-                    "[upload] auto-queued Path B chunking for doc %s (agent_scope=%s)",
+                    "[upload] auto-queued Path B chunking for doc %s (agent_scope=%s, unified-flow)",
                     document.id, agent_scope,
                 )
             except Exception as auto_err:
@@ -2511,6 +2533,30 @@ async def upload_file(
                 )
                 await db.rollback()
 
+        # Compute page_count for the response. PDF: from the extracted
+        # pages list. HTML/DOCX/text: not paginated — fall back to a
+        # content-length proxy (~3000 chars/page). Defaults to 1.
+        try:
+            _pc = int(page_count or 0)
+        except Exception:
+            _pc = 0
+        if _pc <= 0:
+            if ext_for_resp := (file.filename.lower().rsplit(".", 1)[-1] if "." in file.filename else ""):
+                if ext_for_resp in ("html", "htm", "docx", "txt", "md"):
+                    _pc = max(1, int(len(contents) / 3000))
+                else:
+                    _pc = 1
+            else:
+                _pc = 1
+        ext_lower = (file.filename.lower().rsplit(".", 1)[-1] if "." in file.filename else "")
+        eta_seconds = _estimate_processing_seconds(ext_lower, len(contents), _pc)
+        # ``stage`` distinguishes extraction-complete from full-pipeline-complete
+        # (which only chunk+embed+publish reaches). The legacy ``status`` field
+        # historically reports "completed" the moment extraction finishes, which
+        # is misleading to chat-side callers waiting on chunks.
+        stage = "extracted" if document.status == "completed" else (
+            "failed" if document.status == "failed" else document.status
+        )
         return {
             "filename": file.filename,
             "content_type": file.content_type,
@@ -2519,6 +2565,9 @@ async def upload_file(
             "gcs_path": gcs_path,
             "document_id": str(document.id),
             "status": document.status,
+            "page_count": _pc,
+            "estimated_processing_seconds": int(eta_seconds),
+            "stage": stage,
         }
     except HTTPException:
         raise
