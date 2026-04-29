@@ -831,8 +831,11 @@ function UrlPanel({ onDocumentAdded }: { onDocumentAdded: () => void }) {
             )}
           </fieldset>
 
-          <details className="upload-advanced">
-            <summary>Advanced</summary>
+          <details className="upload-advanced" open>
+            <summary>
+              Advanced — depth {maxDepth}, max {maxPages} pages
+              {strategy === 'scrape' ? '' : ' (not used for this strategy)'}
+            </summary>
             <div className="upload-advanced-grid">
               <label>
                 Max depth
