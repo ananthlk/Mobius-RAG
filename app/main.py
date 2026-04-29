@@ -2477,6 +2477,40 @@ async def upload_file(
             # Don't raise - return success but with failed status
             # Frontend can check status endpoint
 
+        # Auto-chain to chunking + embedding when the caller is the chat
+        # upload path (or any other agent-driven upload). Without this,
+        # extraction completes but the doc sits idle until somebody calls
+        # /documents/{id}/chunking/start manually. Closes the loop so
+        # mobius-chat can poll /documents/{id}/status and see the doc go
+        # extracted → chunked → embedded → published in one shot.
+        # AUTO_PUBLISH_ON_EMBED on the embedding worker handles publish.
+        if agent_scope and document.status == "completed":
+            try:
+                from datetime import datetime as _dt
+                auto_job = ChunkingJob(
+                    document_id=document.id,
+                    generator_id="B",       # Path B is lexicon-aware; matches Repository tab default
+                    status="pending",
+                    threshold="0.6",
+                    critique_enabled="true",
+                    max_retries=2,
+                    extraction_enabled="true",
+                    created_at=_dt.utcnow(),
+                    updated_at=_dt.utcnow(),
+                )
+                db.add(auto_job)
+                await db.commit()
+                logger.info(
+                    "[upload] auto-queued Path B chunking for doc %s (agent_scope=%s)",
+                    document.id, agent_scope,
+                )
+            except Exception as auto_err:
+                logger.warning(
+                    "[upload] auto-chunk queue failed (non-fatal): %s",
+                    auto_err,
+                )
+                await db.rollback()
+
         return {
             "filename": file.filename,
             "content_type": file.content_type,
