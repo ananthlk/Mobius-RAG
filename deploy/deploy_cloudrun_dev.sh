@@ -73,6 +73,15 @@ gcloud artifacts repositories describe mobius-rag \
 #     debug session on 2026-04-27 was exactly this.
 if [[ -d frontend ]] && [[ -f frontend/package.json ]]; then
   echo "--- building frontend dist ---"
+  # Vite reads VITE_* env vars at build time and bakes them into the
+  # bundle. Without these the URL panel's Submit button posts to a
+  # same-origin /scrape (which is the rag service, not the scraper),
+  # producing "Method Not Allowed". Default to the dev URLs; operators
+  # can override per-call by exporting these before invoking this script.
+  : "${VITE_SCRAPER_API_BASE:=https://mobius-web-scraper-ortabkknqa-uc.a.run.app}"
+  : "${VITE_API_BASE:=}"   # empty → same-origin (rag-self), correct for the deployed shell
+  export VITE_SCRAPER_API_BASE VITE_API_BASE
+  echo "--- frontend env: VITE_SCRAPER_API_BASE=$VITE_SCRAPER_API_BASE  VITE_API_BASE=${VITE_API_BASE:-<same-origin>} ---"
   (cd frontend && npm run build) || {
     echo "ERROR: frontend build failed; aborting deploy" >&2
     exit 1
