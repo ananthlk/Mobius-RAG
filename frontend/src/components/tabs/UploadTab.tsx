@@ -845,7 +845,6 @@ function UrlPanel({ onDocumentAdded }: { onDocumentAdded: () => void }) {
                   max={10}
                   value={maxDepth}
                   onChange={(e) => setMaxDepth(parseInt(e.target.value, 10) || 3)}
-                  disabled={strategy !== 'scrape'}
                 />
               </label>
               <label>
@@ -856,7 +855,6 @@ function UrlPanel({ onDocumentAdded }: { onDocumentAdded: () => void }) {
                   max={2000}
                   value={maxPages}
                   onChange={(e) => setMaxPages(parseInt(e.target.value, 10) || 200)}
-                  disabled={strategy !== 'scrape'}
                 />
               </label>
             </div>
@@ -867,7 +865,6 @@ function UrlPanel({ onDocumentAdded }: { onDocumentAdded: () => void }) {
                   type="checkbox"
                   checked={includeHtml}
                   onChange={(e) => setIncludeHtml(e.target.checked)}
-                  disabled={strategy !== 'scrape'}
                 />
                 HTML pages
               </label>
@@ -876,7 +873,6 @@ function UrlPanel({ onDocumentAdded }: { onDocumentAdded: () => void }) {
                   type="checkbox"
                   checked={includePdfs}
                   onChange={(e) => setIncludePdfs(e.target.checked)}
-                  disabled={strategy !== 'scrape'}
                 />
                 PDFs
               </label>
