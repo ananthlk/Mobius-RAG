@@ -345,7 +345,7 @@ export function EvalTab() {
     : !filter
     ? runDetail.results
     : runDetail.results.filter((r) => {
-        if (filter.key === 'verdict') return (r.judge_verdict || 'unable_to_verify') === filter.value
+        if (filter.key === 'verdict') return (r.effective_verdict || r.judge_verdict || 'unable_to_verify') === filter.value
         if (filter.key === 'strategy') return r.strategy_executed === filter.value
         if (filter.key === 'routing_correct') return String(r.routing_correct) === filter.value
         if (filter.key === 'confidence') return r.confidence === filter.value
@@ -825,7 +825,8 @@ function PipelineFunnel({
   let citationMiss = 0
 
   for (const r of results) {
-    verdicts[r.judge_verdict || 'unable_to_verify'] = (verdicts[r.judge_verdict || 'unable_to_verify'] || 0) + 1
+    const effV = r.effective_verdict || r.judge_verdict || 'unable_to_verify'
+    verdicts[effV] = (verdicts[effV] || 0) + 1
     if (r.strategy_executed) strategies[r.strategy_executed] = (strategies[r.strategy_executed] || 0) + 1
     if (r.confidence) confidences[r.confidence] = (confidences[r.confidence] || 0) + 1
     if (r.routing_correct === true) routingCorrect++

@@ -58,9 +58,15 @@ interface DriveFolder {
   name: string
 }
 
+interface UploadMeta {
+  payer?: string
+  state?: string
+  program?: string
+}
+
 interface Props {
   documents: DocLike[]
-  onUpload: (file: File) => Promise<void>
+  onUpload: (file: File, meta?: UploadMeta) => Promise<void>
   uploading: boolean
   error: string | null
   onDocumentAdded: () => void
@@ -491,12 +497,26 @@ function ComputerPanel({
   uploading,
   error,
 }: {
-  onUpload: (file: File) => Promise<void>
+  onUpload: (file: File, meta?: UploadMeta) => Promise<void>
   uploading: boolean
   error: string | null
 }) {
-  const [file, setFile] = useState<File | null>(null)
+  const [files, setFiles] = useState<File[]>([])
   const [dragActive, setDragActive] = useState(false)
+  const [payer, setPayer] = useState('')
+  const [state, setState] = useState('')
+  const [program, setProgram] = useState('')
+  const [uploadingIdx, setUploadingIdx] = useState<number | null>(null)
+  const [doneCount, setDoneCount] = useState(0)
+
+  const addFiles = (incoming: FileList | null) => {
+    if (!incoming) return
+    const pdfs = Array.from(incoming).filter((f) => f.type === 'application/pdf' || f.name.endsWith('.pdf'))
+    setFiles((prev) => {
+      const existing = new Set(prev.map((f) => f.name + f.size))
+      return [...prev, ...pdfs.filter((f) => !existing.has(f.name + f.size))]
+    })
+  }
 
   const handleDrag = (e: React.DragEvent) => {
     e.preventDefault()
@@ -509,16 +529,31 @@ function ComputerPanel({
     e.preventDefault()
     e.stopPropagation()
     setDragActive(false)
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0])
+    addFiles(e.dataTransfer.files)
   }
 
+  const removeFile = (idx: number) => setFiles((prev) => prev.filter((_, i) => i !== idx))
+
   const handleUpload = async () => {
-    if (!file) return
-    await onUpload(file)
-    setFile(null)
+    if (files.length === 0) return
+    const meta: UploadMeta = {
+      payer: payer.trim() || undefined,
+      state: state.trim() || undefined,
+      program: program.trim() || undefined,
+    }
+    setDoneCount(0)
+    for (let i = 0; i < files.length; i++) {
+      setUploadingIdx(i)
+      await onUpload(files[i], meta)
+      setDoneCount(i + 1)
+    }
+    setUploadingIdx(null)
+    setFiles([])
     const fileInput = document.getElementById('upload-tab-file-input') as HTMLInputElement | null
     if (fileInput) fileInput.value = ''
   }
+
+  const isUploading = uploadingIdx !== null || uploading
 
   return (
     <div className="upload-panel">
@@ -532,37 +567,104 @@ function ComputerPanel({
         <input
           type="file"
           id="upload-tab-file-input"
-          onChange={(e) => {
-            if (e.target.files && e.target.files[0]) setFile(e.target.files[0])
-          }}
+          multiple
+          onChange={(e) => addFiles(e.target.files)}
           accept=".pdf"
-          disabled={uploading}
+          disabled={isUploading}
           className="upload-dropzone-input"
         />
         <label htmlFor="upload-tab-file-input" className="upload-dropzone-label">
-          {file ? file.name : 'Choose a file or drag it here'}
+          {files.length === 0
+            ? 'Choose files or drag them here'
+            : `${files.length} file${files.length > 1 ? 's' : ''} selected — drop more or click to add`}
         </label>
-        {file && (
-          <div className="upload-dropzone-info">
-            <span>{(file.size / 1024 / 1024).toFixed(2)} MB</span>
-          </div>
-        )}
         <button
           type="button"
           onClick={handleUpload}
-          disabled={!file || uploading}
+          disabled={files.length === 0 || isUploading}
           className="btn btn-primary upload-dropzone-btn"
         >
-          {uploading ? 'Uploading…' : 'Upload'}
+          {isUploading
+            ? `Uploading ${uploadingIdx !== null ? uploadingIdx + 1 : doneCount} / ${files.length}…`
+            : files.length > 1
+              ? `Upload ${files.length} files`
+              : 'Upload'}
         </button>
       </div>
+
+      {files.length > 0 && (
+        <ul style={{ margin: '8px 0 0', padding: 0, listStyle: 'none', display: 'grid', gap: 4 }}>
+          {files.map((f, i) => (
+            <li
+              key={f.name + f.size}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 8, fontSize: 12,
+                padding: '4px 8px', background: uploadingIdx === i ? '#eff6ff' : '#f9fafb',
+                borderRadius: 4, border: `1px solid ${uploadingIdx === i ? '#93c5fd' : '#e5e7eb'}`,
+              }}
+            >
+              <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={f.name}>
+                {uploadingIdx === i ? '⏳ ' : doneCount > i ? '✓ ' : ''}{f.name}
+              </span>
+              <span style={{ color: '#6b7280', whiteSpace: 'nowrap' }}>
+                {(f.size / 1024 / 1024).toFixed(1)} MB
+              </span>
+              {!isUploading && (
+                <button
+                  type="button"
+                  onClick={() => removeFile(i)}
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#9ca3af', padding: '0 2px', fontSize: 14 }}
+                  title="Remove"
+                >
+                  ×
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginTop: 10 }}>
+        <label style={{ fontSize: 12 }}>
+          <div style={{ color: '#6b7280', marginBottom: 2 }}>Payer (optional)</div>
+          <input
+            value={payer}
+            onChange={(e) => setPayer(e.target.value)}
+            placeholder="e.g. Aetna Better Health"
+            disabled={isUploading}
+            style={{ width: '100%', fontSize: 12, padding: '4px 6px', border: '1px solid #d1d5db', borderRadius: 4, boxSizing: 'border-box' }}
+          />
+        </label>
+        <label style={{ fontSize: 12 }}>
+          <div style={{ color: '#6b7280', marginBottom: 2 }}>State (optional)</div>
+          <input
+            value={state}
+            onChange={(e) => setState(e.target.value.toUpperCase())}
+            placeholder="FL"
+            maxLength={2}
+            disabled={isUploading}
+            style={{ width: '100%', fontSize: 12, padding: '4px 6px', border: '1px solid #d1d5db', borderRadius: 4, boxSizing: 'border-box' }}
+          />
+        </label>
+        <label style={{ fontSize: 12 }}>
+          <div style={{ color: '#6b7280', marginBottom: 2 }}>Program (optional)</div>
+          <input
+            value={program}
+            onChange={(e) => setProgram(e.target.value)}
+            placeholder="e.g. Medicaid"
+            disabled={isUploading}
+            style={{ width: '100%', fontSize: 12, padding: '4px 6px', border: '1px solid #d1d5db', borderRadius: 4, boxSizing: 'border-box' }}
+          />
+        </label>
+      </div>
+
       {error && (
-        <div className="error-message" role="alert">
+        <div className="error-message" role="alert" style={{ marginTop: 8 }}>
           {error}
         </div>
       )}
       <p className="upload-hint">
-        PDF only. Backend infers payer / state / authority from filename — edit later in Repository.
+        PDF only. Metadata overrides filename inference — leave blank to let the backend infer from filename.
       </p>
     </div>
   )

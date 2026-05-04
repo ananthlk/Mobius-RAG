@@ -1191,13 +1191,16 @@ function App() {
     }
   }, [selectedJobId, chunkingActive, processingParagraphId, paragraphs])
 
-  const handleUpload = async (file: File) => {
+  const handleUpload = async (file: File, meta?: { payer?: string; state?: string; program?: string }) => {
     setFile(file)
     setError(null)
     setUploading(true)
-    
+
     const formData = new FormData()
     formData.append('file', file)
+    if (meta?.payer) formData.append('payer', meta.payer)
+    if (meta?.state) formData.append('state', meta.state)
+    if (meta?.program) formData.append('program', meta.program)
 
     try {
       const response = await fetch(`${API_BASE}/upload`, {
