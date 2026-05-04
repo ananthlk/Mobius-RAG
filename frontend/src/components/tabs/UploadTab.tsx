@@ -18,7 +18,12 @@ interface DocLike {
   published_at?: string | null
   // Used to group docs under their parent scrape host in the queue.
   gcs_path?: string | null
-  source_metadata?: { source_url?: string | null; scrape_job_id?: string | null } | null
+  source_metadata?: {
+    source_url?: string | null
+    scrape_job_id?: string | null
+    agent_scope?: string | null
+  } | null
+  expires_at?: string | null
 }
 
 interface ProbeResult {
@@ -80,6 +85,7 @@ interface QueueRow {
   progressPct: number
   recentlyCompleted: boolean
   meta?: string
+  source?: 'chat' | 'drive' | 'url' | 'computer' | 'scrape'
   /** Optional child rows (per-doc detail when this row is a host group). */
   children?: QueueRow[]
 }
@@ -143,6 +149,7 @@ function scrapeJobsToRows(jobs: ScrapeJob[]): QueueRow[] {
         'completed',
       progressPct: pct,
       recentlyCompleted: recent,
+      source: 'scrape',
       meta:
         j.status === 'failed' ? (j.error || 'failed') :
         isActive
@@ -155,21 +162,34 @@ function scrapeJobsToRows(jobs: ScrapeJob[]): QueueRow[] {
 
 /**
  * Infer the host a document came from. Order:
- *  1. source_metadata.source_url (set by import-from-gcs / -html)
- *  2. gcs_path (web URL for HTML imports, gs:// for scrape PDFs)
- *  3. '(uploaded)' bucket for hand-uploaded files
+ *  1. agent_scope === 'chat' → chat upload (ephemeral, high-priority)
+ *  2. source_metadata.source_url (set by import-from-gcs / -html)
+ *  3. gcs_path (web URL for HTML imports, gs:// for scrape PDFs)
+ *  4. '(uploaded)' bucket for hand-uploaded files
  */
 function docHost(d: DocLike): string {
+  if (d.source_metadata?.agent_scope === 'chat' || d.expires_at) return '(chat)'
   const sm = d.source_metadata?.source_url
   if (sm) {
-    try { return new URL(sm).hostname.replace(/^www\./, '') } catch { /* fall through */ }
+    try {
+      const h = new URL(sm).hostname.replace(/^www\./, '')
+      if (h.includes('drive.google')) return '(drive)'
+      return h
+    } catch { /* fall through */ }
   }
   const gp = d.gcs_path || ''
   if (gp.startsWith('http')) {
     try { return new URL(gp).hostname.replace(/^www\./, '') } catch { /* fall through */ }
   }
-  if (gp.startsWith('gs://')) return '(uploaded · gcs)'
+  if (gp.startsWith('gs://')) return '(uploaded)'
   return '(uploaded)'
+}
+
+function hostToSource(host: string): QueueRow['source'] {
+  if (host === '(chat)') return 'chat'
+  if (host === '(drive)') return 'drive'
+  if (host === '(uploaded)') return 'computer'
+  return 'url'
 }
 
 /** Per-doc stage classification, separated so the group view can re-use it. */
@@ -307,6 +327,7 @@ function deriveQueue(documents: DocLike[]): QueueRow[] {
       stage: topStage,
       progressPct: aggPct,
       recentlyCompleted: g.active === 0 && g.recent > 0,
+      source: hostToSource(g.host),
       meta: `${g.docs.length} ${g.docs.length === 1 ? 'doc' : 'docs'} · ${parts.join(' · ')}`,
       children,
     })
@@ -322,15 +343,13 @@ function deriveQueue(documents: DocLike[]): QueueRow[] {
 }
 
 /**
- * Upload tab — single source-selector row (Computer / URL / Drive),
- * one panel per source. Right side: in-flight queue.
+ * Upload tab — clean single-card layout with a collapsible in-flight footer.
  */
 export function UploadTab({ documents, onUpload, uploading, error, onDocumentAdded }: Props) {
   const [sourceType, setSourceType] = useState<SourceType>('computer')
+  const [footerOpen, setFooterOpen] = useState(false)
 
-  // Poll scraper-side active jobs so the in-flight queue surfaces
-  // running scrapes (otherwise they'd be invisible until the downstream
-  // chunk/embed jobs land in /documents). 5s cadence — cheap.
+  // Poll scraper-side active jobs (5s cadence).
   const [scrapeJobs, setScrapeJobs] = useState<ScrapeJob[]>([])
   useEffect(() => {
     let cancelled = false
@@ -341,82 +360,105 @@ export function UploadTab({ documents, onUpload, uploading, error, onDocumentAdd
         if (!r.ok) return
         const data = await r.json() as { jobs: ScrapeJob[] }
         if (!cancelled) setScrapeJobs(data.jobs || [])
-      } catch {
-        // Silent — scraper unreachable shouldn't break the Upload tab.
-      }
+      } catch { /* scraper unreachable — silent */ }
     }
     fetchActive()
     const interval = setInterval(fetchActive, 5000)
     return () => { cancelled = true; clearInterval(interval) }
   }, [])
 
-  const queue = useMemo(() => {
-    // Scrape jobs first (they're upstream of doc rows), then doc-stage rows.
-    return [...scrapeJobsToRows(scrapeJobs), ...deriveQueue(documents)]
-  }, [scrapeJobs, documents])
+  const queue = useMemo(
+    () => [...scrapeJobsToRows(scrapeJobs), ...deriveQueue(documents)],
+    [scrapeJobs, documents],
+  )
+
+  // Auto-open footer when active items appear for the first time.
+  const prevActive = useRef(0)
+  useEffect(() => {
+    const active = queue.filter(r => r.stage !== 'completed' && r.stage !== 'failed').length
+    if (active > 0 && prevActive.current === 0) setFooterOpen(true)
+    prevActive.current = active
+  }, [queue])
 
   return (
     <div className="upload-tab">
-      <div className="upload-tab-grid">
+      <div className="upload-main">
         <div className="upload-card">
           <div className="upload-source-selector" role="tablist" aria-label="Upload source">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={sourceType === 'computer'}
-              className={`upload-source-btn ${sourceType === 'computer' ? 'active' : ''}`}
-              onClick={() => setSourceType('computer')}
-            >
-              <span className="upload-source-icon" aria-hidden>📁</span>
-              Computer
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={sourceType === 'url'}
-              className={`upload-source-btn ${sourceType === 'url' ? 'active' : ''}`}
-              onClick={() => setSourceType('url')}
-            >
-              <span className="upload-source-icon" aria-hidden>🌐</span>
-              URL
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={sourceType === 'drive'}
-              className={`upload-source-btn ${sourceType === 'drive' ? 'active' : ''}`}
-              onClick={() => setSourceType('drive')}
-            >
-              <span className="upload-source-icon" aria-hidden>☁</span>
-              Drive
-            </button>
+            {([
+              ['computer', '📁', 'Computer'],
+              ['url', '🌐', 'URL'],
+              ['drive', '☁', 'Drive'],
+            ] as [SourceType, string, string][]).map(([type, icon, label]) => (
+              <button
+                key={type}
+                type="button"
+                role="tab"
+                aria-selected={sourceType === type}
+                className={`upload-source-btn ${sourceType === type ? 'active' : ''}`}
+                onClick={() => setSourceType(type)}
+              >
+                <span className="upload-source-icon" aria-hidden>{icon}</span>
+                {label}
+              </button>
+            ))}
           </div>
 
           <div className="upload-source-panel">
             {sourceType === 'computer' && (
-              <ComputerPanel
-                onUpload={onUpload}
-                uploading={uploading}
-                error={error}
-              />
+              <ComputerPanel onUpload={onUpload} uploading={uploading} error={error} />
             )}
-            {sourceType === 'url' && (
-              <UrlPanel onDocumentAdded={onDocumentAdded} />
-            )}
-            {sourceType === 'drive' && (
-              <DrivePanel onDocumentAdded={onDocumentAdded} />
-            )}
+            {sourceType === 'url' && <UrlPanel onDocumentAdded={onDocumentAdded} />}
+            {sourceType === 'drive' && <DrivePanel onDocumentAdded={onDocumentAdded} />}
           </div>
         </div>
+      </div>
 
-        <div className="upload-queue-card">
-          <h3 className="upload-card-title">
-            In-flight <span className="upload-queue-count">({queue.length})</span>
-          </h3>
-          {queue.length === 0 ? (
-            <div className="upload-queue-empty">
-              No active uploads. Drop a file or paste a URL to get started.
-            </div>
+      <InflightFooter queue={queue} open={footerOpen} onToggle={() => setFooterOpen(v => !v)} />
+    </div>
+  )
+}
+
+/* ─── Collapsible in-flight footer ─────────────────────────────────────── */
+
+const SOURCE_ICON: Record<string, string> = {
+  chat: '💬',
+  drive: '☁',
+  computer: '📁',
+  url: '🌐',
+  scrape: '🔍',
+}
+
+function InflightFooter({
+  queue,
+  open,
+  onToggle,
+}: {
+  queue: QueueRow[]
+  open: boolean
+  onToggle: () => void
+}) {
+  const active = queue.filter(r => r.stage !== 'completed' && r.stage !== 'failed')
+  const chatActive = active.filter(r => r.source === 'chat').length
+  const total = queue.length
+
+  // Summary badge text
+  let summary = ''
+  if (total === 0) {
+    summary = 'No active uploads'
+  } else if (active.length === 0) {
+    summary = `${total} recently completed`
+  } else {
+    summary = `${active.length} in‑flight`
+    if (chatActive > 0) summary += ` · ${chatActive} from chat`
+  }
+
+  return (
+    <div className={`upload-footer ${open ? 'upload-footer--open' : ''}`}>
+      {open && (
+        <div className="upload-footer-body">
+          {total === 0 ? (
+            <p className="upload-footer-empty">No active or recent uploads.</p>
           ) : (
             <ul className="upload-queue-list">
               {queue.map((row) => (
@@ -425,13 +467,27 @@ export function UploadTab({ documents, onUpload, uploading, error, onDocumentAdd
             </ul>
           )}
         </div>
-      </div>
+      )}
+
+      <button
+        type="button"
+        className="upload-footer-bar"
+        onClick={onToggle}
+        aria-expanded={open}
+      >
+        <span className="upload-footer-indicator">
+          {active.length > 0 && <span className="upload-footer-pulse" />}
+          {active.length > 0 ? '⟳' : '✓'}
+        </span>
+        <span className="upload-footer-summary">{summary}</span>
+        <span className="upload-footer-chevron">{open ? '▴' : '▾'}</span>
+      </button>
     </div>
   )
 }
 
-/* ───────────────────── Computer panel ─────────────────────── */
 /* ───────────────────── Queue row (collapsible) ─────────────────────── */
+/* ───────────────────── Computer panel ─────────────────────── */
 function QueueRowView({ row }: { row: QueueRow }) {
   const [expanded, setExpanded] = useState(false)
   const hasChildren = !!row.children && row.children.length > 0
@@ -455,9 +511,17 @@ function QueueRowView({ row }: { row: QueueRow }) {
             {expanded ? '▾' : '▸'}
           </span>
         )}
+        {row.source && (
+          <span className="upload-queue-source" title={row.source}>
+            {SOURCE_ICON[row.source] || ''}
+          </span>
+        )}
         <span className="upload-queue-name" title={row.filename}>
           {row.filename}
         </span>
+        {row.source === 'chat' && (
+          <span className="upload-queue-pill upload-queue-pill--chat">chat</span>
+        )}
         <span className={`upload-queue-pill stage-${row.stage}`}>{row.stage}</span>
       </div>
       <div className="upload-queue-progress">
