@@ -84,6 +84,24 @@ class CorpusSearchRequest(BaseModel):
     include_document_ids: list[str] | None = None
     min_similarity: float | None = None
 
+    # tag_mode controls how the lexicon-extracted j/d/p tags filter the
+    # candidate pool. Exposed to the agent / ReAct loop so it can pick
+    # the right precision/recall tradeoff per query intent:
+    #
+    #   "auto"     — STRICT first (metadata-J: documents.payer/state/program
+    #                 must match), fall through to RELAXED if 0 hits.
+    #                 Default for chat/agent usage. Smart fallback.
+    #   "strict"   — metadata-J only. Returns empty when no AHCA-payer
+    #                 doc exists for an AHCA query. Use when grounding
+    #                 a specific claim about a specific authority.
+    #   "relaxed"  — skip metadata-J entirely; OR across d/p body tags.
+    #                 Use for exploratory / cross-payer / "what does the
+    #                 literature say" questions.
+    #   "none"     — no tag filter; only the candidate cap (1000 rows)
+    #                 bounds the BM25 work. Use for code lookups and
+    #                 generic queries where tags would hurt recall.
+    tag_mode: str = "auto"
+
     # ── Assembly controls ────────────────────────────────────────────────
     # assembly_strategy controls how k slots are filled from the ranked pool:
     #
@@ -99,6 +117,48 @@ class CorpusSearchRequest(BaseModel):
     # at least half the slots go to authoritative docs when they exist.
     assembly_strategy: str = "score"    # score | canonical_first | balanced
     canonical_floor: float = 0.5        # fraction [0, 1]; used by "balanced"
+
+    # ── Reranker tag-coverage signal (Fix #2 — 2026-05-02) ──────────────
+    # When the agent has identified REQUIRED tag phrases for the query
+    # (e.g. ``["behavioral health", "prior authorization", "Sunshine Health"]``),
+    # the reranker boosts chunks whose body text contains all of them
+    # and penalises chunks that cover only a subset. This kills the
+    # failure mode where BM25 returns chunks containing 2 of 3 required
+    # topics in unrelated contexts.
+    required_phrases: list[str] | None = None
+
+    # Per-phrase weights aligned with ``required_phrases`` by index.
+    # Sourced from the lexicon's selectivity per tag — rarer / more
+    # discriminating phrases (e.g. "sunshine health" at sel 0.93) get
+    # more weight in tag_coverage than common phrases (e.g. "prior
+    # authorization" at 0.79). When a phrase has weight w, its presence
+    # in body / meta haystack contributes w / sum(weights) to
+    # tag_coverage. None or mismatched length → all phrases equal
+    # (legacy behavior).
+    required_phrase_weights: list[float] | None = None
+
+    # Optional per-phrase TAG CODE aligned with required_phrases by
+    # index. When the phrase comes from a lexicon tag (j: / d: / p:)
+    # the FULL CODE goes here (e.g. ``"j:payor.sunshine_health"``).
+    # Literals and free-text phrases get None. The reranker uses this
+    # to short-circuit substring matching: if the phrase is a j-tag
+    # and the chunk's parent document is TAGGED with that j-code,
+    # presence is a hard YES — no need to substring-search body or
+    # filename. j-tags are binary (a doc IS or ISN'T about Sunshine
+    # Health); d-tags are softer (a doc MAY cover this topic), so the
+    # binary credit only applies to j-tags.
+    required_phrase_tag_codes: list[str | None] | None = None
+
+    # ── Neighborhood expansion (ported from mobius-chat doc_assembly) ──
+    # Pull ±N paragraphs (within ±M pages) of EACH assembled chunk from
+    # the same document. The classic failure mode this solves: BM25
+    # surfaces a chunk containing the LEAD-IN to a fact ("see the table
+    # below…") and the actual numbers live in the next chunk. Without
+    # neighbors the LLM never sees the answer.
+    #
+    # Set ``neighbor_paragraph_window=0`` to disable.
+    neighbor_paragraph_window: int = 2  # ±N paragraphs per assembled chunk
+    neighbor_page_window: int = 1       # ±M pages constraint
 
 
 class CorpusChunk(BaseModel):
@@ -117,6 +177,19 @@ class CorpusChunk(BaseModel):
     payer: str | None
     state: str | None
     jpd_tags: list[str] = []       # dominant J/P/D families matched by this chunk
+    # Where in the doc this chunk lives — used by the trace UI to show
+    # "is the LLM seeing enough context?" diagnostics. All optional;
+    # populated when the underlying ``rag_published_embeddings`` row has
+    # them set (which is the standard case for chunked-and-published docs).
+    section_path: str | None = None
+    chapter_path: str | None = None
+    summary: str | None = None
+    # Neighborhood expansion: True when this chunk was added as a
+    # supporting sibling of an assembled hit, NOT as a primary retrieval
+    # match. Downstream consumers can render neighbors differently
+    # (smaller font, "context" badge, etc.). Defaults False so existing
+    # callers see no shape change.
+    is_neighbor: bool = False
 
 
 class CorpusSearchResponse(BaseModel):
@@ -419,8 +492,15 @@ def _build_filter_clauses(
             params["f_auth"] = filters.authority_level
 
     if include_document_ids:
-        # Use ANY with a UUID-cast so Postgres doesn't reject the text array
-        clauses.append("document_id::text = ANY(:inc_ids)")
+        # Use ANY with a UUID-cast so Postgres doesn't reject the text array.
+        # Table-qualify ``document_id`` because the lexicon-expansion path
+        # (and the new corpus_search_agent candidate-pool path) add a
+        # LEFT JOIN to document_tags, which has its own ``document_id``
+        # column and makes an unqualified reference ambiguous. Same class
+        # of bug as the 2026-05-01 _BM25_COLS ``id`` ambiguity fix.
+        clauses.append(
+            "rag_published_embeddings.document_id::text = ANY(:inc_ids)"
+        )
         params["inc_ids"] = include_document_ids
 
     return (" AND " + " AND ".join(clauses)) if clauses else ""
@@ -440,7 +520,41 @@ def _row_to_base_dict(row: Any) -> dict[str, Any]:
         "authority_level": (row["document_authority_level"] or "").strip() or None,
         "payer": (row["document_payer"] or "").strip() or None,
         "state": (row["document_state"] or "").strip() or None,
+        # Section / chapter / summary — surfaced for context-quality
+        # diagnostics in the trace UI. May be empty strings in the DB;
+        # normalise to None so the frontend can show "—" cleanly.
+        "section_path": _none_if_empty(_safe_get(row, "section_path")),
+        "chapter_path": _none_if_empty(_safe_get(row, "chapter_path")),
+        "summary": _none_if_empty(_safe_get(row, "summary")),
+        "content_sha": _none_if_empty(_safe_get(row, "content_sha")),
     }
+
+
+def _safe_get(row, key: str):
+    """``row`` may be a SQLAlchemy Row (mapping-like) or a plain dict.
+    Some call paths populate the dict pre-merge without these columns."""
+    try:
+        return row[key]
+    except (KeyError, TypeError):
+        return None
+
+
+def _none_if_empty(v):
+    if v is None:
+        return None
+    s = str(v).strip()
+    return s or None
+
+
+# ---------------------------------------------------------------------------
+# Reranker thresholds
+# ---------------------------------------------------------------------------
+
+# Hard floor on tag coverage. A chunk that is missing any REQUIRED tag phrase
+# is dropped entirely — better to return nothing than to return off-topic
+# context that pollutes the LLM prompt. Set to 1.0 to require ALL required
+# phrases present; lower to allow partial coverage.
+_TAG_COVERAGE_FLOOR = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -448,11 +562,28 @@ def _row_to_base_dict(row: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 _BM25_COLS = """
-    id, document_id, source_type, text,
-    page_number, paragraph_index,
-    document_display_name, document_filename,
-    document_authority_level, document_payer, document_state
+    rag_published_embeddings.id,
+    rag_published_embeddings.document_id,
+    rag_published_embeddings.source_type,
+    rag_published_embeddings.text,
+    rag_published_embeddings.page_number,
+    rag_published_embeddings.paragraph_index,
+    rag_published_embeddings.section_path,
+    rag_published_embeddings.chapter_path,
+    rag_published_embeddings.summary,
+    rag_published_embeddings.content_sha,
+    rag_published_embeddings.document_display_name,
+    rag_published_embeddings.document_filename,
+    rag_published_embeddings.document_authority_level,
+    rag_published_embeddings.document_payer,
+    rag_published_embeddings.document_state
 """
+# Columns explicitly table-qualified because the vector arm and the
+# relaxed-tag BM25 candidate stage both LEFT JOIN document_tags when
+# lexicon expansion matches d/p tags. document_tags also has ``id``
+# and ``document_id`` columns, so unqualified SELECT raises
+# ``AmbiguousColumnError`` — observed 2026-05-01 silently zeroing out
+# every vector arm whose query hit a process/domain tag.
 
 # ---------------------------------------------------------------------------
 # BM25 query normalizer
@@ -548,6 +679,7 @@ async def _bm25_arm(
     filters: CorpusFilters | None,
     include_document_ids: list[str] | None,
     search_id: str = "",
+    tag_mode: str = "auto",
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any]]:
     """Full-text BM25 via Postgres tsvector with lexicon-driven query expansion.
 
@@ -600,6 +732,70 @@ async def _bm25_arm(
         _log_stage("bm25_query_normalized", search_id,
                    original=raw_query[:80], normalized=bm25_query[:80])
 
+    # ── 1.5 Code-like pattern fast-path ────────────────────────────────
+    # Queries like ``FL.UM.02.00`` or ``CP.MP.71`` or ``H0019`` are
+    # structured policy / HCPCS / revenue codes. The default tokenizer
+    # strips the dots → ``fl | um | 02 | 00`` which matches everything.
+    # Detect these and do a literal substring match on text + filename
+    # first; only fall back to tsquery if the substring search returns
+    # nothing (so we don't lose recall for genuinely-rare codes).
+    _code_re = re.compile(r"^[A-Z]{1,4}[.\-_]?[A-Z0-9]{1,5}([.\-_][A-Z0-9]{1,5})+$|^[A-Z]\d{4,5}$")
+    looks_like_code = bool(_code_re.match(raw_query.upper().strip()))
+    if looks_like_code:
+        if search_id:
+            _log_stage("bm25_code_fastpath", search_id, query=raw_query[:80])
+        # ILIKE on the indexed filename/display_name columns ONLY.
+        # Skipping the text column: that's a 70k-row sequential scan
+        # (no pg_trgm index) and times out at 30s. Policy IDs are
+        # nearly always in the filename anyway; if they're only in
+        # body text we fall through to tsquery which DOES tokenize
+        # most code patterns correctly when there are no dots
+        # (e.g. H0019 → ``h0019``).
+        code_sql = text(f"""
+            SELECT {_BM25_COLS}, 1.0 AS bm25_score
+            FROM rag_published_embeddings
+            WHERE (document_filename ILIKE :pat
+                   OR document_display_name ILIKE :pat)
+              {_build_filter_clauses(filters, include_document_ids, {})}
+            LIMIT :k
+        """)
+        params_code = {"k": k, "pat": f"%{raw_query}%"}
+        # _build_filter_clauses mutates a params dict; rebuild here
+        params_code_full: dict[str, Any] = {"k": k, "pat": f"%{raw_query}%"}
+        _ = _build_filter_clauses(filters, include_document_ids, params_code_full)
+        # Re-execute with filters merged in (same SQL above already has them)
+        try:
+            result = await db.execute(code_sql, params_code_full)
+            rows = result.mappings().all()
+            if rows:
+                out: list[dict[str, Any]] = []
+                for rank0, row in enumerate(rows):
+                    c = _row_to_base_dict(row)
+                    c["similarity"] = 1.0
+                    c["match_score"] = 1.0
+                    c["_arm"] = "bm25_code"
+                    out.append(c)
+                if search_id:
+                    _log_stage("bm25_code_fastpath_hit", search_id,
+                               hits=len(out))
+                # Skip lexicon expansion; return the code matches directly.
+                return out, normalized, {
+                    "matched_codes": [],
+                    "expansion_phrases": [],
+                    "expansion_phrases_count": 0,
+                    "final_tsquery": "",
+                    "log": [f"code_fastpath: matched {len(out)} via ILIKE"],
+                    "domain_tags": [],
+                    "jurisdiction_tags": [],
+                    "process_tags": [],
+                }
+            # else: no hits via fast path — fall through to normal tsquery
+            if search_id:
+                _log_stage("bm25_code_fastpath_miss", search_id,
+                           note="no ILIKE hits — falling back to tsquery")
+        except Exception as exc:
+            logger.warning("bm25 code fast-path error (falling back): %s", exc)
+
     # ── 2. Lexicon expansion (best-effort; never raises) ───────────────
     try:
         expansion: LexiconExpansion = await expand_query_via_lexicon(db, bm25_query)
@@ -642,19 +838,226 @@ async def _bm25_arm(
     params: dict[str, Any] = {"k": k, "query": final_ts}
     filter_sql = _build_filter_clauses(filters, include_document_ids, params)
 
+    # ── 3.5. Strategy A — Namespace filter via document_tags overlap ──
+    # The lexicon emits tag codes like ``j:payor.sunshine_health``,
+    # ``d:health_care_services.behavioral_health``,
+    # ``p:utilization_management.prior_authorization``.
+    # The ``document_tags`` table stores those same codes WITHOUT the
+    # ``j:``/``d:``/``p:`` prefix as KEYS in a JSONB OBJECT (not array)
+    # like ``{"payor.sunshine_health": 5, "state.florida": 1}``.
+    #
+    # So we strip the prefix and use ``jsonb_exists()`` (the function
+    # form of the ``?`` operator, safer with asyncpg's ``$N`` parameter
+    # binding) to test for key presence. Tags within a category OR
+    # together; categories OR across each other — this is permissive,
+    # not strict (a doc only needs to share ONE tag in any category).
+    #
+    # Strategy C — Two-stage rank with hard candidate cap. Even if the
+    # tag filter doesn't fire (lexicon classified nothing), the CTE
+    # caps candidates so ``ts_rank_cd`` never scores more than ``CAP``
+    # rows. This is the safety floor: BM25 latency is bounded
+    # regardless of corpus size or query expansion shape.
+    def _strip_prefix(tag: str, prefix: str) -> str | None:
+        return tag[len(prefix):] if tag.startswith(prefix) else None
+
+    j_keys = [k for k in (_strip_prefix(t, "j:") for t in expansion.jurisdiction_tags) if k]
+    d_keys = [k for k in (_strip_prefix(t, "d:") for t in expansion.domain_tags) if k]
+    p_keys = [k for k in (_strip_prefix(t, "p:") for t in expansion.process_tags) if k]
+    has_any_tag = bool(j_keys or d_keys or p_keys)
+
+    # Strategy refinement (2026-04-30): TWO-STAGE filter using
+    # documents.payer/state/program METADATA (authoritative) instead
+    # of document_tags.j_tags (body-derived, noisy). When the lexicon
+    # extracts ``j:regulatory_authority.ahca`` from the query, we
+    # filter docs whose ``payer`` column actually IS AHCA — not docs
+    # that merely mention AHCA in their text. Same for state/program.
+    #
+    #   Stage 1 (strict, metadata-J): ``documents.payer/state/program``
+    #     match the lexicon-extracted j-tag values. Authoritative.
+    #   Stage 2 (relaxed-DP fallback): drop j requirement, narrow by
+    #     d/p body-tag overlap. Catches queries that name a jurisdiction
+    #     we don't have docs for.
+    tag_join_sql = ""
+    tag_filter_strict = ""
+    tag_filter_relaxed = ""
+
+    # Map j-tag suffix → SQL clause on documents columns.
+    # ``rag_published_embeddings`` has document_payer/state/program
+    # columns inlined from the publish, so we match those directly.
+    # For payor/regulatory_authority we additionally check dt.j_tags
+    # (JSONB) via a LEFT JOIN to document_tags, because some docs are
+    # published with a generic payer (e.g. "Ahca.myflorida") even though
+    # their j_tags contain the correct payor key (e.g. "payor.aetna").
+    # The OR catches both cases without extra round-trips.
+    _needs_dt_join_for_strict = False
+
+    def _j_to_metadata_clauses(j_keys_list: list[str]) -> tuple[list[str], dict]:
+        nonlocal _needs_dt_join_for_strict
+        clauses: list[str] = []
+        local_params: dict = {}
+        i = 0
+        for jk in j_keys_list:
+            # jk is like "payor.sunshine_health", "regulatory_authority.ahca",
+            # "state.fl", "program.medicaid"
+            if "." not in jk:
+                continue
+            cat, val = jk.split(".", 1)
+            val_human = val.replace("_", " ")
+            pname = f"_meta_{i}"; i += 1
+            if cat == "state":
+                # state stored as 'FL' (2-char code). Match upper case.
+                local_params[pname] = val.upper()[:2]
+                clauses.append(f"document_state = :{pname}")
+            elif cat == "program":
+                local_params[pname] = f"%{val_human}%"
+                clauses.append(f"document_program ILIKE :{pname}")
+            elif cat in ("payor", "regulatory_authority"):
+                # Check both the inlined document_payer column AND the j_tags
+                # JSONB on document_tags — some docs authored by a regulatory
+                # body (e.g. AHCA) carry the true payor only in j_tags.
+                local_params[pname] = f"%{val_human}%"
+                jtag_pname = f"_jtag_{i}"
+                local_params[jtag_pname] = jk  # e.g. "payor.aetna"
+                clauses.append(
+                    f"(document_payer ILIKE :{pname} OR jsonb_exists(dt.j_tags, :{jtag_pname}))"
+                )
+                _needs_dt_join_for_strict = True
+        return clauses, local_params
+
+    if has_any_tag:
+        # Build STRICT (metadata-J) clauses
+        strict_clauses, strict_params = _j_to_metadata_clauses(j_keys)
+        if strict_clauses:
+            params.update(strict_params)
+            tag_filter_strict = " AND (" + " OR ".join(strict_clauses) + ")"
+
+        # Build RELAXED (d/p body-tag) clauses, requires LEFT JOIN
+        # to document_tags
+        if d_keys or p_keys or _needs_dt_join_for_strict:
+            tag_join_sql = " LEFT JOIN document_tags dt ON dt.document_id = rag_published_embeddings.document_id "
+            idx = 0
+            relaxed_ors: list[str] = []
+            for k in d_keys:
+                pname = f"_dt_r_{idx}"; idx += 1
+                relaxed_ors.append(f"jsonb_exists(dt.d_tags, :{pname})")
+                params[pname] = k
+            for k in p_keys:
+                pname = f"_pt_r_{idx}"; idx += 1
+                relaxed_ors.append(f"jsonb_exists(dt.p_tags, :{pname})")
+                params[pname] = k
+            if relaxed_ors:
+                tag_filter_relaxed = " AND (" + " OR ".join(relaxed_ors) + ")"
+
+        if search_id:
+            _log_stage(
+                "bm25_tag_filter",
+                search_id,
+                mode="metadata_two_stage",
+                j_keys=j_keys, d_keys=d_keys, p_keys=p_keys,
+                strict_clauses=len(strict_clauses),
+            )
+    else:
+        if search_id:
+            _log_stage(
+                "bm25_no_tag_cap",
+                search_id,
+                note="no j/d/p tags from lexicon — relying on candidate cap only",
+            )
+
+    # tag_mode controls which filter we run and whether to fall back.
+    #   auto    → strict first, relaxed on zero hits  (back-compat default)
+    #   strict  → strict only, return empty if zero  (no auto-fallback)
+    #   relaxed → relaxed only, skip strict
+    #   none    → no tag filter at all (only candidate cap applies)
+    tm = (tag_mode or "auto").lower().strip()
+    if tm == "none":
+        tag_filter_sql = ""
+        tag_filter_relaxed = ""    # disable fallback
+        tag_filter_strict = ""
+    elif tm == "relaxed":
+        tag_filter_sql = tag_filter_relaxed
+        tag_filter_strict = ""     # disable retry
+        tag_filter_relaxed = ""
+    elif tm == "strict":
+        tag_filter_sql = tag_filter_strict
+        tag_filter_relaxed = ""    # disable fallback
+    else:  # auto (default)
+        tag_filter_sql = tag_filter_strict
+        # tag_filter_relaxed kept as the auto-fallback target
+
     # ── 4. Execute against multi-field GIN-indexed search_vec ──────────
+    # Two-stage CTE pattern: cheap candidate prefilter (uses GIN on
+    # search_vec + optional tag overlap), then expensive ``ts_rank_cd``
+    # only on the bounded candidate set. Without this, ts_rank_cd was
+    # observed at 36s on a 1962-doc corpus (2026-04-29 baseline).
     gin_path = True
-    try:
-        sql = text(f"""
+    candidate_cap = 1000
+    params["_cap"] = candidate_cap
+    def _build_main_sql(tfilter: str) -> Any:
+        # Determinism fix (2026-05-03): ORDER BY bm25_score DESC, id ASC
+        # in BOTH the candidate CTE and the outer SELECT.
+        #
+        # Without ORDER BY in the CTE, ``LIMIT :_cap`` truncated in
+        # whatever physical order Postgres returned rows — heap layout
+        # / parallel scan order, NOT stable across executions on the
+        # same data. For wide candidate sets (>1000 chunks matching
+        # the tsvector) this dropped different chunks each call, which
+        # then produced different reranker top-K and different agent
+        # answers across runs of the same query (cmhc006/a returned
+        # 4 unique top docs across 5 runs in the N=5 variance matrix).
+        # The downstream variance was being attributed to the strategy,
+        # but it was a Postgres tie-breaking artefact.
+        #
+        # Adding ORDER BY ts_rank_cd DESC keeps the top-K BM25 matches
+        # by score (the principled set), and the secondary ``id ASC``
+        # tie-breaks deterministically when scores tie. Outer SELECT
+        # repeats the order so the returned rank is deterministic too.
+        return text(f"""
+            WITH candidates AS (
+                SELECT rag_published_embeddings.id,
+                       ts_rank_cd(search_vec, to_tsquery('english', :query), 32) AS _ts
+                FROM rag_published_embeddings
+                {tag_join_sql}
+                WHERE search_vec @@ to_tsquery('english', :query)
+                  {filter_sql}
+                  {tfilter}
+                ORDER BY _ts DESC, rag_published_embeddings.id ASC
+                LIMIT :_cap
+            )
             SELECT {_BM25_COLS},
                 ts_rank_cd(search_vec, to_tsquery('english', :query), 32) AS bm25_score
             FROM rag_published_embeddings
-            WHERE search_vec @@ to_tsquery('english', :query)
-              {filter_sql}
-            ORDER BY bm25_score DESC
+            WHERE id IN (SELECT id FROM candidates)
+            ORDER BY bm25_score DESC, id ASC
             LIMIT :k
         """)
-        result = await db.execute(sql, params)
+
+    try:
+        # Stage 1: strict (hard-J)
+        result = await db.execute(_build_main_sql(tag_filter_strict), params)
+        rows_check = result.mappings().all()
+        # If zero hits AND we have a relaxed fallback different from strict,
+        # retry with the relaxed filter.
+        if not rows_check and tag_filter_relaxed and tag_filter_relaxed != tag_filter_strict:
+            if search_id:
+                _log_stage(
+                    "bm25_tag_filter_relaxed",
+                    search_id,
+                    note="strict (hard-J) returned 0; retrying with relaxed (d/p only)",
+                )
+            result = await db.execute(_build_main_sql(tag_filter_relaxed), params)
+            rows_check = result.mappings().all()
+        # We've consumed result; package back via a tiny adapter so the
+        # downstream code that expects ``result.mappings().all()`` keeps
+        # working without restructuring.
+        class _R:
+            def __init__(self, rows): self._rows = rows
+            def mappings(self):
+                class _M:
+                    def __init__(self, r): self._r = r
+                    def all(self): return self._r
+                return _M(self._rows)
+        result = _R(rows_check)
     except Exception as exc:
         if "search_vec" in str(exc):
             # Multi-field migration not yet applied — fall back to inline
@@ -662,16 +1065,29 @@ async def _bm25_arm(
             gin_path = False
             logger.warning("corpus_search bm25: search_vec column missing, using inline tsvector: %s", exc)
             sql = text(f"""
+                WITH candidates AS (
+                    SELECT rag_published_embeddings.id,
+                           ts_rank_cd(
+                               to_tsvector('english', coalesce(text, '')),
+                               to_tsquery('english', :query), 32
+                           ) AS _ts
+                    FROM rag_published_embeddings
+                    {tag_join_sql}
+                    WHERE to_tsvector('english', coalesce(text, ''))
+                          @@ to_tsquery('english', :query)
+                      {filter_sql}
+                      {tag_filter_sql}
+                    ORDER BY _ts DESC, rag_published_embeddings.id ASC
+                    LIMIT :_cap
+                )
                 SELECT {_BM25_COLS},
                     ts_rank_cd(
                         to_tsvector('english', coalesce(text, '')),
                         to_tsquery('english', :query), 32
                     ) AS bm25_score
                 FROM rag_published_embeddings
-                WHERE to_tsvector('english', coalesce(text, ''))
-                      @@ to_tsquery('english', :query)
-                  {filter_sql}
-                ORDER BY bm25_score DESC
+                WHERE id IN (SELECT id FROM candidates)
+                ORDER BY bm25_score DESC, id ASC
                 LIMIT :k
             """)
             result = await db.execute(sql, params)
@@ -717,37 +1133,152 @@ async def _vector_arm(
     filters: CorpusFilters | None,
     include_document_ids: list[str] | None,
     search_id: str = "",
+    expansion: "LexiconExpansion | None" = None,
+    tag_mode: str = "auto",
+    min_similarity: float | None = None,
+    over_fetch_factor: int = 1,
 ) -> list[dict[str, Any]]:
-    """pgvector ANN over rag_published_embeddings.embedding_vec (HNSW cosine)."""
-    params: dict[str, Any] = {"k": k}
+    """pgvector ANN over rag_published_embeddings.embedding_vec (HNSW cosine).
+
+    Honors the same ``tag_mode`` semantics as the BM25 arm so the
+    chosen jurisdiction filter applies symmetrically across both
+    search arms in hybrid retrieval.
+
+    ``min_similarity`` (0..1, post-filter on cosine similarity) drops
+    chunks below the threshold AFTER the SQL ORDER BY/LIMIT. Useful
+    when the corpus has a large boilerplate cluster that ties at one
+    similarity value: the rerank later may dramatically change scores,
+    so we only want to bring forward candidates that have a reasonable
+    initial similarity. Defaults to ``None`` (no filter).
+
+    ``over_fetch_factor`` multiplies ``k`` for the SQL LIMIT before
+    threshold filtering. With over_fetch_factor=8 and k=80 we ask
+    Postgres for 640 candidates, drop the boilerplate-tied ones below
+    the threshold, then keep up to k for downstream rerank. Cheap
+    insurance against HNSW tie-crowding.
+    """
+    sql_limit = max(1, k) * max(1, int(over_fetch_factor))
+    params: dict[str, Any] = {"k": sql_limit}
     filter_sql = _build_filter_clauses(filters, include_document_ids, params)
     # pgvector text form: '[f1,f2,...]'
     params["query_vec"] = "[" + ",".join(repr(float(x)) for x in query_embedding) + "]"
 
-    sql = text(f"""
-        SELECT {_BM25_COLS},
-            1 - (embedding_vec <=> CAST(:query_vec AS vector)) AS similarity
-        FROM rag_published_embeddings
-        WHERE embedding_vec IS NOT NULL
-          {filter_sql}
-        ORDER BY embedding_vec <=> CAST(:query_vec AS vector)
-        LIMIT :k
-    """)
+    # Build metadata-J / d-p filters from the lexicon expansion, mirroring
+    # the BM25 arm. Without this, vector search would surface AHCA-mention
+    # docs (e.g., Sunshine Provider Manual) for an "AHCA rules" query
+    # when the user explicitly wants AHCA-authored content.
+    tag_filter_strict = ""
+    tag_filter_relaxed = ""
+    tag_join_sql = ""
+    if expansion is not None and (tag_mode or "auto").lower() != "none":
+        def _strip_prefix(tag: str, prefix: str) -> str | None:
+            return tag[len(prefix):] if tag.startswith(prefix) else None
+        j_keys = [k for k in (_strip_prefix(t, "j:") for t in expansion.jurisdiction_tags) if k]
+        d_keys = [k for k in (_strip_prefix(t, "d:") for t in expansion.domain_tags) if k]
+        p_keys = [k for k in (_strip_prefix(t, "p:") for t in expansion.process_tags) if k]
+        idx = 0
+        # Strict — metadata-J on rag_published_embeddings inlined columns
+        strict_clauses: list[str] = []
+        for jk in j_keys:
+            if "." not in jk:
+                continue
+            cat, val = jk.split(".", 1)
+            val_human = val.replace("_", " ")
+            pname = f"_v_meta_{idx}"; idx += 1
+            if cat == "state":
+                params[pname] = val.upper()[:2]
+                strict_clauses.append(f"document_state = :{pname}")
+            elif cat == "program":
+                params[pname] = f"%{val_human}%"
+                strict_clauses.append(f"document_program ILIKE :{pname}")
+            elif cat in ("payor", "regulatory_authority"):
+                params[pname] = f"%{val_human}%"
+                strict_clauses.append(f"document_payer ILIKE :{pname}")
+        if strict_clauses:
+            tag_filter_strict = " AND (" + " OR ".join(strict_clauses) + ")"
+        # Relaxed — d/p body tags (require JOIN)
+        if d_keys or p_keys:
+            tag_join_sql = " LEFT JOIN document_tags dt ON dt.document_id = rag_published_embeddings.document_id "
+            relaxed_ors: list[str] = []
+            for k_ in d_keys:
+                pname = f"_v_dt_r_{idx}"; idx += 1
+                relaxed_ors.append(f"jsonb_exists(dt.d_tags, :{pname})")
+                params[pname] = k_
+            for k_ in p_keys:
+                pname = f"_v_pt_r_{idx}"; idx += 1
+                relaxed_ors.append(f"jsonb_exists(dt.p_tags, :{pname})")
+                params[pname] = k_
+            if relaxed_ors:
+                tag_filter_relaxed = " AND (" + " OR ".join(relaxed_ors) + ")"
+
+    tm = (tag_mode or "auto").lower().strip()
+    if tm == "none":
+        tag_filter_sql = ""
+        tag_filter_relaxed = ""
+    elif tm == "relaxed":
+        tag_filter_sql = tag_filter_relaxed
+        tag_filter_relaxed = ""    # disable retry
+    elif tm == "strict":
+        tag_filter_sql = tag_filter_strict
+        tag_filter_relaxed = ""
+    else:  # auto
+        tag_filter_sql = tag_filter_strict
+
+    def _build_vec_sql(tfilter: str) -> Any:
+        return text(f"""
+            SELECT {_BM25_COLS},
+                1 - (embedding_vec <=> CAST(:query_vec AS vector)) AS similarity
+            FROM rag_published_embeddings
+            {tag_join_sql}
+            WHERE embedding_vec IS NOT NULL
+              {filter_sql}
+              {tfilter}
+            ORDER BY embedding_vec <=> CAST(:query_vec AS vector)
+            LIMIT :k
+        """)
+
     try:
-        result = await db.execute(sql, params)
+        result = await db.execute(_build_vec_sql(tag_filter_sql), params)
+        rows_check = result.mappings().all()
+        # Auto fallback: if strict returned 0 and we have a relaxed
+        # fallback, retry with that filter.
+        if not rows_check and tag_filter_relaxed and tag_filter_relaxed != tag_filter_sql:
+            if search_id:
+                _log_stage(
+                    "vector_tag_filter_relaxed",
+                    search_id,
+                    note="strict returned 0; retrying with relaxed (d/p only)",
+                )
+            result = await db.execute(_build_vec_sql(tag_filter_relaxed), params)
+            rows_check = result.mappings().all()
+
+        class _R:
+            def __init__(self, rows): self._rows = rows
+            def mappings(self):
+                class _M:
+                    def __init__(self, r): self._r = r
+                    def all(self): return self._r
+                return _M(self._rows)
+        result = _R(rows_check)
     except Exception as exc:
         logger.error("corpus_search vector arm failed: %s", exc, exc_info=True)
         return []
 
     rows = result.mappings().all()
     out: list[dict[str, Any]] = []
+    n_below_threshold = 0
     for rank0, row in enumerate(rows):
-        c = _row_to_base_dict(row)
         cosine_sim = max(0.0, min(1.0, float(row["similarity"] or 0.0)))
+        if min_similarity is not None and cosine_sim < min_similarity:
+            n_below_threshold += 1
+            continue
+        c = _row_to_base_dict(row)
         c["similarity"] = cosine_sim
         c["match_score"] = cosine_sim
         c["_arm"] = "vector"
         out.append(c)
+        if len(out) >= k:
+            break
         _log_stage(
             "vector_arm",
             search_id,
@@ -761,7 +1292,15 @@ async def _vector_arm(
         )
 
     if search_id:
-        _log_stage("vector_arm_summary", search_id, hits=len(out))
+        _log_stage(
+            "vector_arm_summary",
+            search_id,
+            hits=len(out),
+            scanned=len(rows),
+            below_threshold=n_below_threshold,
+            threshold=min_similarity,
+            sql_limit=sql_limit,
+        )
     return out
 
 
@@ -874,27 +1413,137 @@ def _best_arm_sim(c: dict[str, Any]) -> float:
     return best
 
 
+# ---------------------------------------------------------------------------
+# Rerank haystack helpers — used by both tag_coverage and jpd signals
+# ---------------------------------------------------------------------------
+#
+# The reranker's body-only haystack threw away crucial doc-level context.
+# A chunk in ``FL_SunshineHealth_Caid_PAReq...`` discussing "H0019" in a
+# table doesn't repeat the words "Sunshine Health" or "prior
+# authorization" in its body — those concepts live in the doc title,
+# section header, and inherited tags. Without doc-level context the
+# reranker scored the chunk at 0.32 (and the floor dropped it to 0).
+#
+# Two enrichments fix this:
+#
+#   1. ``_body_haystack(c)``  — chunk body PLUS any pre-fetched neighbor
+#      paragraphs (``c["_neighbor_text"]``). The neighbor pass happens
+#      ONCE per corpus_search call, batched, before rerank. Neighbors
+#      give us the section header / table label / paragraph above and
+#      below — which is where the topical context lives.
+#
+#   2. ``_meta_haystack(c)``  — doc filename + display name + payer +
+#      state + section_path + chapter_path + summary. Captures all the
+#      doc-level metadata as a separate evidence type, used by the
+#      ``meta_boost`` signal in the formula.
+#
+# Both haystacks are normalised (lowercased + whitespace-collapsed) so
+# substring matching stays simple and case-insensitive.
+
+def _normalise_for_haystack(s: str | None) -> str:
+    if not s:
+        return ""
+    return " ".join(str(s).lower().split())
+
+
+def _body_haystack(c: dict[str, Any]) -> str:
+    """Body text + any pre-fetched neighbor paragraph bodies."""
+    parts: list[str] = [_normalise_for_haystack(c.get("text"))]
+    nbr = _normalise_for_haystack(c.get("_neighbor_text"))
+    if nbr:
+        parts.append(nbr)
+    return " | ".join(p for p in parts if p)
+
+
+def _meta_haystack(c: dict[str, Any]) -> str:
+    """Doc-level metadata that semantically belongs to this chunk
+    even when the body doesn't repeat it. Used by ``meta_boost``.
+
+    Filename gets a dual treatment: raw + an underscore-replaced
+    version, because filenames like ``FL_SunshineHealth_Caid_PAReq``
+    pack multiple words into a single token — splitting on
+    ``_/-`` lets ``"sunshine health"`` substring-match.
+
+    Inherited d/j/p tag leaves are also folded in (when
+    ``_attach_inherited_doc_tags`` ran upstream): a tag like
+    ``utilization_management.prior_authorization`` contributes its
+    leaf ``"prior authorization"`` to the haystack so a chunk
+    inherits the topical concepts assigned at ingest time.
+    """
+    parts: list[str] = []
+    for key in (
+        "document_name", "document_filename", "document_display_name",
+        "payer", "state", "section_path", "chapter_path", "summary",
+    ):
+        v = c.get(key)
+        if not v:
+            continue
+        parts.append(_normalise_for_haystack(v))
+        # Filename / paths often pack multi-word concepts into one
+        # token via separators. Add a separator-split version so
+        # substring lookups work.
+        if key in ("document_filename", "section_path", "chapter_path"):
+            split = _normalise_for_haystack(
+                str(v).replace("_", " ").replace("-", " ").replace("/", " ").replace(".", " ")
+            )
+            if split:
+                parts.append(split)
+    # Inherited document tags — leaf names with underscores expanded
+    # to spaces so substring matching works.
+    for tag_key in ("_doc_d_tags", "_doc_j_tags", "_doc_p_tags"):
+        for tag in (c.get(tag_key) or []):
+            # Leaf is the bit after the last "."; expand underscores.
+            leaf = str(tag).split(".")[-1].replace("_", " ").strip().lower()
+            if leaf:
+                parts.append(leaf)
+            # Also fold the FULL dotted path expanded — captures parent
+            # category words too (e.g. "utilization management" from
+            # "utilization_management.prior_authorization").
+            full = str(tag).replace(".", " ").replace("_", " ").strip().lower()
+            if full and full != leaf:
+                parts.append(full)
+    return " | ".join(p for p in parts if p)
+
+
 def _rerank(
     chunks: list[dict[str, Any]],
     search_id: str = "",
     query: str = "",
+    required_phrases: list[str] | None = None,
+    required_phrase_weights: list[float] | None = None,
+    required_phrase_tag_codes: list[str | None] | None = None,
 ) -> list[dict[str, Any]]:
     """Apply weighted signals and sort by rerank_score (desc).
 
-    Weights from reranker_v1.yaml (Phase 2B — full 80 % coverage):
-      score (0.30) + authority_level (0.15) + length (0.10) + jpd_tag_match (0.25) = 0.80
+    Weights (reranker_v1.2 — 2026-05-03 hayack-expansion):
+      sim (0.25) + authority (0.10) + length (0.05) + jpd (0.20)
+        + tag_coverage (0.40) + meta_boost (0.15)   = up to 1.15
 
-    We rescale to [0, 1] by dividing by 0.80 (MAX_WEIGHT) so confidence
-    thresholds remain interpretable.
+    Two changes vs v1.1:
 
-    The ``score`` signal uses ``_best_arm_sim`` which rescales the raw arm
-    scores (BM25 ts_rank or cosine similarity) rather than the compressed
-    RRF score, giving far better discrimination between candidates.
+    1. ``tag_coverage`` and ``jpd`` now run against an ENRICHED
+       body haystack — the chunk's body PLUS any pre-fetched
+       neighbor paragraphs (``c["_neighbor_text"]`` set by the
+       upstream sibling-fetch pass). This fixes the failure mode
+       where a chunk in a topically-tagged doc has a sparse body
+       (e.g. just a row in a code table) and the body-only
+       reranker scored it near zero even though its parent
+       document is exactly on-topic. The neighbor paragraphs
+       carry the section header / table label that gives the
+       chunk its semantic context.
 
-    The ``jpd_tag_match`` signal classifies the query into J/P/D intent
-    categories and scores each chunk by keyword overlap.  When the query has
-    no JPD intent the signal contributes 0; the other signals fill the gap and
-    MAX_WEIGHT falls back to 0.55 (Phase 1 behaviour).
+    2. New ``meta_boost`` signal — fraction of ``required_phrases``
+       found in the chunk's DOC-LEVEL metadata (filename,
+       display name, payer, state, section_path, chapter_path,
+       summary). This is a SEPARATE signal from ``tag_coverage``
+       so a chunk that lives in the right document but whose body
+       doesn't substantively talk about the topic still gets some
+       credit (instead of being silently dropped by the body-only
+       coverage floor).
+
+    When ``required_phrases`` is empty/None (e.g. literal-only
+    queries or PRECISION_DOMINANT cases), both ``tag_coverage`` and
+    ``meta_boost`` fall out of the mix.
     """
     if not chunks:
         return chunks
@@ -903,32 +1552,188 @@ def _rerank(
     query_cats = _classify_jpd(query) if query else {}
     has_jpd = bool(query_cats)
 
-    MAX_WEIGHT = 0.30 + 0.15 + 0.10 + (0.25 if has_jpd else 0.0)
+    has_tag_cov = bool(required_phrases)
+    required_lower = [p.lower() for p in (required_phrases or []) if p]
+    has_meta = has_tag_cov   # meta_boost only meaningful when phrases set
+
+    # Selectivity-weighted phrase coverage. The classifier already
+    # computed an IDF-style selectivity per tag (rarer / more
+    # discriminating tags get higher selectivity, e.g. payor names at
+    # ~0.93 vs broad domains at ~0.79). Pass-through here so a chunk
+    # that hits a rare term ("sunshine health") gets more credit than
+    # a chunk that hits a common term ("prior authorization") — fixes
+    # the failure mode where tangential AHCA quarterly reports outscore
+    # the actual Sunshine Provider Manual on a Sunshine PA query
+    # because both contain the common term but only one contains the
+    # rare one.
+    if (
+        required_phrase_weights
+        and len(required_phrase_weights) == len(required_lower)
+        and any(w > 0 for w in required_phrase_weights)
+    ):
+        phrase_weights = [max(0.0, float(w)) for w in required_phrase_weights]
+    else:
+        phrase_weights = [1.0] * len(required_lower)
+    total_weight = sum(phrase_weights) or 1.0
+
+    # Per-phrase tag codes (j:/d:/p: full codes) aligned by index. j-tags
+    # get BINARY doc-level credit: if the chunk's parent doc carries the
+    # j-tag (per ``_doc_j_tags`` attached upstream), the phrase counts
+    # as present even if the body/meta haystack doesn't substring-match
+    # the leaf word. This reflects how j-tags work — payor / state /
+    # jurisdiction is a yes/no domain membership for the doc, not a
+    # topical theme that has to be repeated in every paragraph. d-tags
+    # are softer (a doc MAY cover this topic); we keep substring matching
+    # for d/p so a chunk in a multi-topic doc only gets credit for the
+    # topics actually discussed in its body or section header.
+    if (
+        required_phrase_tag_codes
+        and len(required_phrase_tag_codes) == len(required_lower)
+    ):
+        phrase_tag_codes: list[str | None] = list(required_phrase_tag_codes)
+    else:
+        phrase_tag_codes = [None] * len(required_lower)
+
+    # Reranker v1.3 (2026-05-03): unified selectivity-weighted
+    # coverage. The earlier v1.2 split body and meta into two separate
+    # signals (tag_coverage 0.40 + meta_boost 0.15) which double-counted
+    # phrases hitting BOTH body and meta. With selectivity weights
+    # added on top this caused regressions (cmhc001 dropped from
+    # CORRECT to HONEST_ABSTAIN because the right chunk had the rare
+    # phrase only in meta, not in body, while a sibling chunk had the
+    # phrase in BOTH and outscored it). Now: a single weighted
+    # ``coverage`` signal where each phrase counts once, scored by
+    # selectivity, presence checked across body OR meta.
+    W_SIM = 0.25
+    W_AUTH = 0.10
+    W_LEN = 0.05
+    W_JPD = 0.20 if has_jpd else 0.0
+    W_COV = 0.55 if has_tag_cov else 0.0   # was tag_coverage 0.40 + meta_boost 0.15
+    MAX_WEIGHT = W_SIM + W_AUTH + W_LEN + W_JPD + W_COV
 
     for c in chunks:
         sim   = _best_arm_sim(c)
         auth  = _authority_score(c.get("authority_level"))
-        lsig  = _length_score(c.get("text") or "")
-        jpd, jpd_tags = _jpd_signal(query_cats, c.get("text") or "") if has_jpd else (0.0, [])
+        body  = (c.get("text") or "")
+        lsig  = _length_score(body)
 
-        raw   = 0.30 * sim + 0.15 * auth + 0.10 * lsig + 0.25 * jpd
+        # Build enriched haystacks once per chunk.
+        body_hay = _body_haystack(c)   # body + neighbor paragraphs
+        meta_hay = _meta_haystack(c) if has_meta else ""
+
+        # JPD signal now reads the enriched body haystack so chunks
+        # whose section header is in a sibling paragraph get credit.
+        jpd, jpd_tags = _jpd_signal(query_cats, body_hay) if has_jpd else (0.0, [])
+
+        # Unified weighted coverage — body OR meta counts as evidence
+        # for each phrase. Each phrase counts ONCE, weighted by its
+        # selectivity. No double-count when a phrase appears in both
+        # body and meta. This makes a chunk in a payer-tagged doc
+        # whose body doesn't repeat the payer name score equally with
+        # a chunk that DOES repeat the payer name — the doc filename /
+        # payer field already tells us who the chunk belongs to.
+        if has_tag_cov:
+            # Binary j-tag credit: a phrase whose tag_code is a j-code
+            # counts as present when the chunk's parent doc carries that
+            # j-code (e.g. j:payor.sunshine_health). Only when the doc
+            # ISN'T tagged do we fall back to substring matching against
+            # the body/meta haystack to see if the chunk's section at
+            # least belongs to that j-domain.
+            doc_j_tags = c.get("_doc_j_tags") or {}
+            # _doc_j_tags is a JSONB object keyed by code-without-prefix
+            # (e.g. {"payor.sunshine_health": {...}}). Treat dict-keys or
+            # list entries uniformly.
+            if isinstance(doc_j_tags, dict):
+                doc_j_codes = set(doc_j_tags.keys())
+            elif isinstance(doc_j_tags, (list, tuple, set)):
+                doc_j_codes = set(doc_j_tags)
+            else:
+                doc_j_codes = set()
+
+            body_present: list[str] = []
+            meta_present: list[str] = []
+            jtag_present: list[str] = []   # binary-credit hits, for telemetry
+            combined_present: set[str] = set()
+            for i, p in enumerate(required_lower):
+                code = phrase_tag_codes[i] if i < len(phrase_tag_codes) else None
+                # j-tag binary credit
+                if code and code.startswith("j:"):
+                    j_code_body = code.split(":", 1)[1]
+                    if j_code_body in doc_j_codes:
+                        jtag_present.append(p)
+                        combined_present.add(p)
+                        continue   # don't double-count via substring
+                # Substring fallback (body OR meta)
+                in_body = p in body_hay
+                in_meta = bool(meta_hay) and p in meta_hay
+                if in_body:
+                    body_present.append(p)
+                if in_meta:
+                    meta_present.append(p)
+                if in_body or in_meta:
+                    combined_present.add(p)
+            present = list(combined_present)
+            missing = [p for p in required_lower if p not in combined_present]
+            cov = sum(
+                phrase_weights[i] for i, p in enumerate(required_lower)
+                if p in combined_present
+            ) / total_weight
+            combined_present_set = combined_present
+        else:
+            cov = 0.0
+            present = []
+            missing = []
+            body_present = []
+            meta_present = []
+            jtag_present = []
+            combined_present_set = set()
+
+        # Legacy variables for the per-signal breakdown / floor (kept
+        # for telemetry). The floor uses the same combined coverage as
+        # the score now, so they're equal.
+        tag_cov = cov
+        meta_boost = (
+            sum(phrase_weights[i] for i, p in enumerate(required_lower)
+                if p in meta_present) / total_weight
+            if has_tag_cov and meta_present else 0.0
+        )
+        combined_cov = cov
+        combined_missing = missing
+        # Mutate the chunk so the downstream floor (in _assemble) uses
+        # the union, not body-only.
+        c["_combined_coverage"] = combined_cov
+        c["_combined_missing"] = combined_missing
+
+        raw   = (W_SIM * sim
+                 + W_AUTH * auth
+                 + W_LEN * lsig
+                 + W_JPD * jpd
+                 + W_COV * cov)
         score = raw / MAX_WEIGHT if MAX_WEIGHT > 0 else raw
         c["rerank_score"] = score
         c["_jpd_tags"] = jpd_tags
         # Stash per-signal breakdown for trace / telemetry
         c["_rerank_signals"] = {
-            "sim_raw":            round(sim, 4),
-            "sim_weighted":       round(0.30 * sim, 4),
-            "authority_raw":      round(auth, 4),
-            "authority_weighted": round(0.15 * auth, 4),
-            "length_raw":         round(lsig, 4),
-            "length_weighted":    round(0.10 * lsig, 4),
-            "jpd_raw":            round(jpd, 4),
-            "jpd_weighted":       round(0.25 * jpd, 4),
-            "jpd_tags":           jpd_tags,
-            "total_raw":          round(raw, 4),
-            "rerank_score":       round(score, 4),
-            "max_weight":         MAX_WEIGHT,
+            "sim_raw":              round(sim, 4),
+            "sim_weighted":         round(W_SIM * sim, 4),
+            "authority_raw":        round(auth, 4),
+            "authority_weighted":   round(W_AUTH * auth, 4),
+            "length_raw":           round(lsig, 4),
+            "length_weighted":      round(W_LEN * lsig, 4),
+            "jpd_raw":              round(jpd, 4),
+            "jpd_weighted":         round(W_JPD * jpd, 4),
+            "jpd_tags":             jpd_tags,
+            "neighbor_chars":       len(c.get("_neighbor_text") or ""),
+            "coverage_raw":         round(cov, 4),
+            "coverage_weighted":    round(W_COV * cov, 4),
+            "coverage_present":     present,
+            "coverage_missing":     missing,
+            "coverage_body_only":   body_present,
+            "coverage_meta_only":   [p for p in meta_present if p not in body_present],
+            "coverage_jtag_binary": jtag_present,
+            "total_raw":            round(raw, 4),
+            "rerank_score":         round(score, 4),
+            "max_weight":           round(MAX_WEIGHT, 4),
         }
         if search_id:
             _log_stage(
@@ -945,6 +1750,64 @@ def _rerank(
                 raw=raw,
                 rerank_score=score,
                 authority_level=c.get("authority_level"),
+            )
+
+    # ── Tag-coverage hard floor (Fix #5 — 2026-05-02) ─────────────────
+    # When the query has REQUIRED phrases, drop any chunk whose body
+    # text doesn't contain ALL of them. The soft tag_coverage signal
+    # earlier already penalised partial-coverage chunks via the score,
+    # but they could still appear when nothing better exists. Better to
+    # return nothing than off-topic. This makes the strategy abstain
+    # cleanly so the router falls to a fallback.
+    pre_coverage_count = len(chunks)
+    dropped_coverage_ids: list[str] = []
+    if has_tag_cov:
+        chunks_after_cov: list[dict[str, Any]] = []
+        for c in chunks:
+            # Use COMBINED coverage (body OR meta) for the floor.
+            # A chunk in the right document whose body is sparse
+            # (e.g. just a row in a code table) shouldn't be dropped
+            # as long as the doc-level metadata covers what's missing
+            # from the body. Body-only ``tag_coverage_raw`` and
+            # meta-only ``meta_boost_raw`` still feed the SCORE
+            # separately as different evidence types.
+            cov = c.get("_combined_coverage")
+            if cov is None:
+                cov = (c.get("_rerank_signals") or {}).get("tag_coverage_raw", 1.0)
+            # Promoted topic-block neighbors (e.g. table rows whose body
+            # is just numbers) are exempt from the coverage floor — they
+            # exist to give the synthesis LLM the full surrounding
+            # context for a high-coverage seed. Their parent seed has
+            # full coverage; dropping them throws away the answer table.
+            is_promoted_neighbor = (
+                c.get("_promoted_from_seed") is not None
+                or "bm25_inherited" in (c.get("retrieval_arms") or [])
+            )
+            if cov < _TAG_COVERAGE_FLOOR and not is_promoted_neighbor:
+                dropped_coverage_ids.append(c["id"])
+                if search_id:
+                    _log_stage(
+                        "rerank_coverage_drop",
+                        search_id,
+                        chunk_id=c["id"],
+                        doc=c.get("document_name", "")[:50],
+                        combined_coverage=cov,
+                        body_coverage=(c.get("_rerank_signals") or {}).get("tag_coverage_raw"),
+                        meta_boost=(c.get("_rerank_signals") or {}).get("meta_boost_raw"),
+                        floor=_TAG_COVERAGE_FLOOR,
+                        missing=c.get("_combined_missing"),
+                    )
+                continue
+            chunks_after_cov.append(c)
+        chunks = chunks_after_cov
+        if search_id:
+            _log_stage(
+                "rerank_coverage_summary",
+                search_id,
+                pre=pre_coverage_count,
+                post=len(chunks),
+                dropped=len(dropped_coverage_ids),
+                floor=_TAG_COVERAGE_FLOOR,
             )
 
     # Per-category decay: drop chunks where rerank_score < 0.6 × best in category
@@ -1104,17 +1967,66 @@ def _assemble(
         _confidence_label(c.get("rerank_score", 0)), min_label
     )
 
+    # Content-sha dedupe (Fix #3 — 2026-05-02). Two filename copies of
+    # the same doc (e.g. ``Provider_Manual.pdf`` and ``Sunshine
+    # Provider Manual``) produce identical chunk text but distinct
+    # document_ids. The page-key dedupe above wouldn't catch them. We
+    # also dedupe by the first 200 chars of body text as a fallback
+    # for chunks where content_sha isn't populated.
+    seen_content: set[str] = set()
+
+    def _content_key(c: dict[str, Any]) -> str:
+        sha = (c.get("content_sha") or "").strip()
+        if sha:
+            return f"sha:{sha}"
+        # Fallback — first 200 normalised chars.
+        body = (c.get("text") or "").lower()
+        body = " ".join(body.split())[:200]
+        return f"body:{body}"
+
     selected: list[dict[str, Any]] = []
+    promoted_extra: list[dict[str, Any]] = []
+    PROMOTED_EXTRA_CAP = 10  # max additional promoted-neighbor chunks beyond k
     for c in ordered:
-        if len(selected) >= k:
-            break
+        # Promoted topic-block neighbors (e.g. table-row paragraphs that
+        # share a page with their seed) are exempt from BOTH the
+        # page-dedup AND the k-slot cap. Their whole purpose is to fill
+        # in the surrounding context that lives in OTHER paragraphs of
+        # the same page (cmhc001: the 180/365/90 table sits in a
+        # neighbor of the BM25 winner; without these exemptions
+        # synthesis never sees the table). Content-dedup still applies.
+        is_promoted = (
+            c.get("_promoted_from_seed") is not None
+            or "bm25_inherited" in (c.get("retrieval_arms") or [])
+        )
         if not _THRESHOLD_PASS(c):
             continue
+        ckey = _content_key(c)
+        if ckey in seen_content:
+            continue
         page_key = (c["document_id"], c.get("page_number"))
+
+        if is_promoted:
+            # Promoted: doesn't count toward k, exempt from page-dedup,
+            # capped separately.
+            if len(promoted_extra) >= PROMOTED_EXTRA_CAP:
+                continue
+            seen_content.add(ckey)
+            promoted_extra.append(c)
+            continue
+
+        if len(selected) >= k:
+            # Once primary k is full, only promoted can still be added.
+            continue
         if page_key in seen_pages:
             continue
         seen_pages.add(page_key)
+        seen_content.add(ckey)
         selected.append(c)
+    # Append promoted chunks AFTER the primary k so they show up as
+    # additional context in the response without displacing the seed
+    # citations.
+    selected.extend(promoted_extra)
 
     # ── Compute assembly metadata ─────────────────────────────────────────
     tier_counts: dict[str, int] = {
@@ -1161,6 +2073,623 @@ def _assemble(
         )
 
     return selected, assembly_meta
+
+
+# ---------------------------------------------------------------------------
+# Neighborhood expansion — port of mobius-chat's doc_assembly.assemble_with_neighbors
+# ---------------------------------------------------------------------------
+#
+# Why: a winning chunk often contains the lead-in to a fact ("see the table
+# below…") but the actual values live in the next chunk. Without neighbor
+# expansion the LLM gets the preamble and hallucinates the answer. With
+# expansion we pull ±N paragraphs (within ±M pages) from the same document
+# as supporting context. Marked ``is_neighbor=True`` so downstream can
+# render them differently from primary hits.
+#
+# This is one batched UNNEST query for ALL seeds, not N round-trips. With
+# Cloud SQL latency the per-call overhead is the dominant cost so batching
+# matters.
+
+# Caps to keep the citation list bounded even if the corpus has very long
+# adjacent chunks or many seeds in a single document.
+#
+# Per-doc cap was bumped from 8 → 20 after observing single-doc queries
+# (e.g. all hits from "Sunshine Provider Manual") where the cap was
+# absorbed entirely by seeds, leaving no room for neighbors. Twenty
+# chunks per doc still fits comfortably in a typical LLM prompt and
+# gives the neighborhood enough oxygen to surface adjacent tables /
+# subsections.
+_NEIGHBOR_TOTAL_CAP   = 50    # absolute ceiling on chunks after expansion
+_NEIGHBOR_PER_DOC_CAP = 20    # max chunks kept from any one document
+
+# Big sentinel so chunks without a page_number get effectively no page
+# constraint (still bounded by paragraph_index window).
+_NEIGHBOR_NO_PAGE_HI = 10_000_000
+
+
+async def _fetch_sibling_chunks_batch(
+    db: AsyncSession,
+    seeds: list[dict[str, Any]],
+    *,
+    paragraph_window: int = 2,
+    page_window: int = 1,
+) -> list[dict[str, Any]]:
+    """Fetch ±paragraph_window paragraphs (within ±page_window pages) from
+    the same document for each seed. Single round-trip via UNNEST. Excludes
+    the seeds themselves.
+
+    Returns a list of chunk-shaped dicts with ``is_neighbor=True`` set so
+    the caller can rank/cap them distinctly from primary hits.
+    """
+    if not seeds:
+        return []
+
+    doc_ids: list[str] = []
+    para_lo: list[int] = []
+    para_hi: list[int] = []
+    page_lo: list[int] = []
+    page_hi: list[int] = []
+    excludes: list[str] = []
+    for s in seeds:
+        doc_id = s.get("document_id")
+        if not doc_id:
+            continue
+        pi = s.get("paragraph_index")
+        pi_int = int(pi) if pi is not None else 0
+        doc_ids.append(str(doc_id))
+        para_lo.append(max(0, pi_int - paragraph_window))
+        para_hi.append(pi_int + paragraph_window)
+        page = s.get("page_number")
+        if isinstance(page, int):
+            page_lo.append(max(0, page - page_window))
+            page_hi.append(page + page_window)
+        else:
+            page_lo.append(0)
+            page_hi.append(_NEIGHBOR_NO_PAGE_HI)
+        cid = s.get("id")
+        excludes.append(str(cid) if cid is not None else "")
+
+    if not doc_ids:
+        return []
+
+    # Note: ``:param::text[]`` cast syntax on bound parameters confuses
+    # asyncpg's parser (it sees the colon as a placeholder boundary).
+    # Use ``CAST(:param AS text[])`` instead — semantically identical
+    # but SQLAlchemy handles the bind-rewrite correctly.
+    sql = (
+        "SELECT DISTINCT ON (m.id) "
+        "       m.id::text                         AS id, "
+        "       m.document_id::text                AS document_id, "
+        "       m.text                             AS text, "
+        "       m.page_number                      AS page_number, "
+        "       m.paragraph_index                  AS paragraph_index, "
+        "       m.section_path                     AS section_path, "
+        "       m.chapter_path                     AS chapter_path, "
+        "       m.summary                          AS summary, "
+        "       m.content_sha                      AS content_sha, "
+        "       m.document_display_name            AS document_display_name, "
+        "       m.document_filename                AS document_filename, "
+        "       m.document_authority_level         AS document_authority_level, "
+        "       m.document_payer                   AS document_payer, "
+        "       m.document_state                   AS document_state "
+        "FROM rag_published_embeddings m "
+        "JOIN ( "
+        "   SELECT UNNEST(CAST(:doc_ids  AS text[])) AS doc_id, "
+        "          UNNEST(CAST(:para_lo  AS int[]))  AS lo, "
+        "          UNNEST(CAST(:para_hi  AS int[]))  AS hi, "
+        "          UNNEST(CAST(:page_lo  AS int[]))  AS plo, "
+        "          UNNEST(CAST(:page_hi  AS int[]))  AS phi, "
+        "          UNNEST(CAST(:excludes AS text[])) AS exclude_id "
+        ") r "
+        "  ON m.document_id::text     = r.doc_id "
+        " AND m.paragraph_index       BETWEEN r.lo  AND r.hi "
+        " AND m.page_number           BETWEEN r.plo AND r.phi "
+        " AND m.id::text              <> COALESCE(NULLIF(r.exclude_id, ''), "
+        "                                          '00000000-0000-0000-0000-000000000000') "
+        "ORDER BY m.id, m.page_number, m.paragraph_index "
+        "LIMIT 500"
+    )
+
+    try:
+        result = await db.execute(text(sql), {
+            "doc_ids":  doc_ids,
+            "para_lo":  para_lo,
+            "para_hi":  para_hi,
+            "page_lo":  page_lo,
+            "page_hi":  page_hi,
+            "excludes": excludes,
+        })
+        rows = result.mappings().all()
+    except Exception as exc:
+        logger.warning("neighbor fetch failed: %s", exc)
+        return []
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        out.append({
+            "id":                 row["id"],
+            "document_id":        row["document_id"],
+            "text":               row.get("text") or "",
+            "page_number":        row.get("page_number"),
+            "paragraph_index":    row.get("paragraph_index"),
+            "section_path":       _none_if_empty(row.get("section_path")),
+            "chapter_path":       _none_if_empty(row.get("chapter_path")),
+            "summary":            _none_if_empty(row.get("summary")),
+            "content_sha":        _none_if_empty(row.get("content_sha")),
+            "document_name":     (row.get("document_display_name")
+                                  or row.get("document_filename")
+                                  or "document"),
+            "source_type":        "hierarchical",
+            "similarity":         0.0,    # neighbors don't have an arm score
+            # Inherit a fraction of seed's score later; default 0 here.
+            "rerank_score":       0.0,
+            "confidence_label":   "low",
+            "retrieval_arms":     ["neighbor"],
+            "authority_level":    _none_if_empty(row.get("document_authority_level")),
+            "payer":              _none_if_empty(row.get("document_payer")),
+            "state":              _none_if_empty(row.get("document_state")),
+            "jpd_tags":           [],
+            "is_neighbor":        True,
+        })
+    return out
+
+
+def _apply_neighbor_caps(
+    seeds: list[dict[str, Any]],
+    neighbors: list[dict[str, Any]],
+    *,
+    total_cap: int = _NEIGHBOR_TOTAL_CAP,
+    per_doc_cap: int = _NEIGHBOR_PER_DOC_CAP,
+) -> list[dict[str, Any]]:
+    """Combine seeds and neighbors with caps. Seeds always come first
+    (preserving their order); neighbors are appended sorted by
+    inherited score desc, capped per-document and overall.
+    """
+    if not seeds and not neighbors:
+        return []
+
+    def _score(c: dict[str, Any]) -> float:
+        try:
+            return float(c.get("rerank_score") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    nbrs = sorted(neighbors, key=_score, reverse=True)
+    per_doc: dict[str, int] = {}
+    out: list[dict[str, Any]] = []
+    # Seed pass — preserve original order, count toward per-doc cap.
+    for c in seeds:
+        if len(out) >= total_cap:
+            break
+        doc_key = str(c.get("document_id") or c.get("document_name") or "_unknown")
+        per_doc[doc_key] = per_doc.get(doc_key, 0) + 1
+        out.append(c)
+    # Neighbor pass.
+    for c in nbrs:
+        if len(out) >= total_cap:
+            break
+        doc_key = str(c.get("document_id") or c.get("document_name") or "_unknown")
+        if per_doc.get(doc_key, 0) >= per_doc_cap:
+            continue
+        per_doc[doc_key] = per_doc.get(doc_key, 0) + 1
+        out.append(c)
+    return out
+
+
+async def _attach_inherited_doc_tags(
+    db: AsyncSession,
+    candidates: list[dict[str, Any]],
+) -> None:
+    """One batched lookup of d/j/p tags from ``document_tags`` for every
+    candidate's parent doc, attached as ``_doc_d_tags`` / ``_doc_j_tags``
+    / ``_doc_p_tags`` lists on each candidate dict.
+
+    Why: the reranker's ``meta_boost`` signal needs to know what
+    topical tags the parent document carries, so a chunk in (e.g.)
+    a ``d:utilization_management.prior_authorization``-tagged doc can
+    get credit for the "prior authorization" concept even when its
+    body doesn't repeat the words. Without this query each chunk's
+    meta_haystack only sees filename + payer + section_path — fine for
+    the doc title but blind to the topical d-tags assigned at ingest.
+    """
+    if not candidates:
+        return
+    doc_ids = list({str(c.get("document_id") or "") for c in candidates if c.get("document_id")})
+    if not doc_ids:
+        return
+    try:
+        rows = await db.execute(
+            text(
+                "SELECT document_id::text AS doc_id, d_tags, j_tags, p_tags "
+                "FROM document_tags "
+                "WHERE document_id::text = ANY(CAST(:ids AS text[]))"
+            ),
+            {"ids": doc_ids},
+        )
+        tag_rows = rows.mappings().all()
+    except Exception as exc:
+        logger.debug("inherited tag fetch failed: %s", exc)
+        return
+
+    by_doc: dict[str, dict[str, Any]] = {}
+    for r in tag_rows:
+        by_doc[r["doc_id"]] = {
+            "d_tags": _coerce_jsonb_to_list(r.get("d_tags")),
+            "j_tags": _coerce_jsonb_to_list(r.get("j_tags")),
+            "p_tags": _coerce_jsonb_to_list(r.get("p_tags")),
+        }
+    for c in candidates:
+        info = by_doc.get(str(c.get("document_id") or ""))
+        if info:
+            c["_doc_d_tags"] = info["d_tags"]
+            c["_doc_j_tags"] = info["j_tags"]
+            c["_doc_p_tags"] = info["p_tags"]
+
+
+def _coerce_jsonb_to_list(v: Any) -> list[str]:
+    """document_tags.{d,j,p}_tags is JSONB. May be a list of strings,
+    or an object whose keys are tag codes (legacy shape). Normalise
+    to a flat list of dotted code strings."""
+    if v is None:
+        return []
+    if isinstance(v, list):
+        return [str(x) for x in v if x]
+    if isinstance(v, dict):
+        return [str(k) for k in v.keys() if k]
+    return []
+
+
+async def _enrich_candidates_with_neighbor_text(
+    db: AsyncSession,
+    candidates: list[dict[str, Any]],
+    *,
+    paragraph_window: int = 1,
+    page_window: int = 1,
+    max_neighbor_chars: int = 1500,
+    search_id: str = "",
+) -> None:
+    """Mutate each candidate dict in-place by attaching a
+    ``_neighbor_text`` string built from the bodies of its ±N
+    paragraph siblings (within ±M pages of the same document).
+
+    This runs BEFORE rerank so the body-haystack signals
+    (``tag_coverage``, ``jpd``) see the chunk's surrounding
+    context — section headers, table labels, the paragraph above
+    that explains what the chunk's data row is about. Without this
+    a chunk with a sparse body (e.g. just a row of HCPCS codes)
+    looks "off-topic" to the reranker even when its parent
+    document is exactly on-topic.
+
+    One batched DB call for ALL candidates. Cap each candidate's
+    neighbor text at ``max_neighbor_chars`` so the rerank stays
+    cheap (substring scans).
+    """
+    if not candidates or paragraph_window <= 0:
+        return
+
+    raw = await _fetch_sibling_chunks_batch(
+        db, candidates,
+        paragraph_window=paragraph_window,
+        page_window=page_window,
+    )
+    if not raw:
+        if search_id:
+            _log_stage(
+                "rerank_neighbor_enrich",
+                search_id,
+                candidates=len(candidates),
+                fetched=0,
+                kept=0,
+            )
+        return
+
+    # Group neighbors by (document_id, page) → list of bodies, keyed
+    # so we can find each candidate's siblings quickly.
+    by_doc: dict[str, list[dict[str, Any]]] = {}
+    for n in raw:
+        by_doc.setdefault(str(n.get("document_id") or ""), []).append(n)
+
+    enriched_count = 0
+    for c in candidates:
+        doc_id = str(c.get("document_id") or "")
+        page = c.get("page_number")
+        para = c.get("paragraph_index")
+        if not doc_id or page is None or para is None:
+            continue
+        siblings = by_doc.get(doc_id) or []
+        # Pick siblings within the requested windows. We don't dedupe
+        # against the candidate itself (sibling fetch already excluded
+        # the seed by id) but we still skip exact-text duplicates so
+        # form-letter pages that share text don't pad the haystack.
+        seen_text: set[str] = set()
+        bodies: list[str] = []
+        for n in siblings:
+            np = n.get("page_number")
+            ni = n.get("paragraph_index")
+            if np is None or ni is None:
+                continue
+            if abs(int(ni) - int(para)) > paragraph_window:
+                continue
+            if abs(int(np) - int(page)) > page_window:
+                continue
+            text = (n.get("text") or "").strip()
+            if not text:
+                continue
+            key = " ".join(text.lower().split())[:200]
+            if key in seen_text:
+                continue
+            seen_text.add(key)
+            bodies.append(text)
+            if sum(len(b) for b in bodies) >= max_neighbor_chars:
+                break
+        if bodies:
+            joined = " || ".join(bodies)[:max_neighbor_chars]
+            c["_neighbor_text"] = joined
+            enriched_count += 1
+
+    if search_id:
+        _log_stage(
+            "rerank_neighbor_enrich",
+            search_id,
+            candidates=len(candidates),
+            fetched=len(raw),
+            enriched=enriched_count,
+        )
+
+
+async def _promote_high_sim_neighbors_to_candidates(
+    db: AsyncSession,
+    candidates: list[dict[str, Any]],
+    *,
+    sim_threshold: float = 0.7,
+    paragraph_window: int = 3,
+    page_window: int = 0,
+    max_per_seed: int = 5,
+    inherit_decay: float = 0.7,   # unused now (kept for signature compat)
+    search_id: str = "",
+) -> int:
+    """Merge same-page same-topic-block sibling text INTO each high-sim
+    seed's ``text`` field, so the synthesis LLM sees one rich passage
+    instead of fragments scattered across separate citations.
+
+    Why this exists: BM25 retrieves chunks whose body lexically matches
+    the query. But the answer often lives in a sibling paragraph
+    WITHIN THE SAME TOPIC BLOCK whose body has none of the query's
+    words — the canonical case is a table where the column headers
+    (matching the query) are in one chunk and the answer numbers (180
+    days, 365 days) are in a sibling chunk.
+
+    Earlier iterations of this function added the siblings as separate
+    rerank candidates. That worked at the retrieval layer (the table
+    chunk reached top-K) but FAILED at synthesis: the LLM saw the
+    table as a separate ``[citation]`` from its intro and didn't
+    piece them together. Per user feedback ("these are context files,
+    should be treated as a single k"), we now MERGE the topic-block
+    siblings' text into the seed's text field with a ``[…context…]``
+    separator, in document order. One citation, one k slot, one rich
+    passage that lets the LLM follow the table from intro to footer.
+
+    cmhc001 (timely filing): seed p.121 pi.4 ("Electronic Claim
+    Submission") gets pi.1 ("Providers must submit claims in a timely
+    manner…"), pi.2 ("Initial Claim*"), pi.3 (180/365/90 table)
+    appended in order. Synthesis sees one chunk that flows: intro →
+    column headers → row labels → numbers → footnote.
+
+    Returns the number of seeds whose text was extended.
+    """
+    if not candidates:
+        return 0
+    # Pick seeds whose own BM25 score is high enough to trust as a topic
+    # anchor. Merging context for low-sim seeds wastes LLM tokens.
+    seeds: list[dict[str, Any]] = []
+    for c in candidates:
+        sc = (c.get("arm_scores") or {}).get("bm25", 0.0)
+        if not sc:
+            sc = float(c.get("similarity") or 0.0)
+        if sc >= sim_threshold:
+            seeds.append(c)
+    if not seeds:
+        return 0
+
+    raw = await _fetch_sibling_chunks_batch(
+        db, seeds,
+        paragraph_window=paragraph_window,
+        page_window=page_window,
+    )
+    if not raw:
+        return 0
+
+    # Group siblings by (doc_id, page_number); we only merge chunks that
+    # share the seed's page (page_window=0 default).
+    # Dedup against:
+    #   1. Same paragraph_index seen multiple times (multi-ingest corpus)
+    #   2. Page-header chunks (just the page number / SH_xxxx / Manual title
+    #      — pure noise that bloats the prompt)
+    import re as _re
+    _HEADER_PAT = _re.compile(r"^\s*\d{1,4}\s*(SH_\d+)?\s*(?:©\s*\d{4})?", _re.IGNORECASE)
+    def _is_page_header(text: str) -> bool:
+        t = (text or "").strip()
+        if len(t) < 80 and ("Provider Manual" in t or "SH_" in t):
+            return True
+        return False
+
+    by_doc_page: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    seen_pi: dict[tuple[str, int], set[int]] = {}
+    for n in raw:
+        ndoc = str(n.get("document_id") or "")
+        npage = n.get("page_number")
+        npi   = n.get("paragraph_index")
+        if not ndoc or npage is None or npi is None:
+            continue
+        key = (ndoc, int(npage))
+        npi_int = int(npi)
+        # Dedup by paragraph_index — multi-ingest corpus has the same
+        # (doc, page, pi) repeated 2-3× with different chunk ids.
+        seen = seen_pi.setdefault(key, set())
+        if npi_int in seen:
+            continue
+        if _is_page_header(n.get("text") or ""):
+            continue
+        seen.add(npi_int)
+        by_doc_page.setdefault(key, []).append(n)
+
+    extended = 0
+    for s in seeds:
+        sdoc = str(s.get("document_id") or "")
+        spage = s.get("page_number")
+        spara = s.get("paragraph_index") or 0
+        if not sdoc or spage is None:
+            continue
+        siblings = by_doc_page.get((sdoc, int(spage))) or []
+        if not siblings:
+            continue
+        # Sort siblings by paragraph_index — preserve document reading order.
+        siblings = sorted(siblings, key=lambda n: int(n.get("paragraph_index") or 0))
+        # Pick up to max_per_seed siblings within paragraph_window of seed.
+        picked: list[dict[str, Any]] = []
+        for n in siblings:
+            npi = int(n.get("paragraph_index") or 0)
+            if abs(npi - spara) > paragraph_window:
+                continue
+            ntext = (n.get("text") or "").strip()
+            if not ntext:
+                continue
+            picked.append(n)
+            if len(picked) >= max_per_seed:
+                break
+        if not picked:
+            continue
+
+        # Build the merged text in document order: prepend siblings whose
+        # paragraph_index < seed.paragraph_index, append those after.
+        before = [p for p in picked if int(p.get("paragraph_index") or 0) < spara]
+        after  = [p for p in picked if int(p.get("paragraph_index") or 0) > spara]
+        seed_text = (s.get("text") or "").strip()
+        merged_parts: list[str] = []
+        for p in before:
+            merged_parts.append((p.get("text") or "").strip())
+        merged_parts.append(seed_text)
+        for p in after:
+            merged_parts.append((p.get("text") or "").strip())
+        # Drop empties and join with a visible separator so the LLM can see
+        # this is one block but composed of contiguous paragraphs.
+        merged_text = "\n\n".join(p for p in merged_parts if p)
+        s["text"] = merged_text
+        s["_topic_block_merged"] = {
+            "n_siblings": len(picked),
+            "before": len(before),
+            "after":  len(after),
+        }
+        extended += 1
+
+    if search_id:
+        _log_stage(
+            "promote_neighbors",
+            search_id,
+            seeds=len(seeds),
+            siblings_fetched=len(raw),
+            extended=extended,
+            sim_threshold=sim_threshold,
+            mode="merge_into_seed_text",
+        )
+    return extended
+
+
+async def _expand_with_neighbors(
+    db: AsyncSession,
+    seeds: list[dict[str, Any]],
+    *,
+    paragraph_window: int = 2,
+    page_window: int = 1,
+    search_id: str = "",
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Fetch siblings, dedupe vs seeds, inherit a fractional score from the
+    nearest seed in the same doc, apply caps. Returns (chunks, meta).
+
+    Returns the original seeds passed in if expansion is disabled by
+    callers (zero windows) or the DB call fails.
+    """
+    if not seeds or paragraph_window <= 0:
+        return seeds, {"requested": False, "fetched": 0, "kept": 0}
+
+    raw = await _fetch_sibling_chunks_batch(
+        db, seeds,
+        paragraph_window=paragraph_window,
+        page_window=page_window,
+    )
+
+    # Dedupe vs seeds AND content-wise. Two failure modes to fight:
+    #   1. The same chunk id appears in seeds (rare; SQL ``exclude_id``
+    #      should already prevent this but be defensive).
+    #   2. The corpus has multiple ingests of the same document, each
+    #      with distinct chunk ids but identical content_sha / body
+    #      text. Without content-level dedup the LLM sees the same
+    #      paragraph 3-5 times.
+    seed_ids = {str(s.get("id")) for s in seeds if s.get("id")}
+
+    seen_content: set[str] = set()
+    # Pre-seed with seed content so neighbors don't duplicate seed bodies.
+    for s in seeds:
+        sha = (s.get("content_sha") or "").strip()
+        if sha:
+            seen_content.add(f"sha:{sha}")
+        else:
+            body = " ".join((s.get("text") or "").lower().split())[:200]
+            if body:
+                seen_content.add(f"body:{body}")
+
+    fresh: list[dict[str, Any]] = []
+    for n in raw:
+        if str(n.get("id")) in seed_ids:
+            continue
+        sha = (n.get("content_sha") or "").strip()
+        if sha:
+            ckey = f"sha:{sha}"
+        else:
+            body = " ".join((n.get("text") or "").lower().split())[:200]
+            ckey = f"body:{body}"
+        if not ckey or ckey == "body:":
+            continue
+        if ckey in seen_content:
+            continue
+        seen_content.add(ckey)
+        fresh.append(n)
+
+    # Inherit a fractional score from the closest seed in the SAME document.
+    # We use 0.5 × seed.rerank_score to keep neighbors below their seeds at
+    # rerank-sort time — they're context, not primary citations.
+    seed_score_by_doc: dict[str, float] = {}
+    for s in seeds:
+        doc = str(s.get("document_id") or "")
+        sc = float(s.get("rerank_score") or 0.0)
+        if doc:
+            seed_score_by_doc[doc] = max(seed_score_by_doc.get(doc, 0.0), sc)
+    for n in fresh:
+        doc = str(n.get("document_id") or "")
+        n["rerank_score"] = 0.5 * seed_score_by_doc.get(doc, 0.0)
+        n["confidence_label"] = "low"
+
+    combined = _apply_neighbor_caps(seeds, fresh)
+
+    if search_id:
+        _log_stage(
+            "neighbor_expand",
+            search_id,
+            paragraph_window=paragraph_window,
+            page_window=page_window,
+            seeds=len(seeds),
+            fetched=len(raw),
+            after_dedupe=len(fresh),
+            combined=len(combined),
+        )
+
+    return combined, {
+        "requested":     True,
+        "fetched":       len(raw),
+        "kept":          len(combined) - len(seeds),
+        "para_window":   paragraph_window,
+        "page_window":   page_window,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1330,6 +2859,7 @@ async def corpus_search(
                 db, request.query, k * 2,
                 request.filters, request.include_document_ids,
                 search_id=search_id,
+                tag_mode=request.tag_mode,
             )
         )
         # Embed runs in foreground while BM25 is in flight.
@@ -1341,11 +2871,24 @@ async def corpus_search(
         bm25_ms = (time.monotonic() - tb) * 1000 - embed_ms  # net DB time
 
         if query_embedding:
+            # Reuse the lexicon expansion from BM25 so vector arm applies
+            # the same metadata-J filter (no second lexicon call).
+            from app.services.corpus_search_lexicon import LexiconExpansion as _LE
+            _exp_for_vec = _LE(
+                matched_codes=bm25_expansion.get("matched_codes") or [],
+                expansion_phrases=bm25_expansion.get("expansion_phrases") or [],
+                domain_tags=bm25_expansion.get("domain_tags") or [],
+                jurisdiction_tags=bm25_expansion.get("jurisdiction_tags") or [],
+                process_tags=bm25_expansion.get("process_tags") or [],
+                log=[],
+            )
             tv = time.monotonic()
             vec_chunks = await _vector_arm(
                 db, query_embedding, k * 2,
                 request.filters, request.include_document_ids,
                 search_id=search_id,
+                expansion=_exp_for_vec,
+                tag_mode=request.tag_mode,
             )
             vec_ms = (time.monotonic() - tv) * 1000
 
@@ -1355,6 +2898,7 @@ async def corpus_search(
             db, request.query, k * 2,
             request.filters, request.include_document_ids,
             search_id=search_id,
+            tag_mode=request.tag_mode,
         )
         bm25_ms = (time.monotonic() - tb) * 1000
 
@@ -1363,11 +2907,36 @@ async def corpus_search(
             request.query, search_id
         )
         if query_embedding:
+            # Recall mode: still classify the query via lexicon so we
+            # can apply the metadata-J filter to the vector arm.
+            from app.services.corpus_search_lexicon import (
+                expand_query_via_lexicon as _expand,
+            )
+            try:
+                _exp_for_vec = await _expand(db, request.query)
+            except Exception:
+                _exp_for_vec = None
             tv = time.monotonic()
+            # Recall mode: instead of a flat k * N candidate count, fetch
+            # MORE candidates from SQL (over_fetch_factor=8) and post-
+            # filter by a similarity threshold. Many corpora contain
+            # large clusters of duplicate-text chunks (multi-page form
+            # PDFs with repeating headers) that all tie at one specific
+            # similarity score and crowd the HNSW result list. With a
+            # threshold, those tied boilerplate chunks are dropped if
+            # they're below the floor, and the higher-similarity unique
+            # content underneath the cluster gets reached. The rerank
+            # below may dramatically shift scores, so we want to bring
+            # forward EVERYTHING that has a reasonable initial sim, not
+            # just the first k that happens to come out of HNSW.
             vec_chunks = await _vector_arm(
                 db, query_embedding, k * 2,
                 request.filters, request.include_document_ids,
                 search_id=search_id,
+                expansion=_exp_for_vec,
+                tag_mode=request.tag_mode,
+                min_similarity=request.min_similarity,
+                over_fetch_factor=8,
             )
             vec_ms = (time.monotonic() - tv) * 1000
 
@@ -1391,8 +2960,90 @@ async def corpus_search(
         _log_stage("fusion_bypass", search_id, reason="recall→vector_only",
                    candidates=len(candidates))
 
+    # ── 3b. Defensive content dedup ───────────────────────────────────────
+    # Multi-page form-letter PDFs (DSH/LIP quarterly reports etc.) put
+    # the same agency-header text on every page. The chunker stores
+    # each one separately, so we end up with hundreds of identical-text
+    # chunks that share an embedding (Vertex returns the same vector
+    # for the same input). At query time these all tie at the same
+    # similarity score, crowd the HNSW result list, and push the
+    # actually-relevant higher-similarity content chunks off the top-N.
+    #
+    # NOTE: ``content_sha`` is NOT a hash of the chunk body — it's a
+    # per-chunk identifier (different value for every chunk even when
+    # the text is identical). So dedup MUST be done on the actual text.
+    # We hash a normalised version of the body so case / whitespace
+    # variants collapse together. Empty bodies are kept (degenerate
+    # case; let rerank decide).
+    pre_dedup = len(candidates)
+    if candidates:
+        seen_keys: set[str] = set()
+        deduped: list[dict[str, Any]] = []
+        for c in candidates:
+            body = " ".join((c.get("text") or "").lower().split())
+            if not body:
+                deduped.append(c)
+                continue
+            # Use first 400 chars of the normalised body as the dedup
+            # key. Long enough to distinguish real content variants;
+            # short enough that minor end-of-chunk differences (page
+            # numbers, footers) don't break dedup of header chunks.
+            key = body[:400]
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            deduped.append(c)
+        candidates = deduped
+    if pre_dedup != len(candidates):
+        _log_stage(
+            "content_dedup",
+            search_id,
+            pre=pre_dedup,
+            post=len(candidates),
+            dropped=pre_dedup - len(candidates),
+        )
+
+    # ── 3c. Pre-rerank enrichment ─────────────────────────────────────
+    # Two batched lookups before rerank:
+    #   1. Sibling paragraphs (±1) → body-haystack expansion so
+    #      tag_coverage / jpd see the chunk's surrounding context
+    #      (section header, table label, paragraph above/below).
+    #   2. Inherited d/j/p tags from document_tags → meta_haystack
+    #      expansion so a chunk in a topically-tagged doc gets credit
+    #      for those concepts even if its body doesn't repeat them.
+    if request.required_phrases:
+        await _enrich_candidates_with_neighbor_text(
+            db, candidates,
+            paragraph_window=1,
+            page_window=1,
+            search_id=search_id,
+        )
+        await _attach_inherited_doc_tags(db, candidates)
+        # Promote topic-block neighbors of high-sim seeds to first-class
+        # rerank candidates with inherited BM25 sim. Fixes the "table
+        # answer is in a sibling chunk that BM25 missed" failure mode
+        # (e.g. cmhc001 timely-filing 180-day table). Only triggers for
+        # seeds with sim ≥ 0.7 to avoid polluting the candidate set
+        # with neighbors of weak BM25 hits.
+        await _promote_high_sim_neighbors_to_candidates(
+            db, candidates,
+            sim_threshold=0.7,
+            paragraph_window=3,
+            page_window=0,    # same page only — keeps the topic block tight
+            max_per_seed=5,
+            inherit_decay=0.7,
+            search_id=search_id,
+        )
+
     # ── 4. Rerank ─────────────────────────────────────────────────────────
-    reranked = _rerank(candidates, search_id=search_id, query=request.query)
+    reranked = _rerank(
+        candidates,
+        search_id=search_id,
+        query=request.query,
+        required_phrases=request.required_phrases,
+        required_phrase_weights=request.required_phrase_weights,
+        required_phrase_tag_codes=request.required_phrase_tag_codes,
+    )
     rerank_ms = (time.monotonic() - tr) * 1000
 
     # ── 5. Assemble — canonical-ratio-aware slot filling ─────────────────
@@ -1410,6 +3061,27 @@ async def corpus_search(
         min_label        = min_label,
         search_id        = search_id,
     )
+
+    # ── 5b. Neighborhood expansion ────────────────────────────────────────
+    # Pull ±N paragraphs from the same document for each assembled hit so
+    # the LLM sees the surrounding context (the table after "see below…",
+    # the next paragraph that completes the answer, etc.). This is the
+    # ported sibling-fetch logic from mobius-chat/doc_assembly. Set
+    # ``neighbor_paragraph_window=0`` on the request to disable.
+    if (
+        request.neighbor_paragraph_window
+        and request.neighbor_paragraph_window > 0
+        and assembled
+    ):
+        assembled, neighbor_meta = await _expand_with_neighbors(
+            db, assembled,
+            paragraph_window=request.neighbor_paragraph_window,
+            page_window=max(0, int(request.neighbor_page_window)),
+            search_id=search_id,
+        )
+        assembly_meta["neighbor_expansion"] = neighbor_meta
+    else:
+        assembly_meta["neighbor_expansion"] = {"requested": False}
 
     # ── 6. Build output + scoring trace ──────────────────────────────────
     chunks_out: list[CorpusChunk] = []
@@ -1435,6 +3107,10 @@ async def corpus_search(
             payer=c.get("payer"),
             state=c.get("state"),
             jpd_tags=c.get("_jpd_tags") or [],
+            section_path=c.get("section_path"),
+            chapter_path=c.get("chapter_path"),
+            summary=c.get("summary"),
+            is_neighbor=bool(c.get("is_neighbor")),
         )
         chunks_out.append(chunk)
 

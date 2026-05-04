@@ -1,0 +1,212 @@
+# Eval query bank — labeled queries used by ``python -m eval.run``.
+#
+# Each entry has:
+#   id              — short unique identifier (q001, q002, ...)
+#   query           — the natural-language query to send to the agent
+#   caller_mode     — optional; defaults to chat.default if unset
+#   expected:
+#     strategy            — which strategy (a-e) we expect to be picked
+#     query_class         — optional, expected qclass label
+#     answer_keywords     — list; LLM judge uses these as grounding (any-of)
+#     must_cite_doc       — optional, list of doc display_name substrings
+#     must_cite_url_contains — optional, list of URL substrings (for d)
+#     fail_fast_reason    — only for expected.strategy == 'e'
+#   notes           — for the analyst, not consumed by harness
+#
+# Convention: expand abbreviations (PA, BH, DME) to their full forms in
+# the query because the lexicon doesn't yet expand acronyms; this is a
+# known parser limitation we'll fix later. Until then, expanded queries
+# avoid false fail-fast.
+
+queries:
+# ─────────────────────────────────────────────────────────────────────
+# GROUP A — Tight Sunshine prior authorization / behavioral health
+# ─────────────────────────────────────────────────────────────────────
+- id: q001
+  query: "Sunshine Health prior authorization behavioral health"
+  expected:
+    strategy: a
+    query_class: tight_pool
+    must_cite_doc: ["Sunshine Provider Manual"]
+    answer_keywords: ["prior authorization", "behavioral health", "authorization", "provider"]
+  notes: "tight cooc — should land paragraph tier"
+
+- id: q002
+  query: "Sunshine Health prior authorization for behavioral health providers"
+  expected:
+    strategy: a
+    query_class: tight_pool
+    must_cite_doc: ["Sunshine Provider Manual"]
+    answer_keywords: ["prior authorization", "behavioral health", "providers", "request", "submit"]
+
+- id: q003
+  query: "providers in Sunshine Health"
+  expected:
+    strategy: e
+    fail_fast_reason: no_domain_match
+  notes: "vague — no D-tag → fail-fast"
+
+# ─────────────────────────────────────────────────────────────────────
+# GROUP B — Literal-anchor / policy-ID
+# ─────────────────────────────────────────────────────────────────────
+- id: q004
+  query: "What does FL.UM.51 say?"
+  expected:
+    strategy: a
+    query_class: literal_anchor
+    answer_keywords: ["UM", "utilization", "policy", "criteria"]
+
+- id: q005
+  query: "Show me CP.MP.98 and FL.UM.51 policies"
+  expected:
+    strategy: a
+    query_class: literal_anchor
+    answer_keywords: ["CP.MP.98", "FL.UM.51", "policy"]
+
+- id: q006
+  query: "H0019 fee schedule rate"
+  expected:
+    strategy: a
+    query_class: literal_anchor
+    answer_keywords: ["H0019", "fee", "rate", "reimbursement", "behavioral", "residential"]
+  notes: "HCPCS H0019 is a behavioral health residential code"
+
+# ─────────────────────────────────────────────────────────────────────
+# GROUP C — AHCA exploratory / cross-payer
+# ─────────────────────────────────────────────────────────────────────
+- id: q007
+  query: "What does AHCA say about behavioral health"
+  expected:
+    strategy: b
+    query_class: exploratory
+    answer_keywords: ["AHCA", "behavioral health", "Florida", "Medicaid"]
+  notes: "exploratory phrasing"
+
+- id: q008
+  query: "What is AHCA"
+  expected:
+    strategy: e
+    fail_fast_reason: no_domain_match
+  notes: "vague meta-question"
+
+- id: q009
+  query: "appeals process across payers"
+  expected:
+    strategy: b
+    query_class: exploratory
+    answer_keywords: ["appeals", "grievance", "process", "reconsideration", "dispute"]
+
+# ─────────────────────────────────────────────────────────────────────
+# GROUP D — Mixed / classic chat questions
+# ─────────────────────────────────────────────────────────────────────
+- id: q010
+  query: "tell me about behavioral health coverage"
+  expected:
+    strategy: b
+    query_class: exploratory
+    answer_keywords: ["behavioral health", "covered", "services", "treatment"]
+  notes: "exploratory — phrasing trigger"
+
+- id: q011
+  query: "durable medical equipment prior authorization"
+  expected:
+    strategy: a
+    query_class: tight_pool
+    answer_keywords: ["durable medical equipment", "DME", "prior authorization", "approval"]
+
+- id: q012
+  query: "Centene Sunshine Health Wellcare prior authorization"
+  expected:
+    strategy: a
+    query_class: tight_pool
+    must_cite_doc: ["Sunshine Provider Manual"]
+    answer_keywords: ["prior authorization", "Sunshine", "Centene", "Wellcare"]
+
+# ─────────────────────────────────────────────────────────────────────
+# GROUP E — Coverage-gap probes (out of corpus / fail-fast)
+# ─────────────────────────────────────────────────────────────────────
+- id: q013
+  query: "What is the Sunshine Health prior authorization day count for behavioral health"
+  expected:
+    strategy: a
+    query_class: tight_pool
+    must_cite_doc: ["Sunshine Provider Manual"]
+    answer_keywords: ["days", "calendar", "review", "prior authorization", "decision"]
+  notes: "specific data point — corpus has it"
+
+- id: q014
+  query: "What's new in Centene credentialing for 2026"
+  expected:
+    strategy: e
+    fail_fast_reason: no_domain_match
+  notes: "no D-tag for credentialing in lexicon → fail-fast"
+
+# ─────────────────────────────────────────────────────────────────────
+# GROUP F — Real CMHC coordinator-style questions
+# ─────────────────────────────────────────────────────────────────────
+- id: q015
+  query: "How do I get credentialed with Centene"
+  expected:
+    strategy: e
+    fail_fast_reason: no_domain_match
+  notes: "credentialing not in d-tag lexicon"
+
+- id: q016
+  query: "What's the timely filing deadline for AHCA"
+  expected:
+    strategy: a
+    query_class: tight_pool
+    answer_keywords: ["365", "365 days", "year", "filing", "deadline", "submit"]
+
+- id: q017
+  query: "Does Sunshine cover ABA therapy"
+  expected:
+    strategy: a
+    query_class: tight_pool
+    must_cite_doc: ["Sunshine Provider Manual"]
+    answer_keywords: ["ABA", "applied behavior analysis", "covered", "therapy", "behavior"]
+
+# ─────────────────────────────────────────────────────────────────────
+# GROUP G — Out-of-corpus probes (Strategy d expected after self-assessment)
+# ─────────────────────────────────────────────────────────────────────
+- id: q018
+  query: "prior authorization for cardiomyopathy genetic testing"
+  expected:
+    strategy: d
+    answer_keywords: ["genetic testing", "medical necessity", "cardiomyopathy", "molecular"]
+    must_cite_url_contains: ["uhc", "evicore", "cms", "tricare", "mayo"]
+  notes: "internal corpus has 11 docs co-occurring; (d) edges via recall"
+
+- id: q019
+  query: "what are CMS guidelines for prior authorization in 2025"
+  expected:
+    strategy: d
+    must_cite_url_contains: ["cms.gov", "medicare", "medicaid"]
+    answer_keywords: ["CMS", "prior authorization", "2025", "guidelines", "rule"]
+  notes: "external authority — LLM/web should win"
+
+- id: q020
+  query: "prior authorization for hyperbaric oxygen wound therapy"
+  expected:
+    strategy: d
+    answer_keywords: ["hyperbaric", "oxygen", "wound", "therapy", "approval"]
+  notes: "tight pool but tokens scattered → router prefers d"
+
+- id: q021
+  query: "prior authorization for fluffernutter sandwiches"
+  expected:
+    strategy: d
+    answer_keywords: ["not", "no", "covered", "absurd", "sandwich"]
+  notes: "missing token — withdraw a; LLM should say 'not a real medical thing'"
+
+# ─────────────────────────────────────────────────────────────────────
+# GROUP H — Strategy (c) expected (LLM-validate when we have the doc)
+# ─────────────────────────────────────────────────────────────────────
+- id: q022
+  query: "What does the Sunshine Provider Manual say about claims submission"
+  caller_mode: chat.thinking
+  expected:
+    strategy: c
+    must_cite_doc: ["Sunshine Provider Manual"]
+    answer_keywords: ["claims", "submission", "electronic", "EDI", "paper", "365"]
+  notes: "explicit doc reference + thinking mode → LLM-validate is right"

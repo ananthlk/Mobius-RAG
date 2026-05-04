@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import re as _re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -189,6 +191,77 @@ async def _load_lexicon_snapshot(db: AsyncSession) -> list[dict[str, Any]]:
         return _cache_payload
 
 
+# ---------------------------------------------------------------------------
+# Precision-filtered expansion (experimental, env-gated)
+# ---------------------------------------------------------------------------
+#
+# When ``LEXICON_PRECISION_CSV`` is set to a path of the diagnostic CSV
+# produced by ``scripts/compute_lexicon_phrase_precision.py``, the
+# expansion will FILTER out phrases marked DROP_NOISY / DROP_RARE /
+# DROP_DUPE. This is the prototype for the eventual ``query_rewrite``
+# JSONB column. Before committing to a schema change we use this path
+# to verify the hypothesis on real queries:
+#
+#   * does the BM25 tsquery shrink?
+#   * does latency drop on the slow queries (Q1, Q5, Q6, Q7, Q16)?
+#   * do recall (n_chunks) and precision (top-doc relevance) hold?
+#
+# When the env var is unset, behaviour is unchanged — every phrase from
+# every matched entry contributes to expansion_phrases as before.
+
+import csv as _csv
+
+_APPROVED_PHRASES_CACHE: dict[str, set[str]] | None = None
+_APPROVED_PHRASES_CSV_PATH: str | None = None
+
+
+def _load_approved_phrases_from_csv() -> dict[str, set[str]]:
+    """Load the precision CSV once and cache. Returns {tag_code: {approved_phrases}}.
+
+    Each CSV row has columns: tag_code, phrase, src, df, df_tagged,
+    precision, verdict, is_canonical. We retain phrases whose verdict
+    is KEEP or KEEP_CANONICAL.
+    """
+    global _APPROVED_PHRASES_CACHE, _APPROVED_PHRASES_CSV_PATH
+
+    csv_path = os.environ.get("LEXICON_PRECISION_CSV", "").strip()
+    if not csv_path:
+        return {}
+    if (
+        _APPROVED_PHRASES_CACHE is not None
+        and _APPROVED_PHRASES_CSV_PATH == csv_path
+    ):
+        return _APPROVED_PHRASES_CACHE
+
+    approved: dict[str, set[str]] = {}
+    try:
+        with open(csv_path, newline="") as f:
+            reader = _csv.DictReader(f)
+            for row in reader:
+                if row.get("verdict") in ("KEEP", "KEEP_CANONICAL"):
+                    code = (row.get("tag_code") or "").strip()
+                    phrase = (row.get("phrase") or "").strip().lower()
+                    if code and phrase:
+                        approved.setdefault(code, set()).add(phrase)
+        _APPROVED_PHRASES_CACHE = approved
+        _APPROVED_PHRASES_CSV_PATH = csv_path
+        logger.info(
+            "lexicon: loaded precision-approved phrases for %d tag codes "
+            "from %s",
+            len(approved), csv_path,
+        )
+    except Exception as exc:
+        logger.warning(
+            "lexicon: failed to load precision CSV %r — running with "
+            "unfiltered expansion: %s",
+            csv_path, exc,
+        )
+        _APPROVED_PHRASES_CACHE = {}
+        _APPROVED_PHRASES_CSV_PATH = csv_path
+
+    return _APPROVED_PHRASES_CACHE
+
+
 def invalidate_cache() -> None:
     """Force the next call to reload the lexicon from DB.
 
@@ -199,31 +272,66 @@ def invalidate_cache() -> None:
     _cache_loaded_at = 0.0
 
 
+async def list_active_d_tag_codes(db: AsyncSession) -> list[str]:
+    """Return sorted active d-tag codes (e.g., ``utilization_management.prior_authorization``).
+
+    Used by the Fail Fast gate to populate ``options`` when refusing
+    with response_mode=reframe — gives the user the actual scope list
+    rather than a hand-maintained string.
+    """
+    snap = await _load_lexicon_snapshot(db)
+    return sorted({e["code"] for e in snap if e["kind"] == "d"})
+
+
 # ---------------------------------------------------------------------------
 # Match logic
 # ---------------------------------------------------------------------------
 
 def _match_entry(query_lower: str, phrases: list[str]) -> str | None:
-    """Return the first phrase in *phrases* that appears as a substring of
-    *query_lower* (which is already lowercase).  None if no match.
+    """Return the first phrase in *phrases* that appears in *query_lower*
+    with word-aligned boundaries (already lowercase).  None if no match.
 
-    We require word-ish boundaries for very short phrases (≤ 3 chars) so
-    "pa" doesn't match "appeal".  Longer phrases use plain substring
-    match, which is sufficient for multi-word strong_phrases.
+    Word-boundary matching is essential. Plain substring matching causes
+    false positives like "oral health" matching inside
+    "behavi**oral health** providers" — observed 2026-04-30 firing the
+    dental classification on every behavioral-health query.
+
+    We normalize both the query and each phrase by replacing any run of
+    non-alphanumerics with a single space, then check space-padded
+    containment. This handles punctuation around phrases too:
+
+      "Notice of Meeting (PCTAP)"  → "notice of meeting pctap"
+      phrase "pctap"               → matches " pctap " ✓
+
+      "behavioral health providers" → "behavioral health providers"
+      phrase "oral health"          → " oral health " ∉ "...behavioral health..." ✓
     """
+    # Pre-normalize the query once
+    q_norm = _re.sub(r"[^a-z0-9]+", " ", query_lower).strip()
+    padded_q = f" {q_norm} "
     for p in phrases:
         if not p:
             continue
-        if len(p) <= 3:
-            # Boundary-aware match to avoid spurious hits inside longer words.
-            # We test against space-padded query so "dme" matches "DME prior"
-            # but not "edmer".
-            padded = f" {query_lower} "
-            if f" {p} " in padded:
-                return p
-        else:
-            if p in query_lower:
-                return p
+        p_norm = _re.sub(r"[^a-z0-9]+", " ", p.lower()).strip()
+        if not p_norm:
+            continue
+        # Bigram-or-longer requirement for non-acronym phrases.
+        # Single-word phrases like "provider", "rules", "general"
+        # are too generic and over-classify queries (observed
+        # 2026-04-30: "providers" → 5 different matches, exploding
+        # the lexicon expansion to 22 phrases of which most were
+        # unrelated to the query). Allow short ALL-CAPS-style codes
+        # like "HCPCS", "NPI", "DME" through (4 chars or less,
+        # source phrase was uppercase / acronym-like) since those
+        # ARE meaningful single tokens.
+        word_count = len(p_norm.split())
+        if word_count == 1:
+            # Allow short acronyms / codes (≤4 chars); reject longer
+            # single words that are too generic.
+            if len(p_norm) > 4:
+                continue
+        if f" {p_norm} " in padded_q:
+            return p
     return None
 
 
@@ -250,7 +358,13 @@ async def expand_query_via_lexicon(
     if not snapshot:
         return expansion
 
+    # Optional precision-filtered expansion. Empty dict = behaviour unchanged.
+    approved_per_tag = _load_approved_phrases_from_csv()
+    use_precision_filter = bool(approved_per_tag)
+
     phrase_seen: set[str] = set()
+    n_phrases_before_filter = 0
+    n_phrases_after_filter = 0
 
     for entry in snapshot:
         if len(expansion.matched_codes) >= _MAX_ENTRIES_PER_QUERY:
@@ -269,11 +383,28 @@ async def expand_query_via_lexicon(
         elif kind == "p":
             expansion.process_tags.append(full_code)
 
-        for p in entry["phrases"]:
+        # Precision filter: keep only phrases approved for this tag (or
+        # all phrases when filter disabled / tag missing from CSV).
+        if use_precision_filter and full_code in approved_per_tag:
+            allowed = approved_per_tag[full_code]
+            entry_phrases = [p for p in entry["phrases"] if p and p.lower() in allowed]
+        else:
+            entry_phrases = entry["phrases"]
+
+        n_phrases_before_filter += len(entry["phrases"])
+        n_phrases_after_filter += len(entry_phrases)
+
+        for p in entry_phrases:
             if p and p not in phrase_seen:
                 phrase_seen.add(p)
                 expansion.expansion_phrases.append(p)
 
         expansion.log.append(f"matched '{hit}' → {full_code}")
+
+    if use_precision_filter and n_phrases_before_filter > 0:
+        expansion.log.append(
+            f"precision_filter: {n_phrases_before_filter} → "
+            f"{n_phrases_after_filter} phrases"
+        )
 
     return expansion

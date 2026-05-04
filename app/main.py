@@ -68,6 +68,9 @@ app.include_router(curator_router)
 from app.routers.skills import router as skills_router  # noqa: E402
 app.include_router(skills_router)
 
+from app.routers.eval import router as eval_router  # noqa: E402
+app.include_router(eval_router)
+
 
 @app.on_event("startup")
 async def run_startup_migrations():
@@ -328,6 +331,20 @@ async def _run_startup_migrations_background():
                 await migrate_policy_line_offsets()
             except Exception as migrate_err:
                 logger.warning(f"Startup migration (policy_lines offsets) skipped: {migrate_err}")
+            try:
+                # 2026-04-30: failure tracking on chunking_jobs to break
+                # the bloat-trapped crash-loop pattern.
+                from app.migrations.add_chunking_failure_tracking import migrate as migrate_fail_tracking
+                await migrate_fail_tracking()
+            except Exception as migrate_err:
+                logger.warning(f"Startup migration (chunking failure tracking) skipped: {migrate_err}")
+            # 2026-04-30 NOTE: policy_paragraphs dedupe is now done
+            # via /admin/reset_bloated_docs (hard reset + re-chunk),
+            # not via a startup migration. The DISTINCT ON migration
+            # held locks for >30 minutes when there were heavy dupes,
+            # AND ran concurrently across multiple Cloud Run revisions
+            # creating deadlock storms. Keeping startup-time migrations
+            # to schema changes only; data cleanup is on-demand admin.
             try:
                 from app.migrations.add_policy_lexicon_candidate_occurrences import migrate as migrate_policy_lexcand_occ
                 await migrate_policy_lexcand_occ()
@@ -701,6 +718,1339 @@ async def cleanup_expired_documents(
         "document_ids": document_ids,
         "failed": failed,
     }
+
+
+@app.get("/admin/repository_audit")
+async def repository_audit(
+    sample: int = Query(20, ge=0, le=200, description="Sample rows of orphans to return for inspection"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Cross-database integrity audit between rag and chat.
+
+    Three sources of truth:
+      1. ``documents``                       — rag-side, ingestion log
+      2. ``rag_published_embeddings``        — rag-side, what's actually
+                                                queryable from the rag corpus
+      3. ``mobius_chat.published_rag_metadata`` — chat-side, what chat sees
+
+    Drift is normal in absolute terms (publish events are not transactional
+    across DBs). It becomes a problem when chat shows docs the rag corpus
+    doesn't have (chat orphan — wrong answers will cite a phantom source) or
+    rag has docs chat can't see (chat blindspot — user can't query them).
+
+    Returns counts plus filename samples so we can name names instead of
+    guessing.
+    """
+    from sqlalchemy import text as _text
+    out: dict = {}
+
+    # rag-side counts
+    rag_rows = (await db.execute(_text("""
+        SELECT
+          (SELECT COUNT(*) FROM documents) AS docs,
+          (SELECT COUNT(DISTINCT document_id) FROM rag_published_embeddings) AS rag_published
+    """))).first()
+    out["rag_documents_total"] = int(rag_rows.docs or 0)
+    out["rag_published_distinct_docs"] = int(rag_rows.rag_published or 0)
+
+    # rag-side: distinct document_ids that ARE in rag_published_embeddings
+    rag_pub_ids_rows = (await db.execute(_text(
+        "SELECT DISTINCT document_id::text AS d FROM rag_published_embeddings"
+    ))).fetchall()
+    rag_pub_ids = {r.d for r in rag_pub_ids_rows}
+
+    # chat-side: query mobius_chat.published_rag_metadata
+    import os as _os
+    import psycopg2 as _pg
+    chat_dsn = _os.environ.get("CHAT_DATABASE_URL", "")
+    if chat_dsn.startswith("postgresql+psycopg2://"):
+        chat_dsn = "postgresql://" + chat_dsn[len("postgresql+psycopg2://"):]
+    if chat_dsn.startswith("postgresql+asyncpg://"):
+        chat_dsn = "postgresql://" + chat_dsn[len("postgresql+asyncpg://"):]
+    if not chat_dsn:
+        return {**out, "chat_db": "CHAT_DATABASE_URL unset"}
+
+    chat_pub_ids: set[str] = set()
+    chat_id_to_filename: dict[str, str] = {}
+    try:
+        conn = _pg.connect(chat_dsn, connect_timeout=15)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT DISTINCT document_id::text, document_filename FROM published_rag_metadata"
+                )
+                for did, fn in cur.fetchall():
+                    chat_pub_ids.add(did)
+                    chat_id_to_filename[did] = fn or ""
+        finally:
+            conn.close()
+    except Exception as exc:
+        return {**out, "chat_db_error": str(exc)[:200]}
+
+    out["chat_published_distinct_docs"] = len(chat_pub_ids)
+
+    chat_only = chat_pub_ids - rag_pub_ids        # ⚠ chat shows, rag doesn't have
+    rag_only = rag_pub_ids - chat_pub_ids         # ⚠ rag has, chat can't see
+    in_both = chat_pub_ids & rag_pub_ids
+
+    out["in_both"] = len(in_both)
+    out["chat_orphans_count"] = len(chat_only)
+    out["rag_blindspots_count"] = len(rag_only)
+
+    # Get filenames for samples
+    if sample > 0:
+        # chat orphans: filename comes from chat-side dict
+        chat_orphan_sample = sorted(list(chat_only))[:sample]
+        out["chat_orphans_sample"] = [
+            {"document_id": did, "filename": chat_id_to_filename.get(did, "")}
+            for did in chat_orphan_sample
+        ]
+        # rag blindspots: pull filename from rag's documents table
+        rag_only_list = sorted(list(rag_only))[:sample]
+        if rag_only_list:
+            rows = (await db.execute(
+                _text("SELECT id::text AS i, filename, display_name FROM documents WHERE id::text = ANY(:ids)"),
+                {"ids": rag_only_list},
+            )).fetchall()
+            out["rag_blindspots_sample"] = [
+                {"document_id": r.i, "filename": r.filename, "display_name": r.display_name}
+                for r in rows
+            ]
+        else:
+            out["rag_blindspots_sample"] = []
+
+    return out
+
+
+@app.post("/admin/block_old_pending")
+async def block_old_pending(
+    min_year: int = Query(2024, ge=2000, le=2030, description="Cut-off year — block docs older than this"),
+    dry_run: bool = Query(True, description="When true, return per-year counts only"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Block docs whose detected year is older than ``min_year`` from
+    chunking before they enter the pipeline.
+
+    Year detection precedence (highest → lowest confidence):
+      1. ``documents.effective_date`` — payer-set, most reliable
+      2. 4-digit year in filename / display_name (e.g. "2015 Press
+         Releases", "FY-2023-DPMS", "Mar25_Ch11_MedPAC")
+      3. None detected → leave alone (no false positives)
+
+    For docs with NO detectable year we leave them in pending —
+    they may be evergreen policy docs (FL.UM.51, CP.MP.71) where
+    the year doesn't appear in the title.
+
+    Reversible: ``status='pending'`` → ``'blocked'`` with
+    ``failure_reason='outdated:<year>'``. Operator can un-block
+    via ``UPDATE chunking_jobs SET status='pending' WHERE
+    failure_reason LIKE 'outdated:%'``.
+    """
+    from sqlalchemy import text as _text
+
+    # Detection: prefer effective_date (most reliable). Fall back to
+    # the largest 4-digit year found in display_name or filename
+    # (regex: ``20\d{2}`` to avoid matching pre-2000 page-number
+    # noise like ``page 1955``). Match the largest year wins so
+    # filenames like "FY-2023-Coverage-Summary-2024-update" are
+    # treated as 2024.
+    base_select = f"""
+        SELECT cj.id::text AS job_id,
+               d.id::text AS doc_id,
+               COALESCE(d.display_name, d.filename, '') AS name,
+               d.effective_date,
+               (
+                  SELECT MAX(m[1]::int) FROM
+                  regexp_matches(
+                      COALESCE(d.display_name, d.filename, ''),
+                      '\\m(20\\d{{2}})\\M', 'g'
+                  ) AS m
+               ) AS filename_year
+        FROM chunking_jobs cj
+        JOIN documents d ON d.id = cj.document_id
+        WHERE cj.status = 'pending'
+    """
+    rows = (await db.execute(_text(base_select))).fetchall()
+
+    bucket: dict[int | str, list[str]] = {}
+    to_block: list[tuple[str, int]] = []  # (job_id, year)
+    for r in rows:
+        # Decide which year to use
+        eff = r.effective_date
+        eff_year = None
+        if eff is not None:
+            try:
+                eff_year = int(str(eff)[:4])
+            except Exception:
+                eff_year = None
+        fn_year = int(r.filename_year) if r.filename_year is not None else None
+        # Effective date wins if present
+        chosen = eff_year if eff_year is not None else fn_year
+        if chosen is None:
+            bucket.setdefault("no_year_detected", []).append(r.job_id)
+            continue
+        bucket.setdefault(chosen, []).append(r.job_id)
+        if chosen < min_year:
+            to_block.append((r.job_id, chosen))
+
+    plan = {
+        "min_year": min_year,
+        "candidates": len(rows),
+        "would_block": len(to_block) if dry_run else None,
+        "blocked": None,
+        "year_distribution": {
+            str(k): len(v) for k, v in sorted(
+                bucket.items(),
+                key=lambda kv: (0, kv[0]) if isinstance(kv[0], int) else (1, 0),
+            )
+        },
+        "sample_blocks": [],
+    }
+
+    # Show a sample of doc names that WOULD be blocked
+    if to_block:
+        sample_ids = [j for j, _ in to_block[:8]]
+        sample_rows = (await db.execute(_text("""
+            SELECT id::text AS job_id,
+                   (SELECT COALESCE(display_name, filename, '') FROM documents WHERE id = cj.document_id) AS name
+            FROM chunking_jobs cj
+            WHERE id::text = ANY(:ids)
+        """), {"ids": sample_ids})).fetchall()
+        plan["sample_blocks"] = [
+            {"job_id": s.job_id, "name": (s.name or "")[:80]}
+            for s in sample_rows
+        ]
+
+    if dry_run or not to_block:
+        return plan
+
+    # Commit blocks
+    blocked = 0
+    for job_id, year in to_block:
+        try:
+            await db.execute(_text("""
+                UPDATE chunking_jobs
+                SET status = 'blocked',
+                    failure_reason = :reason,
+                    error_message = :msg
+                WHERE id::text = :id AND status = 'pending'
+            """), {
+                "id": job_id,
+                "reason": f"outdated_{year}",
+                "msg": f"outdated: detected year {year} < min_year={min_year}",
+            })
+            blocked += 1
+        except Exception:
+            pass
+    await db.commit()
+    plan["blocked"] = blocked
+    return plan
+
+
+@app.post("/admin/block_junk_pending")
+async def block_junk_pending(
+    dry_run: bool = Query(True, description="When true, return per-pattern counts only"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Block junk-pattern docs from chunking BEFORE they enter the pipeline.
+
+    Targets ``chunking_jobs`` rows whose ``status='pending'`` and whose
+    document filename/display_name matches an admin/news/navigation
+    pattern that has no retrieval value. Marks them
+    ``status='blocked'`` with ``failure_reason='junk_filter'`` so:
+
+      - Workers never claim them (saves chunking + embedding compute)
+      - They never reach chat (no pollution downstream)
+      - Easily reversible — operator can re-queue if a pattern was wrong
+
+    The patterns capture: meeting announcements, press releases,
+    procurement notices, application listings, audit reports, news,
+    nav chrome.
+
+    Idempotent: only updates ``pending`` rows so re-running changes
+    nothing extra. Dry-run returns per-pattern counts; commit returns
+    the total updated.
+    """
+    from sqlalchemy import text as _text
+
+    # Each pattern is an ILIKE that matches junk by filename / display_name.
+    # Add new patterns as they're observed.
+    patterns: list[tuple[str, str]] = [
+        ("notice_of_meeting",      "%Notice of Meeting%"),
+        ("notice_of_workshop",     "%Notice of Workshop%"),
+        ("notice_of_hearing",      "%Notice of Public Hearing%"),
+        ("press_release",          "%press release%"),
+        ("press_release_titled",   "Press Release%"),
+        ("procurement",            "%Procurement%"),
+        ("bid_opportunities",      "%Bid Opportunit%"),
+        ("application_received",   "Application Received%"),
+        ("certificate_of_need_app","%Certificate of Need (CON) Applications%"),
+        ("certificate_of_need_batching", "Certificate of Need Competitive Review-Batching%"),
+        ("annual_report",          "%Annual Report%"),
+        ("audited_annual",         "%Audited Annual%"),
+        ("florida_becomes",        "Florida Becomes %"),
+        ("wins_award",             "%Wins Award%"),
+        ("recognized",             "%Recognized%"),
+        ("achievement_news",       "%Achievement%"),
+        ("nav_follow_us",          "Follow Us%"),
+        ("nav_sign_up",            "Sign up for%"),
+        ("nav_contact_us",         "Contact Us%"),
+        ("nav_about_us",           "About Us%"),
+    ]
+
+    plan: list[dict] = []
+    total_blocked = 0
+
+    for tag, pat in patterns:
+        if dry_run:
+            row = (await db.execute(_text("""
+                SELECT COUNT(*) AS n
+                FROM chunking_jobs cj
+                WHERE cj.status = 'pending'
+                  AND cj.document_id IN (
+                    SELECT id FROM documents
+                    WHERE COALESCE(display_name, filename, '') ILIKE :pat
+                  )
+            """), {"pat": pat})).first()
+            n = int(row.n or 0) if row else 0
+        else:
+            res = await db.execute(_text("""
+                UPDATE chunking_jobs
+                SET status = 'blocked',
+                    failure_reason = 'junk_filter',
+                    error_message = :tag
+                WHERE status = 'pending'
+                  AND document_id IN (
+                    SELECT id FROM documents
+                    WHERE COALESCE(display_name, filename, '') ILIKE :pat
+                  )
+            """), {"pat": pat, "tag": f"junk_filter:{tag}"})
+            n = res.rowcount or 0
+            await db.commit()
+            total_blocked += n
+        if n > 0:
+            plan.append({"pattern": tag, "ilike": pat, "matched_or_blocked": n})
+
+    return {
+        "dry_run": dry_run,
+        "patterns_with_matches": len(plan),
+        "total_blocked": total_blocked if not dry_run else None,
+        "total_would_block": sum(p["matched_or_blocked"] for p in plan) if dry_run else None,
+        "per_pattern": plan,
+    }
+
+
+@app.post("/admin/backfill_metadata")
+async def backfill_metadata(
+    dry_run: bool = Query(True, description="When true, only show what WOULD change"),
+    max_docs: int = Query(2000, ge=1, le=20000),
+    db: AsyncSession = Depends(get_db),
+):
+    """Backfill ``state`` and ``program`` on docs whose payer is known
+    but those fields are NULL.
+
+    The scraper auto-derives ``payer`` from URL hostname but never
+    populates state/program. This produced ~6,300 docs that had a
+    payer but no jurisdiction tags, breaking retrieval filters.
+
+    Rules below map a known payer to its canonical (state, program).
+    For ambiguous payers (e.g. Humana — multi-state), state is left
+    NULL and only program is set. Unknown payers are skipped — they
+    flow to the "needs human review" queue.
+
+    Idempotent: only updates rows where the target columns are NULL,
+    so running twice changes nothing extra. Dry-run by default.
+    """
+    from sqlalchemy import text as _text
+
+    # Inference rules — payer (lowercased, partial match) → (state, program).
+    # Use None to leave a field NULL (don't overwrite if it's already set
+    # AND don't infer when ambiguous).
+    rules: list[tuple[str, str | None, str | None]] = [
+        # Florida Medicaid managed care payers (full state coverage)
+        ("ahca",                 "FL",  "Medicaid"),
+        ("sunshine health",      "FL",  "Medicaid"),
+        ("wellcare",             "FL",  "Medicaid"),
+        ("simply healthcare",    "FL",  "Medicaid"),
+        ("staywell",             "FL",  "Medicaid"),
+        ("aetna better health",  "FL",  "Medicaid"),
+        ("molina",               "FL",  "Medicaid"),
+        ("centene",              "FL",  "Medicaid"),
+        # Multi-state — Humana operates in many states; leave state NULL,
+        # set program where docs are typically Medicaid in FL context.
+        ("humana",               None,  "Medicaid"),
+        # Federal agencies — no state-specific scoping
+        ("samhsa",               None,  "BehavioralHealth"),
+        ("cms",                  None,  "Medicare"),
+        ("medicaid.gov",         None,  "Medicaid"),
+        ("cdc",                  None,  None),  # no inference, just acknowledge known
+        ("govinfo",              None,  None),
+        ("hhs",                  None,  None),
+        ("macpac",               None,  "Medicaid"),
+        ("medpac",               None,  "Medicare"),
+    ]
+
+    plan: list[dict] = []
+    total_updated = 0
+
+    for payer_pattern, infer_state, infer_program in rules:
+        # Build the SET clause carefully: only fill NULL targets, never
+        # overwrite operator-set values.
+        sets: list[str] = []
+        params: dict = {"p": f"%{payer_pattern}%", "lim": max_docs}
+        if infer_state is not None:
+            sets.append("state = COALESCE(state, :s)")
+            params["s"] = infer_state
+        if infer_program is not None:
+            sets.append("program = COALESCE(program, :prog)")
+            params["prog"] = infer_program
+        if not sets:
+            # No-op rule (we just acknowledge the payer is "known")
+            continue
+
+        # Match condition: payer ILIKE pattern AND at least one target
+        # column is currently NULL (else nothing to update).
+        target_null_clause = []
+        if infer_state is not None:
+            target_null_clause.append("state IS NULL")
+        if infer_program is not None:
+            target_null_clause.append("program IS NULL")
+        cond = " OR ".join(target_null_clause)
+
+        if dry_run:
+            count_row = (await db.execute(_text(f"""
+                SELECT COUNT(*) AS n FROM documents
+                WHERE payer ILIKE :p
+                  AND ({cond})
+                LIMIT :lim
+            """), params)).first()
+            n = int(count_row.n or 0) if count_row else 0
+        else:
+            res = await db.execute(_text(f"""
+                UPDATE documents SET {", ".join(sets)}
+                WHERE id IN (
+                    SELECT id FROM documents
+                    WHERE payer ILIKE :p
+                      AND ({cond})
+                    LIMIT :lim
+                )
+            """), params)
+            n = res.rowcount or 0
+            await db.commit()
+            total_updated += n
+
+        plan.append({
+            "rule": payer_pattern,
+            "infer_state": infer_state,
+            "infer_program": infer_program,
+            "matched_or_updated": n,
+        })
+
+    return {
+        "dry_run": dry_run,
+        "rules_applied": len(plan),
+        "total_updated": total_updated,
+        "per_rule": plan,
+    }
+
+
+@app.post("/admin/backfill_sitemap")
+async def backfill_sitemap(
+    payer: str | None = Query(None, description="Restrict to one payer (ILIKE match), or run all"),
+    max_docs: int = Query(200, ge=1, le=2000),
+    dry_run: bool = Query(True),
+    db: AsyncSession = Depends(get_db),
+):
+    """Backfill ``discovered_sources`` rows for docs that lack them.
+
+    Background — many docs landed in the corpus via direct upload
+    (Drive, manual GCS, instant-rag) without going through the scraper's
+    curator-push step. Scraper-imported docs from older runs also lack
+    registry rows because the curator push wasn't always wired up.
+    Result: ``discovered_sources`` is sparse (1 row for Sunshine vs 570
+    actual docs), so per-host pipeline counts in the UI undercount.
+
+    This backfill creates a synthetic ``discovered_sources`` row per
+    orphan doc:
+      - ``url`` derived from source_metadata.source_url, then
+        documents.source_url, then file_path, then ``internal://...``
+      - ``host`` derived from URL hostname, falling back to payer
+      - ``ingested = 'True'`` and ``ingested_doc_id = doc.id``
+      - ``discovered_via = 'backfill_2026-04-30'``
+
+    Idempotent: skips docs that already have a row.
+    Dry-run by default — pass ``dry_run=false`` to actually insert.
+    """
+    from sqlalchemy import text as _text
+    from urllib.parse import urlparse as _urlparse
+    import json as _json
+
+    where_payer = "AND d.payer ILIKE :p" if payer else ""
+    params: dict = {"lim": max_docs}
+    if payer:
+        params["p"] = f"%{payer}%"
+
+    rows = (await db.execute(_text(f"""
+        SELECT d.id::text AS doc_id, d.filename, d.file_path,
+               d.source_metadata::text AS source_metadata,
+               d.payer, d.state, d.program, d.authority_level,
+               d.created_at::text AS created_at_str
+        FROM documents d
+        WHERE NOT EXISTS (
+            SELECT 1 FROM discovered_sources ds
+            WHERE ds.ingested_doc_id = d.id
+        )
+        {where_payer}
+        ORDER BY d.created_at DESC
+        LIMIT :lim
+    """), params)).fetchall()
+
+    plan: list[dict] = []
+    inserted = 0
+    failed: list[dict] = []
+    for r in rows:
+        # Derive URL — prefer source_metadata.source_url, then file_path,
+        # else synthesize an internal:// URL.
+        url = None
+        try:
+            md = _json.loads(r.source_metadata) if r.source_metadata else {}
+            url = (md or {}).get("source_url") if isinstance(md, dict) else None
+        except Exception:
+            url = None
+        if not url:
+            url = r.file_path or f"internal://{(r.payer or 'unknown').lower()}/{r.filename}"
+        # Normalize host. Priority:
+        #  1. real http(s) hostname (use as-is)
+        #  2. payer-based synthetic host like ``sunshine_health.local``
+        #     (preferred for gs:// and internal:// URLs — keeps the
+        #     Repository sidebar grouping useful)
+        #  3. gs:// bucket name as last-resort fallback
+        host = ""
+        if url.startswith(("http://", "https://")):
+            try:
+                host = _urlparse(url).netloc.lower()
+            except Exception:
+                host = ""
+        if not host and r.payer:
+            host = r.payer.lower().strip().replace(" ", "_") + ".local"
+        if not host and url.startswith("gs://"):
+            try:
+                host = url[5:].split("/", 1)[0].lower()
+            except Exception:
+                host = "gcs"
+        if not host:
+            host = "internal"
+
+        path = ""
+        if url.startswith(("http://", "https://")):
+            try:
+                path = _urlparse(url).path or "/"
+            except Exception:
+                path = "/"
+        else:
+            path = "/" + (r.filename or "")
+
+        ext = None
+        fn = r.filename or ""
+        if "." in fn:
+            ext = fn.rsplit(".", 1)[-1].lower()[:20]
+
+        plan.append({
+            "doc_id": r.doc_id, "filename": r.filename,
+            "url": url[:120], "host": host[:64],
+        })
+
+        if dry_run:
+            continue
+        try:
+            await db.execute(_text("""
+                INSERT INTO discovered_sources
+                  (id, url, host, path, payer, state, program,
+                   curated_authority_level, content_kind, extension,
+                   first_seen_at, last_seen_at, fetch_attempt_count,
+                   ingested, ingested_doc_id, ingested_at,
+                   discovered_via, curation_status, created_at, updated_at)
+                VALUES
+                  (gen_random_uuid(), :url, :host, :path, :payer, :state, :program,
+                   :auth, :kind, :ext,
+                   now(), now(), 0,
+                   'True', CAST(:doc_id AS uuid), now(),
+                   'backfill_2026-04-30', 'auto', now(), now())
+                ON CONFLICT DO NOTHING
+            """), {
+                "url": url, "host": host, "path": path,
+                "payer": r.payer, "state": r.state, "program": r.program,
+                "auth": r.authority_level,
+                "kind": "doc" if ext in ("pdf","docx","doc","xlsx","xls","pptx") else "page",
+                "ext": ext,
+                "doc_id": r.doc_id,
+            })
+            await db.commit()
+            inserted += 1
+        except Exception as exc:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            failed.append({"doc_id": r.doc_id, "error": str(exc)[:200]})
+
+    return {
+        "dry_run": dry_run,
+        "candidates": len(plan),
+        "inserted": inserted,
+        "failed_count": len(failed),
+        "failed_sample": failed[:5],
+        "plan_sample": plan[:10],
+    }
+
+
+@app.get("/admin/list_blocked_docs")
+async def list_blocked_docs(
+    limit: int = Query(100, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+):
+    """List chunking jobs that have been auto-blocked after 3 failures.
+
+    These docs are NOT retried by the worker. Operator review path:
+      - Inspect failure_reason to understand why
+      - Decide: retry (POST /admin/reset_bloated_docs?max_docs=1 with
+        the doc_id) or mark permanently skip
+    """
+    from sqlalchemy import text as _text
+    rows = (await db.execute(_text("""
+        SELECT cj.id::text AS job_id,
+               cj.document_id::text AS doc_id,
+               cj.status,
+               COALESCE(cj.failure_count, 0) AS failure_count,
+               cj.failure_reason,
+               LEFT(COALESCE(cj.error_message, ''), 200) AS error_message,
+               cj.completed_at::text AS last_attempt,
+               (SELECT filename FROM documents WHERE id = cj.document_id) AS filename,
+               (SELECT COUNT(*) FROM policy_lines pl WHERE pl.document_id = cj.document_id) AS leftover_lines
+        FROM chunking_jobs cj
+        WHERE cj.status = 'blocked'
+           OR (cj.status = 'failed' AND COALESCE(cj.failure_count, 0) >= 3)
+        ORDER BY cj.completed_at DESC NULLS LAST
+        LIMIT :lim
+    """), {"lim": limit})).fetchall()
+    return {
+        "blocked_count": len(rows),
+        "items": [
+            {
+                "job_id": r.job_id,
+                "document_id": r.doc_id,
+                "filename": r.filename,
+                "status": r.status,
+                "failure_count": int(r.failure_count or 0),
+                "failure_reason": r.failure_reason,
+                "leftover_lines": int(r.leftover_lines or 0),
+                "last_attempt": r.last_attempt,
+                "error_message": r.error_message,
+            }
+            for r in rows
+        ],
+    }
+
+
+@app.post("/admin/reset_bloated_docs")
+async def reset_bloated_docs(
+    min_dupes: int = Query(50, ge=1, description="Min duplicate paragraphs to count as bloated"),
+    max_docs: int = Query(20, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    """Hard-reset docs whose policy_paragraphs are heavily duplicated.
+
+    Faster than per-doc dedupe (no NOT IN subquery, no cascading
+    delete logic): just DELETE everything for the doc and re-queue
+    the chunking_job. With the fixed worker (clear_policy_for_document
+    now raises on failure + the unique-key insert), the re-chunk
+    produces clean output.
+
+    Used after the silent-cleanup-failure bug accumulated 5×-35×
+    duplicate paragraphs on ~70 docs.
+    """
+    from sqlalchemy import text as _text
+
+    # Pick the most-bloated docs first
+    rows = (await db.execute(_text("""
+        SELECT document_id::text AS d,
+               COUNT(*) - COUNT(DISTINCT (page_number, order_index)) AS dupes
+        FROM policy_paragraphs
+        GROUP BY document_id
+        HAVING COUNT(*) - COUNT(DISTINCT (page_number, order_index)) >= :min_d
+        ORDER BY dupes DESC
+        LIMIT :lim
+    """), {"min_d": min_dupes, "lim": max_docs})).fetchall()
+
+    reset: list[dict] = []
+    for row in rows:
+        doc_id = row.d
+        try:
+            # Hard-delete all paragraph + line rows. Workers shouldn't
+            # have these doc_ids in flight (we're picking docs that
+            # already finished — bloated chunking is "successful" from
+            # the worker's POV, just bloated). Cascade order: lines
+            # first (FK), then paragraphs.
+            r1 = await db.execute(
+                _text("DELETE FROM policy_lines WHERE document_id = CAST(:d AS uuid)"),
+                {"d": doc_id},
+            )
+            r2 = await db.execute(
+                _text("DELETE FROM policy_paragraphs WHERE document_id = CAST(:d AS uuid)"),
+                {"d": doc_id},
+            )
+            # Also clear chunks + embeddings so re-chunking starts fresh
+            r3 = await db.execute(
+                _text("DELETE FROM hierarchical_chunks WHERE document_id = CAST(:d AS uuid)"),
+                {"d": doc_id},
+            )
+            r4 = await db.execute(
+                _text("DELETE FROM chunk_embeddings WHERE document_id = CAST(:d AS uuid)"),
+                {"d": doc_id},
+            )
+            # Re-queue the chunking job
+            r5 = await db.execute(_text("""
+                UPDATE chunking_jobs
+                SET status='pending',
+                    error_message=NULL,
+                    started_at=NULL,
+                    completed_at=NULL,
+                    worker_id=NULL
+                WHERE document_id = CAST(:d AS uuid)
+                  AND status IN ('completed', 'failed')
+            """), {"d": doc_id})
+            await db.commit()
+            reset.append({
+                "document_id": doc_id,
+                "lines_deleted": r1.rowcount or 0,
+                "paragraphs_deleted": r2.rowcount or 0,
+                "chunks_deleted": r3.rowcount or 0,
+                "embeddings_deleted": r4.rowcount or 0,
+                "chunking_jobs_requeued": r5.rowcount or 0,
+            })
+        except Exception as exc:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            reset.append({
+                "document_id": doc_id,
+                "error": str(exc)[:200],
+            })
+
+    return {
+        "docs_reset": len([r for r in reset if "error" not in r]),
+        "docs_failed": len([r for r in reset if "error" in r]),
+        "results": reset,
+    }
+
+
+@app.post("/admin/dedupe_policy_paragraphs")
+async def dedupe_policy_paragraphs(
+    max_docs: int = Query(50, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+):
+    """Dedupe ``policy_paragraphs`` and dependent ``policy_lines`` per doc.
+
+    The chunking worker's old swallow-on-failure cleanup path (fixed
+    2026-04-30) inserted duplicate paragraph rows on every retry. We saw
+    multipliers from 5× to 35×. This endpoint walks the docs that
+    actually have duplicates (cheap GROUP BY pre-filter) and dedupes
+    each in its own short transaction so it doesn't fight the chunking
+    workers for locks.
+
+    Per-doc scope = small transactions = no long lock holds = workers
+    keep running. Run repeatedly with ``max_docs`` batches until 0
+    duplicates remain.
+    """
+    from sqlalchemy import text as _text
+
+    # Find docs with duplicates (cheap, indexed)
+    dupe_rows = (await db.execute(_text("""
+        SELECT document_id::text AS d,
+               COUNT(*) - COUNT(DISTINCT (page_number, order_index)) AS dupes
+        FROM policy_paragraphs
+        GROUP BY document_id
+        HAVING COUNT(*) > COUNT(DISTINCT (page_number, order_index))
+        ORDER BY dupes DESC
+        LIMIT :lim
+    """), {"lim": max_docs})).fetchall()
+
+    deduped: list[dict] = []
+    failed: list[dict] = []
+    total_lines_freed = 0
+    total_paras_freed = 0
+
+    for row in dupe_rows:
+        doc_id = row.d
+        try:
+            # Step 1: delete dupe policy_lines for this doc
+            r1 = await db.execute(_text("""
+                DELETE FROM policy_lines
+                WHERE paragraph_id IN (
+                    SELECT id FROM policy_paragraphs
+                    WHERE document_id = CAST(:d AS uuid)
+                      AND id NOT IN (
+                        SELECT DISTINCT ON (page_number, order_index) id
+                        FROM policy_paragraphs
+                        WHERE document_id = CAST(:d AS uuid)
+                        ORDER BY page_number, order_index, id DESC
+                      )
+                )
+            """), {"d": doc_id})
+            lines_freed = r1.rowcount or 0
+
+            # Step 2: delete dupe policy_paragraphs for this doc
+            r2 = await db.execute(_text("""
+                DELETE FROM policy_paragraphs
+                WHERE document_id = CAST(:d AS uuid)
+                  AND id NOT IN (
+                    SELECT DISTINCT ON (page_number, order_index) id
+                    FROM policy_paragraphs
+                    WHERE document_id = CAST(:d AS uuid)
+                    ORDER BY page_number, order_index, id DESC
+                  )
+            """), {"d": doc_id})
+            paras_freed = r2.rowcount or 0
+
+            await db.commit()
+            total_lines_freed += lines_freed
+            total_paras_freed += paras_freed
+            deduped.append({
+                "document_id": doc_id,
+                "paragraphs_freed": paras_freed,
+                "lines_freed": lines_freed,
+            })
+        except Exception as exc:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            failed.append({"document_id": doc_id, "error": str(exc)[:200]})
+
+    return {
+        "docs_processed": len(deduped),
+        "docs_failed": len(failed),
+        "paragraphs_freed": total_paras_freed,
+        "lines_freed": total_lines_freed,
+        "remaining_dupe_docs": "rerun until 0 to fully drain",
+        "failed_sample": failed[:5],
+    }
+
+
+@app.post("/admin/cleanup_chat_orphans")
+async def cleanup_chat_orphans(
+    dry_run: bool = Query(True, description="If true, just count what WOULD be deleted; if false, actually delete"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete rows from ``mobius_chat.published_rag_metadata`` whose
+    document_id is no longer present in rag's ``rag_published_embeddings``.
+
+    These are the "chat orphans" surfaced by ``/admin/repository_audit``.
+    They cause chat to appear to retrieve docs that the rag corpus doesn't
+    actually have — confusing for users (cite a phantom source) and a
+    correctness risk for any downstream agent that trusts chat's
+    citations.
+
+    Default ``dry_run=true``. Pass ``dry_run=false`` to actually delete.
+    Returns counts and (in dry run) a sample of doomed rows.
+    """
+    from sqlalchemy import text as _text
+
+    # rag-side: distinct document_ids that ARE in rag_published_embeddings
+    rag_pub_ids_rows = (await db.execute(_text(
+        "SELECT DISTINCT document_id::text AS d FROM rag_published_embeddings"
+    ))).fetchall()
+    rag_pub_ids = {r.d for r in rag_pub_ids_rows}
+
+    import os as _os
+    import psycopg2 as _pg
+    chat_dsn = _os.environ.get("CHAT_DATABASE_URL", "")
+    if chat_dsn.startswith("postgresql+psycopg2://"):
+        chat_dsn = "postgresql://" + chat_dsn[len("postgresql+psycopg2://"):]
+    if chat_dsn.startswith("postgresql+asyncpg://"):
+        chat_dsn = "postgresql://" + chat_dsn[len("postgresql+asyncpg://"):]
+    if not chat_dsn:
+        raise HTTPException(status_code=500, detail="CHAT_DATABASE_URL unset")
+
+    # Pull all chat doc_ids
+    chat_pub_ids: list[str] = []
+    chat_id_to_filename: dict[str, str] = {}
+    conn = _pg.connect(chat_dsn, connect_timeout=15)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT document_id::text, document_filename FROM published_rag_metadata"
+            )
+            for did, fn in cur.fetchall():
+                chat_pub_ids.append(did)
+                chat_id_to_filename[did] = fn or ""
+    finally:
+        conn.close()
+
+    orphan_ids = [did for did in chat_pub_ids if did not in rag_pub_ids]
+    sample = [
+        {"document_id": did, "filename": chat_id_to_filename.get(did, "")}
+        for did in orphan_ids[:30]
+    ]
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "would_delete_count": len(orphan_ids),
+            "sample": sample,
+            "hint": "Pass ?dry_run=false to actually delete.",
+        }
+
+    if not orphan_ids:
+        return {"dry_run": False, "deleted_count": 0, "sample": []}
+
+    # Delete in chunks to avoid huge IN-list explosion (we only have 75 here,
+    # but make the endpoint robust against larger drift in the future).
+    deleted = 0
+    conn = _pg.connect(chat_dsn, connect_timeout=15)
+    try:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            CHUNK = 200
+            for i in range(0, len(orphan_ids), CHUNK):
+                batch = orphan_ids[i:i + CHUNK]
+                cur.execute(
+                    "DELETE FROM published_rag_metadata WHERE document_id::text = ANY(%s)",
+                    (batch,),
+                )
+                deleted += cur.rowcount
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    return {
+        "dry_run": False,
+        "deleted_count": deleted,
+        "orphan_doc_ids": len(orphan_ids),
+        "sample": sample,
+    }
+
+
+@app.post("/admin/publish_unpublished")
+async def publish_unpublished(
+    limit: int = Query(500, ge=1, le=5000),
+    db: AsyncSession = Depends(get_db),
+):
+    """Sweep docs that completed embedding but never got a publish_event.
+
+    Background: when AUTO_PUBLISH_ON_EMBED gets reset by a deploy
+    (happened 2026-04-29 morning when the embedding-worker revision
+    rolled without the env var), embeds done during that window land
+    in chunk_embeddings but never sync to chat. This endpoint catches
+    them up so they're queryable.
+
+    Returns counts of attempted / published / failed.
+    """
+    from sqlalchemy import text as _text
+    from app.services.publish import publish_document
+    from app.database import AsyncSessionLocal
+    from uuid import UUID  # not imported at module scope
+    rows = (await db.execute(_text("""
+        SELECT DISTINCT ej.document_id::text AS doc_id
+        FROM embedding_jobs ej
+        LEFT JOIN publish_events pe ON pe.document_id = ej.document_id
+        WHERE ej.status='completed' AND pe.id IS NULL
+        ORDER BY 1
+        LIMIT :lim
+    """), {"lim": limit})).fetchall()
+    doc_ids = [r.doc_id for r in rows]
+    published = 0
+    failed: list[dict] = []
+    # IMPORTANT: open a *fresh* session per doc. ``publish_document``
+    # commits/rolls back internally; sharing one session across many
+    # publishes leaves the SQLAlchemy session in an inconsistent state
+    # after the first call and subsequent calls hang. (Discovered the
+    # hard way 2026-04-29 while draining the auto-publish gap — every
+    # batch timed out at 0 published.)
+    for did in doc_ids:
+        try:
+            async with AsyncSessionLocal() as doc_db:
+                res = await publish_document(UUID(did), doc_db)
+                # IMPORTANT: publish_document only flushes; the caller
+                # owns commit. Without this commit the writes to
+                # rag_published_embeddings get rolled back when the
+                # session closes, even though the chat-side cross-DB
+                # sync (raw psycopg2) already persisted. That mismatch
+                # is exactly what burned us 2026-04-29 — chat retrieval
+                # found docs that the rag side reported as unpublished.
+                # Also write a PublishEvent so the audit log + the
+                # /pipeline_health gap query stay accurate.
+                doc_db.add(PublishEvent(
+                    document_id=UUID(did),
+                    rows_written=res.rows_written,
+                    verification_passed=res.verification_passed,
+                    verification_message=res.verification_message,
+                ))
+                await doc_db.commit()
+            if res.verification_passed:
+                published += 1
+            else:
+                failed.append({"doc_id": did, "msg": (res.verification_message or "")[:200]})
+        except Exception as exc:
+            failed.append({"doc_id": did, "msg": str(exc)[:200]})
+    return {
+        "attempted": len(doc_ids),
+        "published": published,
+        "failed_count": len(failed),
+        "failed_sample": failed[:10],
+    }
+
+
+@app.get("/pipeline_health")
+@app.get("/admin/pipeline_health")  # legacy alias — frontend uses /pipeline_health
+async def pipeline_health(db: AsyncSession = Depends(get_db)):
+    """Live pipeline health for the Repository status banner.
+
+    Returns per-stage:
+      - active: rows currently in 'processing' status (= workers busy)
+      - last_hour: rows transitioned to terminal state in the past hour
+      - pending: rows queued but not started
+      - status: 'green' | 'yellow' | 'red'
+
+    Status rule of thumb (tune per real ops experience):
+      green  = workers active AND last_hour > 0 AND pending growth ok
+      yellow = workers idle but pending=0 (just nothing to do), OR
+               workers active but pending growing faster than throughput
+      red    = pending > 0 AND last_hour == 0 (pipeline frozen) OR
+               embedded-but-not-published gap > 50 (auto-publish broken)
+    """
+    from sqlalchemy import text as _text
+    out: dict = {}
+
+    # Chunking
+    rows = (await db.execute(_text("""
+        SELECT
+          SUM(CASE WHEN status='processing' THEN 1 ELSE 0 END) AS active,
+          SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END)    AS pending,
+          SUM(CASE WHEN status='completed' AND completed_at > now() - interval '1 hour' THEN 1 ELSE 0 END) AS last_hour
+        FROM chunking_jobs
+    """))).first()
+    chk_active = int(rows.active or 0)
+    chk_pending = int(rows.pending or 0)
+    chk_lh = int(rows.last_hour or 0)
+    if chk_pending == 0 and chk_active == 0:
+        chk_status = "green"  # nothing to do
+    elif chk_active > 0 and chk_lh > 0:
+        chk_status = "green" if chk_lh >= chk_active * 5 else "yellow"
+    elif chk_pending > 0 and chk_lh == 0:
+        chk_status = "red"
+    else:
+        chk_status = "yellow"
+    out["chunking"] = {"active": chk_active, "pending": chk_pending,
+                       "last_hour": chk_lh, "status": chk_status}
+
+    # ── Rolling 30-min stats helper ──────────────────────────────────
+    # Buckets the last 30 min into 6 × 5-min slices and returns:
+    #   - buckets_5min  : list of 6 ints (oldest → newest)
+    #   - rate_per_hour : recent rate computed from last-30-min count × 2
+    #   - rate_lo / rate_hi : 95% Poisson CI on the rate (normal approx,
+    #                         with ±2 floor for small counts)
+    #   - eta_seconds_lo / eta_seconds_hi : optimistic / pessimistic
+    #     bounds of "pending / rate" given the rate CI. ``lo`` uses the
+    #     HIGH rate (drains faster), ``hi`` uses the LOW rate.
+    # Caller passes the table + status filter + completion column so we
+    # reuse this for chunking, embedding, and publishing.
+    async def _rolling_stats(table: str, ts_col: str, status_filter: str | None,
+                             pending: int) -> dict:
+        import math
+        bucket_sql = f"""
+            WITH g AS (
+                SELECT generate_series(0, 5) AS i
+            )
+            SELECT i,
+                   COALESCE((SELECT COUNT(*) FROM {table}
+                             WHERE {ts_col} >= now() - (g.i + 1) * interval '5 minutes'
+                               AND {ts_col} <  now() - g.i * interval '5 minutes'
+                               {f"AND status = '{status_filter}'" if status_filter else ""}
+                            ), 0) AS n
+            FROM g
+            ORDER BY i DESC
+        """
+        rows = (await db.execute(_text(bucket_sql))).fetchall()
+        buckets = [int(r.n) for r in rows]  # oldest-first (i=5 is oldest, ORDER BY i DESC puts i=5 first)
+        n_total = sum(buckets)
+        rate_per_hour = n_total * 2  # 30-min count * 2 = per-hour
+        if n_total >= 5:
+            stderr = math.sqrt(n_total)
+            margin = 1.96 * stderr * 2  # propagate the ×2 scaling
+        else:
+            margin = max(2.0, n_total * 2.0)  # wider band for tiny samples
+        rate_lo = max(0.0, rate_per_hour - margin)
+        rate_hi = rate_per_hour + margin
+        eta_seconds_lo = (pending * 3600.0 / rate_hi) if rate_hi > 0 else None
+        eta_seconds_hi = (pending * 3600.0 / rate_lo) if rate_lo > 0 else None
+        return {
+            "buckets_5min": buckets,
+            "rate_per_hour": round(rate_per_hour, 1),
+            "rate_lo_per_hour": round(rate_lo, 1),
+            "rate_hi_per_hour": round(rate_hi, 1),
+            "eta_seconds_p50": (pending * 3600.0 / rate_per_hour) if rate_per_hour > 0 else None,
+            "eta_seconds_p5": eta_seconds_lo,    # optimistic (high rate)
+            "eta_seconds_p95": eta_seconds_hi,   # pessimistic (low rate)
+        }
+
+    try:
+        out["chunking"]["rolling"] = await _rolling_stats(
+            "chunking_jobs", "completed_at", "completed", chk_pending,
+        )
+    except Exception as exc:
+        out["chunking"]["rolling_error"] = str(exc)[:120]
+
+    # In-flight chunking — currently-processing docs with progress
+    try:
+        in_flight = (await db.execute(_text("""
+            SELECT
+              cj.document_id::text AS doc_id,
+              EXTRACT(EPOCH FROM (now() - cj.started_at))::int AS elapsed_s,
+              (SELECT filename FROM documents WHERE id = cj.document_id) AS filename,
+              (SELECT COALESCE(payer, '<unknown>') FROM documents WHERE id = cj.document_id) AS payer,
+              (SELECT COUNT(*) FROM document_pages WHERE document_id = cj.document_id) AS pages,
+              (SELECT COUNT(*) FROM policy_paragraphs pp WHERE pp.document_id = cj.document_id) AS paragraphs_done
+            FROM chunking_jobs cj
+            WHERE cj.status = 'processing'
+            ORDER BY cj.started_at
+            LIMIT 20
+        """))).fetchall()
+        out["chunking"]["in_flight"] = [
+            {
+                "doc_id": r.doc_id,
+                "filename": (r.filename or "")[:80],
+                "payer": r.payer,
+                "elapsed_s": int(r.elapsed_s or 0),
+                "pages": int(r.pages or 0),
+                "paragraphs_done": int(r.paragraphs_done or 0),
+            }
+            for r in in_flight
+        ]
+    except Exception:
+        out["chunking"]["in_flight"] = []
+
+    # Embedding
+    rows = (await db.execute(_text("""
+        SELECT
+          SUM(CASE WHEN status='processing' THEN 1 ELSE 0 END) AS active,
+          SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END)    AS pending,
+          SUM(CASE WHEN status='completed' AND completed_at > now() - interval '1 hour' THEN 1 ELSE 0 END) AS last_hour
+        FROM embedding_jobs
+    """))).first()
+    emb_active = int(rows.active or 0)
+    emb_pending = int(rows.pending or 0)
+    emb_lh = int(rows.last_hour or 0)
+    if emb_pending == 0 and emb_active == 0:
+        emb_status = "green"
+    elif emb_active > 0 and emb_lh > 0:
+        emb_status = "green"
+    elif emb_pending > 0 and emb_lh == 0:
+        emb_status = "red"
+    else:
+        emb_status = "yellow"
+    out["embedding"] = {"active": emb_active, "pending": emb_pending,
+                        "last_hour": emb_lh, "status": emb_status}
+    try:
+        out["embedding"]["rolling"] = await _rolling_stats(
+            "embedding_jobs", "completed_at", "completed", emb_pending,
+        )
+    except Exception as exc:
+        out["embedding"]["rolling_error"] = str(exc)[:120]
+
+    # In-flight embedding
+    try:
+        in_flight = (await db.execute(_text("""
+            SELECT
+              ej.document_id::text AS doc_id,
+              EXTRACT(EPOCH FROM (now() - ej.started_at))::int AS elapsed_s,
+              (SELECT filename FROM documents WHERE id = ej.document_id) AS filename,
+              (SELECT COALESCE(payer, '<unknown>') FROM documents WHERE id = ej.document_id) AS payer,
+              (SELECT COUNT(*) FROM chunk_embeddings ce WHERE ce.document_id = ej.document_id) AS chunks_done
+            FROM embedding_jobs ej
+            WHERE ej.status = 'processing'
+            ORDER BY ej.started_at
+            LIMIT 20
+        """))).fetchall()
+        out["embedding"]["in_flight"] = [
+            {
+                "doc_id": r.doc_id,
+                "filename": (r.filename or "")[:80],
+                "payer": r.payer,
+                "elapsed_s": int(r.elapsed_s or 0),
+                "chunks_done": int(r.chunks_done or 0),
+            }
+            for r in in_flight
+        ]
+    except Exception:
+        out["embedding"]["in_flight"] = []
+
+    # Publishing — count via rag_published_embeddings (the actual data
+    # of record). publish_events is just the audit log and is missing
+    # rows from the auto-publish-on-embed path (worker doesn't insert
+    # PublishEvent). Joining on it overcounts the gap by ~1000.
+    rows = (await db.execute(_text("""
+        SELECT
+          (SELECT COUNT(*) FROM publish_events WHERE published_at > now() - interval '1 hour') AS last_hour,
+          (SELECT COUNT(DISTINCT ej.document_id)
+             FROM embedding_jobs ej
+             WHERE ej.status='completed'
+               AND NOT EXISTS (
+                 SELECT 1 FROM rag_published_embeddings rpe
+                 WHERE rpe.document_id = ej.document_id
+               )) AS embedded_unpublished
+    """))).first()
+    pub_lh = int(rows.last_hour or 0)
+    pub_gap = int(rows.embedded_unpublished or 0)
+    if pub_gap == 0:
+        pub_status = "green"
+    elif pub_gap > 0 and pub_lh > 0:
+        pub_status = "yellow"
+    else:
+        pub_status = "red"  # gap > 0 and no recent publishes
+    out["publishing"] = {"last_hour": pub_lh, "embedded_unpublished": pub_gap,
+                         "status": pub_status}
+    try:
+        out["publishing"]["rolling"] = await _rolling_stats(
+            "publish_events", "published_at", None, pub_gap,
+        )
+    except Exception as exc:
+        out["publishing"]["rolling_error"] = str(exc)[:120]
+
+    # Recently published — there's no "active publishing" since publish
+    # is fast (< 1s typical), but the user wants to see what just landed
+    # in chat. Last 20 publish events.
+    try:
+        recent = (await db.execute(_text("""
+            SELECT
+              pe.document_id::text AS doc_id,
+              EXTRACT(EPOCH FROM (now() - pe.published_at))::int AS age_s,
+              pe.rows_written,
+              (SELECT filename FROM documents WHERE id = pe.document_id) AS filename,
+              (SELECT COALESCE(payer, '<unknown>') FROM documents WHERE id = pe.document_id) AS payer
+            FROM publish_events pe
+            WHERE pe.published_at > now() - interval '30 minutes'
+            ORDER BY pe.published_at DESC
+            LIMIT 20
+        """))).fetchall()
+        out["publishing"]["in_flight"] = [
+            {
+                "doc_id": r.doc_id,
+                "filename": (r.filename or "")[:80],
+                "payer": r.payer,
+                "elapsed_s": int(r.age_s or 0),
+                "chunks_done": int(r.rows_written or 0),
+            }
+            for r in recent
+        ]
+    except Exception:
+        out["publishing"]["in_flight"] = []
+
+    # Live totals for the dashboard banner. Computed server-side so the
+    # UI doesn't have to pull all 8k+ documents to count them. These
+    # are the canonical numbers the user sees ticking up in the
+    # Repository tab's status strip.
+    rows = (await db.execute(_text("""
+        SELECT
+          (SELECT COUNT(*) FROM documents) AS documents,
+          (SELECT COUNT(DISTINCT document_id) FROM chunking_jobs WHERE status='completed') AS chunked,
+          (SELECT COUNT(DISTINCT document_id) FROM embedding_jobs WHERE status='completed') AS embedded,
+          (SELECT COUNT(DISTINCT document_id) FROM rag_published_embeddings) AS published
+    """))).first()
+    out["totals"] = {
+        "documents": int(rows.documents or 0),
+        "chunked": int(rows.chunked or 0),
+        "embedded": int(rows.embedded or 0),
+        "published": int(rows.published or 0),
+    }
+
+    # Integrity check: docs that chat shows but rag doesn't have.
+    # Cheap query — counts only, no full ID transfer. Cached value would
+    # be even cheaper but 10s polling on a couple of indexed scans is
+    # negligible at our scale.
+    # ── Integrity check — three dimensions ─────────────────────────────
+    # 1) chat_orphans:    docs visible to chat that rag does NOT have
+    # 2) sitemap_orphans: rag docs with no discovered_sources registry row
+    # 3) blocked_jobs:    chunking jobs at status='blocked' (failure_count>=3)
+    # Status is the worst of the three, with thresholds tuned to surface
+    # real drift without flapping on tiny counts.
+    integrity_status = "green"
+    chat_orphans = 0
+    sitemap_orphans = 0
+    blocked_jobs = 0
+
+    # Sitemap orphans + blocked jobs + metadata orphans — rag-side only,
+    # cheap indexed counts.
+    metadata_orphans = 0
+    try:
+        sm_row = (await db.execute(_text("""
+            SELECT
+              (SELECT COUNT(*) FROM documents d
+                 WHERE NOT EXISTS (SELECT 1 FROM discovered_sources ds
+                                   WHERE ds.ingested_doc_id = d.id))
+                AS sitemap_orphans,
+              (SELECT COUNT(*) FROM chunking_jobs WHERE status = 'blocked')
+                AS blocked_jobs,
+              (SELECT COUNT(*) FROM documents d
+                 WHERE d.payer IS NULL OR d.payer = ''
+                    OR (d.state IS NULL AND d.program IS NULL))
+                AS metadata_orphans
+        """))).first()
+        sitemap_orphans = int(sm_row.sitemap_orphans or 0)
+        blocked_jobs = int(sm_row.blocked_jobs or 0)
+        metadata_orphans = int(sm_row.metadata_orphans or 0)
+    except Exception:
+        pass
+
+    try:
+        import os as _os, psycopg2 as _pg
+        chat_dsn = _os.environ.get("CHAT_DATABASE_URL", "")
+        if chat_dsn.startswith("postgresql+psycopg2://"):
+            chat_dsn = "postgresql://" + chat_dsn[len("postgresql+psycopg2://"):]
+        if chat_dsn.startswith("postgresql+asyncpg://"):
+            chat_dsn = "postgresql://" + chat_dsn[len("postgresql+asyncpg://"):]
+        if chat_dsn:
+            # Pull chat doc ids
+            conn = _pg.connect(chat_dsn, connect_timeout=5)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT DISTINCT document_id::text FROM published_rag_metadata")
+                    chat_ids = {r[0] for r in cur.fetchall()}
+            finally:
+                conn.close()
+            rag_ids = {r.d for r in (await db.execute(_text(
+                "SELECT DISTINCT document_id::text AS d FROM rag_published_embeddings"
+            ))).fetchall()}
+            chat_orphans = len(chat_ids - rag_ids)
+    except Exception:
+        pass  # chat lookup failed; leave chat_orphans=0 and degrade status below
+
+    # Compute overall status — worst of the 4 dimensions.
+    drift_total = chat_orphans + sitemap_orphans + blocked_jobs + metadata_orphans
+    has_critical = (
+        chat_orphans >= 100 or sitemap_orphans >= 500
+        or blocked_jobs >= 10 or metadata_orphans >= 1000
+    )
+    if drift_total == 0:
+        integrity_status = "green"
+    elif has_critical:
+        integrity_status = "red"
+    else:
+        integrity_status = "yellow"
+
+    out["integrity"] = {
+        "chat_orphans": chat_orphans,
+        "sitemap_orphans": sitemap_orphans,
+        "blocked_jobs": blocked_jobs,
+        "metadata_orphans": metadata_orphans,
+        "status": integrity_status,
+    }
+
+    return out
 
 
 @app.post("/admin/cleanup-stale-jobs")

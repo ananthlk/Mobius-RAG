@@ -1,0 +1,2063 @@
+[
+  {
+    "qid": "cmhc001",
+    "strategy_forced": "b",
+    "repeat": 0,
+    "strategy_executed": "b",
+    "judge_verdict": "wrong",
+    "judge_score": 0.0,
+    "agent_confidence": "low",
+    "latency_ms": 12915,
+    "llm_answer": "",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:claims.timely_filing",
+        "j:payor.sunshine_health",
+        "j:state.florida"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "EXPLORE_AHCA",
+      "pool_size": 3321,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 3,
+      "n_bonus_facts": 5
+    },
+    "judge_reasoning": "The system provided no answer or relevant information to the question asked.",
+    "top_doc": null,
+    "top_page": null,
+    "top_rerank": null,
+    "n_chunks": 0
+  },
+  {
+    "qid": "cmhc001",
+    "strategy_forced": "a",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "unable_to_verify",
+    "judge_score": 0.5,
+    "agent_confidence": "high",
+    "latency_ms": 38473,
+    "llm_answer": "For initial claims, participating providers must submit within 180 days, and non-participating providers within 365 days [2]. These days are calculated from the date of service to the date Sunshine Health receives the claim [2]. For Medicare claims crossing over to Medicaid, the filing limit is the greater of 36 months from the date of service or 12 months from Medicare\u2019s adjudication date [2].",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:claims.timely_filing",
+        "j:payor.sunshine_health",
+        "j:state.florida"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "L2_JD",
+      "pool_size": 15,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 3,
+      "n_bonus_facts": 5
+    },
+    "judge_reasoning": "",
+    "top_doc": "Sunshine Provider Manual",
+    "top_page": 122,
+    "top_rerank": 0.8221,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc001",
+    "strategy_forced": "natural",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "unable_to_verify",
+    "judge_score": 0.5,
+    "agent_confidence": "high",
+    "latency_ms": 39672,
+    "llm_answer": "Providers must submit initial claims to Sunshine Health in a timely manner, with participating providers having 180 days and non-participating providers having 365 days [2]. These days are calculated from the date of service to the date received by Sunshine Health [2]. For Medicare claims crossing over to Medicaid, the filing limit is the greater of 36 months from the date of service or 12 months from Medicare\u2019s adjudication date [2].",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:claims.timely_filing",
+        "j:payor.sunshine_health",
+        "j:state.florida"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "L2_JD",
+      "pool_size": 15,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 3,
+      "n_bonus_facts": 5
+    },
+    "judge_reasoning": "",
+    "top_doc": "Sunshine Provider Manual",
+    "top_page": 122,
+    "top_rerank": 0.8221,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc002",
+    "strategy_forced": "natural",
+    "repeat": 0,
+    "strategy_executed": "b",
+    "judge_verdict": "unable_to_verify",
+    "judge_score": 0.5,
+    "agent_confidence": "low",
+    "latency_ms": 48270,
+    "llm_answer": "Residential treatment for substance abuse requires prior authorization from Sunshine Health [3]. However, the provided passages do not specify if code H0019 is for residential substance use treatment or if it specifically requires prior authorization. Providers should use the Pre-Auth Check Tool to look up a service code and determine if prior authorization is needed [3].",
+    "features": {
+      "literal_anchors": [
+        "H0019"
+      ],
+      "tag_matches": [
+        "d:utilization_management.prior_authorization",
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "PRECISION_DOMINANT",
+      "cascade_level": "EXPLORE_AHCA",
+      "pool_size": 3321,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "um",
+      "n_must_facts": 2,
+      "n_bonus_facts": 7
+    },
+    "judge_reasoning": "",
+    "top_doc": "Provider_Manual.pdf",
+    "top_page": 80,
+    "top_rerank": 0.6664,
+    "n_chunks": 6
+  },
+  {
+    "qid": "cmhc003",
+    "strategy_forced": "natural",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "correct",
+    "judge_score": 1.0,
+    "agent_confidence": "low",
+    "latency_ms": 33989,
+    "llm_answer": "The provided passages list administrative subcontractors and affiliates for Aetna Better Health of Florida and Sunshine State Health Plan [1], [2], [3], [4], [5]. However, they do not contain any information regarding referral requirements for outpatient behavioral health therapy for Aetna Better Health Florida.",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:health_care_services.behavioral_health",
+        "j:payor.aetna"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "L2_JD",
+      "pool_size": 54,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "front_end",
+      "n_must_facts": 3,
+      "n_bonus_facts": 4
+    },
+    "judge_reasoning": "The system correctly states that the provided chunks do not contain information about referral requirements for outpatient behavioral health therapy for Aetna Better Health Florida, which is accurate given the content of the chunks.",
+    "top_doc": "Administrative_Subcontractors_and_Affiliates_Report_Q4_2024.pdf",
+    "top_page": 1,
+    "top_rerank": 0.89,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc002",
+    "strategy_forced": "a",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "wrong",
+    "judge_score": 0.0,
+    "agent_confidence": "high",
+    "latency_ms": 51155,
+    "llm_answer": "Yes, Sunshine Health requires prior authorization for procedure code H0019 [1], [3]. This code is listed under the \"Behavioral Health & Substance Use\" category for \"Alcohol and drug management, treatment, and rehabilitation\" [1]. Sunshine Health requires prior authorization as a condition of payment for many services, including the procedure codes listed as of 12/31/2025 [3].",
+    "features": {
+      "literal_anchors": [
+        "H0019"
+      ],
+      "tag_matches": [
+        "d:utilization_management.prior_authorization",
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "PRECISION_DOMINANT",
+      "cascade_level": "L2_JD",
+      "pool_size": 236,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "um",
+      "n_must_facts": 2,
+      "n_bonus_facts": 7
+    },
+    "judge_reasoning": "The system claims that procedure code H0019 requires prior authorization and cites chunk [1] as evidence, but H0019 is not present in chunk [1] or any other provided chunk.",
+    "top_doc": "FL_SunshineHealth_Caid_PAReq_CMS19_CMS21_MMA_AIP.pdf",
+    "top_page": 3,
+    "top_rerank": 0.7081,
+    "n_chunks": 3
+  },
+  {
+    "qid": "cmhc002",
+    "strategy_forced": "b",
+    "repeat": 0,
+    "strategy_executed": "b",
+    "judge_verdict": "unable_to_verify",
+    "judge_score": 0.5,
+    "agent_confidence": "medium",
+    "latency_ms": 51654,
+    "llm_answer": "Yes, requests for residential treatment for substance abuse require prior authorization [3]. However, the provided passages do not explicitly state whether code H0019 specifically requires prior authorization. Providers should use the Pre-Auth Check Tool to look up a service code to determine if prior authorization is needed [3].",
+    "features": {
+      "literal_anchors": [
+        "H0019"
+      ],
+      "tag_matches": [
+        "d:utilization_management.prior_authorization",
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "PRECISION_DOMINANT",
+      "cascade_level": "EXPLORE_AHCA",
+      "pool_size": 3321,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "um",
+      "n_must_facts": 2,
+      "n_bonus_facts": 7
+    },
+    "judge_reasoning": "",
+    "top_doc": "Provider_Manual.pdf",
+    "top_page": 80,
+    "top_rerank": 0.6664,
+    "n_chunks": 6
+  },
+  {
+    "qid": "cmhc003",
+    "strategy_forced": "b",
+    "repeat": 0,
+    "strategy_executed": "b",
+    "judge_verdict": "unable_to_verify",
+    "judge_score": 0.5,
+    "agent_confidence": "low",
+    "latency_ms": 20324,
+    "llm_answer": "The provided passages do not explicitly state whether Aetna Better Health Florida requires a referral for outpatient behavioral health therapy. While some services may require a referral or prior authorization under certain member contracts, other care listed under the Direct Access provision does not require a PCP referral [3]. Referrals are accepted for Brave Health's virtual behavioral health and substance use disorder services [1].",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:health_care_services.behavioral_health",
+        "j:payor.aetna"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "EXPLORE_AHCA",
+      "pool_size": 3321,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "front_end",
+      "n_must_facts": 3,
+      "n_bonus_facts": 4
+    },
+    "judge_reasoning": "",
+    "top_doc": "ABHFL_SBIRT_Provider_Toolkit.pdf",
+    "top_page": 4,
+    "top_rerank": 0.6533,
+    "n_chunks": 6
+  },
+  {
+    "qid": "cmhc003",
+    "strategy_forced": "a",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "unable_to_verify",
+    "judge_score": 0.5,
+    "agent_confidence": "low",
+    "latency_ms": 25315,
+    "llm_answer": "The provided passages list administrative subcontractors and affiliates for Aetna Better Health of Florida, including entities like American Therapy Administrators of Florida/Health Network One (ATA/HN1) and Behavioral Services Network (BSN) [1], [3]. However, these passages do not contain any information regarding referral requirements for outpatient behavioral health therapy. Therefore, the question cannot be answered from the given information.",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:health_care_services.behavioral_health",
+        "j:payor.aetna"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "L2_JD",
+      "pool_size": 54,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "front_end",
+      "n_must_facts": 3,
+      "n_bonus_facts": 4
+    },
+    "judge_reasoning": "",
+    "top_doc": "Administrative_Subcontractors_and_Affiliates_Report_Q4_2024.pdf",
+    "top_page": 1,
+    "top_rerank": 0.89,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc004",
+    "strategy_forced": "a",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "correct",
+    "judge_score": 1.0,
+    "agent_confidence": "high",
+    "latency_ms": 25064,
+    "llm_answer": "Yes, telehealth consults for behavioral health assessments are covered under Florida Medicaid. Managed Care Plans are approved to provide contracted services, which include \"Telehealth Consults for Behavioral Health Assessments and Referrals\" [3]. Florida's Medicaid Managed Care plans are authorized to cover telehealth services, and coverage for telehealth is greatest among these plans [5].",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:health_care_services.behavioral_health"
+      ],
+      "query_type": "MIXED",
+      "cascade_level": "L3_AHCA_D",
+      "pool_size": 824,
+      "payer_specificity": "mco_specific",
+      "answer_shape": null,
+      "persona": "front_end",
+      "n_must_facts": 3,
+      "n_bonus_facts": 5
+    },
+    "judge_reasoning": "The system correctly states that telehealth consults for behavioral health assessments are covered under Florida Medicaid, citing chunk [3] which explicitly lists 'Telehealth Consults for Behavioral Health Assessments and Referrals' as a service provided by Managed Care Plans.",
+    "top_doc": "FL.UM.28.pdf",
+    "top_page": 2,
+    "top_rerank": 0.9023,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc004",
+    "strategy_forced": "natural",
+    "repeat": 0,
+    "strategy_executed": "b",
+    "judge_verdict": "partial",
+    "judge_score": 0.4,
+    "agent_confidence": "low",
+    "latency_ms": 26347,
+    "llm_answer": "{\n  \"answer\": \"The provided passages indicate that Florida Medicaid covers behavioral health assessment services, including Bio-psychosocial Evaluations and Brief Behavioral Health Status Examinations [5], [6]. Florida Medicaid",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:health_care_services.behavioral_health"
+      ],
+      "query_type": "MIXED",
+      "cascade_level": "EXPLORE_AHCA",
+      "pool_size": 3321,
+      "payer_specificity": "mco_specific",
+      "answer_shape": null,
+      "persona": "front_end",
+      "n_must_facts": 3,
+      "n_bonus_facts": 5
+    },
+    "judge_reasoning": "The system confirms that behavioral health assessments are covered by Florida Medicaid, but it fails to explicitly state whether these specific services are covered when delivered via telehealth, which was a key part of the question.",
+    "top_doc": "TAC_Report.pdf",
+    "top_page": 15,
+    "top_rerank": 0.6595,
+    "n_chunks": 6
+  },
+  {
+    "qid": "cmhc004",
+    "strategy_forced": "b",
+    "repeat": 0,
+    "strategy_executed": "b",
+    "judge_verdict": "unable_to_verify",
+    "judge_score": 0.5,
+    "agent_confidence": "low",
+    "latency_ms": 24429,
+    "llm_answer": "{\n  \"answer\": \"Yes, Florida Medicaid covers behavioral health assessment services, including bio-psychosocial evaluations and brief behavioral health status examinations, which are used for screening and identification of",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:health_care_services.behavioral_health"
+      ],
+      "query_type": "MIXED",
+      "cascade_level": "EXPLORE_AHCA",
+      "pool_size": 3321,
+      "payer_specificity": "mco_specific",
+      "answer_shape": null,
+      "persona": "front_end",
+      "n_must_facts": 3,
+      "n_bonus_facts": 5
+    },
+    "judge_reasoning": "",
+    "top_doc": "TAC_Report.pdf",
+    "top_page": 15,
+    "top_rerank": 0.6595,
+    "n_chunks": 6
+  },
+  {
+    "qid": "cmhc005",
+    "strategy_forced": "a",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "correct",
+    "judge_score": 1.0,
+    "agent_confidence": "low",
+    "latency_ms": 26997,
+    "llm_answer": "The provided passages list H0015 as the code for Alcohol/drug services; intensive outpatient program (IOP), per day, and mention Revenue code 0169 in relation to HCPCS codes H0008 \u2013 H0015 [1], [2]. However, the passages do not specify any modifiers to be used when billing H0015 IOP services for Florida Medicaid.",
+    "features": {
+      "literal_anchors": [
+        "H0015"
+      ],
+      "tag_matches": [],
+      "query_type": "PRECISION_DOMINANT",
+      "cascade_level": "L4_AHCA",
+      "pool_size": 3321,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 5,
+      "n_bonus_facts": 3
+    },
+    "judge_reasoning": "The system correctly states that the provided passages do not contain information about modifiers for H0015 IOP services for Florida Medicaid, which is accurate based on the given chunks.",
+    "top_doc": "FL.CP.BH.12.pdf",
+    "top_page": 3,
+    "top_rerank": 0.7081,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc005",
+    "strategy_forced": "natural",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "correct",
+    "judge_score": 1.0,
+    "agent_confidence": "low",
+    "latency_ms": 46949,
+    "llm_answer": "The provided passages list H0015 as the code for Alcohol/drug services; intensive outpatient program (IOP), per day, and associate it with revenue code 0169 [1], [2]. However, the passages do not specify any modifiers to be used when billing H0015 IOP services for Florida Medicaid.",
+    "features": {
+      "literal_anchors": [
+        "H0015"
+      ],
+      "tag_matches": [],
+      "query_type": "PRECISION_DOMINANT",
+      "cascade_level": "L4_AHCA",
+      "pool_size": 3321,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 5,
+      "n_bonus_facts": 3
+    },
+    "judge_reasoning": "The system correctly identifies that the provided passages mention H0015 and its associated revenue code but do not specify any modifiers for billing H0015 IOP services for Florida Medicaid, thus accurately answering the question based on the given context.",
+    "top_doc": "FL.CP.BH.12.pdf",
+    "top_page": 3,
+    "top_rerank": 0.7081,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc006",
+    "strategy_forced": "b",
+    "repeat": 0,
+    "strategy_executed": "b",
+    "judge_verdict": "unable_to_verify",
+    "judge_score": 0.5,
+    "agent_confidence": "high",
+    "latency_ms": 26722,
+    "llm_answer": "For non-urgent, pre-service medical and behavioral health prior authorization requests, Sunshine Health Florida makes determinations within seven calendar days of receiving the request [1], [6]. This timeframe may be extended by up to an additional four calendar days if Sunshine Health is unable to issue a decision due to matters beyond its control [1], [6]. For urgent medical pre-service or expedited requests, determinations are made within 48 hours of receipt [4], [6]. If additional information is required for urgent requests, a one-time extension of one additional calendar day may be implem",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:utilization_management.prior_authorization",
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "EXPLORE_AHCA",
+      "pool_size": 3321,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "um",
+      "n_must_facts": 3,
+      "n_bonus_facts": 6
+    },
+    "judge_reasoning": "",
+    "top_doc": "Provider_Manual.pdf",
+    "top_page": 33,
+    "top_rerank": 0.6331,
+    "n_chunks": 6
+  },
+  {
+    "qid": "cmhc006",
+    "strategy_forced": "natural",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "correct",
+    "judge_score": 1.0,
+    "agent_confidence": "low",
+    "latency_ms": 39395,
+    "llm_answer": "The provided passages do not contain information regarding the standard prior authorization decision timeframe for Sunshine Health Florida.",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:utilization_management.prior_authorization",
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "L2_JD",
+      "pool_size": 236,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "um",
+      "n_must_facts": 3,
+      "n_bonus_facts": 6
+    },
+    "judge_reasoning": "The system correctly states that the provided passages do not contain the requested information, which is accurate based on the content of the chunks.",
+    "top_doc": "Sunshine Health Behavioral Health Clinical Policy",
+    "top_page": 2,
+    "top_rerank": 0.8443,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc007",
+    "strategy_forced": "b",
+    "repeat": 0,
+    "strategy_executed": "b",
+    "judge_verdict": "wrong",
+    "judge_score": 0.0,
+    "agent_confidence": "low",
+    "latency_ms": 5805,
+    "llm_answer": "",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:claims.corrected_claims",
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "EXPLORE_AHCA",
+      "pool_size": 3321,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 3,
+      "n_bonus_facts": 4
+    },
+    "judge_reasoning": "The system did not provide any information on how to submit a corrected claim, which was the user's question.",
+    "top_doc": null,
+    "top_page": null,
+    "top_rerank": null,
+    "n_chunks": 0
+  },
+  {
+    "qid": "cmhc006",
+    "strategy_forced": "a",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "correct",
+    "judge_score": 1.0,
+    "agent_confidence": "low",
+    "latency_ms": 40474,
+    "llm_answer": "The provided passages do not contain information regarding the standard prior authorization decision timeframe for Sunshine Health Florida.",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:utilization_management.prior_authorization",
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "L2_JD",
+      "pool_size": 236,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "um",
+      "n_must_facts": 3,
+      "n_bonus_facts": 6
+    },
+    "judge_reasoning": "The system correctly states that the provided passages do not contain the requested information, which is accurate based on the content of the chunks.",
+    "top_doc": "Sunshine Health Behavioral Health Clinical Policy",
+    "top_page": 2,
+    "top_rerank": 0.8443,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc005",
+    "strategy_forced": "b",
+    "repeat": 0,
+    "strategy_executed": "b",
+    "judge_verdict": "unable_to_verify",
+    "judge_score": 0.5,
+    "agent_confidence": "low",
+    "latency_ms": 51139,
+    "llm_answer": "The provided passages do not specify a modifier for billing H0015 IOP services for Florida Medicaid. To find approved modifier codes, you should refer to the Medicaid Fee Schedule and the Billing and Procedure Coding Guide [2]. Additional information on entering modifiers on the claim form can be found in Chapter 1 of the Florida Medicaid Provider Reimbursement Handbook, Non-Institutional 081 [6].",
+    "features": {
+      "literal_anchors": [
+        "H0015"
+      ],
+      "tag_matches": [],
+      "query_type": "PRECISION_DOMINANT",
+      "cascade_level": "EXPLORE_AHCA",
+      "pool_size": 3321,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 5,
+      "n_bonus_facts": 3
+    },
+    "judge_reasoning": "",
+    "top_doc": "FL.CP.BH.12.pdf",
+    "top_page": 3,
+    "top_rerank": 0.7411,
+    "n_chunks": 6
+  },
+  {
+    "qid": "cmhc009",
+    "strategy_forced": "natural",
+    "repeat": 0,
+    "strategy_executed": "e",
+    "judge_verdict": "wrong",
+    "judge_score": 0.0,
+    "agent_confidence": "low",
+    "latency_ms": 7,
+    "llm_answer": "",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "j:payor.sunshine_health",
+        "p:submission.submit"
+      ],
+      "query_type": "MIXED",
+      "cascade_level": null,
+      "pool_size": null,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 3,
+      "n_bonus_facts": 6
+    },
+    "judge_reasoning": "The system failed to provide an answer, indicating no domain match, while the expected outcome implies an answer should have been found.",
+    "top_doc": null,
+    "top_page": null,
+    "top_rerank": null,
+    "n_chunks": 0
+  },
+  {
+    "qid": "cmhc007",
+    "strategy_forced": "natural",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "wrong",
+    "judge_score": 0.0,
+    "agent_confidence": "low",
+    "latency_ms": 28569,
+    "llm_answer": "The provided passages do not specify the general process for submitting a corrected claim to Sunshine Health Florida. However, for interim inpatient stays exceeding 100 consecutive days, a previous interim claim is voided and replaced with a new claim using type of bill code 0117 for subsequent billing [2]. Providers are also advised to review daily error reports for rejected claims that need to be corrected in a timely manner [1]. When code editing software applies an edit to a claim, a claim adjustment should be made [3].",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:claims.corrected_claims",
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "L2_JD",
+      "pool_size": 15,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 3,
+      "n_bonus_facts": 4
+    },
+    "judge_reasoning": "The system explicitly states that the provided passages do not specify the general process for submitting a corrected claim, which is what the question asks for.",
+    "top_doc": "Sunshine Provider Manual",
+    "top_page": 122,
+    "top_rerank": 0.8245,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc009",
+    "strategy_forced": "a",
+    "repeat": 0,
+    "strategy_executed": "e",
+    "judge_verdict": "wrong",
+    "judge_score": 0.0,
+    "agent_confidence": "low",
+    "latency_ms": 9,
+    "llm_answer": "",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "j:payor.sunshine_health",
+        "p:submission.submit"
+      ],
+      "query_type": "MIXED",
+      "cascade_level": null,
+      "pool_size": null,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 3,
+      "n_bonus_facts": 6
+    },
+    "judge_reasoning": "The system failed to provide an answer, indicating no domain match, while the expected outcome was to provide a correct answer.",
+    "top_doc": null,
+    "top_page": null,
+    "top_rerank": null,
+    "n_chunks": 0
+  },
+  {
+    "qid": "cmhc009",
+    "strategy_forced": "b",
+    "repeat": 0,
+    "strategy_executed": "e",
+    "judge_verdict": "wrong",
+    "judge_score": 0.0,
+    "agent_confidence": "low",
+    "latency_ms": 8,
+    "llm_answer": "",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "j:payor.sunshine_health",
+        "p:submission.submit"
+      ],
+      "query_type": "MIXED",
+      "cascade_level": null,
+      "pool_size": null,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 3,
+      "n_bonus_facts": 6
+    },
+    "judge_reasoning": "The system failed to provide any answer or relevant information, indicating 'no_domain_match', while the expected outcome implies a successful retrieval of information.",
+    "top_doc": null,
+    "top_page": null,
+    "top_rerank": null,
+    "n_chunks": 0
+  },
+  {
+    "qid": "cmhc007",
+    "strategy_forced": "a",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "wrong",
+    "judge_score": 0.0,
+    "agent_confidence": "low",
+    "latency_ms": 32612,
+    "llm_answer": "{\n  \"answer\": \"For subsequent inpatient hospital billing of interim inpatient stays exceeding 100 consecutive days, the previous interim claim is voided by being recouped and replaced with the",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:claims.corrected_claims",
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "L2_JD",
+      "pool_size": 15,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 3,
+      "n_bonus_facts": 4
+    },
+    "judge_reasoning": "The system's response provides an incomplete sentence about voiding and replacing interim claims for long inpatient stays, which does not answer the general question of how to submit a corrected claim, and the provided chunks are irrelevant to the question.",
+    "top_doc": "Sunshine Provider Manual",
+    "top_page": 122,
+    "top_rerank": 0.8245,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc008",
+    "strategy_forced": "a",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "wrong",
+    "judge_score": 0.0,
+    "agent_confidence": "high",
+    "latency_ms": 29699,
+    "llm_answer": "",
+    "features": {
+      "literal_anchors": [
+        "96130",
+        "96139"
+      ],
+      "tag_matches": [
+        "d:billing_codes.procedure_code",
+        "d:health_care_services.behavioral_health",
+        "d:utilization_management.prior_authorization",
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "PRECISION_DOMINANT",
+      "cascade_level": "L2_JD",
+      "pool_size": 125,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "um",
+      "n_must_facts": 3,
+      "n_bonus_facts": 5
+    },
+    "judge_reasoning": "The system's response provides a list of CPT codes for other services but does not include or mention CPT codes 96130-96139, thus failing to answer the question.",
+    "top_doc": "FL_SunshineHealth_Caid_PAReq_CMS19_CMS21_MMA_AIP.pdf",
+    "top_page": 3,
+    "top_rerank": 0.7081,
+    "n_chunks": 1
+  },
+  {
+    "qid": "cmhc008",
+    "strategy_forced": "natural",
+    "repeat": 0,
+    "strategy_executed": "d",
+    "judge_verdict": "partial",
+    "judge_score": 0.6,
+    "agent_confidence": "low",
+    "latency_ms": 33614,
+    "llm_answer": "{\n  \"answer\": \"Sunshine Health does not require prior authorization for CPT codes 96130 and 96136 for evaluation services for individuals",
+    "features": {
+      "literal_anchors": [
+        "96130",
+        "96139"
+      ],
+      "tag_matches": [
+        "d:billing_codes.procedure_code",
+        "d:health_care_services.behavioral_health",
+        "d:utilization_management.prior_authorization",
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "PRECISION_DOMINANT",
+      "cascade_level": null,
+      "pool_size": null,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "um",
+      "n_must_facts": 3,
+      "n_bonus_facts": 5
+    },
+    "judge_reasoning": "The system's response correctly states that prior authorization is not required for CPT codes 96130 and 96136, which are part of the requested range, but it does not address the other CPT codes within the 96130-96139 range.",
+    "top_doc": "Florida Medicaid Pre-Authorization | Sunshine Health",
+    "top_page": null,
+    "top_rerank": 1.0,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc010",
+    "strategy_forced": "b",
+    "repeat": 0,
+    "strategy_executed": "b",
+    "judge_verdict": "correct",
+    "judge_score": 1.0,
+    "agent_confidence": "high",
+    "latency_ms": 18149,
+    "llm_answer": "Providers should verify member eligibility before providing services for Sunshine Health members [3]. This can be done using the provider portal or through tools and resources provided by AHCA [3]. It is recommended that providers verify a member's eligibility each time an appointment is scheduled and when the member arrives for services [3].",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:eligibility.general",
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "EXPLORE_AHCA",
+      "pool_size": 3321,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "front_end",
+      "n_must_facts": 3,
+      "n_bonus_facts": 3
+    },
+    "judge_reasoning": "The system correctly identifies the methods for verifying member eligibility, which are the provider portal or tools/resources from AHCA, directly supported by the provided chunk.",
+    "top_doc": "Provider_Manual.pdf",
+    "top_page": 126,
+    "top_rerank": 0.7033,
+    "n_chunks": 7
+  },
+  {
+    "qid": "cmhc010",
+    "strategy_forced": "a",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "correct",
+    "judge_score": 1.0,
+    "agent_confidence": "low",
+    "latency_ms": 32092,
+    "llm_answer": "The provided passages do not contain information on how to verify member eligibility for a Sunshine Health Florida member. They discuss types of members covered by specific policies and eligibility criteria for certain expanded benefits, but not the general process for verifying membership [1, 3, 4].",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:eligibility.general",
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "L2_JD",
+      "pool_size": 162,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "front_end",
+      "n_must_facts": 3,
+      "n_bonus_facts": 3
+    },
+    "judge_reasoning": "The system correctly states that the provided passages do not contain the information requested by the user, which is accurate based on the content of the chunks.",
+    "top_doc": "Sunshine Health Behavioral Health Clinical Policy",
+    "top_page": 1,
+    "top_rerank": 0.8071,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc010",
+    "strategy_forced": "natural",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "unable_to_verify",
+    "judge_score": 0.5,
+    "agent_confidence": "low",
+    "latency_ms": 30055,
+    "llm_answer": "The provided passages do not contain information on how to verify member eligibility for a Sunshine Health Florida member. The passages discuss various behavioral health benefits, member and provider responsibilities, and eligibility criteria for specific services, but not the process for verifying overall member eligibility [1, 2, 3, 4, 5].",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:eligibility.general",
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "L2_JD",
+      "pool_size": 162,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "front_end",
+      "n_must_facts": 3,
+      "n_bonus_facts": 3
+    },
+    "judge_reasoning": "",
+    "top_doc": "Sunshine Health Behavioral Health Clinical Policy",
+    "top_page": 1,
+    "top_rerank": 0.8071,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc008",
+    "strategy_forced": "b",
+    "repeat": 0,
+    "strategy_executed": "b",
+    "judge_verdict": "correct",
+    "judge_score": 1.0,
+    "agent_confidence": "low",
+    "latency_ms": 46402,
+    "llm_answer": "The provided passages do not explicitly state whether Sunshine Health requires prior authorization for psychological testing under CPT codes 96130-96139. Providers are advised to use the Pre-Auth Check Tool to determine if prior authorization is needed for a specific service code [1]. This tool can be accessed via the Pre-Auth Check Tool link, followed by selecting the product in which the member is enrolled [1].",
+    "features": {
+      "literal_anchors": [
+        "96130",
+        "96139"
+      ],
+      "tag_matches": [
+        "d:billing_codes.procedure_code",
+        "d:health_care_services.behavioral_health",
+        "d:utilization_management.prior_authorization",
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "PRECISION_DOMINANT",
+      "cascade_level": "EXPLORE_AHCA",
+      "pool_size": 3321,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "um",
+      "n_must_facts": 3,
+      "n_bonus_facts": 5
+    },
+    "judge_reasoning": "The system correctly states that the provided passages do not explicitly contain the answer to the specific question about CPT codes 96130-96139 and accurately directs the user to the Pre-Auth Check Tool, which is the correct next step according to the provided chunk [1].",
+    "top_doc": "Provider_Manual.pdf",
+    "top_page": 31,
+    "top_rerank": 0.6213,
+    "n_chunks": 4
+  },
+  {
+    "qid": "cmhc012",
+    "strategy_forced": "natural",
+    "repeat": 0,
+    "strategy_executed": "b",
+    "judge_verdict": "unable_to_verify",
+    "judge_score": 0.0,
+    "agent_confidence": "low",
+    "latency_ms": 2607,
+    "llm_answer": "",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:health_care_services.aba_therapy",
+        "j:state.florida"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "EXPLORE_AHCA",
+      "pool_size": 3321,
+      "payer_specificity": "mco_specific",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 3,
+      "n_bonus_facts": 6
+    },
+    "judge_reasoning": "The system provided no answer or chunks, making it impossible to verify against the expected ground truth.",
+    "top_doc": null,
+    "top_page": null,
+    "top_rerank": null,
+    "n_chunks": 0
+  },
+  {
+    "qid": "cmhc012",
+    "strategy_forced": "b",
+    "repeat": 0,
+    "strategy_executed": "b",
+    "judge_verdict": "unable_to_verify",
+    "judge_score": 0.0,
+    "agent_confidence": "low",
+    "latency_ms": 1493,
+    "llm_answer": "",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:health_care_services.aba_therapy",
+        "j:state.florida"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "EXPLORE_AHCA",
+      "pool_size": 3321,
+      "payer_specificity": "mco_specific",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 3,
+      "n_bonus_facts": 6
+    },
+    "judge_reasoning": "The system returned an empty response with no chunks, failing to provide any information regarding the requested HCPCS code.",
+    "top_doc": null,
+    "top_page": null,
+    "top_rerank": null,
+    "n_chunks": 0
+  },
+  {
+    "qid": "cmhc011",
+    "strategy_forced": "b",
+    "repeat": 0,
+    "strategy_executed": "b",
+    "judge_verdict": "unable_to_verify",
+    "judge_score": 0.5,
+    "agent_confidence": "low",
+    "latency_ms": 21727,
+    "llm_answer": "{\n  \"answer\": \"Sunshine Health requires prior authorization for all non-emergency inpatient admissions, including psychiatric admissions [1]. Behavioral health providers can submit requests for inpatient psychiatric services",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:utilization_management.prior_authorization",
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "EXPLORE_AHCA",
+      "pool_size": 3321,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "um",
+      "n_must_facts": 3,
+      "n_bonus_facts": 7
+    },
+    "judge_reasoning": "",
+    "top_doc": "Provider_Manual.pdf",
+    "top_page": 80,
+    "top_rerank": 0.6906,
+    "n_chunks": 4
+  },
+  {
+    "qid": "cmhc011",
+    "strategy_forced": "natural",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "unable_to_verify",
+    "judge_score": 0.5,
+    "agent_confidence": "high",
+    "latency_ms": 34362,
+    "llm_answer": "Prior authorization is required for non-emergency inpatient admissions for members under Managed Medical Assistance (MMA), Comprehensive Long-Term Care (LTC), Serious Mental Illness (SMI), and HIV/AIDS programs [2, 3]. Behavioral health providers are specifically instructed to submit requests for inpatient psychiatric services [2]. Medical practitioners and providers, including network hospitals, must submit these requests through Sunshine Health\u2019s Secure Provider Portal [2, 3]. For emergent or urgent inpatient admissions, authorizations must be obtained through the Secure Provider Portal with",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:utilization_management.prior_authorization",
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "L2_JD",
+      "pool_size": 236,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "um",
+      "n_must_facts": 3,
+      "n_bonus_facts": 7
+    },
+    "judge_reasoning": "",
+    "top_doc": "Sunshine Health Behavioral Health Clinical Policy",
+    "top_page": 2,
+    "top_rerank": 0.8408,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc011",
+    "strategy_forced": "a",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "unable_to_verify",
+    "judge_score": 0.5,
+    "agent_confidence": "high",
+    "latency_ms": 34543,
+    "llm_answer": "Prior authorization is required for non-emergency inpatient admissions for members under Managed Medical Assistance (MMA), Comprehensive Waiver Services Program (CWSP), Serious Mental Illness (SMI), and HIV/AIDS [2]. All non-emergency inpatient admissions generally require prior authorization from Sunshine Health [3]. Behavioral health providers are responsible for submitting requests for inpatient psychiatric services [2]. For emergent or urgent inpatient admissions, authorization must be obtained through Sunshine Health\u2019s Secure Provider Portal within two business days after the date of admi",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:utilization_management.prior_authorization",
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "L2_JD",
+      "pool_size": 236,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "um",
+      "n_must_facts": 3,
+      "n_bonus_facts": 7
+    },
+    "judge_reasoning": "",
+    "top_doc": "Sunshine Health Behavioral Health Clinical Policy",
+    "top_page": 2,
+    "top_rerank": 0.8408,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc012",
+    "strategy_forced": "a",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "wrong",
+    "judge_score": 0.0,
+    "agent_confidence": "low",
+    "latency_ms": 24718,
+    "llm_answer": "The provided passages describe Behavior Analysis Services, including their scope and provider qualifications under Florida Medicaid, but they do not specify the HCPCS code for billing Applied Behavior Analysis (ABA) therapy [1], [3], [4]. The passages discuss policy development for these services but do not list specific billing codes [5].",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:health_care_services.aba_therapy",
+        "j:state.florida"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "L3_AHCA_D",
+      "pool_size": 22,
+      "payer_specificity": "mco_specific",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 3,
+      "n_bonus_facts": 6
+    },
+    "judge_reasoning": "The system explicitly states that the provided passages do not specify the HCPCS code, thus failing to answer the question directly.",
+    "top_doc": "IDD_Amendment_07022025.PDF",
+    "top_page": 140,
+    "top_rerank": 0.6921,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc013",
+    "strategy_forced": "natural",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "correct",
+    "judge_score": 1.0,
+    "agent_confidence": "low",
+    "latency_ms": 23433,
+    "llm_answer": "The provided passages do not contain information regarding whether Sunshine Health covers dental services for adults. The passages discuss Florida Medicaid's coverage of behavioral health community support services and list administrative subcontractors for Sunshine State Health Plan [1, 2, 3, 4, 5].",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:health_care_services.dental",
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "L2_JD",
+      "pool_size": 230,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "front_end",
+      "n_must_facts": 3,
+      "n_bonus_facts": 5
+    },
+    "judge_reasoning": "The system correctly states that the provided passages do not contain information about dental services for adults by Sunshine Health, which aligns with the expected strategy of indicating the information is not available.",
+    "top_doc": "SH-PRO-BH-PSR.pdf",
+    "top_page": 4,
+    "top_rerank": 0.9379,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc013",
+    "strategy_forced": "a",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "correct",
+    "judge_score": 1.0,
+    "agent_confidence": "low",
+    "latency_ms": 24784,
+    "llm_answer": "The provided passages do not contain information regarding whether Sunshine Health covers dental services for adults. The passages discuss behavioral health community support services and administrative subcontractors for Sunshine State Health Plan [1, 2, 3, 4, 5].",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:health_care_services.dental",
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "L2_JD",
+      "pool_size": 230,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "front_end",
+      "n_must_facts": 3,
+      "n_bonus_facts": 5
+    },
+    "judge_reasoning": "The system correctly states that the provided passages do not contain information about dental services for adults, which aligns with the expected outcome of 'd' (information not found).",
+    "top_doc": "SH-PRO-BH-PSR.pdf",
+    "top_page": 4,
+    "top_rerank": 0.9379,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc013",
+    "strategy_forced": "b",
+    "repeat": 0,
+    "strategy_executed": "b",
+    "judge_verdict": "correct",
+    "judge_score": 1.0,
+    "agent_confidence": "high",
+    "latency_ms": 17482,
+    "llm_answer": "Yes, Sunshine Health covers adult dental services. Multiple policy documents indicate that Sunshine Health provides \"Adult dental services (Expanded)\" [1], [2], [3], [4], [5].",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:health_care_services.dental",
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "EXPLORE_AHCA",
+      "pool_size": 3321,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "front_end",
+      "n_must_facts": 3,
+      "n_bonus_facts": 5
+    },
+    "judge_reasoning": "The system correctly answers 'Yes' and provides multiple document references that explicitly state 'Adult dental services (Expanded)' are covered by 'Sunshine Health' with a 'Y' indicator.",
+    "top_doc": "Express_Enrollment_1115_Public_Notice_March_2015.pdf",
+    "top_page": 16,
+    "top_rerank": 0.6409,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc015",
+    "strategy_forced": "b",
+    "repeat": 0,
+    "strategy_executed": "b",
+    "judge_verdict": "unable_to_verify",
+    "judge_score": 0.0,
+    "agent_confidence": "low",
+    "latency_ms": 2769,
+    "llm_answer": "",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:disputes.appeal",
+        "j:payor.sunshine_health",
+        "p:submission.submit"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "EXPLORE_AHCA",
+      "pool_size": 3321,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "front_end",
+      "n_must_facts": 3,
+      "n_bonus_facts": 7
+    },
+    "judge_reasoning": "The system returned no information or chunks, therefore it did not answer the question.",
+    "top_doc": null,
+    "top_page": null,
+    "top_rerank": null,
+    "n_chunks": 0
+  },
+  {
+    "qid": "cmhc016",
+    "strategy_forced": "natural",
+    "repeat": 0,
+    "strategy_executed": "e",
+    "judge_verdict": "wrong",
+    "judge_score": 0.0,
+    "agent_confidence": "low",
+    "latency_ms": 8,
+    "llm_answer": "",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": null,
+      "pool_size": null,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "front_end",
+      "n_must_facts": 3,
+      "n_bonus_facts": 6
+    },
+    "judge_reasoning": "The system failed to provide any information or answer to the question, indicating 'no_domain_match' and returning no chunks.",
+    "top_doc": null,
+    "top_page": null,
+    "top_rerank": null,
+    "n_chunks": 0
+  },
+  {
+    "qid": "cmhc016",
+    "strategy_forced": "a",
+    "repeat": 0,
+    "strategy_executed": "e",
+    "judge_verdict": "wrong",
+    "judge_score": 0.0,
+    "agent_confidence": "low",
+    "latency_ms": 9,
+    "llm_answer": "",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": null,
+      "pool_size": null,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "front_end",
+      "n_must_facts": 3,
+      "n_bonus_facts": 6
+    },
+    "judge_reasoning": "The system failed to provide any information or answer to the question, indicating a 'no_domain_match' fail-fast.",
+    "top_doc": null,
+    "top_page": null,
+    "top_rerank": null,
+    "n_chunks": 0
+  },
+  {
+    "qid": "cmhc016",
+    "strategy_forced": "b",
+    "repeat": 0,
+    "strategy_executed": "e",
+    "judge_verdict": "unable_to_verify",
+    "judge_score": 0.0,
+    "agent_confidence": "low",
+    "latency_ms": 9,
+    "llm_answer": "",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": null,
+      "pool_size": null,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "front_end",
+      "n_must_facts": 3,
+      "n_bonus_facts": 6
+    },
+    "judge_reasoning": "The system failed fast with 'no_domain_match' and provided no answer, while the expected outcome indicates that a strategy ('a') should have been used to answer the question.",
+    "top_doc": null,
+    "top_page": null,
+    "top_rerank": null,
+    "n_chunks": 0
+  },
+  {
+    "qid": "cmhc014",
+    "strategy_forced": "b",
+    "repeat": 0,
+    "strategy_executed": "b",
+    "judge_verdict": "wrong",
+    "judge_score": 0.0,
+    "agent_confidence": "high",
+    "latency_ms": 20426,
+    "llm_answer": "Sunshine Health contracts with Express Scripts to administer the prescription drug benefit for its members [1]. Express Scripts processes prescription claims for Sunshine Health [1]. The plan also performs prior authorization for certain prescription drugs subject to quantity limits, age limits, or other clinical considerations [1].",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:pharmacy.pharmacy_benefit",
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "EXPLORE_AHCA",
+      "pool_size": 3321,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 3,
+      "n_bonus_facts": 4
+    },
+    "judge_reasoning": "The system hallucinates 'Express Scripts' as the pharmacy benefit manager and falsely attributes this information to chunk [1], which does not contain this detail.",
+    "top_doc": "Provider_Manual.pdf",
+    "top_page": 106,
+    "top_rerank": 0.8894,
+    "n_chunks": 7
+  },
+  {
+    "qid": "cmhc014",
+    "strategy_forced": "natural",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "wrong",
+    "judge_score": 0.0,
+    "agent_confidence": "high",
+    "latency_ms": 27556,
+    "llm_answer": "Sunshine Health contracts with Express Scripts to administer the prescription drug benefit for its members [1]. Express Scripts is responsible for processing prescription claims for Sunshine Health [1].",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:pharmacy.pharmacy_benefit",
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "L2_JD",
+      "pool_size": 44,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 3,
+      "n_bonus_facts": 4
+    },
+    "judge_reasoning": "The system's answer states that Express Scripts processes claims for Sunshine Health, but this information is not present in the provided chunk [1] or any other chunk.",
+    "top_doc": "Sunshine Provider Manual",
+    "top_page": 106,
+    "top_rerank": 0.9671,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc014",
+    "strategy_forced": "a",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "wrong",
+    "judge_score": 0.0,
+    "agent_confidence": "high",
+    "latency_ms": 25832,
+    "llm_answer": "Sunshine Health contracts with Express Scripts to administer the prescription drug benefit for its members [1]. Express Scripts processes the prescription claims for Sunshine Health members [1].",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:pharmacy.pharmacy_benefit",
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "L2_JD",
+      "pool_size": 44,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 3,
+      "n_bonus_facts": 4
+    },
+    "judge_reasoning": "The system's LLM answer states 'Express Scripts' and cites chunk [1], but chunk [1] does not contain any information about Express Scripts or any pharmacy benefit manager.",
+    "top_doc": "Sunshine Provider Manual",
+    "top_page": 106,
+    "top_rerank": 0.9671,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc015",
+    "strategy_forced": "natural",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "unable_to_verify",
+    "judge_score": 0.5,
+    "agent_confidence": "high",
+    "latency_ms": 25305,
+    "llm_answer": "Sunshine Health's member appeals can be filed orally or in writing [1]. To file, you can mail your appeal to Sunshine Grievance & Appeals P.O. Box 459087 Fort Lauderdale, FL 33345-9087, fax it to 1-866-534-5972, or call 1-866-796-0530 (TTY 1-800-955-8770) [1]. An expedited appeal can be requested verbally or in writing directly to Sunshine Health, particularly if applying the standard procedure could seriously jeopardize the member\u2019s life, health, or ability to regain maximum function [3]. Members are not required to submit a written appeal request if they verbally request an expedited appeal ",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:disputes.appeal",
+        "j:payor.sunshine_health",
+        "p:submission.submit"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "L1_JDP",
+      "pool_size": 87,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "front_end",
+      "n_must_facts": 3,
+      "n_bonus_facts": 7
+    },
+    "judge_reasoning": "",
+    "top_doc": "SH-PRO-Qi-Appeals-Guide.pdf",
+    "top_page": 2,
+    "top_rerank": 0.8688,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc015",
+    "strategy_forced": "a",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "unable_to_verify",
+    "judge_score": 0.5,
+    "agent_confidence": "high",
+    "latency_ms": 22304,
+    "llm_answer": "Sunshine Health's member appeals can be filed orally or in writing via mail, fax, phone at 1-866-796-0530 (TTY 1-800-955-8770), or email [1]. An expedited appeals process is available for situations where applying the standard procedure could seriously jeopardize the member\u2019s life, health, or ability to regain maximum function [3]. Members can request an expedited appeal verbally or in writing, and are not required to submit a written request if made verbally [3]. Members are also provided reasonable opportunity to present evidence and allegations of fact or law in person or in writing, and ca",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:disputes.appeal",
+        "j:payor.sunshine_health",
+        "p:submission.submit"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "L1_JDP",
+      "pool_size": 87,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "front_end",
+      "n_must_facts": 3,
+      "n_bonus_facts": 7
+    },
+    "judge_reasoning": "",
+    "top_doc": "SH-PRO-Qi-Appeals-Guide.pdf",
+    "top_page": 2,
+    "top_rerank": 0.8688,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc017",
+    "strategy_forced": "natural",
+    "repeat": 0,
+    "strategy_executed": "b",
+    "judge_verdict": "unable_to_verify",
+    "judge_score": 0.5,
+    "agent_confidence": "high",
+    "latency_ms": 18270,
+    "llm_answer": "For Florida Medicaid telemedicine services, providers must include modifier GT on the CMS-1500 claim form [1], [7]. This requirement applies to services reimbursed by Florida Medicaid using interactive telecommunications equipment [1], [7].",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:health_care_services.managed_care",
+        "j:state.florida"
+      ],
+      "query_type": "MIXED",
+      "cascade_level": "EXPLORE_AHCA",
+      "pool_size": 3321,
+      "payer_specificity": "mco_specific",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 3,
+      "n_bonus_facts": 6
+    },
+    "judge_reasoning": "",
+    "top_doc": "CMS-PRO-PE-Manual.pdf",
+    "top_page": 81,
+    "top_rerank": 0.7702,
+    "n_chunks": 7
+  },
+  {
+    "qid": "cmhc017",
+    "strategy_forced": "b",
+    "repeat": 0,
+    "strategy_executed": "b",
+    "judge_verdict": "unable_to_verify",
+    "judge_score": 0.5,
+    "agent_confidence": "high",
+    "latency_ms": 19314,
+    "llm_answer": "For Florida Medicaid telemedicine services, providers must include modifier GT on the CMS-1500 claim form [1], [7]. This requirement applies to the practice of healthcare delivery by a practitioner located at a site other than the recipient's location for evaluation, diagnosis, or treatment [1], [7]. Florida Medicaid managed care plans are authorized to cover telehealth services, and the vast majority of Florida Medicaid beneficiaries are enrolled in managed care [3].",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:health_care_services.managed_care",
+        "j:state.florida"
+      ],
+      "query_type": "MIXED",
+      "cascade_level": "EXPLORE_AHCA",
+      "pool_size": 3321,
+      "payer_specificity": "mco_specific",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 3,
+      "n_bonus_facts": 6
+    },
+    "judge_reasoning": "",
+    "top_doc": "CMS-PRO-PE-Manual.pdf",
+    "top_page": 81,
+    "top_rerank": 0.7702,
+    "n_chunks": 7
+  },
+  {
+    "qid": "cmhc017",
+    "strategy_forced": "a",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "unable_to_verify",
+    "judge_score": 0.5,
+    "agent_confidence": "high",
+    "latency_ms": 26410,
+    "llm_answer": "Providers must include modifier GT on the CMS-1500 claim form for telehealth services under Florida Medicaid [1]. Florida Medicaid reimburses for telemedicine services using interactive telecommunications equipment that includes, at a minimum, audio and video equipment permitting two-way, real-time, interactive communication between a patient and a practitioner [1]. The vast majority of Florida Medicaid beneficiaries are enrolled in managed care, and Florida\u2019s Medicaid Managed Care plans are authorized to cover telehealth services [3].",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:health_care_services.managed_care",
+        "j:state.florida"
+      ],
+      "query_type": "MIXED",
+      "cascade_level": "L3_AHCA_D",
+      "pool_size": 1097,
+      "payer_specificity": "mco_specific",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 3,
+      "n_bonus_facts": 6
+    },
+    "judge_reasoning": "",
+    "top_doc": "CMS-PRO-PE-Manual.pdf",
+    "top_page": 81,
+    "top_rerank": 0.8968,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc018",
+    "strategy_forced": "b",
+    "repeat": 0,
+    "strategy_executed": "b",
+    "judge_verdict": "unable_to_verify",
+    "judge_score": 0.5,
+    "agent_confidence": "low",
+    "latency_ms": 21892,
+    "llm_answer": "The provided passages do not explicitly state whether Sunshine Health requires prior authorization for outpatient electroconvulsive therapy (ECT). While most behavioral health outpatient services do not require prior authorization, providers are advised to use the Pre-Auth Check Tool to look up a specific service code to determine if prior authorization is needed [3], [5].",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:utilization_management.prior_authorization",
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "MIXED",
+      "cascade_level": "EXPLORE_AHCA",
+      "pool_size": 3321,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "um",
+      "n_must_facts": 3,
+      "n_bonus_facts": 5
+    },
+    "judge_reasoning": "",
+    "top_doc": "Provider_Manual.pdf",
+    "top_page": 80,
+    "top_rerank": 0.6685,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc019",
+    "strategy_forced": "b",
+    "repeat": 0,
+    "strategy_executed": "b",
+    "judge_verdict": "wrong",
+    "judge_score": 0.0,
+    "agent_confidence": "low",
+    "latency_ms": 6955,
+    "llm_answer": "",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:claims.timely_filing",
+        "j:payor.aetna"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "EXPLORE_AHCA",
+      "pool_size": 3321,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 2,
+      "n_bonus_facts": 4
+    },
+    "judge_reasoning": "The system provided no information or chunks to answer the question about the timely filing deadline for Aetna Better Health Florida Medicaid claims.",
+    "top_doc": null,
+    "top_page": null,
+    "top_rerank": null,
+    "n_chunks": 0
+  },
+  {
+    "qid": "cmhc018",
+    "strategy_forced": "natural",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "unable_to_verify",
+    "judge_score": 0.5,
+    "agent_confidence": "medium",
+    "latency_ms": 40678,
+    "llm_answer": "The provided passages state that prior authorization is required for specific behavioral health outpatient services for MMA, CWSP, SMI, and HIV/AIDS members [2]. However, the passages do not explicitly state whether outpatient electroconvulsive therapy (ECT) is among these specific services that require prior authorization [1, 2, 4, 5]. Providers can check the Pre-Auth Tool on the Plan\u2019s website to determine if an expanded benefit requires prior authorization [1].",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:utilization_management.prior_authorization",
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "MIXED",
+      "cascade_level": "L2_JD",
+      "pool_size": 236,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "um",
+      "n_must_facts": 3,
+      "n_bonus_facts": 5
+    },
+    "judge_reasoning": "",
+    "top_doc": "Sunshine Health Behavioral Health Clinical Policy",
+    "top_page": 2,
+    "top_rerank": 0.8432,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc018",
+    "strategy_forced": "a",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "unable_to_verify",
+    "judge_score": 0.5,
+    "agent_confidence": "low",
+    "latency_ms": 41061,
+    "llm_answer": "The provided passages indicate that prior authorization is required for specific behavioral health outpatient services for MMA, CWSP, SMI, and HIV/AIDS members [2]. However, the passages do not explicitly state whether outpatient electroconvulsive therapy (ECT) is among these specific services that require prior authorization [2]. Providers can check the Pre-Auth Tool on Sunshine Health's website to determine if an expanded benefit requires prior authorization [1].",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:utilization_management.prior_authorization",
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "MIXED",
+      "cascade_level": "L2_JD",
+      "pool_size": 236,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "um",
+      "n_must_facts": 3,
+      "n_bonus_facts": 5
+    },
+    "judge_reasoning": "",
+    "top_doc": "Sunshine Health Behavioral Health Clinical Policy",
+    "top_page": 2,
+    "top_rerank": 0.8432,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc019",
+    "strategy_forced": "natural",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "wrong",
+    "judge_score": 0.0,
+    "agent_confidence": "high",
+    "latency_ms": 31826,
+    "llm_answer": "The timely filing deadline for Aetna Better Health of Florida Medicaid claims, including initial and corrected claims, is 180 days from the date of service or the date of discharge [2]. This applies to Medicaid (MMA), Comprehensive Long-Term Care (LTC), HIV/AIDS Specialty Plan, and Serious Mental Illness (SMI) Specialty Plan lines of business [2].",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:claims.timely_filing",
+        "j:payor.aetna"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "L2_JD",
+      "pool_size": 1,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 2,
+      "n_bonus_facts": 4
+    },
+    "judge_reasoning": "The system provided a specific answer regarding the timely filing deadline, but this information is not present in any of the provided chunks, and the citation to chunk [2] is incorrect as chunk [2] does not contain this information. The expected outcome was that the information would not be found.",
+    "top_doc": "abhfl_medicaid_comprehensive_ltc_provider_manual.pdf",
+    "top_page": 4,
+    "top_rerank": 0.7729,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc021",
+    "strategy_forced": "natural",
+    "repeat": 0,
+    "strategy_executed": "e",
+    "judge_verdict": "wrong",
+    "judge_score": 0.0,
+    "agent_confidence": "low",
+    "latency_ms": 7,
+    "llm_answer": "",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "MIXED",
+      "cascade_level": null,
+      "pool_size": null,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "front_end",
+      "n_must_facts": 3,
+      "n_bonus_facts": 6
+    },
+    "judge_reasoning": "The system failed to provide any information, indicating 'no_domain_match', while the expected outcome suggests there should be an answer to the question.",
+    "top_doc": null,
+    "top_page": null,
+    "top_rerank": null,
+    "n_chunks": 0
+  },
+  {
+    "qid": "cmhc019",
+    "strategy_forced": "a",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "wrong",
+    "judge_score": 0.0,
+    "agent_confidence": "high",
+    "latency_ms": 28651,
+    "llm_answer": "The timely filing deadline for Aetna Better Health of Florida Medicaid claims, including initial and corrected claims, is 180 days from the date of service or the date of discharge [2].",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:claims.timely_filing",
+        "j:payor.aetna"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "L2_JD",
+      "pool_size": 1,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 2,
+      "n_bonus_facts": 4
+    },
+    "judge_reasoning": "The system's answer provides a specific timely filing deadline and cites chunk [2], but chunk [2] does not contain any information about filing deadlines, indicating a hallucination of the source content.",
+    "top_doc": "abhfl_medicaid_comprehensive_ltc_provider_manual.pdf",
+    "top_page": 4,
+    "top_rerank": 0.7729,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc021",
+    "strategy_forced": "a",
+    "repeat": 0,
+    "strategy_executed": "e",
+    "judge_verdict": "wrong",
+    "judge_score": 0.0,
+    "agent_confidence": "low",
+    "latency_ms": 10,
+    "llm_answer": "",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "MIXED",
+      "cascade_level": null,
+      "pool_size": null,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "front_end",
+      "n_must_facts": 3,
+      "n_bonus_facts": 6
+    },
+    "judge_reasoning": "The system failed fast with 'no_domain_match' and provided no information, thus it did not answer the question about required documentation for pediatric patient enrollment.",
+    "top_doc": null,
+    "top_page": null,
+    "top_rerank": null,
+    "n_chunks": 0
+  },
+  {
+    "qid": "cmhc021",
+    "strategy_forced": "b",
+    "repeat": 0,
+    "strategy_executed": "e",
+    "judge_verdict": "wrong",
+    "judge_score": 0.0,
+    "agent_confidence": "low",
+    "latency_ms": 7,
+    "llm_answer": "",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "j:payor.sunshine_health"
+      ],
+      "query_type": "MIXED",
+      "cascade_level": null,
+      "pool_size": null,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "front_end",
+      "n_must_facts": 3,
+      "n_bonus_facts": 6
+    },
+    "judge_reasoning": "The system failed to provide any information regarding the required documentation, indicating a 'no_domain_match' fail-fast, which does not answer the question.",
+    "top_doc": null,
+    "top_page": null,
+    "top_rerank": null,
+    "n_chunks": 0
+  },
+  {
+    "qid": "cmhc020",
+    "strategy_forced": "a",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "correct",
+    "judge_score": 1.0,
+    "agent_confidence": "low",
+    "latency_ms": 35086,
+    "llm_answer": "The provided passages do not contain information regarding Simply Healthcare Florida Medicaid's prior authorization decision timeframe. The passages discuss the implementation of a Prior Authorization API for various payers, including Medicaid managed care plans, and its aim to speed up the prior authorization process, but they do not specify a particular timeframe for decisions [1, 4, 5].",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:utilization_management.prior_authorization",
+        "j:payor.simply_healthcare"
+      ],
+      "query_type": "MIXED",
+      "cascade_level": "L2_JD",
+      "pool_size": 154,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "um",
+      "n_must_facts": 3,
+      "n_bonus_facts": 4
+    },
+    "judge_reasoning": "The system correctly states that the provided passages do not contain the requested information, which aligns with the expected outcome of 'strategy: d' (information not found).",
+    "top_doc": "2024-00895.pdf",
+    "top_page": 110,
+    "top_rerank": 0.7776,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc020",
+    "strategy_forced": "b",
+    "repeat": 0,
+    "strategy_executed": "b",
+    "judge_verdict": "unable_to_verify",
+    "judge_score": 0.5,
+    "agent_confidence": "low",
+    "latency_ms": 21508,
+    "llm_answer": "{\n  \"answer\": \"The provided passages describe the prior authorization decision timeframes for Sunshine Health, a Medicaid product, but do not specifically mention Simply Healthcare Florida Medicaid. For non-urgent,",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:utilization_management.prior_authorization",
+        "j:payor.simply_healthcare"
+      ],
+      "query_type": "MIXED",
+      "cascade_level": "EXPLORE_AHCA",
+      "pool_size": 3321,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "um",
+      "n_must_facts": 3,
+      "n_bonus_facts": 4
+    },
+    "judge_reasoning": "",
+    "top_doc": "Provider_Manual.pdf",
+    "top_page": 33,
+    "top_rerank": 0.6439,
+    "n_chunks": 3
+  },
+  {
+    "qid": "cmhc022",
+    "strategy_forced": "a",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "unable_to_verify",
+    "judge_score": 0.5,
+    "agent_confidence": "low",
+    "latency_ms": 63995,
+    "llm_answer": "The provided passages do not contain information on how EPSDT (Early Periodic Screening Diagnostic Treatment) services are billed under FL Medicaid.",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:health_care_services.child_health",
+        "j:state.florida"
+      ],
+      "query_type": "MIXED",
+      "cascade_level": "L3_AHCA_D",
+      "pool_size": 220,
+      "payer_specificity": "mco_specific",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 3,
+      "n_bonus_facts": 6
+    },
+    "judge_reasoning": "",
+    "top_doc": "FLA_MMA_STCs_Oct_2022.pdf",
+    "top_page": 109,
+    "top_rerank": 0.8757,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc022",
+    "strategy_forced": "b",
+    "repeat": 0,
+    "strategy_executed": "b",
+    "judge_verdict": "wrong",
+    "judge_score": 0.0,
+    "agent_confidence": "low",
+    "latency_ms": 70281,
+    "llm_answer": "",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:health_care_services.child_health",
+        "j:state.florida"
+      ],
+      "query_type": "MIXED",
+      "cascade_level": "EXPLORE_AHCA",
+      "pool_size": 3321,
+      "payer_specificity": "mco_specific",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 3,
+      "n_bonus_facts": 6
+    },
+    "judge_reasoning": "The system provided no information or chunks to answer the question, indicating a complete failure to address the query.",
+    "top_doc": null,
+    "top_page": null,
+    "top_rerank": null,
+    "n_chunks": 0
+  },
+  {
+    "qid": "cmhc020",
+    "strategy_forced": "natural",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "correct",
+    "judge_score": 1.0,
+    "agent_confidence": "low",
+    "latency_ms": 92954,
+    "llm_answer": "The provided passages discuss the implementation of a Prior Authorization API for Medicaid managed care plans, including a compliance date of January 1, 2027, for its maintenance [5]. While the API is intended to speed up the prior authorization process [4], the passages do not specify a decision timeframe for Simply Healthcare Florida Medicaid's prior authorizations.",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:utilization_management.prior_authorization",
+        "j:payor.simply_healthcare"
+      ],
+      "query_type": "MIXED",
+      "cascade_level": "L2_JD",
+      "pool_size": 154,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "um",
+      "n_must_facts": 3,
+      "n_bonus_facts": 4
+    },
+    "judge_reasoning": "The system correctly states that the provided passages do not contain the specific prior authorization decision timeframe for Simply Healthcare Florida Medicaid, which aligns with the expected outcome of not finding the information.",
+    "top_doc": "2024-00895.pdf",
+    "top_page": 110,
+    "top_rerank": 0.7776,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc022",
+    "strategy_forced": "natural",
+    "repeat": 0,
+    "strategy_executed": "b",
+    "judge_verdict": "wrong",
+    "judge_score": 0.0,
+    "agent_confidence": "low",
+    "latency_ms": 75187,
+    "llm_answer": "",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:health_care_services.child_health",
+        "j:state.florida"
+      ],
+      "query_type": "MIXED",
+      "cascade_level": "EXPLORE_AHCA",
+      "pool_size": 3321,
+      "payer_specificity": "mco_specific",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 3,
+      "n_bonus_facts": 6
+    },
+    "judge_reasoning": "The system provided no content or information to answer the question about how EPSDT services are billed under FL Medicaid, thus failing to address the query.",
+    "top_doc": null,
+    "top_page": null,
+    "top_rerank": null,
+    "n_chunks": 0
+  }
+]

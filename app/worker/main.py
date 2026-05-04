@@ -325,7 +325,32 @@ async def process_job(job: ChunkingJob, db: AsyncSession, *, worker_cfg: WorkerC
         except Exception as rb:
             logger.error("[JOB %s] Rollback failed: %s", getattr(job, "id", None), rb, exc_info=True)
         try:
-            job.status = "failed"
+            # Increment failure_count and decide between 'failed' and
+            # 'blocked'. Once a job hits 3 failures it's blocked from
+            # the auto-claim path; operator must manually triage via
+            # /admin/list_blocked_docs and decide retry vs skip.
+            prior_count = int(getattr(job, "failure_count", 0) or 0)
+            new_count = prior_count + 1
+            # Categorize the failure so operators can triage at a glance.
+            err_str = str(e).lower()
+            if "statement timeout" in err_str or "queryanceled" in err_str or "querycanceled" in err_str:
+                reason = "cleanup_timeout"
+            elif "greenlet_spawn" in err_str or "await_only" in err_str:
+                reason = "session_state"
+            elif "extract" in err_str:
+                reason = "extraction_error"
+            else:
+                reason = getattr(job, "failure_reason", None) or "transient"
+            job.failure_count = new_count
+            job.failure_reason = reason
+            if new_count >= 3:
+                job.status = "blocked"
+                logger.warning(
+                    "[JOB %s] BLOCKED after %d failures (reason=%s). Manual review required.",
+                    getattr(job, "id", None), new_count, reason,
+                )
+            else:
+                job.status = "failed"
             job.error_message = str(e)[:2000]
             job.completed_at = _utc_now_naive()
             await db.commit()
@@ -454,10 +479,6 @@ def main():
         sys.exit(1)
 
 
-if __name__ == "__main__":
-    main()
-
-
 # ---------------------------------------------------------------------------
 # Helpers (parameter resolution — private to this module)
 # ---------------------------------------------------------------------------
@@ -487,6 +508,10 @@ def _resolve_bool(raw, default: bool) -> bool:
         return str(raw).strip().lower() == "true"
     except Exception:
         return default
+
+
+if __name__ == "__main__":
+    main()
 
 
 def _resolve_prompts(job: ChunkingJob):

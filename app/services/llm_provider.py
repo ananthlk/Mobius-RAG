@@ -90,6 +90,11 @@ class VertexAIProvider(LLMProvider):
             raise Exception(f"Failed to initialize Vertex AI: {str(e)}")
     
     def _generation_config(self, **kwargs) -> dict:
+        # Translate generic kwarg names to Vertex's GenerationConfig
+        # field names so callers using llm_manager_client conventions
+        # (e.g. ``max_tokens``) work in the dev-fallback Vertex path.
+        if "max_tokens" in kwargs and "max_output_tokens" not in kwargs:
+            kwargs["max_output_tokens"] = kwargs.pop("max_tokens")
         return {"temperature": 0.1, **kwargs}
     
     async def stream_generate(self, prompt: str, **kwargs) -> AsyncIterator[str]:

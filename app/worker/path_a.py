@@ -203,26 +203,39 @@ async def process_paragraph(
                 find_span_fn=_find_fact_span_in_markdown,
             )
 
-            # Write embeddable units: chunk text + each fact
+            # Write embeddable units: chunk text + each fact (bulk).
+            # See path_b.py for the rationale; same write-amplification
+            # applies here once a paragraph has many facts.
             try:
-                await db_handler.write_embeddable_unit(
-                    db, doc_uuid, "A", "chunk", chunk.id,
-                    paragraph_text,
-                    page_number=page_number,
-                    paragraph_index=para_idx,
-                    section_path=section_path,
-                    metadata={"summary": summary},
-                )
+                bulk_rows: list[dict[str, Any]] = [
+                    {
+                        "document_id": doc_uuid,
+                        "generator_id": "A",
+                        "source_type": "chunk",
+                        "source_id": chunk.id,
+                        "text": paragraph_text,
+                        "page_number": page_number,
+                        "paragraph_index": para_idx,
+                        "section_path": section_path,
+                        "metadata": {"summary": summary},
+                    }
+                ]
                 for fact_obj in facts:
                     fact_text = (fact_obj.get("fact_text") or "").strip()
                     if fact_text:
-                        await db_handler.write_embeddable_unit(
-                            db, doc_uuid, "A", "fact", chunk.id,
-                            fact_text,
-                            page_number=page_number,
-                            paragraph_index=para_idx,
-                            section_path=section_path,
+                        bulk_rows.append(
+                            {
+                                "document_id": doc_uuid,
+                                "generator_id": "A",
+                                "source_type": "fact",
+                                "source_id": chunk.id,
+                                "text": fact_text,
+                                "page_number": page_number,
+                                "paragraph_index": para_idx,
+                                "section_path": section_path,
+                            }
                         )
+                await db_handler.write_embeddable_units_bulk(db, bulk_rows)
             except Exception as eu_err:
                 logger.warning("[%s] [%s] embeddable_unit write (non-fatal): %s", doc_id, para_id, eu_err)
 

@@ -15,6 +15,7 @@ import { SourcesTab } from './components/tabs/SourcesTab'
 import { UploadTab } from './components/tabs/UploadTab'
 import { RepositoryTab } from './components/tabs/RepositoryTab'
 import { TestTab } from './components/tabs/TestTab'
+import { EvalTab } from './components/tabs/EvalTab'
 
 interface UploadResponse {
   filename: string
@@ -197,7 +198,13 @@ function App() {
   const loadDocuments = async () => {
     setLoadingDocuments(true)
     try {
-      const response = await fetch(`${API_BASE}/documents`)
+      // ``/documents`` defaults to limit=100 server-side; with the corpus
+      // now > 8k docs, that truncation made every Repository entity card
+      // show 0 ingested/chunked/embedded/published unless the entity's
+      // docs happened to land in the most-recent 100. Fetch a large
+      // page so the pipeline strip can see the whole corpus. Long-term
+      // this should move to a server-side per-host aggregate endpoint.
+      const response = await fetch(`${API_BASE}/documents?limit=20000`)
       if (response.ok) {
         const data = await response.json()
         setDocuments(data.documents || [])
@@ -216,7 +223,7 @@ function App() {
   // new 2-tab Upload + Repository shell (Stage A of the IA refactor).
   const [legacyMode, setLegacyMode] = useState(false)
   // Stage A: new shell uses just two tabs.
-  const [shellTab, setShellTab] = useState<'upload' | 'repository' | 'test'>('repository')
+  const [shellTab, setShellTab] = useState<'upload' | 'repository' | 'test' | 'eval'>('repository')
 
   // Load documents on mount + handle deep-link URL params from cross-module links
   // (e.g. mobius-chat opens ?tab=read&documentId=...&pageNumber=...)
@@ -1440,6 +1447,9 @@ function App() {
             <Tab id="test" isActive={shellTab === 'test'} onClick={() => setShellTab('test')}>
               Test
             </Tab>
+            <Tab id="eval" isActive={shellTab === 'eval'} onClick={() => setShellTab('eval')}>
+              Eval
+            </Tab>
           </TabList>
           <TabPanels>
             <TabPanel id="upload" isActive={shellTab === 'upload'}>
@@ -1457,6 +1467,7 @@ function App() {
                 selectedDocumentId={selectedDocumentId}
                 navigateToRead={navigateToRead}
                 onNavigateToReadConsumed={() => setNavigateToRead(null)}
+                onRefresh={loadDocuments}
                 onDocumentSelect={(docId: string) => {
                   const doc = documents.find((d: { id: string }) => d.id === docId)
                   if (doc) {
@@ -1469,6 +1480,9 @@ function App() {
             </TabPanel>
             <TabPanel id="test" isActive={shellTab === 'test'}>
               <TestTab />
+            </TabPanel>
+            <TabPanel id="eval" isActive={shellTab === 'eval'}>
+              <EvalTab />
             </TabPanel>
           </TabPanels>
         </Tabs>

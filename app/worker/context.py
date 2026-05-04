@@ -44,7 +44,23 @@ class ChunkingRunContext:
         paragraph_id: str | None = None,
         extra: dict | None = None,
     ) -> None:
-        """Persist a ChunkingEvent with dual messages and optional extras."""
+        """Persist a ChunkingEvent with dual messages and optional extras.
+
+        Per-paragraph events (``paragraph_start`` / ``paragraph_complete``)
+        are SKIPPED by default — they fire 2× per paragraph on a 589k+ row
+        hot table, dominating the per-paragraph commit budget. Cost
+        analysis 2026-04-30 showed paragraph time was 0.7s on healthy
+        days and 25-30s on contended days; per-paragraph chunking_events
+        writes are a major contention source.
+
+        Set ``EMIT_PARAGRAPH_EVENTS=1`` to re-enable for debugging.
+        Job-level events (``job_start``, ``chunking_complete``,
+        ``embedding_*``, ``status_message``) are always emitted.
+        """
+        import os as _os
+        if event_type in ("paragraph_start", "paragraph_complete"):
+            if _os.environ.get("EMIT_PARAGRAPH_EVENTS", "").strip() not in ("1", "true", "yes"):
+                return
         data: dict[str, Any] = {
             "message": message,
             "user_message": user_message,

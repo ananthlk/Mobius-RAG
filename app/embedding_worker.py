@@ -298,13 +298,41 @@ async def process_embedding_job(job: EmbeddingJob, db: AsyncSession) -> None:
         if os.environ.get("AUTO_PUBLISH_ON_EMBED", "").strip() in ("1", "true", "yes"):
             try:
                 from app.services.publish import publish_document
+                from app.models import PublishEvent as _PE
                 pres = await publish_document(UUID(str(job.document_id)), db)
+                # CRITICAL: publish_document only flushes; the caller
+                # owns the commit. Without this commit, the writes to
+                # ``rag_published_embeddings`` get rolled back when
+                # the worker's session closes — but the chat-side
+                # cross-DB sync (raw psycopg2 with its own commit)
+                # already persisted. That mismatch is exactly what
+                # produced "chat orphans" on 2026-04-30: chat shows
+                # the doc, rag-side rag_published_embeddings has no
+                # rows for it, so the integrity check flags drift.
+                # Also write a PublishEvent row so the audit log is
+                # accurate (publishing.last_hour in /pipeline_health
+                # was reading 0 even with successful publishes).
+                db.add(_PE(
+                    document_id=UUID(str(job.document_id)),
+                    rows_written=pres.rows_written,
+                    verification_passed=pres.verification_passed,
+                    verification_message=pres.verification_message,
+                ))
+                await db.commit()
                 logger.info(
                     "[JOB %s] auto-published: rows_written=%d ok=%s msg=%s",
                     job.id, pres.rows_written, pres.verification_passed,
                     (pres.verification_message or "")[:200],
                 )
             except Exception as pub_err:
+                # Roll back the failed publish so the session is usable
+                # for the next iteration. Embedding succeeded already,
+                # so we treat this as non-fatal at the job level — the
+                # /admin/publish_unpublished sweep will retry.
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
                 logger.warning(
                     "[JOB %s] auto-publish-on-embed failed (non-fatal): %s",
                     job.id, pub_err,

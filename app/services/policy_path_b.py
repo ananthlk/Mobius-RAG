@@ -551,20 +551,38 @@ def _count_tags(tag_dict: dict | None) -> dict[str, int]:
 async def aggregate_line_tags_to_paragraph(
     db: AsyncSession,
     paragraph_id,
+    *,
+    lines: list | None = None,
+    paragraph=None,
 ) -> None:
     """Forward-propagate: aggregate all child PolicyLine tags into the parent
     PolicyParagraph (p_tags, d_tags, j_tags).  Caller should commit.
+
+    Performance: callers in the chunking pipeline already hold the line
+    ORM objects in memory (returned by ``build_paragraph_and_lines`` and
+    decorated in-place by ``apply_lexicon_to_lines``). Pass them via
+    ``lines=`` to skip a per-paragraph SELECT against ``policy_lines``,
+    which on the production 589k-row table costs **~9.7 s per call**
+    (97% of Path B wall time, measured 2026-05-01 via PATHB_TIMING). The
+    ``paragraph=`` kwarg likewise skips a primary-key fetch when the
+    caller has the ORM object.
+
+    Without those kwargs the function falls back to its original query
+    so callers outside the hot path (admin reprocess, tests) still work.
     """
     from app.models import PolicyParagraph, PolicyLine
 
-    para = await db.get(PolicyParagraph, paragraph_id)
+    para = paragraph
     if para is None:
-        return
+        para = await db.get(PolicyParagraph, paragraph_id)
+        if para is None:
+            return
 
-    lines_q = await db.execute(
-        select(PolicyLine).where(PolicyLine.paragraph_id == paragraph_id)
-    )
-    lines = lines_q.scalars().all()
+    if lines is None:
+        lines_q = await db.execute(
+            select(PolicyLine).where(PolicyLine.paragraph_id == paragraph_id)
+        )
+        lines = lines_q.scalars().all()
 
     agg_p: dict = {}
     agg_d: dict = {}

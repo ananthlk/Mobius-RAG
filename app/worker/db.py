@@ -83,13 +83,23 @@ async def recover_stale_jobs(
     # Use a raw-SQL CTE because SQLAlchemy Core's NOT EXISTS subquery
     # syntax across an update...returning path on the same table is
     # ugly; the SQL is clearer as a statement.
+    # On stale recovery: increment failure_count. If it crosses 3, mark
+    # the job 'blocked' instead of resetting to 'pending' so workers
+    # don't try the same doomed doc forever. Bloat-trapped docs hit
+    # this; clean docs that just ran long don't (they're rare and
+    # 3 attempts gives them benefit of the doubt).
     stmt = text(
         """
         UPDATE chunking_jobs AS j
-        SET status = 'pending',
+        SET status = CASE
+              WHEN COALESCE(j.failure_count, 0) >= 2 THEN 'blocked'
+              ELSE 'pending'
+            END,
             worker_id = NULL,
             started_at = NULL,
-            error_message = :msg
+            error_message = :msg,
+            failure_count = COALESCE(j.failure_count, 0) + 1,
+            failure_reason = COALESCE(j.failure_reason, 'stale_no_heartbeat')
         WHERE j.status = 'processing'
           AND j.started_at < :started_cutoff
           AND NOT EXISTS (
@@ -97,7 +107,7 @@ async def recover_stale_jobs(
               WHERE e.document_id = j.document_id
                 AND e.created_at > :heartbeat_cutoff
           )
-        RETURNING j.id, j.document_id
+        RETURNING j.id, j.document_id, j.status, j.failure_count
         """
     )
     msg = (
@@ -115,12 +125,24 @@ async def recover_stale_jobs(
     recovered = result.fetchall()
     await db.commit()
 
-    for job_id, doc_id in recovered:
-        logger.warning(
-            "[stale-recovery] Reset job %s (doc %s) — no heartbeat "
-            "in %.0fmin, started >%0.fmin ago",
-            job_id, doc_id, heartbeat_timeout_minutes, timeout_minutes,
-        )
+    for row in recovered:
+        # Row may have 2 or 4 columns depending on schema state
+        try:
+            job_id, doc_id, new_status, fail_count = row
+        except (ValueError, TypeError):
+            job_id, doc_id, new_status, fail_count = row[0], row[1], "pending", 1
+        if new_status == "blocked":
+            logger.warning(
+                "[stale-recovery] BLOCKED job %s (doc %s) — failure_count=%d, "
+                "no longer eligible for auto-claim. Use /admin/list_blocked_docs.",
+                job_id, doc_id, fail_count,
+            )
+        else:
+            logger.warning(
+                "[stale-recovery] Reset job %s (doc %s, attempt %d) — no heartbeat "
+                "in %.0fmin, started >%0.fmin ago",
+                job_id, doc_id, fail_count, heartbeat_timeout_minutes, timeout_minutes,
+            )
     return len(recovered)
 
 
@@ -358,14 +380,22 @@ async def clear_policy_for_document(db: AsyncSession, doc_uuid: UUID) -> None:
             doc_uuid, deleted_lines, res2.rowcount or 0,
         )
     except Exception as exc:
-        # Critical: rollback BEFORE returning so the caller's session
-        # is usable. Previously we only logged and the next statement
-        # hit InFailedSQLTransactionError (see git blame).
+        # Critical: rollback BEFORE re-raising so the caller's session
+        # is usable. Previously we only logged "non-fatal" and the
+        # caller continued — that path inserted a fresh set of
+        # paragraphs ON TOP of the old set, accumulating duplicates
+        # on every retry. Dev-smoke 2026-04-30 found docs with up to
+        # 35× duplication (Constrained Budgets HIV: 43 unique vs
+        # 1,497 stored). The right behavior is to fail the chunking
+        # attempt so the worker either retries with a clean slate
+        # next iteration or surfaces the underlying problem (deadlock,
+        # statement timeout, etc.) instead of papering over it.
         try:
             await db.rollback()
         except Exception:
             pass
-        logger.warning("[db] clear_policy_for_document (non-fatal, rolled back): %s", exc)
+        logger.error("[db] clear_policy_for_document FAILED — aborting to prevent duplicate inserts: %s", exc)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -605,7 +635,12 @@ async def write_embeddable_unit(
     section_path: str | None = None,
     metadata: dict | None = None,
 ) -> None:
-    """Insert one row into embeddable_units. Caller should commit."""
+    """Insert one row into embeddable_units. Caller should commit.
+
+    Prefer ``write_embeddable_units_bulk`` when writing >1 row in the same
+    paragraph — per-row flush dominates Path B latency on large docs (each
+    flush is a separate round-trip; 600 paragraphs × 8 lines ≈ 5k flushes).
+    """
     from app.models import EmbeddableUnit
 
     unit = EmbeddableUnit(
@@ -621,6 +656,51 @@ async def write_embeddable_unit(
     )
     db.add(unit)
     await db.flush()
+
+
+async def write_embeddable_units_bulk(
+    db: AsyncSession,
+    rows: list[dict[str, Any]],
+) -> int:
+    """Bulk-insert N embeddable_units rows in a single round-trip.
+
+    Each ``rows`` entry must provide ``document_id``, ``generator_id``,
+    ``source_type``, ``source_id``, ``text``; optional ``page_number``,
+    ``paragraph_index``, ``section_path``, ``metadata`` (mapped to the
+    ``metadata_`` ORM attribute / ``metadata`` column).
+
+    Why this exists: the per-line ``write_embeddable_unit`` loop did
+    ``db.add(); await db.flush()`` for every single line, which on a
+    600-paragraph / 8-line-per-paragraph doc is ~5,000 separate flushes.
+    Each flush is its own DB round-trip; under 12-worker contention on
+    Cloud SQL that's the dominant cost (45+ min/doc). Adding all rows
+    then issuing one flush emits one multi-VALUES INSERT, cutting Path B
+    write time roughly 10×. Caller still controls commit cadence.
+
+    Returns the number of rows queued.
+    """
+    if not rows:
+        return 0
+    from app.models import EmbeddableUnit
+
+    units = []
+    for r in rows:
+        units.append(
+            EmbeddableUnit(
+                document_id=r["document_id"],
+                generator_id=r.get("generator_id"),
+                source_type=r["source_type"],
+                source_id=r["source_id"],
+                text=r["text"],
+                page_number=r.get("page_number"),
+                paragraph_index=r.get("paragraph_index"),
+                section_path=r.get("section_path"),
+                metadata_=r.get("metadata") or r.get("metadata_") or {},
+            )
+        )
+    db.add_all(units)
+    await db.flush()
+    return len(units)
 
 
 async def clear_embeddable_units(

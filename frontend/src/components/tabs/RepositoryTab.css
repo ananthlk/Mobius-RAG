@@ -359,6 +359,7 @@
 .repo-entity-area {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: var(--mobius-space-md);
   min-width: 0;
   transition: flex 0.2s ease, max-width 0.2s ease;

@@ -121,7 +121,10 @@ export function EntitySidebar({
 }: Props) {
   const filtered = useMemo(() => {
     let list = hosts
-    if (domainFilter !== 'all') list = list.filter((h) => h.domain === domainFilter)
+    if (domainFilter !== 'all') {
+      // "(uploaded)" virtual entry is always shown regardless of domain filter
+      list = list.filter((h) => h.host === '(uploaded)' || h.domain === domainFilter)
+    }
     if (entitySearch.trim()) {
       const q = entitySearch.trim().toLowerCase()
       list = list.filter(
@@ -238,8 +241,11 @@ export function EntitySidebar({
           <div className="repo-sidebar-empty">No sources match</div>
         )}
         {filtered.map((h) => {
-          const label = h.payer ?? h.host.replace(/^www\./, '')
-          const sub = h.payer ? h.host.replace(/^www\./, '') : null
+          const isUploadedVirtual = h.host === '(uploaded)'
+          const label = isUploadedVirtual
+            ? `Uploads (${h.corpusDocs})`
+            : (h.payer ?? h.host.replace(/^www\./, ''))
+          const sub = (!isUploadedVirtual && h.payer) ? h.host.replace(/^www\./, '') : null
           const publishedPct =
             h.corpusDocs > 0 ? (h.corpusPublished / h.corpusDocs) * 100 : 0
           const staged = h.corpusDocs - h.corpusPublished

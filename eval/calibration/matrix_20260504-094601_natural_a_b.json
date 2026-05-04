@@ -1,0 +1,66 @@
+[
+  {
+    "qid": "cmhc001",
+    "strategy_forced": "natural",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "unable_to_verify",
+    "judge_score": 0.5,
+    "agent_confidence": "high",
+    "latency_ms": 52359,
+    "llm_answer": "For initial claims, participating providers must submit within 180 days, and non-participating providers within 365 days [2]. These days are calculated from the date of service to the date Sunshine Health receives the claim [2]. For Medicare claims crossing over to Medicaid, the filing limit is the greater of 36 months from the date of service or 12 months from Medicare\u2019s adjudication date [2].",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:claims.timely_filing",
+        "j:payor.sunshine_health",
+        "j:state.florida"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "L2_JD",
+      "pool_size": 15,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 3,
+      "n_bonus_facts": 5
+    },
+    "judge_reasoning": "",
+    "top_doc": "Sunshine Provider Manual",
+    "top_page": 122,
+    "top_rerank": 0.8221,
+    "n_chunks": 5
+  },
+  {
+    "qid": "cmhc001",
+    "strategy_forced": "a",
+    "repeat": 0,
+    "strategy_executed": "a",
+    "judge_verdict": "correct",
+    "judge_score": 1.0,
+    "agent_confidence": "high",
+    "latency_ms": 20206,
+    "llm_answer": "For initial claims, participating providers must submit within 180 days, and non-participating providers have 365 days [2]. These days are calculated from the date of service to the date received by Sunshine Health [2]. The filing limit for Medicare claims crossing over to Medicaid is the greater of 36 months from the date of service or 12 months from Medicare\u2019s adjudication date [2].",
+    "features": {
+      "literal_anchors": [],
+      "tag_matches": [
+        "d:claims.timely_filing",
+        "j:payor.sunshine_health",
+        "j:state.florida"
+      ],
+      "query_type": "CONCEPTUAL",
+      "cascade_level": "L2_JD",
+      "pool_size": 15,
+      "payer_specificity": "strict",
+      "answer_shape": null,
+      "persona": "billing",
+      "n_must_facts": 3,
+      "n_bonus_facts": 5
+    },
+    "judge_reasoning": "The system correctly identifies the timely filing deadlines for initial claims for both participating and non-participating providers, and also includes information for Medicare claims crossing over to Medicaid, all supported by the provided chunk.",
+    "top_doc": "Sunshine Provider Manual",
+    "top_page": 122,
+    "top_rerank": 0.8221,
+    "n_chunks": 5
+  }
+]

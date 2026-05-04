@@ -107,7 +107,7 @@ class ChunkingJob(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False)
-    status = Column(String(20), default="pending", nullable=False)  # pending, processing, completed, failed, cancelled
+    status = Column(String(20), default="pending", nullable=False)  # pending, processing, completed, failed, cancelled, blocked
     threshold = Column(String(10), nullable=False)  # Store as string to avoid float precision issues
     worker_id = Column(String(100), nullable=True)  # ID of worker processing this job
     started_at = Column(DateTime, nullable=True)
@@ -115,6 +115,15 @@ class ChunkingJob(Base):
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    # 2026-04-30 — failure-loop guard. Increments on every stale-recovery
+    # reset OR explicit worker-side failure. Once failure_count >= 3 the
+    # job moves to status='blocked' and workers refuse to claim it.
+    # ``failure_reason`` is a short categorical tag (cleanup_timeout,
+    # oversize, extraction_error, transient, manual) that operators can
+    # filter on. Surface in /admin/list_blocked_docs.
+    failure_count = Column(Integer, default=0, nullable=False)
+    failure_reason = Column(String(40), nullable=True)
 
     # Run-configured: immutable refs to prompt set and LLM config (append-only)
     prompt_versions = Column(JSONB, nullable=True)  # e.g. {"extraction": "v1", "extraction_retry": "v1", "critique": "v1"}

@@ -124,6 +124,13 @@ COMMON_ENV=(
   "CHROMA_SSL=0"
   # chat Postgres (same Cloud SQL instance, mobius_chat database)
   "CHAT_DATABASE_URL=${CHAT_DB_URL_FOR_RAG}"
+  # Auto-publish on embed: when an embedding_job completes, the worker
+  # immediately copies vectors into rag_published_embeddings + chat
+  # Postgres so the doc is queryable end-to-end without a separate
+  # "publish" admin call. Without this, embedded docs sit invisible to
+  # chat retrieval forever — exactly the failure mode that stranded
+  # 23 humana docs on 2026-04-27 after a deploy reset env vars.
+  "AUTO_PUBLISH_ON_EMBED=1"
 )
 
 COMMON_SECRETS=(
@@ -174,11 +181,16 @@ deploy_service() {
 # 3. API service (autoscales, minScale=0)
 deploy_service "mobius-rag" "" 0 10 "" "1Gi"
 
-# 4. Chunking worker (always-on, minScale=1, no CPU throttling — needs
-#    to poll the DB between bursty requests).
+# 4. Chunking worker. Self-polling supervisor (FOR UPDATE SKIP LOCKED
+#    handles dedup across instances), so Cloud Run autoscaling never
+#    fires from HTTP load — we have to pin min=max=N to get N parallel
+#    pollers. With single instance, queue p50 wait was 2h (2026-04-27
+#    perf scan); 5 pollers brings throughput from ~32 docs/24h to
+#    theoretical ~9k/day. Drop min back to 1 if cost matters more
+#    than instant-rag SLA.
 deploy_service "mobius-rag-chunking-worker" \
   "uvicorn,app.worker_server_chunking:app,--host,0.0.0.0,--port,8080" \
-  1 1 "no" "2Gi"
+  12 12 "no" "2Gi"
 
 # 5. Embedding worker (same shape, fewer resources since Vertex does
 #    the heavy lifting remotely).

@@ -1,0 +1,751 @@
+bank_version: cmhc_v1.1_consensus_validated
+queries:
+- id: cmhc001
+  persona: billing
+  payer_specificity: strict
+  query: What is the timely filing deadline for Sunshine Health FL Medicaid claims?
+  expected:
+    strategy: a
+    query_class: tight_pool
+  golden_answer: 'For Sunshine Health Florida Medicaid the timely filing window
+
+    depends on the provider''s network status. Participating providers
+
+    must submit initial claims within 180 days from the date of
+
+    service; non-participating providers have 365 days. Days are
+
+    calculated from the date of service to the date the claim is
+
+    received by Sunshine Health. Reconsiderations and claim disputes
+
+    must be received within 90 days of the original Explanation of
+
+    Payment (or 180 days for non-participating providers).
+
+    Coordination-of-Benefits (secondary) claims have 90 days from the
+
+    date of the primary payer''s EOP regardless of network status. If
+
+    a claim is denied for timely filing the provider cannot bill the
+
+    member.
+
+    '
+  must_facts:
+  - 180 days for participating providers (initial claims)
+  - 365 days for non-participating providers (initial claims)
+  - Sunshine Health is the payer in question
+  bonus_facts:
+  - Reconsiderations / claim disputes within 90 days of the original EOP for participating providers
+  - Reconsiderations / claim disputes within 180 days of the original EOP for non-participating providers
+  - Coordination-of-benefits / secondary claims have 90 days from the primary payer's EOP
+  - Days are calculated from date of service to the date the claim is received by Sunshine Health
+  - If a claim is denied for timely filing, the provider cannot bill the member
+  forbidden_facts:
+  - No timely filing limit applies
+  - All claims have a 1-year window regardless of network status
+  - Timely filing window is the same for participating and non-participating providers
+  - Reconsiderations have an unlimited window
+  golden_citation:
+    document: SH-PRO-PE-MFC-Training.pdf
+    section: Timely Filing Table (page 29)
+  externally_verified: true
+  notes: Verified against the corpus chunk (SH-PRO-PE-MFC-Training.pdf p.29). Primary axis is participating vs non-participating, NOT a single 180d standard. Earlier external rule about newborn/retroactive eligibility may apply on top but the network-status split is the canonical Sunshine policy.
+- id: cmhc002
+  persona: um
+  payer_specificity: strict
+  query: Does Sunshine Health require prior authorization for residential substance use treatment under code H0019?
+  expected:
+    strategy: a
+    query_class: tight_pool
+  golden_answer: 'Yes — Sunshine Health requires prior authorization for services
+
+    billed under H0019 (alcohol and drug management, treatment, and
+
+    rehabilitation, behavioral health residential). The PA request
+
+    should include the ASAM Level of Care determination (residential
+
+    criteria typically map to Level 3.1, 3.5, or 3.7), current
+
+    clinical assessment, and proposed treatment plan. Submit via the
+
+    Sunshine provider portal or fax. Standard PA decision is 14 days;
+
+    expedited (urgent) is 72 hours. Sunshine treats residential SUD
+
+    PA as a condition of payment.
+
+    '
+  must_facts:
+  - Yes, prior authorization is required for H0019
+  - Sunshine Health is the payer being asked about
+  bonus_facts:
+  - H0019 is the residential SUD treatment code (alcohol and drug management / rehabilitation)
+  - PA is required from Day 1 of service for residential treatment
+  - ASAM Level of Care determination should match residential criteria (Level 3.1, 3.5, or 3.7)
+  - 14-day standard turnaround for PA decisions
+  - 72-hour expedited turnaround for urgent requests
+  - Submit via Sunshine provider portal or fax
+  - Submission must include current clinical assessment and treatment plan
+  forbidden_facts:
+  - No prior authorization required for H0019
+  - H0019 is an outpatient-only code
+  - PA only required after 30 days of treatment
+  - Generic ASAM Level 1 or 2 satisfies residential PA
+  golden_citation:
+    document: FL_SunshineHealth_Caid_PAReq_CMS19_CMS21_MMA_AIP.pdf
+    section: Behavioral Health & Substance Use — Alcohol and drug management, treatment, and rehabilitation
+  externally_verified: true
+  notes: Verified against corpus chunk (FL_SunshineHealth_Caid_PAReq p.3). The corpus only confirms the basic 'PA required for H0019' fact; ASAM-specificity and Day-1 detail are bonus_facts because they come from external practitioner knowledge, not the doc.
+- id: cmhc003
+  persona: front_end
+  payer_specificity: strict
+  query: Does Aetna Better Health Florida require a referral for outpatient behavioral health therapy?
+  expected:
+    strategy: a
+    query_class: tight_pool
+  golden_answer: 'No — Aetna Better Health Florida members do not need a PCP
+
+    referral to access outpatient behavioral health services, BUT
+
+    self-referral applies ONLY to in-network providers. Out-of-network
+
+    behavioral health requires prior authorization from Aetna Better
+
+    Health (Aetna is more restrictive than Sunshine on out-of-network
+
+    BH access). Members can self-refer to in-network providers for
+
+    routine therapy (90791 intake, 90834/90837 individual therapy,
+
+    90847 family therapy).
+
+    '
+  must_facts:
+  - No PCP referral is required for outpatient behavioral health therapy
+  - Aetna Better Health FL is the payer
+  - Self-referral applies ONLY to in-network providers
+  bonus_facts:
+  - Members can self-refer to in-network providers
+  - Out-of-network behavioral health requires prior authorization from Aetna
+  - Covers 90791 intake, 90834 / 90837 individual therapy, 90847 family therapy
+  - Aetna Better Health is more restrictive on out-of-network BH access than Sunshine
+  forbidden_facts:
+  - PCP referral required for outpatient therapy
+  - Members must call member services first
+  - All behavioral health requires prior authorization
+  - Out-of-network providers are accessible via self-referral
+  golden_citation:
+    document: Aetna Better Health Provider Manual
+    section: Behavioral Health Access > Referrals and Self-Referral
+  externally_verified: true
+  notes: intake staff hits this every shift — in-network/out-of-network distinction matters for routing
+- id: cmhc004
+  persona: front_end
+  payer_specificity: mco_specific
+  query: Is telehealth covered for behavioral health intake assessments under Florida Medicaid?
+  expected:
+    strategy: a
+    query_class: wide_pool
+  golden_answer: 'Yes — Florida Medicaid covers behavioral health intake assessments
+
+    (90791) via telehealth. Use place-of-service code 02 (telehealth
+
+    other than home) or 10 (telehealth in patient''s home; the newer
+
+    post-COVID standard for home telehealth). Synchronous audio-video
+
+    is required; audio-only is permitted only for specified codes and
+
+    not the initial intake. Depending on the MCO, the GT or 95
+
+    modifier may still be required on the encounter even when POS
+
+    code 02 or 10 is used — verify the specific MCO billing guide.
+
+    '
+  must_facts:
+  - Yes, telehealth is covered for behavioral health intake (90791)
+  - Florida Medicaid is the payer
+  - Synchronous audio-video required
+  bonus_facts:
+  - Place-of-service code 02 (telehealth other than home) for telehealth
+  - Place-of-service code 10 (telehealth in patient's home) is the newer post-COVID standard
+  - Audio-only is not permitted for initial intake
+  - GT or 95 modifier may still be required by some MCOs even with POS 02/10
+  - Verify the specific MCO billing guide for modifier requirements
+  forbidden_facts:
+  - Telehealth is not covered for behavioral health
+  - Audio-only is acceptable for the initial intake
+  - POS 02 or 10 alone is sufficient for all MCOs without modifier consideration
+  - POS 11 (office) is the correct telehealth POS code
+  golden_citation:
+    document: Florida Medicaid Behavioral Health Coverage Policy
+  externally_verified: true
+  notes: scheduling staff asks this when booking new intakes; modifier/POS interplay varies by MCO
+- id: cmhc005
+  persona: billing
+  payer_specificity: strict
+  query: What modifier should I use when billing H0015 IOP services for Florida Medicaid?
+  expected:
+    strategy: a
+    query_class: tight_pool
+  golden_answer: 'For Florida Medicaid behavioral health, H0015 (intensive
+
+    outpatient program) MUST be billed with a level-of-care
+
+    modifier — modifiers are STANDARD, not optional. Use HF
+
+    (substance use disorder services) for SUD-IOP and HE (mental
+
+    health services) for mental-health IOP. The state uses these
+
+    modifiers to track program efficacy and route claims to the
+
+    correct fee schedule, so submitting H0015 without HE or HF
+
+    typically denies as "missing or invalid modifier" or pays at
+
+    the wrong rate. Verify the specific MCO Behavioral Health
+
+    Supplemental Billing Guide for any additional payer-specific
+
+    modifiers.
+
+    '
+  must_facts:
+  - H0015 is the IOP code under discussion
+  - Florida Medicaid is the payer context
+  - A level-of-care modifier (HE or HF) is REQUIRED on H0015 — not optional
+  - HF modifier is used for substance use disorder services
+  - HE modifier is used for mental health services
+  bonus_facts:
+  - Without HE or HF the claim typically denies as missing/invalid modifier or pays at the wrong rate
+  - Florida uses HE/HF to track program efficacy and route to the correct fee schedule
+  - Verify the MCO Behavioral Health Supplemental Billing Guide for additional modifiers
+  forbidden_facts:
+  - Always append modifier 25
+  - Modifier is never required for H0015
+  - H0015 is typically billed without a modifier
+  - HE and HF modifiers are optional or vary by payer
+  - H0015 is a per-day code that requires modifier 76 for repeat services
+  golden_citation:
+    document: Florida Medicaid Behavioral Health Services Coverage Policy
+    section: IOP Billing > Modifier Requirements
+  externally_verified: true
+  notes: 'PRIOR DRAFT WAS WRONG: said modifiers ''typically not required''; corrected — HE/HF are STANDARD; this is the #1 denial reason for H0015 claims'
+- id: cmhc006
+  persona: um
+  payer_specificity: strict
+  query: What is the standard prior authorization decision timeframe for Sunshine Health Florida?
+  expected:
+    strategy: a
+    query_class: tight_pool
+  golden_answer: 'Sunshine Health makes determinations for non-urgent, pre-service
+
+    medical and behavioral health prior authorization requests within
+
+    seven calendar days of receiving the request. If Sunshine cannot
+
+    issue a decision due to matters beyond its control it may extend
+
+    the decision time frame by up to an additional four calendar days
+
+    (max 11 calendar days total). Determinations for urgent or
+
+    expedited requests are made within 48 hours of receipt. The UM
+
+    staff may implement a one-time extension of one additional
+
+    calendar day on urgent requests, capping at 72 hours. For
+
+    inpatient urgent or emergent admissions, notification windows are
+
+    two business days for medical admissions and 24 hours for
+
+    behavioral health facility admissions. Sunshine commits to these
+
+    timeframes per NCQA guidelines and AHCA requirements for all
+
+    Medicaid products.
+
+    '
+  must_facts:
+  - 7 calendar days for standard / non-urgent prior authorization decisions
+  - Sunshine Health is the payer
+  - 48 hours for urgent / expedited requests
+  bonus_facts:
+  - Standard PA may extend an additional 4 calendar days for matters beyond Sunshine's control (up to 11 days total)
+  - Urgent PA may extend one additional calendar day with a one-time extension (up to 72 hours)
+  - Inpatient urgent / emergent medical admission notification within 2 business days
+  - Inpatient urgent / emergent behavioral health admission notification within 24 hours
+  - Determinations follow NCQA guidelines and AHCA requirements
+  - Approved requests get written follow-up to non-participating providers within one business day
+  forbidden_facts:
+  - 14 calendar days is Sunshine's standard PA decision timeframe
+  - 30 days for standard PA
+  - 72 hours is Sunshine's expedited / urgent timeframe
+  - 24 hours is Sunshine's standard expedited timeframe
+  - No defined turnaround timeframe
+  golden_citation:
+    document: Sunshine Provider Manual
+    section: Utilization Management > Prior Authorization Decision Timeframes (page 33)
+  externally_verified: true
+  notes: Verified against Sunshine Provider Manual p.33. Sunshine's contract is TIGHTER than the federal Medicaid Managed Care floor (which is 14d standard / 72h urgent per 42 CFR 438.210). 14d/72h is the federal floor; 7d/48h is Sunshine's actual SLA.
+- id: cmhc007
+  persona: billing
+  payer_specificity: strict
+  query: How do I submit a corrected claim to Sunshine Health Florida?
+  expected:
+    strategy: a
+    query_class: tight_pool
+  golden_answer: 'Submit corrected claims to Sunshine Health Florida electronically
+
+    via your clearinghouse using bill type frequency code 7
+
+    (replacement of prior claim) on the institutional or professional
+
+    claim form. Place the original claim''s reference number (ICN /
+
+    DCN) in Loop 2300, REF*F8 segment of the 837 EDI transaction —
+
+    this is critical: putting it in the wrong loop causes the system
+
+    to treat the submission as a duplicate original claim instead of
+
+    a correction. Paper corrected claims must be marked CORRECTED
+
+    CLAIM and include a copy of the original Remittance Advice.
+
+    Corrected claims must be filed within 90 days of the original
+
+    Remittance Advice. Note: Frequency Code 8 (Void / Cancel) is
+
+    different — it retracts the original payment without re-processing
+
+    the new data, so DO NOT use 8 when you mean 7.
+
+    '
+  must_facts:
+  - Submit electronically via clearinghouse with bill type frequency code 7
+  - Reference the original claim's ICN / DCN in Loop 2300, REF*F8 segment
+  - Sunshine Health Florida is the destination
+  bonus_facts:
+  - Paper claims should be marked CORRECTED CLAIM
+  - Include the original Remittance Advice with paper submission
+  - 90-day window from original Remittance Advice
+  - Frequency code 8 is Void/Cancel and is different from code 7
+  forbidden_facts:
+  - Frequency code 1 for corrected claims
+  - Frequency code 8 is correct for corrected claims
+  - Resubmit as a brand new claim with a new claim number
+  - No deadline for corrected claims
+  - Original claim number can be in any loop / segment of the 837
+  golden_citation:
+    document: Sunshine Provider Manual
+    section: Claims > Corrected Claims Submission > 837 EDI
+  externally_verified: true
+  notes: billers do this constantly — wrong loop or wrong frequency code = duplicate-claim denial; code-8-vs-code-7 is the most expensive error
+- id: cmhc008
+  persona: um
+  payer_specificity: strict
+  query: Does Sunshine Health require prior authorization for psychological testing under CPT codes 96130-96139?
+  expected:
+    strategy: a
+    query_class: tight_pool
+  golden_answer: 'Sunshine Health (Centene) requires prior authorization for
+
+    psychological and neuropsychological testing under CPT
+
+    96130-96139 when total testing time exceeds 4 units per episode.
+
+    Code 96130 (the first hour of psychological evaluation) is
+
+    typically what triggers the PA requirement: 1 unit of 96130 plus
+
+    3 units of 96131 already hits the 4-unit threshold. The PA
+
+    request must include the referring diagnosis, a clinical rationale
+
+    for testing, and the proposed test battery. Brief screening below
+
+    the 4-unit threshold does not require PA.
+
+    '
+  must_facts:
+  - Yes, prior authorization is required for psychological testing 96130-96139
+  - Sunshine Health is the payer
+  - The threshold is 4 units per episode (unit-based / time-based, not flat)
+  bonus_facts:
+  - 96130 is typically the trigger code (first hour of evaluation)
+  - 1 unit 96130 + 3 units 96131 hits the 4-unit threshold
+  - Brief screening under the 4-unit threshold does not require PA
+  - Submission must include referring diagnosis and clinical rationale
+  - Proposed test battery should be listed
+  forbidden_facts:
+  - Psychological testing never requires PA
+  - Only 96130 needs PA, the others are exempt
+  - PA is automatically approved for any licensed psychologist
+  - The threshold is 8 hours or 8 units
+  golden_citation:
+    document: Sunshine Provider Manual
+    section: Behavioral Health > Psychological Testing
+  externally_verified: true
+  notes: high-volume PA category — psych testing requests fail often; 4-unit threshold is the Centene/Sunshine rule
+- id: cmhc009
+  persona: billing
+  payer_specificity: strict
+  query: What is the deadline to file a claim payment appeal with Sunshine Health Florida?
+  expected:
+    strategy: a
+    query_class: tight_pool
+  golden_answer: 'For Sunshine Health Florida there is a critical distinction
+
+    between a Claim Reconsideration (the informal first step) and a
+
+    formal Claim Appeal. Sunshine generally requires the
+
+    Reconsideration to be filed FIRST before a formal Appeal can be
+
+    lodged. The 90-day window from the date on the original
+
+    Remittance Advice typically applies to the Reconsideration (the
+
+    first step of the dispute). Submit via the Sunshine provider
+
+    portal or by mail to the Sunshine Provider Appeals address.
+
+    Include the original claim number, the Remittance Advice,
+
+    supporting clinical documentation, and a written explanation of
+
+    the basis for the dispute.
+
+    '
+  must_facts:
+  - 90 days from the date on the original Remittance Advice
+  - Sunshine Health Florida is the payer
+  - The 90-day window applies to the first step of the dispute (Reconsideration)
+  bonus_facts:
+  - Sunshine distinguishes Claim Reconsideration (informal) from formal Claim Appeal
+  - Reconsideration must generally be filed before a formal Appeal
+  - Submission can be via the provider portal or by mail
+  - Include the original claim number
+  - Include supporting clinical documentation
+  - Include a written explanation of the basis for the appeal
+  forbidden_facts:
+  - 180 days appeal window for provider claim appeals
+  - Formal Appeal can be filed without a prior Reconsideration
+  - Appeals must be filed only by phone
+  - No appeal deadline
+  - Reconsideration and Appeal are interchangeable terms
+  golden_citation:
+    document: Sunshine Provider Manual
+    section: Provider Appeals > Reconsideration and Formal Appeal
+  externally_verified: true
+  notes: billers reach for this when claims get short-paid or denied; reconsideration vs appeal sequence trips up new staff
+- id: cmhc010
+  persona: front_end
+  payer_specificity: strict
+  query: How do I verify member eligibility for a Sunshine Health Florida member?
+  expected:
+    strategy: a
+    query_class: tight_pool
+  golden_answer: 'Verify Sunshine Health Florida member eligibility through one of
+
+    three channels: the Sunshine provider portal (real-time
+
+    eligibility lookup by member ID or name + DOB), the AHCA Florida
+
+    Medicaid Web Portal (which shows current MCO assignment), or by
+
+    calling Sunshine Provider Services. Eligibility should be checked
+
+    at every visit because Medicaid enrollment and MCO assignment can
+
+    change month to month.
+
+    '
+  must_facts:
+  - Sunshine provider portal supports real-time eligibility lookup
+  - Eligibility should be checked at every visit
+  - Sunshine Health is the payer being verified
+  bonus_facts:
+  - AHCA Florida Medicaid Web Portal is an additional source
+  - Provider Services phone line is an alternative channel
+  - MCO assignment can change month to month
+  forbidden_facts:
+  - Eligibility only needs to be verified annually
+  - The Sunshine portal does not show real-time eligibility
+  - Member ID alone is sufficient — DOB is not needed
+  golden_citation:
+    document: Sunshine Provider Manual
+    section: Member Eligibility Verification
+  externally_verified: true
+  notes: intake / scheduling — the very first thing they do for any new visit
+- id: cmhc011
+  persona: um
+  payer_specificity: strict
+  query: What is Sunshine Health's prior authorization process for inpatient psychiatric admission?
+  expected:
+    strategy: a
+    query_class: tight_pool
+  golden_answer: For Sunshine Health Florida Medicaid, all non-emergency inpatient psychiatric admissions require prior authorization. Behavioral health providers submit requests through the Sunshine Health Secure Provider Portal (fax and phone are alternates). The submission must include clinical information sufficient to demonstrate medical necessity per Sunshine's UM criteria. For emergent or urgent inpatient admissions, notification must be made within 2 business days for medical and 24 hours for behavioral health admissions. Decisions on non-urgent BH PA requests are returned within 7 calendar days; urgent / expedited requests receive a determination within 48 hours.
+  must_facts:
+  - Prior authorization is required for non-emergency inpatient psychiatric admissions
+  - Sunshine Health is the payer
+  - Submission via Secure Provider Portal (fax/phone alternate)
+  bonus_facts:
+  - Coverage applies across MMA, CWSP, SMI, HIV/AIDS member populations
+  - 'Emergent/urgent BH inpatient admissions: notify within 24 hours'
+  - 'Emergent/urgent medical inpatient admissions: notify within 2 business days'
+  - 'Non-urgent BH PA decision: 7 calendar days (Sunshine UM standard)'
+  - 'Urgent / expedited PA decision: 48 hours'
+  - Submission must include clinical info supporting medical necessity
+  - PA review uses AHCA Community Behavioral Health Services Coverage and Limitations Handbook criteria
+  forbidden_facts:
+  - no prior authorization required
+  - PA not required for inpatient
+- id: cmhc012
+  persona: billing
+  payer_specificity: mco_specific
+  query: What HCPCS code do I bill for Applied Behavior Analysis (ABA) therapy under FL Medicaid?
+  expected:
+    strategy: c
+    query_class: tight_pool
+  golden_answer: 'For Applied Behavior Analysis (ABA) services under Florida Medicaid, bill the CPT 97150-series adaptive-behavior codes: 97151 — Behavior identification assessment / treatment-plan development (administered by the qualified professional); 97153 — Adaptive behavior treatment by protocol, by technician (RBT under BCBA supervision), 15-minute units; 97155 — Adaptive behavior treatment with protocol modification, by the qualified professional, 15-minute units; 97156 — Family adaptive-behavior treatment guidance. Florida Medicaid follows the Behavior Analysis Services Coverage Policy (and Sunshine Health''s FL.CP.BH.500). Codes pair with the appropriate place-of-service and modifier (such as HN/HM for technician-vs-professional supervision tier) per the MCO billing guide. Prior authorization is required for ongoing ABA services beyond the initial assessment.'
+  must_facts:
+  - 97153 is the technician-delivered ABA treatment code
+  - 97151 is the assessment / treatment-plan-development code
+  - FL Medicaid is the payer context
+  bonus_facts:
+  - 97155 — protocol modification by the qualified professional
+  - 97156 — family adaptive behavior treatment guidance
+  - Codes are 15-minute units (typically)
+  - Sunshine clinical policy FL.CP.BH.500 governs ABA
+  - Modifiers (HN/HM) may be required to indicate supervision level
+  - Prior authorization required for ongoing ABA services
+  forbidden_facts:
+  - No specific HCPCS code
+- id: cmhc013
+  persona: front_end
+  payer_specificity: strict
+  query: Does Sunshine Health cover dental services for adults?
+  expected:
+    strategy: d
+    query_class: tight_pool
+  golden_answer: Yes — Sunshine Health Florida Medicaid covers dental services for adults as an expanded benefit beyond the AHCA-mandated baseline. Coverage typically includes preventive services (routine cleanings, X-rays, oral exams) at low or no cost, restorative services (fillings, crowns, root canals) at standard coinsurance, and additional dental services for pregnant adults aged 21+. The specific benefit limits, copays, and in-network dentist directory are published on Sunshine Health's adult dental benefit page. For exact limits / age-tier breakdowns, see the member handbook or the AHCA Florida Medicaid dental policy.
+  must_facts:
+  - Yes, Sunshine Health covers adult dental services
+  - Sunshine Health is the payer
+  - Coverage includes preventive services (cleanings, exams, X-rays)
+  bonus_facts:
+  - Adult dental is offered as an expanded benefit beyond the Medicaid baseline
+  - Restorative services (fillings, crowns, root canals) covered with coinsurance
+  - Additional dental coverage for pregnant adults 21+
+  - Detailed benefits available on Sunshine Health's adult dental page
+  - Provider directory available for in-network dentists
+  forbidden_facts:
+  - no adult dental coverage
+  - dental only for children
+- id: cmhc014
+  persona: billing
+  payer_specificity: strict
+  query: Which pharmacy benefit manager processes Sunshine Health prescription claims?
+  expected:
+    strategy: a
+    query_class: tight_pool
+  golden_answer: Sunshine Health contracts with Express Scripts to administer the prescription drug benefit for Sunshine Health members. Express Scripts handles claims processing, drug utilization review, mail-order pharmacy services, and pharmacy network management. AcariaHealth (a related Centene specialty pharmacy) is the preferred provider for biopharmaceuticals and specialty injectables. Sunshine Health itself retains responsibility for benefit design consultation, prior authorization, and drug utilization review on its end.
+  must_facts:
+  - Express Scripts is the PBM
+  - Sunshine Health is the payer
+  - Express Scripts processes prescription claims
+  bonus_facts:
+  - AcariaHealth is the specialty / biopharmaceutical pharmacy partner
+  - Pharmacies may call Express Scripts at 1-833-750-4392
+  - Express Scripts also handles drug utilization review and mail-order
+  - Sunshine retains PA and benefit design responsibilities
+  forbidden_facts:
+  - CVS Caremark
+  - OptumRx
+  - Sunshine processes claims directly
+- id: cmhc015
+  persona: front_end
+  payer_specificity: strict
+  query: What is Sunshine Health's member appeals process and how do I file a grievance?
+  expected:
+    strategy: a
+    query_class: tight_pool
+  golden_answer: 'Sunshine Health handles member appeals and grievances through its Grievance & Appeals department. Members can file an appeal or grievance orally or in writing. Written submissions go to: Sunshine Grievance & Appeals, P.O. Box 459087, Fort Lauderdale, FL 33345-9087, or by fax to 1-866-534-5972. Oral submissions can be made by phone at 1-866-796-0530 (TTY 1-800-955-8770). If someone other than the member files on the member''s behalf, written authorization is required. Sunshine must acknowledge receipt within 5 business days and resolve grievances within 90 calendar days; appeals of adverse benefit determinations are resolved within 30 calendar days standard / 72 hours for expedited.'
+  must_facts:
+  - Sunshine Health is the payer
+  - Members can file appeals and grievances orally or in writing
+  - Sunshine Grievance & Appeals department handles both
+  bonus_facts:
+  - 'Written: Sunshine Grievance & Appeals, P.O. Box 459087, Fort Lauderdale, FL 33345-9087'
+  - 'Fax: 1-866-534-5972'
+  - 'Phone: 1-866-796-0530 (TTY 1-800-955-8770)'
+  - If filed by someone other than member, written authorization required
+  - 'Standard resolution: 90 days for grievances, 30 days for appeals'
+  - Expedited appeals resolved within 72 hours
+  - Acknowledgment of receipt within 5 business days
+  forbidden_facts:
+  - no formal appeals process
+  - appeals only by phone
+- id: cmhc016
+  persona: front_end
+  payer_specificity: strict
+  query: How do I get credentialed with Sunshine Health?
+  expected:
+    strategy: a
+    query_class: tight_pool
+  golden_answer: 'To become a credentialed provider with Sunshine Health, prospective providers submit a credentialing application through the CAQH ProView system (CAQH ID required) and complete Sunshine Health''s provider enrollment packet. Sunshine Health then verifies primary-source credentials per NCQA standards: state license, DEA registration (where applicable), board certification, malpractice insurance, work history, education, and OIG/SAM exclusion checks. The Credentialing Committee reviews complete applications; standard credentialing decisions are issued within 60 calendar days of receipt. Re-credentialing happens every 36 months. Initial contracting occurs in parallel — contact Sunshine Health Provider Services for the contract package. Behavioral health providers may have additional state-specific requirements per AHCA.'
+  must_facts:
+  - Provider must complete a credentialing application (CAQH or Sunshine packet)
+  - Sunshine Health is the payer
+  - Primary-source verification per NCQA standards
+  bonus_facts:
+  - CAQH ProView is the preferred credentialing data source
+  - 'Standard credentialing decision: 60 calendar days'
+  - Re-credentialing every 36 months
+  - Verifies license, DEA, board cert, malpractice, work history, education, OIG/SAM
+  - Credentialing Committee reviews and approves
+  - Contract execution runs in parallel with credentialing
+  forbidden_facts:
+  - no credentialing required
+  - anyone can join the network without credentialing
+  notes: 'LEXICON GAP — ''credentialed/credentialing'' don''t map to d:credentialing.general. Currently fail-fasts unless rephrased as ''provider network''. Backlog: extend lexicon synonyms.'
+- id: cmhc017
+  persona: billing
+  payer_specificity: mco_specific
+  query: What modifier is required for telehealth services under FL Medicaid managed care?
+  expected:
+    strategy: d
+    query_class: wide_pool
+  golden_answer: FL Medicaid telehealth services historically required modifier GT (interactive audio-video). The newer industry-standard modifier 95 is also accepted for synchronous telehealth on CPT-based services. Florida AHCA rule 59G-1.057 governs telemedicine billing; in current practice claims should be submitted with place-of-service code 02 (telehealth other-than-home) or 10 (telehealth in patient's home — newer post-COVID standard) AND the appropriate modifier (GT or 95) per the MCO's billing guide. Audio-only telephonic services use modifier 93 (or FQ in some fee schedules). Always verify the specific MCO's current Behavioral Health Supplemental Billing Guide for modifier requirements; Sunshine Health, Aetna Better Health, Simply Healthcare, and Humana may differ.
+  must_facts:
+  - GT or 95 modifier is required for telehealth on CPT-based services
+  - FL Medicaid is the payer context
+  - Place-of-service code 02 or 10 is required for telehealth
+  bonus_facts:
+  - GT is the historical modifier; 95 is the newer industry standard
+  - POS 02 — telehealth other than home (older)
+  - POS 10 — telehealth in patient's home (post-COVID standard)
+  - Audio-only uses modifier 93 (or FQ in some schedules)
+  - AHCA rule 59G-1.057 governs FL Medicaid telemedicine
+  - MCO billing guides may impose additional modifier requirements
+  forbidden_facts:
+  - no modifier required
+  - GT is not required for telehealth
+  notes: (c) confidently said 'modifier 95, GT not required' which is inaccurate for FL Medicaid — known LLM-prior failure mode on payer-modifier nuance. (d) was most complete via AHCA rule citation.
+- id: cmhc018
+  persona: um
+  payer_specificity: strict
+  query: Does Sunshine Health require prior authorization for outpatient electroconvulsive therapy (ECT)?
+  expected:
+    strategy: c
+    query_class: tight_pool
+  golden_answer: 'Yes — Sunshine Health requires prior authorization for ECT in all settings, including outpatient. ECT is treated as a specialty behavioral health procedure subject to medical-necessity review per Sunshine''s UM criteria (and AHCA''s Community Behavioral Health Services Coverage and Limitations Handbook). Submission goes through the Sunshine Health Secure Provider Portal with clinical documentation supporting medical necessity (typically: failed pharmacotherapy trials, severity of depression / catatonia / psychosis, treatment-resistant diagnosis). Standard PA decision: 7 calendar days for non-urgent; 48 hours for urgent. Verify the most recent Pre-Auth Check Tool on Sunshine''s provider site for the specific CPT codes (90870 series) and any current bypass exceptions.'
+  must_facts:
+  - Yes, prior authorization is required for ECT (outpatient or inpatient)
+  - Sunshine Health is the payer
+  - Submission via Secure Provider Portal with clinical documentation
+  bonus_facts:
+  - ECT CPT code is 90870
+  - 'Standard PA decision: 7 calendar days non-urgent / 48 hours urgent'
+  - Documentation must support medical necessity (failed pharmacotherapy, severity)
+  - AHCA Community BH Services Coverage and Limitations Handbook governs review
+  - Pre-Auth Check Tool on Sunshine's website confirms current PA list
+  forbidden_facts:
+  - no prior authorization required for ECT
+  - ECT not covered by Sunshine
+  notes: (c) gave LLM-prior correct answer; (a)/(b) corpus-deflected to Pre-Auth Tool. Same payer-specific + corpus-thin pattern as cmhc013.
+- id: cmhc019
+  persona: billing
+  payer_specificity: strict
+  query: What is the timely filing deadline for Aetna Better Health Florida Medicaid claims?
+  expected:
+    strategy: d
+    query_class: tight_pool
+  golden_answer: For Aetna Better Health of Florida (Medicaid managed care), participating providers must submit initial claims within 180 calendar days from the date of service. Non-participating providers typically have 365 days. Corrected claims and reconsideration requests have separate, shorter windows from the original remittance advice (commonly 90 days for participating providers). The exact deadlines are codified in the Aetna Better Health of Florida provider contract and the FL Medicaid managed care plan agreement; verify with Aetna Provider Services or the most current Provider Manual for any changes (Aetna announced filing-limit reductions for non-par providers in 2026).
+  must_facts:
+  - Aetna Better Health of Florida is the payer
+  - 'Participating providers: 180 calendar days from DOS'
+  bonus_facts:
+  - 'Non-participating providers: 365 calendar days (subject to 2026 reductions)'
+  - 'Corrected claims / reconsiderations: shorter window (commonly 90 days)'
+  - Aetna announced filing-limit changes for 2026 — verify current contract
+  - Days calculated from date of service
+  forbidden_facts:
+  - no timely filing deadline
+  - unlimited filing window
+  notes: Cross-payer query, corpus thin on Aetna. (c) said 365 (generic LLM); (d) said 180 (Aetna's own page). Confirms payer-specific + corpus-thin → (d) winner pattern.
+- id: cmhc020
+  persona: um
+  payer_specificity: strict
+  query: What is Simply Healthcare Florida Medicaid's prior authorization decision timeframe?
+  expected:
+    strategy: d
+    query_class: tight_pool
+  golden_answer: 'Simply Healthcare''s Florida Medicaid managed care plan follows AHCA-mandated and federal floor PA decision timeframes: 14 calendar days for standard / non-urgent pre-service decisions and 72 hours for urgent / expedited requests. NCQA accreditation may impose tighter targets (commonly 7 calendar days standard for behavioral health). Effective January 2026, the federal CMS Interoperability and PA Final Rule shortens the standard timeframe to 7 calendar days for impacted payers (including state Medicaid managed care). Verify the exact contracted timeframe in Simply Healthcare''s current Provider Manual or AHCA contract addendum.'
+  must_facts:
+  - 14 calendar days for standard non-urgent (federal floor; 7 days post-Jan 2026)
+  - Simply Healthcare is the payer
+  - 72 hours for urgent / expedited requests
+  bonus_facts:
+  - NCQA may set tighter target — 7 days standard for BH
+  - Federal CMS Interop & PA Rule shortens standard to 7 days from Jan 2026
+  - AHCA contract addendum codifies the timeframe
+  - Simply is a Centene plan (same parent as Sunshine Health)
+  forbidden_facts:
+  - no PA decision timeframe
+  - PA decisions take 30+ days
+  notes: Same shape as cmhc006 but for Simply (cross-payer). Corpus thin on Simply. (d) gave federal-baseline answer. Industry-standard answer.
+- id: cmhc021
+  persona: front_end
+  payer_specificity: strict
+  query: What documentation is required to enroll a new pediatric patient with Sunshine Health?
+  expected:
+    strategy: a
+    query_class: tight_pool
+  golden_answer: 'To enroll a new pediatric patient with Sunshine Health Florida Medicaid, the guardian / parent typically needs to: (1) verify the child''s Florida Medicaid eligibility through the AHCA Florida Medicaid web portal or DCF ACCESS system (child must already be enrolled in Florida Medicaid before MMA plan assignment); (2) confirm Sunshine Health is the assigned MMA plan or initiate a plan change during open enrollment; (3) provide the child''s Medicaid ID, date of birth, guardian information, and primary-care assignment preference. Provider-side enrollment uses the Sunshine member portal eligibility-verification tool to confirm active coverage at every visit. For Florida KidCare (CHIP) tier members, enrollment runs through Florida Healthy Kids Corporation. For initial well-child visits, EPSDT documentation requirements apply per AHCA''s Child Health Check-Up guidelines.'
+  must_facts:
+  - Child must be enrolled in Florida Medicaid first (via AHCA / DCF ACCESS)
+  - Sunshine Health is the payer
+  - Provider verifies eligibility via Sunshine member portal
+  bonus_facts:
+  - AHCA Florida Medicaid web portal for verification
+  - DCF ACCESS for initial Medicaid enrollment
+  - Plan change requires open-enrollment period or qualifying event
+  - Florida KidCare (CHIP) routes through Florida Healthy Kids Corp
+  - EPSDT (Child Health Check-Up) documentation applies for well-child visits
+  - 'Required info: Medicaid ID, DOB, guardian info, PCP preference'
+  forbidden_facts:
+  - Sunshine handles initial Medicaid enrollment
+  - no eligibility verification needed
+  notes: 'LEXICON GAPS: ''enroll'', ''pediatric'', ''documentation/documents'' all fail-fast. Only ''verification'' works. Backlog: extend lexicon for these terms.'
+- id: cmhc022
+  persona: billing
+  payer_specificity: mco_specific
+  query: How are EPSDT (Early Periodic Screening Diagnostic Treatment) services billed under FL Medicaid?
+  expected:
+    strategy: c
+    query_class: tight_pool
+  golden_answer: EPSDT services under Florida Medicaid (locally branded Child Health Check-Up Program / CHCUP) are billed by primary care providers using a defined set of preventive-care CPT and HCPCS codes per the AHCA EPSDT Services Coverage and Limitations Handbook. Standard well-child visits use the age-appropriate CPT preventive-medicine series (99381-99385 new patient / 99391-99395 established patient). Florida-specific HCPCS codes include screening procedure codes (e.g., developmental screening 96110, autism screening 96127, behavioral health screening 96161). Claims are submitted on the Professional 837P / CMS-1500 form with the appropriate place-of-service code and the EP modifier (EPSDT-related service) when applicable. Reimbursement is the lesser of the provider's usual and customary charge or the Florida Medicaid maximum allowable fee schedule amount. Each MCO (Sunshine, Aetna, Simply, Humana, etc.) follows the AHCA fee schedule but may have additional billing-guide modifier requirements.
+  must_facts:
+  - EPSDT (Florida CHCUP) is for Medicaid recipients under 21
+  - Bill on Professional 837P / CMS-1500
+  - FL Medicaid is the payer context
+  bonus_facts:
+  - Use age-appropriate preventive-medicine CPT (99381-99385 new / 99391-99395 estab)
+  - 'Developmental screening: 96110; autism screening: 96127; BH screening: 96161'
+  - EP modifier indicates EPSDT-related service
+  - 'Reimbursement: lesser of usual charge or FL Medicaid max fee schedule'
+  - AHCA EPSDT Services Coverage and Limitations Handbook is authoritative
+  - Each MCO follows AHCA fee schedule with possible additional billing-guide rules
+  forbidden_facts:
+  - EPSDT is not covered
+  - no specific billing requirements
+  notes: Generic-fact / no-payer; v1.2.4 boost fired (a:2.20 down from 2.50) but (b) still won routing at 2.46. (c) had the best summary but came in at 2.16 — close. With +0.55 boost (instead of +0.40) (c) would win.
