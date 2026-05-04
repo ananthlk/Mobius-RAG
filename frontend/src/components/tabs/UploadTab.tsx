@@ -22,6 +22,9 @@ interface DocLike {
     source_url?: string | null
     scrape_job_id?: string | null
     agent_scope?: string | null
+    payer?: string | null
+    state?: string | null
+    program?: string | null
   } | null
   expires_at?: string | null
 }
@@ -169,6 +172,12 @@ function scrapeJobsToRows(jobs: ScrapeJob[]): QueueRow[] {
  */
 function docHost(d: DocLike): string {
   if (d.source_metadata?.agent_scope === 'chat' || d.expires_at) return '(chat)'
+  // Prefer semantic metadata over raw URL hostname
+  const payer = d.source_metadata?.payer?.trim()
+  const state = d.source_metadata?.state?.trim()
+  const program = d.source_metadata?.program?.trim()
+  if (payer) return state ? `${payer} · ${state}` : payer
+  if (program) return program
   const sm = d.source_metadata?.source_url
   if (sm) {
     try {
@@ -189,6 +198,8 @@ function hostToSource(host: string): QueueRow['source'] {
   if (host === '(chat)') return 'chat'
   if (host === '(drive)') return 'drive'
   if (host === '(uploaded)') return 'computer'
+  // Metadata-labeled groups (payer names) are still URL-sourced
+  if (host.startsWith('(')) return 'computer'
   return 'url'
 }
 
