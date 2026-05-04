@@ -2770,7 +2770,7 @@ async def _enqueue_retag_job(db: AsyncSession, doc_uuid, document_id_str: str) -
             ChunkingJob.status.in_(("pending", "processing")),
         )
     )
-    if existing.scalar_one_or_none():
+    if existing.scalars().first():
         return None  # already queued
 
     job = ChunkingJob(
@@ -2827,14 +2827,38 @@ async def retag_documents_bulk(
         )
         documents = docs_result.scalars().all()
 
+    # Batch-load all already-pending/processing Path B jobs to avoid N per-doc queries.
+    doc_ids_in_scope = [doc.id for doc in documents]
+    if doc_ids_in_scope:
+        existing_result = await db.execute(
+            select(ChunkingJob.document_id).where(
+                ChunkingJob.document_id.in_(doc_ids_in_scope),
+                ChunkingJob.generator_id == "B",
+                ChunkingJob.status.in_(("pending", "processing")),
+            )
+        )
+        already_pending: set = {row[0] for row in existing_result.all()}
+    else:
+        already_pending = set()
+
     queued = []
     skipped = 0
     for doc in documents:
-        job_info = await _enqueue_retag_job(db, doc.id, str(doc.id))
-        if job_info:
-            queued.append(job_info)
-        else:
+        if doc.id in already_pending:
             skipped += 1
+            continue
+        job = ChunkingJob(
+            document_id=doc.id,
+            generator_id="B",
+            threshold="0.6",
+            status="pending",
+            extraction_enabled="false",
+            critique_enabled="false",
+            max_retries=0,
+            skip_embedding="true",
+        )
+        db.add(job)
+        queued.append({"document_id": str(doc.id), "job_id": str(job.id)})
 
     if queued:
         await db.commit()

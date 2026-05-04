@@ -56,6 +56,9 @@ export function UploadedDocsPanel({ docs, selectedDocumentId, onSelectDoc, onRef
   const [saving, setSaving] = useState(false)
   const [triggering, setTriggering] = useState<string | null>(null)
   const [bulkTriggering, setBulkTriggering] = useState(false)
+  const [retagging, setRetagging] = useState<string | null>(null)
+  const [bulkRetagging, setBulkRetagging] = useState(false)
+  const [retagResult, setRetagResult] = useState<string | null>(null)
 
   const startEdit = (d: DocLike) => {
     setEditing(d.id)
@@ -122,34 +125,96 @@ export function UploadedDocsPanel({ docs, selectedDocumentId, onSelectDoc, onRef
     }
   }
 
+  const retagDoc = async (docId: string) => {
+    setRetagging(docId)
+    setRetagResult(null)
+    try {
+      const res = await fetch(`${API_BASE}/documents/${docId}/retag`, { method: 'POST' })
+      if (res.ok) {
+        setRetagResult('Retag queued')
+        onRefresh()
+      } else {
+        const j = await res.json().catch(() => ({}))
+        setRetagResult(`Error: ${j.detail ?? res.status}`)
+      }
+    } finally {
+      setRetagging(null)
+    }
+  }
+
+  const retagAll = async () => {
+    setBulkRetagging(true)
+    setRetagResult(null)
+    try {
+      const res = await fetch(`${API_BASE}/documents/retag`, { method: 'POST' })
+      if (res.ok) {
+        const j = await res.json()
+        setRetagResult(`Queued ${j.queued ?? '?'}, skipped ${j.skipped ?? '?'}`)
+        onRefresh()
+      } else {
+        const j = await res.json().catch(() => ({}))
+        setRetagResult(`Error: ${j.detail ?? res.status}`)
+      }
+    } finally {
+      setBulkRetagging(false)
+    }
+  }
+
   const stuckCount = docs.filter(canRetrigger).length
 
   return (
     <div style={{ padding: '12px 16px', minHeight: 200, minWidth: 0, overflow: 'hidden' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
         <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600 }}>
           Uploaded Documents ({docs.length})
         </h3>
-        {stuckCount > 0 && (
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 6, alignItems: 'center' }}>
+          {stuckCount > 0 && (
+            <button
+              onClick={retriggerAll}
+              disabled={bulkTriggering}
+              style={{
+                fontSize: 12,
+                padding: '3px 10px',
+                background: '#f59e0b',
+                color: '#fff',
+                border: 'none',
+                borderRadius: 4,
+                cursor: bulkTriggering ? 'not-allowed' : 'pointer',
+                opacity: bulkTriggering ? 0.6 : 1,
+              }}
+            >
+              {bulkTriggering ? 'Retriggering…' : `↺ Retrigger ${stuckCount} stuck`}
+            </button>
+          )}
           <button
-            onClick={retriggerAll}
-            disabled={bulkTriggering}
+            onClick={retagAll}
+            disabled={bulkRetagging}
+            title="Re-run Path B tagging on all completed docs (picks up new lexicon terms)"
             style={{
-              marginLeft: 'auto',
               fontSize: 12,
               padding: '3px 10px',
-              background: '#f59e0b',
+              background: '#6366f1',
               color: '#fff',
               border: 'none',
               borderRadius: 4,
-              cursor: bulkTriggering ? 'not-allowed' : 'pointer',
-              opacity: bulkTriggering ? 0.6 : 1,
+              cursor: bulkRetagging ? 'not-allowed' : 'pointer',
+              opacity: bulkRetagging ? 0.6 : 1,
             }}
           >
-            {bulkTriggering ? 'Retriggering…' : `Retrigger ${stuckCount} stuck`}
+            {bulkRetagging ? 'Retagging…' : '⟳ Retag All'}
           </button>
-        )}
+        </div>
       </div>
+      {retagResult && (
+        <div style={{
+          fontSize: 11, color: retagResult.startsWith('Error') ? '#ef4444' : '#10b981',
+          marginBottom: 8, padding: '3px 6px', background: retagResult.startsWith('Error') ? '#fef2f2' : '#f0fdf4',
+          borderRadius: 4,
+        }}>
+          {retagResult}
+        </div>
+      )}
 
       {docs.length === 0 && (
         <p style={{ color: '#888', fontSize: 13 }}>No uploaded documents found.</p>
@@ -224,6 +289,20 @@ export function UploadedDocsPanel({ docs, selectedDocumentId, onSelectDoc, onRef
                     }}
                   >
                     {triggering === d.id ? '…' : '↺ retrigger'}
+                  </button>
+                )}
+                {d.extraction_status === 'completed' && !isEditing && (
+                  <button
+                    onClick={() => retagDoc(d.id)}
+                    disabled={retagging === d.id}
+                    title="Re-run Path B tagging (picks up new lexicon terms)"
+                    style={{
+                      background: 'none', border: '1px solid #6366f1', borderRadius: 4,
+                      padding: '2px 6px', fontSize: 11, cursor: 'pointer', color: '#6366f1',
+                      opacity: retagging === d.id ? 0.6 : 1,
+                    }}
+                  >
+                    {retagging === d.id ? '…' : '⟳ retag'}
                   </button>
                 )}
               </div>
