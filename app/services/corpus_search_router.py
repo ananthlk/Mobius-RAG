@@ -192,11 +192,12 @@ QueryClass = Literal[
     "literal_anchor",     # has an HCPCS / policy-ID literal
     "tight_pool",         # cascade L1/L2 produced ≤500 docs and tags matched
     "wide_pool",          # cascade L3/L4 only — broad domain, no tight pool
+    "conceptual",         # query_type=CONCEPTUAL — explanation/definition, not lookup
     "exploratory",        # exploratory phrasing detected (tell me / overview / across)
     "vague",              # VAGUE classification (no tags, no literals)
 ]
 
-PRIORS_VERSION = "v1.2.6.2026-05-05"
+PRIORS_VERSION = "v1.2.7.2026-05-05"
 
 # v1.2 update — derived from N=5 strategy×query verdict matrix
 # (eval/calibration/strategy_matrix_n5_20260503-183648.json) with
@@ -249,6 +250,9 @@ _BASE_PRIORS: dict[StrategyId, dict[QueryClass, StrategyPrior]] = {
         "tight_pool":     StrategyPrior(["structured"], accuracy=0.690, accuracy_std=0.000, recall_capacity=0.65, speed=0.95),
         # N=3 post-fix on cmhc003/004: pooled mean 0.92, within-σ 0.14 → corrected σ < 0 → clamp 0
         "wide_pool":      StrategyPrior(["structured"], accuracy=0.920, accuracy_std=0.000, recall_capacity=0.40, speed=0.80),
+        # BM25 keyword search misses conceptual synonymy — low accuracy, low recall.
+        # Speed advantage is marginal when (b) vector-broad is nearby in latency.
+        "conceptual":     StrategyPrior(["structured"], accuracy=0.25,  accuracy_std=0.000, recall_capacity=0.25, speed=0.85),
         "exploratory":    StrategyPrior(["structured"], accuracy=0.55,  accuracy_std=0.20, recall_capacity=0.35, speed=0.85),
         "vague":          StrategyPrior(["structured"], accuracy=0.000, accuracy_std=0.000, recall_capacity=0.25, speed=0.85),
     },
@@ -259,6 +263,9 @@ _BASE_PRIORS: dict[StrategyId, dict[QueryClass, StrategyPrior]] = {
         "tight_pool":     StrategyPrior(["structured", "essay"], accuracy=0.500, accuracy_std=0.479, recall_capacity=0.70, speed=0.85),
         # N=5 mean=0.730, σ_total=0.271 → σ_strategy=0.201
         "wide_pool":      StrategyPrior(["structured", "essay"], accuracy=0.730, accuracy_std=0.201, recall_capacity=0.75, speed=0.80),
+        # Vector-broad excels at conceptual queries — semantic similarity captures
+        # paraphrase and definition better than any keyword approach.
+        "conceptual":     StrategyPrior(["structured", "essay"], accuracy=0.70,  accuracy_std=0.15, recall_capacity=0.80, speed=0.80),
         "exploratory":    StrategyPrior(["structured", "essay"], accuracy=0.75,  accuracy_std=0.20, recall_capacity=0.85, speed=0.85),
         "vague":          StrategyPrior(["structured", "essay"], accuracy=0.000, accuracy_std=0.000, recall_capacity=0.65, speed=0.85),
     },
@@ -269,6 +276,10 @@ _BASE_PRIORS: dict[StrategyId, dict[QueryClass, StrategyPrior]] = {
         "tight_pool":     StrategyPrior(["essay", "structured"], accuracy=0.575, accuracy_std=0.281, recall_capacity=0.60, speed=0.40, cost_per_call=0.02),
         # N=5 mean=0.350, σ_total=0.337 → σ_strategy=0.283 (often returns empty)
         "wide_pool":      StrategyPrior(["essay", "structured"], accuracy=0.350, accuracy_std=0.283, recall_capacity=0.55, speed=0.40, cost_per_call=0.02),
+        # LLM parametric prior is reliable for policy/clinical conceptual questions
+        # (stable knowledge, not time-sensitive). Accuracy higher, std lower than wide_pool
+        # because conceptual answers don't depend on exact corpus coverage.
+        "conceptual":     StrategyPrior(["essay", "structured"], accuracy=0.75,  accuracy_std=0.15, recall_capacity=0.70, speed=0.40, cost_per_call=0.02),
         "exploratory":    StrategyPrior(["essay", "structured"], accuracy=0.60,  accuracy_std=0.30, recall_capacity=0.85, speed=0.40, cost_per_call=0.02),
         "vague":          StrategyPrior(["essay", "structured"], accuracy=0.000, accuracy_std=0.000, recall_capacity=0.50, speed=0.40, cost_per_call=0.02),
     },
@@ -290,6 +301,10 @@ _BASE_PRIORS: dict[StrategyId, dict[QueryClass, StrategyPrior]] = {
         "tight_pool":     StrategyPrior(["essay", "structured"], accuracy=0.650, accuracy_std=0.221, recall_capacity=0.65, speed=0.65, cost_per_call=0.03),
         # N=5 mean=0.600, σ_total=0.211 → σ_strategy=0.105. Recall: 1.00 → 0.60.
         "wide_pool":      StrategyPrior(["essay", "structured"], accuracy=0.600, accuracy_std=0.105, recall_capacity=0.60, speed=0.65, cost_per_call=0.03),
+        # External search is poor at explanatory/conceptual queries — SERP tends
+        # to return procedure docs and forms rather than definitions or policy rationale.
+        # Lower accuracy and recall than c (LLM prior) for this question shape.
+        "conceptual":     StrategyPrior(["essay", "structured"], accuracy=0.50,  accuracy_std=0.20, recall_capacity=0.55, speed=0.65, cost_per_call=0.03),
         # No empirical data; halve old optimistic values to match the principle.
         "exploratory":    StrategyPrior(["essay", "structured"], accuracy=0.50,  accuracy_std=0.20, recall_capacity=0.50, speed=0.65, cost_per_call=0.03),
         "vague":          StrategyPrior(["essay", "structured"], accuracy=0.000, accuracy_std=0.000, recall_capacity=0.20, speed=0.65, cost_per_call=0.03),
@@ -322,6 +337,13 @@ def derive_query_class(profile_features: dict[str, Any]) -> QueryClass:
         return "exploratory"
     if qt == "VAGUE":
         return "vague"
+    # Conceptual queries ask HOW/WHY/WHAT-IS rather than looking up a specific
+    # fact. (c) LLM parametric prior beats (d) external search for these because
+    # the answer is stable policy knowledge, not a live lookup. Route to the
+    # dedicated conceptual class so the priors reflect this asymmetry.
+    # MIXED and PRECISION_DOMINANT still fall through to pool-size routing.
+    if qt == "CONCEPTUAL":
+        return "conceptual"
     if 0 < pool <= 500:
         return "tight_pool"
     if pool > 500:
