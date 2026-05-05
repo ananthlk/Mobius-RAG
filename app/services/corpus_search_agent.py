@@ -2628,16 +2628,68 @@ async def corpus_search_agent(
     caller: str = "api",
     caller_id: str | None = None,
 ) -> CorpusSearchAgentResponse:
-    """Public entry point — runs the inner agent and persists the
-    routing decision (fire-and-forget) before returning.
+    """Public entry point — internally cascades through routing strategies
+    on low-quality results (up to 3 tries), persisting each routing
+    decision fire-and-forget before returning.
 
     Persistence is best-effort: failures are logged but never block
-    the response. The persisted row gives the bandit + eval harness +
+    the response. The persisted rows give the bandit + eval harness +
     frontend a complete record of what was decided and why.
     """
-    response = await _corpus_search_agent_impl(db, request, caller, caller_id)
-    _persist_routing_decision_async(request, response)
-    return response
+    # Explicit mode overrides (A/B testing knob) suppress retry —
+    # honour the caller's forced strategy without cascading.
+    explicit_mode = (getattr(request, "mode", None) or "").lower().strip()
+    _is_override = explicit_mode in {
+        "explore", "validate", "external",
+        "a", "b", "c", "d",
+        "precision", "cascade",
+        "recall", "themes", "discovery",
+        "reverse_rag", "llm_validate",
+        "google", "scrape",
+    }
+    _MAX_TRIES = 1 if _is_override else 3
+    # Seed with strategies the caller already tried externally so the
+    # router excludes them from the very first attempt.
+    _tried: list[str] = list(request.prior_strategies_tried or [])
+    _best_resp: CorpusSearchAgentResponse | None = None
+    response: CorpusSearchAgentResponse | None = None
+
+    for _attempt in range(_MAX_TRIES):
+        # Pass the accumulated tried list so router_decide picks a fresh arm.
+        attempt_request = request.model_copy(
+            update={"prior_strategies_tried": _tried}
+        )
+        response = await _corpus_search_agent_impl(db, attempt_request, caller, caller_id)
+        _persist_routing_decision_async(attempt_request, response)
+
+        strategy_used = response.strategy_used or "a"
+        if strategy_used not in _tried:
+            _tried.append(strategy_used)
+
+        # Terminal: e=fail-fast (off-scope, retrying won't help),
+        #            d=external (highest-recall tier, nothing beyond this).
+        if strategy_used in ("e", "d"):
+            return response
+
+        # Success: corpus chunks returned with decent confidence — done.
+        n_chunks = len(response.chunks or [])
+        if n_chunks > 0 and response.confidence in ("high", "medium"):
+            return response
+
+        # Low / empty result — store best and retry if budget allows.
+        best_n = len(_best_resp.chunks or []) if _best_resp else -1
+        if n_chunks > best_n:
+            _best_resp = response
+
+        if _attempt + 1 < _MAX_TRIES:
+            logger.info(
+                "[corpus_search_agent] attempt=%d strategy=%s chunks=%d "
+                "conf=%s → retrying with next arm",
+                _attempt, strategy_used, n_chunks, response.confidence,
+            )
+
+    # All attempts exhausted — return best result found across all tries.
+    return _best_resp if _best_resp is not None else response  # type: ignore[return-value]
 
 
 def _persist_routing_decision_async(
