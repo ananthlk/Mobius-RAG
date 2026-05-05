@@ -590,7 +590,7 @@ const STRATEGY_LABEL: Record<string, string> = {
 const SYSTEM_CURVE_KEYS = new Set(['system_oracle', 'system_best'])
 
 function PRCurvePanel({ runId }: { runId: string }) {
-  const [axis, setAxis] = useState<'top_rerank' | 'mean_top3' | 'confidence_tier'>('top_rerank')
+  const [axis, setAxis] = useState<'top_rerank' | 'mean_top3' | 'confidence_tier'>('confidence_tier')
   const [data, setData] = useState<PRPayload | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -616,6 +616,22 @@ function PRCurvePanel({ runId }: { runId: string }) {
   if (error) return <div className="pr-panel pr-error">PR curve: {error}</div>
   if (!data && loading) return <div className="pr-panel">Loading PR curve…</div>
   if (!data) return null
+
+  // Detect degenerate top_rerank data: when rerank_score is null for most
+  // rows, conf is treated as 0 — all rows only appear at τ=0, causing
+  // precision and recall to both increase together (not the expected tradeoff).
+  const isRerankDegenerate = axis === 'top_rerank' && (() => {
+    let total = 0, nullConf = 0
+    for (const pts of Object.values(data.points)) {
+      for (const p of pts) {
+        total++
+        // At τ>0, a row only appears if its rerank score ≥ τ.
+        // If nearly all non-τ=0 points have null precision, the data is degenerate.
+        if (p.tau > 0 && p.precision === null) nullConf++
+      }
+    }
+    return total > 0 && nullConf / total > 0.7
+  })()
 
   // Sort strategies so system curves render LAST (on top of others)
   // and group nicely in the legend.
@@ -657,6 +673,17 @@ function PRCurvePanel({ runId }: { runId: string }) {
           </select>
         </div>
       </div>
+
+      {isRerankDegenerate && (
+        <div className="pr-warn">
+          ⚠ Most rows have null rerank scores — the top_rerank axis will show precision
+          and recall rising together (not the expected tradeoff). Switch to{' '}
+          <button className="pr-warn-link" onClick={() => setAxis('confidence_tier')}>
+            confidence tier
+          </button>{' '}
+          for a meaningful curve. The null rerank bug is a separate fix in the RAG service.
+        </div>
+      )}
 
       <div className="pr-chart-row">
         <svg width={W} height={H} className="pr-svg">
