@@ -2647,7 +2647,9 @@ async def corpus_search_agent(
         "reverse_rag", "llm_validate",
         "google", "scrape",
     }
-    _MAX_TRIES = 1 if _is_override else 3
+    # Always allow up to 3 attempts. Override mode only locks attempt 0 to
+    # the caller's explicit strategy — subsequent attempts are router-driven.
+    _MAX_TRIES = 3
     # Seed with strategies the caller already tried externally so the
     # router excludes them from the very first attempt.
     _tried: list[str] = list(request.prior_strategies_tried or [])
@@ -2655,10 +2657,13 @@ async def corpus_search_agent(
     response: CorpusSearchAgentResponse | None = None
 
     for _attempt in range(_MAX_TRIES):
-        # Pass the accumulated tried list so router_decide picks a fresh arm.
-        attempt_request = request.model_copy(
-            update={"prior_strategies_tried": _tried}
-        )
+        # Attempt 0 honours the caller's explicit mode (if any).
+        # Attempt 1+ clears it so the router takes over — the planner already
+        # tried its preferred strategy; now let the agent cascade to the next.
+        attempt_request = request.model_copy(update={
+            "prior_strategies_tried": _tried,
+            "mode": request.mode if _attempt == 0 else None,
+        })
         response = await _corpus_search_agent_impl(db, attempt_request, caller, caller_id)
         _persist_routing_decision_async(attempt_request, response)
 
