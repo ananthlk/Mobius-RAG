@@ -197,7 +197,7 @@ QueryClass = Literal[
     "vague",              # VAGUE classification (no tags, no literals)
 ]
 
-PRIORS_VERSION = "v1.2.7.2026-05-05"
+PRIORS_VERSION = "v1.2.8.2026-05-05"
 
 # v1.2 update — derived from N=5 strategy×query verdict matrix
 # (eval/calibration/strategy_matrix_n5_20260503-183648.json) with
@@ -276,10 +276,10 @@ _BASE_PRIORS: dict[StrategyId, dict[QueryClass, StrategyPrior]] = {
         "tight_pool":     StrategyPrior(["essay", "structured"], accuracy=0.575, accuracy_std=0.281, recall_capacity=0.60, speed=0.40, cost_per_call=0.02),
         # N=5 mean=0.350, σ_total=0.337 → σ_strategy=0.283 (often returns empty)
         "wide_pool":      StrategyPrior(["essay", "structured"], accuracy=0.350, accuracy_std=0.283, recall_capacity=0.55, speed=0.40, cost_per_call=0.02),
-        # LLM parametric prior is reliable for policy/clinical conceptual questions
-        # (stable knowledge, not time-sensitive). Accuracy higher, std lower than wide_pool
-        # because conceptual answers don't depend on exact corpus coverage.
-        "conceptual":     StrategyPrior(["essay", "structured"], accuracy=0.75,  accuracy_std=0.15, recall_capacity=0.70, speed=0.40, cost_per_call=0.02),
+        # c is bimodal on conceptual queries: either the LLM surfaces an exact
+        # citation (high) or finds nothing (zero). High std reflects this; d
+        # external is more consistent for this question shape.
+        "conceptual":     StrategyPrior(["essay", "structured"], accuracy=0.40,  accuracy_std=0.35, recall_capacity=0.55, speed=0.40, cost_per_call=0.02),
         "exploratory":    StrategyPrior(["essay", "structured"], accuracy=0.60,  accuracy_std=0.30, recall_capacity=0.85, speed=0.40, cost_per_call=0.02),
         "vague":          StrategyPrior(["essay", "structured"], accuracy=0.000, accuracy_std=0.000, recall_capacity=0.50, speed=0.40, cost_per_call=0.02),
     },
@@ -301,10 +301,10 @@ _BASE_PRIORS: dict[StrategyId, dict[QueryClass, StrategyPrior]] = {
         "tight_pool":     StrategyPrior(["essay", "structured"], accuracy=0.650, accuracy_std=0.221, recall_capacity=0.65, speed=0.65, cost_per_call=0.03),
         # N=5 mean=0.600, σ_total=0.211 → σ_strategy=0.105. Recall: 1.00 → 0.60.
         "wide_pool":      StrategyPrior(["essay", "structured"], accuracy=0.600, accuracy_std=0.105, recall_capacity=0.60, speed=0.65, cost_per_call=0.03),
-        # External search is poor at explanatory/conceptual queries — SERP tends
-        # to return procedure docs and forms rather than definitions or policy rationale.
-        # Lower accuracy and recall than c (LLM prior) for this question shape.
-        "conceptual":     StrategyPrior(["essay", "structured"], accuracy=0.50,  accuracy_std=0.20, recall_capacity=0.55, speed=0.65, cost_per_call=0.03),
+        # External search is useful for conceptual queries — Wikipedia, clinical
+        # guidelines, official policy pages tend to rank well for HOW/WHY/WHAT-IS
+        # questions. More consistent than c (which is bimodal on conceptual).
+        "conceptual":     StrategyPrior(["essay", "structured"], accuracy=0.65,  accuracy_std=0.20, recall_capacity=0.70, speed=0.65, cost_per_call=0.03),
         # No empirical data; halve old optimistic values to match the principle.
         "exploratory":    StrategyPrior(["essay", "structured"], accuracy=0.50,  accuracy_std=0.20, recall_capacity=0.50, speed=0.65, cost_per_call=0.03),
         "vague":          StrategyPrior(["essay", "structured"], accuracy=0.000, accuracy_std=0.000, recall_capacity=0.20, speed=0.65, cost_per_call=0.03),
