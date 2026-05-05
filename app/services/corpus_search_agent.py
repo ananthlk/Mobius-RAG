@@ -2901,6 +2901,17 @@ async def _corpus_search_agent_impl(
         # — router_decide uses it to route to strategy (d) external.
         "has_zero_cooc_term": bool(_missing_token),
         "zero_cooc_token": _missing_token,
+        # has_ahca_pool — True when the pre-route candidate pool cascade
+        # landed at AHCA scope (L3_AHCA_D or L4_AHCA). AHCA is the FL
+        # Medicaid umbrella domain; when a query has a domain tag but no
+        # specific payer tag, AHCA scope substitutes for payer scope —
+        # corpus retrieval (strategy a/b) is still meaningful within AHCA.
+        # The router uses this to suppress the no-payer haircut on (a).
+        "has_ahca_pool": (
+            pool_pre is not None
+            and pool_pre.cascade_level in ("L3_AHCA_D", "L4_AHCA")
+        ),
+        "pool_cascade_level": pool_pre.cascade_level if pool_pre is not None else "L5_empty",
     }
 
     # Override path — explicit mode set by caller bypasses the router's

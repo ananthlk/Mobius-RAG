@@ -196,7 +196,7 @@ QueryClass = Literal[
     "vague",              # VAGUE classification (no tags, no literals)
 ]
 
-PRIORS_VERSION = "v1.2.4.2026-05-03"
+PRIORS_VERSION = "v1.2.6.2026-05-05"
 
 # v1.2 update — derived from N=5 strategy×query verdict matrix
 # (eval/calibration/strategy_matrix_n5_20260503-183648.json) with
@@ -549,9 +549,17 @@ def decide(
         # or returned generic content.
         adj = 0.0
         adj_reason = None
+        # No-payer routing: when the query has a domain tag but no specific
+        # payer, the answer is general/public-knowledge shape. (c) wins
+        # because its LLM prior IS global policy when no payer narrows it.
+        # Exception: when pool already landed at AHCA scope (L3_AHCA_D /
+        # L4_AHCA), the domain pool IS meaningful narrowing — AHCA
+        # substitutes for the absent payer (v1.2.6). Skip the haircut and
+        # let the AHCA-substitution block below do the routing instead.
         if (
             profile_features.get("has_d_tag")
             and not profile_features.get("has_j_payor_tag")
+            and not profile_features.get("has_ahca_pool")
         ):
             if sid == "c":
                 adj = +0.40
@@ -559,6 +567,24 @@ def decide(
             elif sid == "a":
                 adj = -0.30
                 adj_reason = "no_payer_a_recall_haircut"
+
+        # AHCA domain substitutes absent payer (v1.2.6 — 2026-05-05):
+        # When the pool cascade landed at AHCA scope and the query has a
+        # domain tag but no payer tag, AHCA is the effective payer scope.
+        # (a) BM25 precision WITHIN AHCA∩D is the right first attempt —
+        # it finds whatever payer-adjacent content the corpus has.
+        # (b) wide-themes is redundant: the pool is already domain-narrowed.
+        if (
+            profile_features.get("has_ahca_pool")
+            and not profile_features.get("has_j_payor_tag")
+            and profile_features.get("has_d_tag")
+        ):
+            if sid == "a":
+                adj += +0.20
+                adj_reason = (adj_reason or "") + "+ahca_domain_substitutes_payer"
+            elif sid == "b":
+                adj -= 0.20
+                adj_reason = (adj_reason or "") + "-ahca_b_redundant_with_domain_pool"
 
         # Zero-cooc routing (v1.2.5 — 2026-05-05):
         # When _estimate_internal_recall found a content token with ZERO
