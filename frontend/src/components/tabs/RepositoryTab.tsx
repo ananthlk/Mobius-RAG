@@ -9,6 +9,12 @@ import type { SearchTelemetry } from './repository/SearchTracePanel'
 import { UploadedDocsPanel } from './repository/UploadedDocsPanel'
 import './RepositoryTab.css'
 
+// suppress unused-import warnings — these are kept per spec
+void EntityCard
+void EntitySidebar
+void domainOf
+void UploadedDocsPanel
+
 const UPLOADED_HOST = '(uploaded)'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -79,6 +85,7 @@ type SearchMode = 'corpus' | 'precision' | 'recall'
 
 interface Props {
   documents: DocLike[]
+  documentsLoading?: boolean
   selectedDocumentId: string | null
   navigateToRead: NavigateToRead | null
   onNavigateToReadConsumed: () => void
@@ -234,6 +241,7 @@ function _CorpusSearchResults({
 
 export function RepositoryTab({
   documents,
+  documentsLoading = false,
   selectedDocumentId,
   navigateToRead,
   onNavigateToReadConsumed,
@@ -271,7 +279,19 @@ export function RepositoryTab({
     if (navigateToRead) setReaderVisible(true)
   }, [navigateToRead])
 
-  const readerOpen = readerVisible && (!!selectedDocumentId || !!urlPreview)
+  // ── Three-panel layout state ─────────────────────────────────────────────
+  // expandedPanel: which panel (if any) is occupying full width
+  const [expandedPanel, setExpandedPanel] = useState<'browse' | 'reader' | 'health' | null>(null)
+  // healthOpen: independent toggle for health panel height within its strip
+  const [healthOpen, setHealthOpen] = useState(false)
+
+  // ── Browse panel state ───────────────────────────────────────────────────
+  const [browseSearch, setBrowseSearch] = useState('')
+  const [payerFilter, setPayerFilter] = useState('')
+  const [stateFilter, setStateFilter] = useState('')
+  const [statusFilter, setStatusFilter] = useState('')
+  // Track which payer groups are collapsed
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({})
 
   // ── Load aggregate stats ─────────────────────────────────────────────────
   useEffect(() => {
@@ -427,6 +447,14 @@ export function RepositoryTab({
     onDocumentSelect(documentId)
     setReaderVisible(true)
     setSidebarCollapsed(true)
+    // Auto-switch to reader panel if reader is currently expanded, keep layout otherwise
+    if (expandedPanel === 'reader') {
+      // already expanded, stay
+    } else if (expandedPanel !== null) {
+      // some other panel expanded — switch to reader
+      setExpandedPanel('reader')
+    }
+    // null → leave default split, user can expand if desired
   }
 
   // @ts-ignore — search UI moved to Test tab.
@@ -471,30 +499,290 @@ export function RepositoryTab({
   // Merge local navigation with external navigation (external wins if more recent)
   const activeNavigateTo = navigateToRead ?? localNavigateTo
 
+  // ── Browse: filter + group logic ─────────────────────────────────────────
+  const filteredDocs = useMemo(() => {
+    const q = browseSearch.toLowerCase()
+    return documents.filter((d) => {
+      // text search
+      if (q) {
+        const haystack = [d.display_name, d.filename, d.payer, d.state]
+          .filter(Boolean).join(' ').toLowerCase()
+        if (!haystack.includes(q)) return false
+      }
+      // payer filter
+      if (payerFilter && (d.payer ?? '') !== payerFilter) return false
+      // state filter
+      if (stateFilter && (d.state ?? '') !== stateFilter) return false
+      // status filter
+      if (statusFilter) {
+        const docStatus = d.published_at
+          ? 'published'
+          : d.chunking_status === 'failed' || d.embedding_status === 'failed'
+            ? 'failed'
+            : 'processing'
+        if (docStatus !== statusFilter) return false
+      }
+      return true
+    })
+  }, [documents, browseSearch, payerFilter, stateFilter, statusFilter])
+
+  // Group by payer
+  const groupedDocs = useMemo(() => {
+    const groups: Record<string, DocLike[]> = {}
+    for (const d of filteredDocs) {
+      const key = d.payer || d.state || '(untagged)'
+      if (!groups[key]) groups[key] = []
+      groups[key].push(d)
+    }
+    return groups
+  }, [filteredDocs])
+
+  // Unique filter options
+  const uniquePayers = useMemo(() =>
+    Array.from(new Set(documents.map((d) => d.payer).filter(Boolean) as string[])).sort(),
+    [documents])
+  const uniqueStates = useMemo(() =>
+    Array.from(new Set(documents.map((d) => d.state).filter(Boolean) as string[])).sort(),
+    [documents])
+
+  // Age formatter
+  const fmtAge = (iso: string | null | undefined) => {
+    if (!iso) return ''
+    const diff = Date.now() - new Date(iso).getTime()
+    const days = Math.floor(diff / 86400000)
+    if (days === 0) return 'today'
+    if (days === 1) return '1d'
+    if (days < 30) return `${days}d`
+    const months = Math.floor(days / 30)
+    return `${months}mo`
+  }
+
+  // Status dot class
+  const statusDotClass = (d: DocLike) => {
+    if (d.published_at) return 'published'
+    if (d.chunking_status === 'failed' || d.embedding_status === 'failed') return 'failed'
+    if (d.chunking_status === 'completed' || d.embedding_status === 'completed') return 'processing'
+    return 'pending'
+  }
+
+  // ── Panel class helpers ───────────────────────────────────────────────────
+  const browsePanelClass = () => {
+    if (expandedPanel === 'browse') return 'repo-panel repo-panel--browse panel-expanded'
+    if (expandedPanel === 'reader') return 'repo-panel repo-panel--browse panel-slim'
+    if (expandedPanel === 'health') return 'repo-panel repo-panel--browse'
+    return 'repo-panel repo-panel--browse'
+  }
+
+  const readerPanelClass = () => {
+    if (expandedPanel === 'reader') return 'repo-panel repo-panel--reader panel-expanded'
+    if (expandedPanel === 'browse') return 'repo-panel repo-panel--reader panel-hidden'
+    return 'repo-panel repo-panel--reader'
+  }
+
+  // Selected doc display name for Reader panel header
+  const selectedDoc = useMemo(
+    () => documents.find((d) => d.id === selectedDocumentId) ?? null,
+    [documents, selectedDocumentId],
+  )
+  const readerTitle = selectedDoc
+    ? (selectedDoc.display_name || selectedDoc.filename)
+    : 'Reader'
+
+  // Suppress unused vars from original code that are now no longer used in render
+  void statsLoading
+  void selectedHost
+  void handleSelectHost
+  void entitySearch
+  void setEntitySearch
+  void domainFilter
+  void setDomainFilter
+  void corpusStats
+  void payerLabel
+  void uploadedDocs
+  void enrichedHosts
+  void openUrlPreview
+
   // ── Render ────────────────────────────────────────────────────────────────
   return (
-    <div className={`repository-tab-v2${sidebarCollapsed ? ' sidebar-collapsed' : ''}`}>
-      {/* ── Left: entity sidebar ──────────────────────────────────────── */}
-      <EntitySidebar
-        hosts={enrichedHosts}
-        selectedHost={selectedHost}
-        onSelectHost={handleSelectHost}
-        collapsed={sidebarCollapsed}
-        onToggle={() => setSidebarCollapsed((c) => !c)}
-        entitySearch={entitySearch}
-        onEntitySearch={setEntitySearch}
-        domainFilter={domainFilter}
-        onDomainFilter={setDomainFilter}
-        stats={corpusStats}
-      />
+    <div className="repo-tab">
+      {/* ── Horizontal panels row ──────────────────────────────────────── */}
+      <div className="repo-panels">
 
-      {/* ── Right: main area ──────────────────────────────────────────── */}
-      <div className="repo-main">
-        {/* Corpus-wide pipeline status banner. Aggregates over ``documents``
-            so users can see overall progress without selecting a host.
-            Search controls now live in the Test tab — removed from here on
-            2026-04-29 to avoid duplication. */}
-        {!readerOpen && (() => {
+        {/* ── Panel 1: Browse ─────────────────────────────────────────── */}
+        <div className={browsePanelClass()}>
+          {/* Header */}
+          <div className="repo-panel-header">
+            <span>📂 Browse</span>
+            <div className="repo-panel-header-actions">
+              {expandedPanel === 'browse' ? (
+                <button
+                  type="button"
+                  className="repo-panel-icon-btn"
+                  title="Collapse browse"
+                  onClick={() => setExpandedPanel(null)}
+                >⊟</button>
+              ) : (
+                <button
+                  type="button"
+                  className="repo-panel-icon-btn"
+                  title="Expand browse"
+                  onClick={() => setExpandedPanel('browse')}
+                >⊞</button>
+              )}
+            </div>
+          </div>
+
+          {/* Body — hidden in slim mode */}
+          {expandedPanel !== 'reader' && (
+            <div className="repo-panel-body">
+              {/* Search + filters */}
+              <div className="repo-browse-search">
+                <input
+                  type="search"
+                  placeholder="Search documents, payer, org…"
+                  value={browseSearch}
+                  onChange={(e) => setBrowseSearch(e.target.value)}
+                />
+                <div className="repo-browse-filters">
+                  <select value={payerFilter} onChange={(e) => setPayerFilter(e.target.value)}>
+                    <option value="">Payer ▾</option>
+                    {uniquePayers.map((p) => (
+                      <option key={p} value={p}>{p}</option>
+                    ))}
+                  </select>
+                  <select value={stateFilter} onChange={(e) => setStateFilter(e.target.value)}>
+                    <option value="">State ▾</option>
+                    {uniqueStates.map((s) => (
+                      <option key={s} value={s}>{s}</option>
+                    ))}
+                  </select>
+                  <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+                    <option value="">Status ▾</option>
+                    <option value="published">published</option>
+                    <option value="processing">processing</option>
+                    <option value="failed">failed</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Document list */}
+              {filteredDocs.length === 0 ? (
+                <div className="repo-browse-empty">
+                  {documentsLoading
+                    ? 'Loading documents…'
+                    : documents.length === 0
+                      ? 'No documents in corpus yet.'
+                      : 'No documents match your search.'}
+                </div>
+              ) : (
+                <ul className="repo-browse-list">
+                  {Object.entries(groupedDocs).map(([group, docs]) => {
+                    const isCollapsed = !!collapsedGroups[group]
+                    return (
+                      <li key={group}>
+                        {/* Group header */}
+                        <div
+                          className="repo-browse-group-header"
+                          onClick={() =>
+                            setCollapsedGroups((prev) => ({ ...prev, [group]: !prev[group] }))
+                          }
+                        >
+                          <span>{isCollapsed ? '▶' : '▼'}</span>
+                          <span>{group}</span>
+                          <span className="repo-browse-group-count">{docs.length}</span>
+                        </div>
+                        {/* Doc items */}
+                        {!isCollapsed && docs.map((d) => (
+                          <div
+                            key={d.id}
+                            className={`repo-browse-doc-item${d.id === selectedDocumentId ? ' selected' : ''}`}
+                            onClick={() => {
+                              openDocument(d.id)
+                              // If reader was previously expanded keep it, else leave layout
+                            }}
+                          >
+                            <span className={`repo-browse-doc-status ${statusDotClass(d)}`} />
+                            <span className="repo-browse-doc-name" title={d.display_name || d.filename}>
+                              {d.display_name || d.filename}
+                            </span>
+                            {d.published_at && (
+                              <span style={{ fontSize: '0.65rem', color: 'var(--mobius-text-muted)', flexShrink: 0 }}>
+                                {fmtAge(d.published_at)}
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* ── Panel 2: Reader ─────────────────────────────────────────── */}
+        <div className={readerPanelClass()}>
+          {/* Header */}
+          <div className="repo-panel-header">
+            <span>📖 {readerTitle}</span>
+            <div className="repo-panel-header-actions">
+              {expandedPanel === 'reader' ? (
+                <button
+                  type="button"
+                  className="repo-panel-icon-btn"
+                  title="Collapse reader"
+                  onClick={() => setExpandedPanel(null)}
+                >⊟</button>
+              ) : (
+                <button
+                  type="button"
+                  className="repo-panel-icon-btn"
+                  title="Expand reader"
+                  onClick={() => setExpandedPanel('reader')}
+                >⊞</button>
+              )}
+              {(selectedDocumentId || urlPreview) && (
+                <button
+                  type="button"
+                  className="repo-panel-icon-btn"
+                  title="Close document"
+                  onClick={closeReader}
+                >✕</button>
+              )}
+            </div>
+          </div>
+
+          {/* Body */}
+          <div className="repo-panel-body repo-reader-body">
+            {!selectedDocumentId && !urlPreview ? (
+              <div className="repo-reader-empty">
+                Select a document from Browse to read it.
+              </div>
+            ) : (
+              <ReaderSlideOut
+                documents={documents}
+                selectedDocumentId={selectedDocumentId}
+                navigateToRead={activeNavigateTo}
+                onNavigateToReadConsumed={() => {
+                  onNavigateToReadConsumed()
+                  setLocalNavigateTo(null)
+                }}
+                onDocumentSelect={onDocumentSelect}
+                urlPreview={urlPreview}
+                onIngestUrl={handleIngestUrl}
+                ingestingUrl={ingestingUrl}
+                onClose={closeReader}
+              />
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Panel 3: Health strip ────────────────────────────────────────── */}
+      <div className={`repo-health-strip${expandedPanel === 'health' ? ' health-fullscreen' : ''}`}>
+        {/* Health bar — always visible */}
+        {(() => {
           // Pipeline health pulled from /admin/pipeline_health every 10s.
           // Drives the green/yellow/red dots next to each stage. Local
           // hook is fine here — keeps the change contained and avoids
@@ -585,20 +873,15 @@ export function RepositoryTab({
             return `${(h / 24).toFixed(1)} d`
           }
           // Tiny inline sparkline for 6 × 5-min buckets (oldest→newest).
-          // Native SVG <title> renders as hover tooltip showing the
-          // exact time-span + count for that bar.
           const Spark = ({ buckets }: { buckets: number[] }) => {
             const w = 78, h = 18, max = Math.max(1, ...buckets)
             const bw = (w - (buckets.length - 1) * 2) / buckets.length
-            // buckets[0] is oldest (e.g. 25-30 min ago for 6 buckets);
-            // buckets[N-1] is newest (0-5 min ago).
             const bucketSpanMin = 5
             const totalBuckets = buckets.length
             return (
               <svg width={w} height={h} style={{ verticalAlign: 'middle' }}>
                 {buckets.map((n, i) => {
                   const bh = (n / max) * (h - 2)
-                  // Time span this bucket represents (relative to now)
                   const minAgoEnd = (totalBuckets - 1 - i) * bucketSpanMin
                   const minAgoStart = minAgoEnd + bucketSpanMin
                   const span = minAgoEnd === 0
@@ -622,341 +905,349 @@ export function RepositoryTab({
               </svg>
             )
           }
+
           return (
-            <div
-              className="repo-corpus-status"
-              role="group"
-              aria-label="Overall corpus pipeline status"
-              style={{
-                borderBottom: '1px solid #eee', fontSize: 13,
-              }}
-            >
-              {/* Collapsed bar — always visible, clickable to expand */}
+            <>
+              {/* Collapsed bar */}
               <div
-                onClick={() => setExpanded(e => !e)}
+                className="repo-health-bar"
+                onClick={() => setHealthOpen((v) => !v)}
                 role="button"
                 tabIndex={0}
-                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setExpanded(x => !x) }}
-                aria-expanded={expanded}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 12,
-                  padding: '8px 12px', cursor: 'pointer',
-                  userSelect: 'none', flexWrap: 'wrap',
-                }}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setHealthOpen((v) => !v) }}
+                aria-expanded={healthOpen}
               >
-              <span
-                style={{ marginRight: 4, fontSize: 11, color: '#888', width: 12, display: 'inline-block' }}
-                aria-hidden
-              >{expanded ? '▼' : '▶'}</span>
-              <strong style={{ marginRight: 4 }}>Corpus</strong>
-              {stageMeta.map((s, i) => (
-                <span key={s.label} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                  {s.dot !== undefined && <Dot s={s.dot} title={s.tip || s.label} />}
-                  <span
-                    title={s.tip}
-                    style={{
-                      fontWeight: 600,
-                      color: s.terminal ? '#10b981' : (s.n > 0 ? '#111' : '#999'),
-                    }}
-                  >{s.n.toLocaleString()}</span>
-                  <span style={{ color: '#666' }} title={s.tip}>{s.label}</span>
-                  {i < stageMeta.length - 1 && <span style={{ color: '#ccc', marginLeft: 8 }}>→</span>}
+                <span style={{ fontSize: 11, color: '#888', width: 12, display: 'inline-block' }} aria-hidden>
+                  {healthOpen ? '▼' : '▶'}
                 </span>
-              ))}
-              {processing > 0 && (
-                <span style={{ marginLeft: 'auto', color: '#f59e0b' }}>
-                  {processing.toLocaleString()} processing
-                </span>
-              )}
-              {failed > 0 && (
-                <span style={{ color: '#ef4444' }}>{failed.toLocaleString()} failed</span>
-              )}
-              {/* Integrity badge — surfaces drift between rag and chat
-                  databases (chat orphans). Green = both sides aligned;
-                  yellow/red = chat shows docs that rag doesn't have, which
-                  causes phantom citations downstream. Tooltip explains. */}
-              {health?.integrity && (
-                <span
+                <strong>Corpus Health</strong>
+                <span style={{ color: '#666' }}>·</span>
+                <span style={{ color: '#666' }}>{total.toLocaleString()} docs</span>
+                <span style={{ color: '#666' }}>·</span>
+                <span style={{ color: '#666' }}>{chunked.toLocaleString()} chunked</span>
+                <span style={{ color: '#666' }}>·</span>
+                <span style={{ color: '#666' }}>{embedded.toLocaleString()} embedded</span>
+                {/* Retag button */}
+                <button
+                  type="button"
                   style={{
-                    display: 'inline-flex', alignItems: 'center', gap: 4,
-                    marginLeft: processing > 0 || failed > 0 ? 0 : 'auto',
-                    paddingLeft: 8, borderLeft: '1px solid #eee',
+                    marginLeft: 'auto',
+                    fontSize: 11, padding: '0.15rem 0.5rem',
+                    border: '1px solid var(--mobius-border)',
+                    borderRadius: 'var(--mobius-radius-sm)',
+                    background: 'var(--mobius-bg-secondary)',
+                    color: 'var(--mobius-text-secondary)',
+                    cursor: 'pointer',
                   }}
-                  title={
-                    health.integrity.chat_orphans === 0
-                      ? 'Integrity OK\nrag and chat are fully aligned'
-                      : `Integrity drift\n${health.integrity.chat_orphans} doc(s) shown by chat that rag does NOT have.\nFix: POST /admin/cleanup_chat_orphans?dry_run=false`
-                  }
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onRefresh?.()
+                  }}
+                  title="Re-tag documents"
                 >
-                  <Dot s={health.integrity.status} title="Integrity status" />
-                  <span style={{ color: '#666' }}>Integrity</span>
-                  {health.integrity.chat_orphans > 0 && (
-                    <span style={{ color: '#ef4444', fontWeight: 600 }}>
-                      {health.integrity.chat_orphans} drift
-                    </span>
-                  )}
-                </span>
-              )}
+                  Retag
+                </button>
+                {/* Expand health to fullscreen */}
+                {expandedPanel === 'health' ? (
+                  <button
+                    type="button"
+                    className="repo-panel-icon-btn"
+                    title="Collapse health panel"
+                    onClick={(e) => { e.stopPropagation(); setExpandedPanel(null) }}
+                  >⊟</button>
+                ) : (
+                  <button
+                    type="button"
+                    className="repo-panel-icon-btn"
+                    title="Expand health panel"
+                    onClick={(e) => { e.stopPropagation(); setExpandedPanel('health') }}
+                  >⊞</button>
+                )}
               </div>
-              {/* Expanded panel — per-stage rate, pending, ETA */}
-              {expanded && health && (
-                <div
-                  style={{
-                    padding: '10px 14px 14px 28px',
-                    background: '#fafbfc',
-                    borderTop: '1px solid #f0f0f0',
-                    display: 'grid',
-                    gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-                    gap: 12,
-                  }}
-                >
-                  {[
-                    { label: 'Chunking', s: chk, terminalCount: chunked, inFlightLabel: 'Currently chunking', extraCol: 'paragraphs_done' },
-                    { label: 'Embedding', s: emb, terminalCount: embedded, inFlightLabel: 'Currently embedding', extraCol: 'chunks_done' },
-                    {
-                      label: 'Publishing',
-                      s: pub
-                        ? { ...pub, active: undefined, pending: pub.embedded_unpublished }
-                        : null,
-                      terminalCount: published,
-                      inFlightLabel: 'Recently published (last 30 min)',
-                      extraCol: 'chunks_done',
-                    },
-                  ].map(({ label, s, terminalCount, inFlightLabel, extraCol }) => {
-                    const r = s?.rolling
-                    const inFlight: any[] = (s as any)?.in_flight || []
-                    const isStageExpanded = !!stageExpanded[label]
-                    return (
+
+              {/* Expanded health body */}
+              {(healthOpen || expandedPanel === 'health') && (
+                <div className="repo-health-body">
+                  {/* Collapsed bar content (the existing CorpusStatus inline JSX) */}
+                  <div
+                    className="repo-corpus-status"
+                    role="group"
+                    aria-label="Overall corpus pipeline status"
+                    style={{ borderBottom: '1px solid #eee', fontSize: 13 }}
+                  >
+                    {/* Inner expand/collapse toggle */}
                     <div
-                      key={label}
+                      onClick={() => setExpanded(e => !e)}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setExpanded(x => !x) }}
+                      aria-expanded={expanded}
                       style={{
-                        background: '#fff',
-                        border: '1px solid #ececec',
-                        borderRadius: 6,
-                        padding: '10px 12px',
+                        display: 'flex', alignItems: 'center', gap: 12,
+                        padding: '8px 12px', cursor: 'pointer',
+                        userSelect: 'none', flexWrap: 'wrap',
                       }}
                     >
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-                        <Dot s={s?.status} title={`${label} status`} />
-                        <strong style={{ fontSize: 13 }}>{label}</strong>
-                        {inFlight.length > 0 && (
+                      <span
+                        style={{ marginRight: 4, fontSize: 11, color: '#888', width: 12, display: 'inline-block' }}
+                        aria-hidden
+                      >{expanded ? '▼' : '▶'}</span>
+                      <strong style={{ marginRight: 4 }}>Corpus</strong>
+                      {stageMeta.map((s, i) => (
+                        <span key={s.label} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                          {s.dot !== undefined && <Dot s={s.dot} title={s.tip || s.label} />}
                           <span
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              setStageExpanded(prev => ({ ...prev, [label]: !prev[label] }))
-                            }}
-                            role="button"
+                            title={s.tip}
                             style={{
-                              marginLeft: 'auto', fontSize: 11, color: '#3b82f6',
-                              cursor: 'pointer', userSelect: 'none',
+                              fontWeight: 600,
+                              color: s.terminal ? '#10b981' : (s.n > 0 ? '#111' : '#999'),
                             }}
-                            title="Click to see what's in flight"
-                          >
-                            {isStageExpanded ? '▼' : '▶'} {inFlight.length} in flight
-                          </span>
-                        )}
-                      </div>
-                      <div style={{ fontSize: 12, color: '#444', display: 'grid', gap: 3 }}>
-                        {/* Last 30 min — primary metric */}
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                          <span style={{ color: '#888' }}>Last 30min:</span>{' '}
-                          <span style={{ fontWeight: 600 }}>
-                            {r ? `${r.rate_per_hour}/h` : `${s?.last_hour ?? 0}/h *`}
-                          </span>
-                          {r?.buckets_5min && <Spark buckets={r.buckets_5min} />}
-                        </div>
-                        {r && (
-                          <div style={{ color: '#888', fontSize: 11 }}>
-                            95% CI: {r.rate_lo_per_hour}–{r.rate_hi_per_hour}/h
-                          </div>
-                        )}
-                        {s?.active != null && (
-                          <div>
-                            <span style={{ color: '#888' }}>Active workers:</span>{' '}
-                            <span style={{ fontWeight: 600 }}>{s.active}</span>
-                          </div>
-                        )}
-                        <div>
-                          <span style={{ color: '#888' }}>Pending:</span>{' '}
-                          <span style={{ fontWeight: 600 }}>{(s?.pending ?? 0).toLocaleString()}</span>
-                        </div>
-                        {/* ETA — show median + 95% CI band when we have rolling data */}
-                        {r && r.eta_seconds_p50 != null ? (
-                          <>
-                            <div>
-                              <span style={{ color: '#888' }}>ETA (median):</span>{' '}
-                              <span style={{ fontWeight: 600 }}>{fmtSeconds(r.eta_seconds_p50)}</span>
-                            </div>
-                            <div style={{ color: '#888', fontSize: 11 }}>
-                              95% CI: {fmtSeconds(r.eta_seconds_p5)} – {fmtSeconds(r.eta_seconds_p95)}
-                            </div>
-                          </>
-                        ) : (
-                          <div>
-                            <span style={{ color: '#888' }}>ETA:</span>{' '}
-                            <span style={{ fontWeight: 600, color: s?.last_hour ? '#111' : '#999' }}>
-                              {fmtEta(s?.pending ?? 0, s?.last_hour ?? 0)}
-                            </span>
-                          </div>
-                        )}
-                        <div style={{ marginTop: 4, paddingTop: 4, borderTop: '1px dashed #f0f0f0' }}>
-                          <span style={{ color: '#888' }}>Total {label.toLowerCase()}:</span>{' '}
-                          <span style={{ fontWeight: 600 }}>{terminalCount.toLocaleString()}</span>
-                        </div>
-                      </div>
-                      {/* In-flight panel — collapsible per-stage */}
-                      {isStageExpanded && inFlight.length > 0 && (
-                        <div
+                          >{s.n.toLocaleString()}</span>
+                          <span style={{ color: '#666' }} title={s.tip}>{s.label}</span>
+                          {i < stageMeta.length - 1 && <span style={{ color: '#ccc', marginLeft: 8 }}>→</span>}
+                        </span>
+                      ))}
+                      {processing > 0 && (
+                        <span style={{ marginLeft: 'auto', color: '#f59e0b' }}>
+                          {processing.toLocaleString()} processing
+                        </span>
+                      )}
+                      {failed > 0 && (
+                        <span style={{ color: '#ef4444' }}>{failed.toLocaleString()} failed</span>
+                      )}
+                      {health?.integrity && (
+                        <span
                           style={{
-                            marginTop: 8, paddingTop: 8,
-                            borderTop: '1px solid #f0f0f0',
+                            display: 'inline-flex', alignItems: 'center', gap: 4,
+                            marginLeft: processing > 0 || failed > 0 ? 0 : 'auto',
+                            paddingLeft: 8, borderLeft: '1px solid #eee',
                           }}
+                          title={
+                            health.integrity.chat_orphans === 0
+                              ? 'Integrity OK\nrag and chat are fully aligned'
+                              : `Integrity drift\n${health.integrity.chat_orphans} doc(s) shown by chat that rag does NOT have.\nFix: POST /admin/cleanup_chat_orphans?dry_run=false`
+                          }
                         >
-                          <div style={{ fontSize: 11, color: '#666', marginBottom: 4 }}>
-                            {inFlightLabel}
-                          </div>
-                          <div
-                            style={{
-                              maxHeight: 220, overflowY: 'auto',
-                              fontSize: 11, fontFamily: 'ui-monospace, monospace',
-                            }}
-                          >
-                            {inFlight.map((d: any, i: number) => {
-                              const elapsed = d.elapsed_s
-                              const elapsedTxt = elapsed < 60
-                                ? `${elapsed}s`
-                                : elapsed < 3600
-                                  ? `${Math.floor(elapsed/60)}m${elapsed%60}s`
-                                  : `${(elapsed/3600).toFixed(1)}h`
-                              const extra = d[extraCol] ?? 0
-                              return (
-                                <div
-                                  key={d.doc_id + ':' + i}
-                                  style={{
-                                    display: 'grid',
-                                    gridTemplateColumns: '1fr auto auto',
-                                    gap: 6, padding: '2px 0',
-                                    borderBottom: '1px dotted #f4f4f4',
-                                  }}
-                                  title={`${d.payer || '<unknown>'}\n${d.filename}\nelapsed: ${elapsedTxt}`}
-                                >
-                                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                    {d.filename || d.doc_id.slice(0, 8)}
-                                  </span>
-                                  <span style={{ color: '#666' }}>
-                                    {label === 'Chunking' && `${d.pages || 0}p · ${extra}¶`}
-                                    {label === 'Embedding' && `${extra} chunks`}
-                                    {label === 'Publishing' && `${extra} chunks`}
-                                  </span>
-                                  <span style={{ color: '#888', minWidth: 38, textAlign: 'right' }}>
-                                    {elapsedTxt}
-                                  </span>
-                                </div>
-                              )
-                            })}
-                          </div>
-                        </div>
+                          <Dot s={health.integrity.status} title="Integrity status" />
+                          <span style={{ color: '#666' }}>Integrity</span>
+                          {health.integrity.chat_orphans > 0 && (
+                            <span style={{ color: '#ef4444', fontWeight: 600 }}>
+                              {health.integrity.chat_orphans} drift
+                            </span>
+                          )}
+                        </span>
                       )}
                     </div>
-                  )})}
-                  {/* Integrity card — 4 dimensions */}
-                  {health.integrity && (() => {
-                    const ig = health.integrity
-                    const row = (label: string, n: number, hint: string) => (
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-                        <span style={{ color: '#888' }} title={hint}>{label}:</span>
-                        <span style={{ fontWeight: 600,
-                                       color: n === 0 ? '#10b981' : (n >= 100 ? '#ef4444' : '#f59e0b') }}>
-                          {n.toLocaleString()}
-                        </span>
-                      </div>
-                    )
-                    return (
+
+                    {/* Expanded panel — per-stage rate, pending, ETA */}
+                    {expanded && health && (
                       <div
                         style={{
-                          background: '#fff',
-                          border: '1px solid #ececec',
-                          borderRadius: 6,
-                          padding: '10px 12px',
-                          gridColumn: 'span 2',
+                          padding: '10px 14px 14px 28px',
+                          background: '#fafbfc',
+                          borderTop: '1px solid #f0f0f0',
+                          display: 'grid',
+                          gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+                          gap: 12,
                         }}
                       >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-                          <Dot s={ig.status} title="Integrity status" />
-                          <strong style={{ fontSize: 13 }}>Integrity</strong>
-                          <span style={{ marginLeft: 'auto', color: '#888', fontSize: 11 }}>
-                            4 dimensions
-                          </span>
-                        </div>
-                        <div style={{ fontSize: 12, color: '#444', display: 'grid', gap: 3 }}>
-                          {row('Chat orphans', ig.chat_orphans ?? 0,
-                            'docs visible to chat that rag does NOT have — phantom citation risk. Fix: POST /admin/cleanup_chat_orphans')}
-                          {row('Sitemap orphans', ig.sitemap_orphans ?? 0,
-                            'rag docs without a discovered_sources registry row — per-host counts undercount. Fix: POST /admin/backfill_sitemap')}
-                          {row('Blocked jobs', ig.blocked_jobs ?? 0,
-                            'chunking jobs at failure_count >= 3 — manual triage required. See: GET /admin/list_blocked_docs')}
-                          {row('Metadata orphans', ig.metadata_orphans ?? 0,
-                            'docs missing payer / state / program tags — cannot be filtered or attributed in retrieval')}
-                        </div>
+                        {[
+                          { label: 'Chunking', s: chk, terminalCount: chunked, inFlightLabel: 'Currently chunking', extraCol: 'paragraphs_done' },
+                          { label: 'Embedding', s: emb, terminalCount: embedded, inFlightLabel: 'Currently embedding', extraCol: 'chunks_done' },
+                          {
+                            label: 'Publishing',
+                            s: pub
+                              ? { ...pub, active: undefined, pending: pub.embedded_unpublished }
+                              : null,
+                            terminalCount: published,
+                            inFlightLabel: 'Recently published (last 30 min)',
+                            extraCol: 'chunks_done',
+                          },
+                        ].map(({ label, s, terminalCount, inFlightLabel, extraCol }) => {
+                          const r = s?.rolling
+                          const inFlight: any[] = (s as any)?.in_flight || []
+                          const isStageExpanded = !!stageExpanded[label]
+                          return (
+                          <div
+                            key={label}
+                            style={{
+                              background: '#fff',
+                              border: '1px solid #ececec',
+                              borderRadius: 6,
+                              padding: '10px 12px',
+                            }}
+                          >
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                              <Dot s={s?.status} title={`${label} status`} />
+                              <strong style={{ fontSize: 13 }}>{label}</strong>
+                              {inFlight.length > 0 && (
+                                <span
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    setStageExpanded(prev => ({ ...prev, [label]: !prev[label] }))
+                                  }}
+                                  role="button"
+                                  style={{
+                                    marginLeft: 'auto', fontSize: 11, color: '#3b82f6',
+                                    cursor: 'pointer', userSelect: 'none',
+                                  }}
+                                  title="Click to see what's in flight"
+                                >
+                                  {isStageExpanded ? '▼' : '▶'} {inFlight.length} in flight
+                                </span>
+                              )}
+                            </div>
+                            <div style={{ fontSize: 12, color: '#444', display: 'grid', gap: 3 }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                <span style={{ color: '#888' }}>Last 30min:</span>{' '}
+                                <span style={{ fontWeight: 600 }}>
+                                  {r ? `${r.rate_per_hour}/h` : `${s?.last_hour ?? 0}/h *`}
+                                </span>
+                                {r?.buckets_5min && <Spark buckets={r.buckets_5min} />}
+                              </div>
+                              {r && (
+                                <div style={{ color: '#888', fontSize: 11 }}>
+                                  95% CI: {r.rate_lo_per_hour}–{r.rate_hi_per_hour}/h
+                                </div>
+                              )}
+                              {s?.active != null && (
+                                <div>
+                                  <span style={{ color: '#888' }}>Active workers:</span>{' '}
+                                  <span style={{ fontWeight: 600 }}>{s.active}</span>
+                                </div>
+                              )}
+                              <div>
+                                <span style={{ color: '#888' }}>Pending:</span>{' '}
+                                <span style={{ fontWeight: 600 }}>{(s?.pending ?? 0).toLocaleString()}</span>
+                              </div>
+                              {r && r.eta_seconds_p50 != null ? (
+                                <>
+                                  <div>
+                                    <span style={{ color: '#888' }}>ETA (median):</span>{' '}
+                                    <span style={{ fontWeight: 600 }}>{fmtSeconds(r.eta_seconds_p50)}</span>
+                                  </div>
+                                  <div style={{ color: '#888', fontSize: 11 }}>
+                                    95% CI: {fmtSeconds(r.eta_seconds_p5)} – {fmtSeconds(r.eta_seconds_p95)}
+                                  </div>
+                                </>
+                              ) : (
+                                <div>
+                                  <span style={{ color: '#888' }}>ETA:</span>{' '}
+                                  <span style={{ fontWeight: 600, color: s?.last_hour ? '#111' : '#999' }}>
+                                    {fmtEta(s?.pending ?? 0, s?.last_hour ?? 0)}
+                                  </span>
+                                </div>
+                              )}
+                              <div style={{ marginTop: 4, paddingTop: 4, borderTop: '1px dashed #f0f0f0' }}>
+                                <span style={{ color: '#888' }}>Total {label.toLowerCase()}:</span>{' '}
+                                <span style={{ fontWeight: 600 }}>{terminalCount.toLocaleString()}</span>
+                              </div>
+                            </div>
+                            {/* In-flight panel */}
+                            {isStageExpanded && inFlight.length > 0 && (
+                              <div
+                                style={{
+                                  marginTop: 8, paddingTop: 8,
+                                  borderTop: '1px solid #f0f0f0',
+                                }}
+                              >
+                                <div style={{ fontSize: 11, color: '#666', marginBottom: 4 }}>
+                                  {inFlightLabel}
+                                </div>
+                                <div
+                                  style={{
+                                    maxHeight: 220, overflowY: 'auto',
+                                    fontSize: 11, fontFamily: 'ui-monospace, monospace',
+                                  }}
+                                >
+                                  {inFlight.map((d: any, i: number) => {
+                                    const elapsed = d.elapsed_s
+                                    const elapsedTxt = elapsed < 60
+                                      ? `${elapsed}s`
+                                      : elapsed < 3600
+                                        ? `${Math.floor(elapsed/60)}m${elapsed%60}s`
+                                        : `${(elapsed/3600).toFixed(1)}h`
+                                    const extra = d[extraCol] ?? 0
+                                    return (
+                                      <div
+                                        key={d.doc_id + ':' + i}
+                                        style={{
+                                          display: 'grid',
+                                          gridTemplateColumns: '1fr auto auto',
+                                          gap: 6, padding: '2px 0',
+                                          borderBottom: '1px dotted #f4f4f4',
+                                        }}
+                                        title={`${d.payer || '<unknown>'}\n${d.filename}\nelapsed: ${elapsedTxt}`}
+                                      >
+                                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                          {d.filename || d.doc_id.slice(0, 8)}
+                                        </span>
+                                        <span style={{ color: '#666' }}>
+                                          {label === 'Chunking' && `${d.pages || 0}p · ${extra}¶`}
+                                          {label === 'Embedding' && `${extra} chunks`}
+                                          {label === 'Publishing' && `${extra} chunks`}
+                                        </span>
+                                        <span style={{ color: '#888', minWidth: 38, textAlign: 'right' }}>
+                                          {elapsedTxt}
+                                        </span>
+                                      </div>
+                                    )
+                                  })}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )})}
+                        {/* Integrity card */}
+                        {health.integrity && (() => {
+                          const ig = health.integrity
+                          const row = (label: string, n: number, hint: string) => (
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                              <span style={{ color: '#888' }} title={hint}>{label}:</span>
+                              <span style={{ fontWeight: 600,
+                                             color: n === 0 ? '#10b981' : (n >= 100 ? '#ef4444' : '#f59e0b') }}>
+                                {n.toLocaleString()}
+                              </span>
+                            </div>
+                          )
+                          return (
+                            <div
+                              style={{
+                                background: '#fff',
+                                border: '1px solid #ececec',
+                                borderRadius: 6,
+                                padding: '10px 12px',
+                                gridColumn: 'span 2',
+                              }}
+                            >
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                                <Dot s={ig.status} title="Integrity status" />
+                                <strong style={{ fontSize: 13 }}>Integrity</strong>
+                                <span style={{ marginLeft: 'auto', color: '#888', fontSize: 11 }}>
+                                  4 dimensions
+                                </span>
+                              </div>
+                              <div style={{ fontSize: 12, color: '#444', display: 'grid', gap: 3 }}>
+                                {row('Chat orphans', ig.chat_orphans ?? 0,
+                                  'docs visible to chat that rag does NOT have — phantom citation risk. Fix: POST /admin/cleanup_chat_orphans')}
+                                {row('Sitemap orphans', ig.sitemap_orphans ?? 0,
+                                  'rag docs without a discovered_sources registry row — per-host counts undercount. Fix: POST /admin/backfill_sitemap')}
+                                {row('Blocked jobs', ig.blocked_jobs ?? 0,
+                                  'chunking jobs at failure_count >= 3 — manual triage required. See: GET /admin/list_blocked_docs')}
+                                {row('Metadata orphans', ig.metadata_orphans ?? 0,
+                                  'docs missing payer / state / program tags — cannot be filtered or attributed in retrieval')}
+                              </div>
+                            </div>
+                          )
+                        })()}
                       </div>
-                    )
-                  })()}
+                    )}
+                  </div>
                 </div>
               )}
-            </div>
+            </>
           )
         })()}
-
-        {/* Content area: entity detail + optional reader */}
-        <div className={`repo-content-area${readerOpen ? ' reader-open' : ''}`}>
-          {/* Entity / search area */}
-          <div className="repo-entity-area">
-            {selectedHost === UPLOADED_HOST ? (
-              <UploadedDocsPanel
-                docs={uploadedDocs}
-                selectedDocumentId={selectedDocumentId}
-                onSelectDoc={(docId) => openDocument(docId)}
-                onRefresh={onRefresh ?? (() => {})}
-              />
-            ) : statsLoading ? (
-              <div className="loading repo-loading">Loading sources…</div>
-            ) : selectedHost ? (
-              <EntityCard
-                host={selectedHost}
-                payerLabel={payerLabel}
-                documents={documents}
-                onSelectDoc={openDocument}
-                onSelectUrl={openUrlPreview}
-                selectedDocumentId={selectedDocumentId}
-                selectedUrl={urlPreview?.url ?? null}
-              />
-            ) : enrichedHosts.length > 0 ? (
-              <div className="repo-empty">
-                Select a source from the left panel, or search the corpus above.
-              </div>
-            ) : null}
-          </div>
-
-          {/* Inline reader pane */}
-          {readerOpen && (
-            <div className="repo-reader-pane">
-              <ReaderSlideOut
-                documents={documents}
-                selectedDocumentId={selectedDocumentId}
-                navigateToRead={activeNavigateTo}
-                onNavigateToReadConsumed={() => {
-                  onNavigateToReadConsumed()
-                  setLocalNavigateTo(null)
-                }}
-                onDocumentSelect={onDocumentSelect}
-                urlPreview={urlPreview}
-                onIngestUrl={handleIngestUrl}
-                ingestingUrl={ingestingUrl}
-                onClose={closeReader}
-              />
-            </div>
-          )}
-        </div>
       </div>
     </div>
   )

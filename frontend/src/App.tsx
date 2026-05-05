@@ -94,7 +94,7 @@ function App() {
   
   // Document list state
   const [documents, setDocuments] = useState<any[]>([])
-  const [_loadingDocuments, setLoadingDocuments] = useState(false)
+  const [loadingDocuments, setLoadingDocuments] = useState(true)
   const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null)
   const [_selectedDocument, setSelectedDocument] = useState<any | null>(null)
   const [navigateToRead, setNavigateToRead] = useState<{
@@ -1467,6 +1467,7 @@ function App() {
             <TabPanel id="repository" isActive={shellTab === 'repository'}>
               <RepositoryTab
                 documents={documents}
+                documentsLoading={loadingDocuments}
                 selectedDocumentId={selectedDocumentId}
                 navigateToRead={navigateToRead}
                 onNavigateToReadConsumed={() => setNavigateToRead(null)}
