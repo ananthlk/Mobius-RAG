@@ -6,13 +6,13 @@
  * EvalTab drilldown (parser → partition → pool → router → strategies
  * → assembler).
  *
- * History sidebar persists in localStorage so re-running yesterday's
- * one-off check is one click.
+ * History sidebar: seeded from /api/routing/decisions on mount (shows
+ * recent chat queries), then extended locally by queries run in this tab.
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { API_BASE } from '../../config'
 import { AgentPipelineTrace, type AgentResponse } from './AgentPipelineTrace'
-import './EvalTab.css'   // reuse styles (run-header, kpi, section, etc.)
+import './EvalTab.css'   // reuse styles (run-header, kv, section, etc.)
 import './TestTab.css'
 
 const CALLER_MODES = [
@@ -59,8 +59,44 @@ export function TestTab() {
       return []
     }
   })
+  const serverSeeded = useRef(false)
 
-  // Persist history.
+  // On mount: fetch recent routing decisions from the server so chat
+  // queries show up immediately without having to run anything locally.
+  useEffect(() => {
+    if (serverSeeded.current) return
+    serverSeeded.current = true
+    fetch(`${API_BASE}/api/routing/decisions?limit=30`)
+      .then((r) => r.ok ? r.json() : null)
+      .then((data) => {
+        if (!data?.decisions?.length) return
+        const serverItems: HistoryItem[] = (data.decisions as any[]).map((d) => ({
+          query: d.query as string,
+          caller_mode: (d.caller_mode as string) || 'chat.default',
+          mode: '',
+          ts: d.ts as string,
+          strategy_used: (d.strategy_executed as string) || null,
+          confidence: (d.confidence as string) || null,
+          total_ms: (d.total_ms as number) || null,
+        }))
+        setHistory((local) => {
+          // Merge: local (pinned test runs) on top, server fills the rest.
+          // Deduplicate by query text, keeping the most recent occurrence.
+          const seen = new Set<string>()
+          const merged: HistoryItem[] = []
+          for (const item of [...local, ...serverItems]) {
+            if (!seen.has(item.query)) {
+              seen.add(item.query)
+              merged.push(item)
+            }
+          }
+          return merged.slice(0, 50)
+        })
+      })
+      .catch(() => { /* silently ignore — server history is best-effort */ })
+  }, [])
+
+  // Persist locally-run queries to localStorage.
   useEffect(() => {
     try {
       localStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, 30)))
@@ -182,7 +218,7 @@ export function TestTab() {
         <div className="test-history">
           <h3>Recent</h3>
           {history.length === 0 && (
-            <div className="eval-empty">No queries yet. Type one above.</div>
+            <div className="eval-empty">No recent queries found.</div>
           )}
           {history.map((item, i) => (
             <div
