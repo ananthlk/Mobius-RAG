@@ -2877,7 +2877,7 @@ async def _corpus_search_agent_impl(
         "a": "a", "b": "b", "c": "c", "d": "d",
         # Aliases.
         "precision": "a", "cascade": "a",
-        "themes": "b", "discovery": "b",
+        "recall": "b", "themes": "b", "discovery": "b",
         "reverse_rag": "c", "llm_validate": "c",
         "google": "d", "scrape": "d",
     }.get(explicit_mode)
