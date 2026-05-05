@@ -687,10 +687,18 @@ function PRCurvePanel({ runId }: { runId: string }) {
           {/* per-strategy curves */}
           {strategies.map(s => {
             const pts = data.points[s] || []
-            const filtered = pts.filter(p => p.precision !== null && p.recall !== null)
-            // Sort by recall ascending for clean line; PR curves are typically
-            // drawn left-to-right by recall.
-            const ordered = [...filtered].sort((a, b) => (a.recall ?? 0) - (b.recall ?? 0))
+            const filtered = pts.filter(p =>
+              p.precision !== null && p.recall !== null &&
+              // Drop degenerate anchor point: strategy answered but every
+              // answer was wrong (precision=0, recall=0). Including it drags
+              // the curve to the origin and creates a misleading upward slope.
+              !(p.precision === 0 && p.recall === 0)
+            )
+            // Sort by τ descending: high τ (high precision, low recall) on the
+            // left → low τ (lower precision, high recall) on the right. This
+            // is the canonical PR curve direction and avoids zig-zags that
+            // arise from sorting by recall when the data is non-monotonic.
+            const ordered = [...filtered].sort((a, b) => b.tau - a.tau)
             const path = ordered.map((p, i) =>
               `${i === 0 ? 'M' : 'L'} ${xR(p.recall ?? 0)} ${yP(p.precision ?? 0)}`).join(' ')
             const color = STRATEGY_COLOR[s] || '#374151'
