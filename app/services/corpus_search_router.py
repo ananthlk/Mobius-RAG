@@ -417,6 +417,7 @@ def decide(
     *,
     fail_fast_reason: str | None = None,
     self_assessments: dict[str, tuple[float, str]] | None = None,
+    prior_strategies_tried: list[str] | None = None,
 ) -> RouteDecision:
     """Pick a strategy for this query.
 
@@ -428,6 +429,11 @@ def decide(
         is below the withdrawal threshold are dropped. When the static
         prior is preferred (e.g. for c, d which always have recall),
         omit them from this dict.
+    ``prior_strategies_tried`` — strategies already executed in this
+        thread (e.g. ["a", "b"]). They are excluded from scoring so the
+        bandit picks the next best arm on re-invocation. When all corpus
+        strategies (a/b/c) are exhausted, the router naturally escalates
+        to (d) external.
 
     Returns ``RouteDecision`` with primary + fallback. The agent
     executes primary and may run fallback if confidence is low and
@@ -457,6 +463,7 @@ def decide(
 
     qclass = derive_query_class(profile_features)
     self_assessments = self_assessments or {}
+    excluded_strategies: set[str] = set(prior_strategies_tried or [])
 
     scores: dict[str, float] = {}
     score_breakdown: dict[str, dict[str, Any]] = {}
@@ -469,6 +476,18 @@ def decide(
 
     for sid in ("a", "b", "c", "d"):
         prior = _BASE_PRIORS[sid][qclass]
+
+        # Exclude strategies already tried in this thread — re-invocation
+        # path. Scored zero so they sort last and never win.
+        if sid in excluded_strategies:
+            withdrawn.append(sid)
+            scores[sid] = 0.0
+            score_breakdown[sid] = {
+                "withdrawn": True,
+                "withdraw_reason": "already_tried_in_thread",
+            }
+            continue
+
         # Per-query recall: use self-assessment if provided; otherwise
         # fall back to the static prior. (a) and (b) always self-assess
         # (corpus coverage check); (c) and (d) intentionally don't —
@@ -540,6 +559,26 @@ def decide(
             elif sid == "a":
                 adj = -0.30
                 adj_reason = "no_payer_a_recall_haircut"
+
+        # Zero-cooc routing (v1.2.5 — 2026-05-05):
+        # When _estimate_internal_recall found a content token with ZERO
+        # corpus presence (e.g. "molina" when Molina docs aren't indexed),
+        # no amount of BM25 or vector recall can help — the corpus simply
+        # doesn't have this entity. Route hard to (d) external.
+        # Condition: has_zero_cooc_term AND has_d_tag (domain is valid) AND
+        # NOT has_literal (literal-anchor miss is a different failure mode —
+        # let the literal-anchor hard-withdraw handle it via est_recall=0).
+        if (
+            profile_features.get("has_zero_cooc_term")
+            and profile_features.get("has_d_tag")
+            and not profile_features.get("has_literal")
+        ):
+            if sid == "d":
+                adj += +0.60
+                adj_reason = (adj_reason or "") + "+zero_cooc_entity_not_in_corpus"
+            elif sid in ("a", "b"):
+                adj += -0.40
+                adj_reason = (adj_reason or "") + "-zero_cooc_internal_strategy_penalised"
         total += adj
 
         scores[sid] = round(total, 4)
@@ -568,6 +607,8 @@ def decide(
             },
             "cost_per_call": prior.cost_per_call,
             "total": round(total, 4),
+            "adj": round(adj, 4),
+            "adj_reason": adj_reason,
         }
 
     # Pick highest-scoring non-withdrawn strategy.

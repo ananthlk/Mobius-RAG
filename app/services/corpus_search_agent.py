@@ -464,30 +464,15 @@ def fail_fast_gate(
 
 
 # ---------------------------------------------------------------------------
-# Strategy chooser — picks the single strategy that will execute
+# Exploratory-query detector — used as a feature for router_decide
 # ---------------------------------------------------------------------------
-#
-# The agent flow is:
-#   classify → choose_strategy → execute → assemble → return
-#
-# Currently supported strategies:
-#   "a" — Narrow → Relax → Narrow (precision retrieval, default)
-#   "b" — Wide → Themes → Narrow (discovery)
-#   "e" — Fail Fast (refuse before retrieval)
-# Future: "c" — LLM → Validate, "d" — External First.
-#
-# Choice rules (in priority order):
-#   1. Fail Fast verdict.fail → "e"
-#   2. request.mode == "explore" → "b"
-#   3. Auto-detect exploratory phrasing → "b"
-#   4. Default → "a"
 
 _EXPLORATORY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\btell me\b", re.I),
     re.compile(r"\bshow me\b", re.I),
     re.compile(r"\boverview\b", re.I),
     re.compile(r"\bsummari[sz]e\b", re.I),
-    re.compile(r"\bacross\s+\w+", re.I),         # across payers / states / ...
+    re.compile(r"\bacross\s+\w+", re.I),
     re.compile(r"\bcompare\b", re.I),
     re.compile(r"\bdifferenc(?:e|es)\b", re.I),
     re.compile(r"\bwhat\s+does\s+\w+\s+say\b", re.I),
@@ -500,28 +485,6 @@ def _is_exploratory(query: str) -> bool:
     """True if query phrasing suggests discovery rather than precision."""
     q = query or ""
     return any(p.search(q) for p in _EXPLORATORY_PATTERNS)
-
-
-def choose_strategy(
-    profile: QueryProfile,
-    request: "CorpusSearchAgentRequest",
-    fail_fast_verdict: FailFastVerdict | None,
-) -> str:
-    """Pick the single strategy that will execute for this query.
-
-    Returns one of ``"a"``, ``"b"``, ``"c"``, ``"e"``. Strategy ``"d"``
-    is added when implemented.
-    """
-    if fail_fast_verdict and fail_fast_verdict.fail:
-        return "e"
-    explicit = (getattr(request, "mode", None) or "").lower().strip()
-    if explicit == "validate":
-        return "c"
-    if explicit == "explore":
-        return "b"
-    if not explicit and _is_exploratory(profile.raw_query):
-        return "b"
-    return "a"
 
 
 # ---------------------------------------------------------------------------
@@ -1502,13 +1465,20 @@ async def _estimate_internal_recall(
     db: AsyncSession,
     profile: QueryProfile,
     pool_size: int,
-) -> tuple[float, str]:
-    """Return (estimated_recall, reason) for internal-corpus strategies.
+) -> tuple[float, str, str | None]:
+    """Return (estimated_recall, reason, missing_token) for internal-corpus strategies.
+
+    ``missing_token`` is the first content term that has zero presence in the
+    corpus (e.g. an unrecognised payor name like "molina"). Non-None is the
+    hard signal that the corpus cannot answer — callers set
+    ``has_zero_cooc_term`` in profile_features so router_decide boosts (d).
 
     Combines pool-size factor (does ANY doc match the tag intersection?)
     with chunk-text presence (do the untagged content tokens appear in
     any chunk body?). Multiplicative — both must pass.
     """
+    _missing_cooc_token: str | None = None  # set when a content term has 0 corpus hits
+
     # Pool factor — coverage by tags.
     if pool_size == 0:
         pool_factor = 0.0
@@ -1613,7 +1583,7 @@ async def _estimate_internal_recall(
             f"missing_literal_anchor={missing_literal!r} "
             f"(no chunk contains it; anchor is a hard-must) — withdrawing"
         )
-        return round(estimate, 3), reason
+        return round(estimate, 3), reason, None
 
     if len(deduped) >= 2:
         joined = " ".join(deduped)
@@ -1665,6 +1635,7 @@ async def _estimate_internal_recall(
                         f"missing_token={empty_token!r} (no chunk has it); "
                         f"tokens={deduped}"
                     )
+                    _missing_cooc_token = empty_token
                 else:
                     intersection = doc_sets[0]
                     for s in doc_sets[1:]:
@@ -1718,7 +1689,7 @@ async def _estimate_internal_recall(
     base_recall = 0.7
     estimate = (base_recall * pool_factor * presence_factor) ** (1.0 / 3.0)
     reason = f"{pool_note}; {presence_note}"
-    return round(estimate, 3), reason
+    return round(estimate, 3), reason, _missing_cooc_token
 
 
 async def build_candidate_pool(
@@ -2582,6 +2553,9 @@ class CorpusSearchAgentResponse(BaseModel):
     # Bandit-ready: every response carries the priors_version and the
     # scores that produced the choice, so we can replay decisions later.
     routing: dict[str, Any] | None = None
+    # Gate result — always present. Tells the chat panel whether the
+    # fail-fast gate fired and why, or confirms it passed cleanly.
+    gate: dict[str, Any] | None = None
     # Strategy (e) Fail Fast — populated when the pre-flight gate refuses.
     # Absent (None) on normal retrieval. When present, ``chunks`` is empty.
     fail_fast: dict[str, Any] | None = None
@@ -2632,6 +2606,16 @@ class CorpusSearchAgentRequest(BaseModel):
     recall_demand: float | None = None    # 0..1
     speed_budget: str | None = None       # "real_time" | "interactive" | "background" | "none"
     cost_budget: float | None = None      # USD per query (not enforced in v1)
+    # When True, skip the final _synthesize_internal_answer LLM call and
+    # return only chunks + routing metadata. Chat planners set this because
+    # they have their own LLM; the internal synthesis is only needed for
+    # eval scoring where the rubric judge needs a composed answer.
+    skip_synthesis: bool = False
+    # Strategies already executed in this thread. Passed on re-invocation
+    # so the router excludes them and picks the next best arm. Enables the
+    # "chat re-invokes → bandit drops prior → picks next" pattern without
+    # the react loop managing arm state itself.
+    prior_strategies_tried: list[str] = []
 
 
 # ---------------------------------------------------------------------------
@@ -2813,6 +2797,7 @@ async def _corpus_search_agent_impl(
     pool_size_pre = 0
     queries_pre: StrategyQueries | None = None
     self_assessments: dict[str, tuple[float, str]] = {}
+    _missing_token: str | None = None  # populated by _estimate_internal_recall
 
     if not (verdict and verdict.fail):
         try:
@@ -2832,7 +2817,7 @@ async def _corpus_search_agent_impl(
             logger.warning("[%s] pre-route pool build failed: %s", agent_id, exc)
 
         # Internal self-assessment for (a) and (b).
-        a_recall, a_reason = await _estimate_internal_recall(
+        a_recall, a_reason, _missing_token = await _estimate_internal_recall(
             db, profile, pool_size_pre,
         )
         # (b) is slightly more permissive — vector finds semantic matches
@@ -2858,6 +2843,12 @@ async def _corpus_search_agent_impl(
         "has_j_payor_tag": any(t.startswith("j:payor.") for t in profile.tag_matches),
         "is_exploratory": _is_exploratory(profile.raw_query),
         "pool_size": pool_size_pre,
+        # has_zero_cooc_term — True when the cooc check found a content token
+        # with zero corpus presence (e.g. "molina" when Molina isn't indexed).
+        # This is the hard signal that internal corpus strategies cannot answer
+        # — router_decide uses it to route to strategy (d) external.
+        "has_zero_cooc_term": bool(_missing_token),
+        "zero_cooc_token": _missing_token,
     }
 
     # Override path — explicit mode set by caller bypasses the router's
@@ -2895,6 +2886,7 @@ async def _corpus_search_agent_impl(
         decision = router_decide(
             profile_features, prefs,
             self_assessments=self_assessments,
+            prior_strategies_tried=request.prior_strategies_tried or [],
         )
 
     strategy_id = decision.strategy
@@ -2954,12 +2946,20 @@ async def _corpus_search_agent_impl(
             strategy_used="e",
             routing=routing_dump,
             queries_per_strategy=queries_per_strategy_dump,
+            gate={
+                "passed": False,
+                "fail_fast_reason": verdict.reason,
+            },
             query_profile={
                 "query_type": profile.query_type,
                 "coverage": round(profile.coverage, 3),
                 "tag_matches": profile.tag_matches,
+                "d_tags": [t for t in profile.tag_matches if t.startswith("d:")],
+                "j_tags": [t for t in profile.tag_matches if t.startswith("j:")],
+                "p_tags": [t for t in profile.tag_matches if t.startswith("p:")],
                 "literal_anchors": profile.literal_anchors,
                 "untagged_meaningful_tokens": profile.untagged_meaningful_tokens,
+                "semantic_core": getattr(profile, "semantic_core", profile.raw_query),
                 "raw_query": profile.raw_query,
             },
             fail_fast={
@@ -3665,16 +3665,22 @@ async def _corpus_search_agent_impl(
     # evaluated on the same footing as (c) and (d). Without this, (a)
     # returns only chunks and the rubric judge can't fairly score
     # claims like "yes, prior auth required" that need composition.
+    # Chat callers set skip_synthesis=True to skip this — they have their
+    # own LLM and paying for two synthesis calls doubles latency.
     final_chunks = best_chunks[: request.k]
-    final_llm_answer, synth_conf, synth_tel = await _synthesize_internal_answer(
-        raw_query, final_chunks,
-        stage="rag_strategy_a_synth",
-        correlation_id=caller_id,
-    )
-    # Cap confidence at the more conservative of the two readings.
-    confidence_rank = {"high": 3, "medium": 2, "low": 1}
-    if synth_conf and confidence_rank.get(synth_conf, 1) < confidence_rank.get(confidence, 1):
-        confidence = synth_conf
+    if request.skip_synthesis:
+        final_llm_answer = None
+        synth_tel: dict[str, Any] = {}
+    else:
+        final_llm_answer, synth_conf, synth_tel = await _synthesize_internal_answer(
+            raw_query, final_chunks,
+            stage="rag_strategy_a_synth",
+            correlation_id=caller_id,
+        )
+        # Cap confidence at the more conservative of the two readings.
+        confidence_rank = {"high": 3, "medium": 2, "low": 1}
+        if synth_conf and confidence_rank.get(synth_conf, 1) < confidence_rank.get(confidence, 1):
+            confidence = synth_conf
 
     total_elapsed_ms = (time.monotonic() - t0) * 1000.0
     logger.info(
@@ -3691,12 +3697,20 @@ async def _corpus_search_agent_impl(
         llm_answer=final_llm_answer or None,
         routing=routing_dump,
             queries_per_strategy=queries_per_strategy_dump,
+        gate={
+            "passed": True,
+            "fail_fast_reason": None,
+        },
         query_profile={
             "query_type": profile.query_type,
             "coverage": round(profile.coverage, 3),
             "tag_matches": profile.tag_matches,
+            "d_tags": [t for t in profile.tag_matches if t.startswith("d:")],
+            "j_tags": [t for t in profile.tag_matches if t.startswith("j:")],
+            "p_tags": [t for t in profile.tag_matches if t.startswith("p:")],
             "literal_anchors": profile.literal_anchors,
             "untagged_meaningful_tokens": profile.untagged_meaningful_tokens,
+            "semantic_core": getattr(profile, "semantic_core", profile.raw_query),
             "raw_query": profile.raw_query,
         },
         term_partition={

@@ -614,6 +614,22 @@ _BM25_NOISE = frozenset({
     'few', 'some', 'any', 'every', 'all', 'most', 'more',
 })
 
+# English function words / PostgreSQL 'english' tsvector stopwords.
+# Including these in k-of-n AND queries either causes to_tsquery errors
+# or silently removes the term, breaking the k-of-n selectivity guarantee.
+# We filter these from filter_tokens (used for WHERE) but NOT from score_ts
+# (used for ts_rank_cd, where OR makes stopwords harmless).
+_FTS_STOP = frozenset({
+    'a', 'an', 'the', 'and', 'or', 'but', 'not', 'is', 'are', 'was', 'were',
+    'be', 'been', 'being', 'do', 'does', 'did', 'have', 'has', 'had',
+    'i', 'me', 'my', 'we', 'our', 'you', 'your', 'he', 'she', 'it', 'they',
+    'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by', 'from', 'up',
+    'about', 'into', 'through', 'during', 'until', 'against', 'among',
+    'when', 'where', 'who', 'which', 'what', 'that', 'this', 'these', 'those',
+    'can', 'will', 'just', 'should', 'would', 'could', 'use', 'used', 'using',
+    'may', 'how', 'why', 'if', 'than', 'so', 'as', 'such', 'also',
+})
+
 
 def _normalize_bm25_query(query: str) -> str:
     """Strip question lead phrases and noise quantifiers from a query.
@@ -670,6 +686,33 @@ def _build_or_tsquery(*phrases: str) -> str:
             seen.add(term)
             parts.append(term)
     return " | ".join(parts) if parts else ""
+
+
+def _build_kofn_tsquery(tokens: list[str], k: int) -> str:
+    """Build a k-of-n tsquery: OR of all C(n,k) AND-combinations of tokens.
+
+    For tokens=[t1,t2,t3,t4,t5] and k=4 this produces:
+      (t1&t2&t3&t4) | (t1&t2&t3&t5) | (t1&t2&t4&t5) | (t1&t3&t4&t5) | (t2&t3&t4&t5)
+
+    Each AND group is highly selective, so the GIN bitmap stays compact
+    even for the "any k-of-n" level. Caller should cascade k from n down
+    to a minimum (e.g. 3) and fall back to pure OR only if all levels fail.
+
+    Caps combinatorial explosion: if C(n,k) > 50, returns "" (caller falls
+    through to OR). Tokens are sanitized via _phrase_to_tsquery_term.
+    """
+    from itertools import combinations as _combinations
+    clean = [_phrase_to_tsquery_term(t) for t in tokens]
+    clean = [t for t in clean if t]
+    n = len(clean)
+    if n == 0 or k > n or k < 1:
+        return ""
+    combos = list(_combinations(clean, k))
+    if len(combos) > 50:
+        return ""
+    parts = ["(" + " & ".join(combo) + ")" if len(combo) > 1 else combo[0]
+             for combo in combos]
+    return " | ".join(parts)
 
 
 async def _bm25_arm(
@@ -803,23 +846,31 @@ async def _bm25_arm(
         logger.warning("corpus_search bm25: lexicon expansion failed (continuing with raw tokens): %s", exc)
         expansion = LexiconExpansion()
 
-    # ── 3. Build OR-joined tsquery ─────────────────────────────────────
-    # Raw query is split into individual tokens so each becomes its own
-    # OR alternative; expansion phrases keep their multi-word AND-group
-    # structure (e.g. "durable medical equipment" → "(durable & medical
-    # & equipment)").
+    # ── 3. Build tsqueries ────────────────────────────────────────────
+    # score_ts: OR of raw tokens + expansion phrases — used for ts_rank_cd
+    #           scoring (broad, gives partial-match credit)
+    # filter_tokens: capped list of raw tokens used to build the WHERE
+    #           filter via k-of-n cascade (selective, keeps GIN bitmap small)
     raw_tokens = re.findall(r"[a-zA-Z0-9]+", bm25_query)
-    final_ts = _build_or_tsquery(*raw_tokens, *expansion.expansion_phrases)
+    score_ts = _build_or_tsquery(*raw_tokens, *expansion.expansion_phrases)
 
-    if not final_ts:
+    if not score_ts:
         # All-junk query (no alphanumerics at all).  Nothing to do.
         return [], normalized, empty_meta
+
+    # Build filter_tokens: strip PostgreSQL English stopwords first, THEN cap.
+    # Stopwords in to_tsquery AND-clauses either raise errors or get silently
+    # dropped, collapsing k-of-n into a smaller AND and triggering the slow
+    # OR fallback. Filtering before capping also ensures content terms past
+    # position 7 (e.g. when a question preamble fills the first 7 slots)
+    # are still considered. Cap at 7 — C(7,3)=35 stays under the 50-combo guard.
+    filter_tokens = [t for t in raw_tokens if t.lower() not in _FTS_STOP and len(t) > 1][:7]
 
     expansion_meta: dict[str, Any] = {
         "matched_codes":           list(expansion.matched_codes),
         "expansion_phrases":       list(expansion.expansion_phrases),
         "expansion_phrases_count": len(expansion.expansion_phrases),
-        "final_tsquery":           final_ts,
+        "final_tsquery":           score_ts,
         "log":                     list(expansion.log),
         "domain_tags":             list(expansion.domain_tags),
         "jurisdiction_tags":       list(expansion.jurisdiction_tags),
@@ -832,10 +883,10 @@ async def _bm25_arm(
             search_id,
             matched_codes=expansion.matched_codes,
             expansion_count=len(expansion.expansion_phrases),
-            final_tsquery=final_ts[:200],
+            final_tsquery=score_ts[:200],
         )
 
-    params: dict[str, Any] = {"k": k, "query": final_ts}
+    params: dict[str, Any] = {"k": k, "query": score_ts, "filter_query": score_ts}
     filter_sql = _build_filter_clauses(filters, include_document_ids, params)
 
     # ── 3.5. Strategy A — Namespace filter via document_tags overlap ──
@@ -990,6 +1041,11 @@ async def _bm25_arm(
     # search_vec + optional tag overlap), then expensive ``ts_rank_cd``
     # only on the bounded candidate set. Without this, ts_rank_cd was
     # observed at 36s on a 1962-doc corpus (2026-04-29 baseline).
+    #
+    # WHERE uses a selective k-of-n tsquery (cascade: all-N → any-(N-1)
+    # → any-(N-2) → floor-3 → full-OR fallback). Each AND-group in the
+    # OR keeps the GIN bitmap compact. Score always uses the full OR
+    # query for partial-match credit.
     gin_path = True
     candidate_cap = 1000
     params["_cap"] = candidate_cap
@@ -1018,7 +1074,7 @@ async def _bm25_arm(
                        ts_rank_cd(search_vec, to_tsquery('english', :query), 32) AS _ts
                 FROM rag_published_embeddings
                 {tag_join_sql}
-                WHERE search_vec @@ to_tsquery('english', :query)
+                WHERE search_vec @@ to_tsquery('english', :filter_query)
                   {filter_sql}
                   {tfilter}
                 ORDER BY _ts DESC, rag_published_embeddings.id ASC
@@ -1032,10 +1088,56 @@ async def _bm25_arm(
             LIMIT :k
         """)
 
+    # Detect code-like anchor tokens (HCPCS: H0015, T1000; CPT-ish: G0001).
+    # When present, try (anchor & score_ts_OR) first — a single specific
+    # AND that keeps the GIN bitmap tiny (code appears in <50 docs typically).
+    # This runs before the k-of-n cascade and short-circuits on a hit.
+    _code_re_anchor = re.compile(r'^[A-Z]\d{3,5}$|^[A-Z]{2}\d{3,4}$')
+    anchor_tokens = [t.lower() for t in filter_tokens if _code_re_anchor.match(t.upper())]
+
+    async def _run_with_kofn_cascade(tfilter: str) -> list:
+        """Try anchor-AND, then k-of-n from all-N down to floor, then full OR."""
+        # ── anchor fast-path ───────────────────────────────────────────────
+        if anchor_tokens:
+            anchor_and = " & ".join(anchor_tokens)
+            rest_or = _build_or_tsquery(*[t for t in filter_tokens if t.lower() not in set(anchor_tokens)])
+            anchor_q = f"({anchor_and}) & ({rest_or})" if rest_or else anchor_and
+            params["filter_query"] = anchor_q
+            if search_id:
+                _log_stage("bm25_kofn_filter", search_id,
+                           k="anchor", anchor=anchor_and, filter_query=anchor_q[:120])
+            result = await db.execute(_build_main_sql(tfilter), params)
+            rows = result.mappings().all()
+            if rows:
+                return list(rows)
+
+        # ── k-of-n cascade ─────────────────────────────────────────────────
+        n = len(filter_tokens)
+        min_k = max(3, (n + 1) // 2)  # at least half the tokens, floor 3
+        levels = list(range(n, min_k - 1, -1))
+        for k_level in levels:
+            kofn_ts = _build_kofn_tsquery(filter_tokens, k_level)
+            if not kofn_ts:
+                continue
+            params["filter_query"] = kofn_ts
+            if search_id:
+                _log_stage("bm25_kofn_filter", search_id,
+                           k=k_level, n=n, filter_query=kofn_ts[:120])
+            result = await db.execute(_build_main_sql(tfilter), params)
+            rows = result.mappings().all()
+            if rows:
+                return list(rows)
+        # Full OR fallback — always uses score_ts (broad)
+        params["filter_query"] = score_ts
+        if search_id:
+            _log_stage("bm25_kofn_filter", search_id,
+                       k="or_fallback", n=n, filter_query=score_ts[:120])
+        result = await db.execute(_build_main_sql(tfilter), params)
+        return list(result.mappings().all())
+
     try:
-        # Stage 1: strict (hard-J)
-        result = await db.execute(_build_main_sql(tag_filter_strict), params)
-        rows_check = result.mappings().all()
+        # Stage 1: strict tag filter with k-of-n cascade
+        rows_check = await _run_with_kofn_cascade(tag_filter_strict)
         # If zero hits AND we have a relaxed fallback different from strict,
         # retry with the relaxed filter.
         if not rows_check and tag_filter_relaxed and tag_filter_relaxed != tag_filter_strict:
@@ -1045,11 +1147,9 @@ async def _bm25_arm(
                     search_id,
                     note="strict (hard-J) returned 0; retrying with relaxed (d/p only)",
                 )
-            result = await db.execute(_build_main_sql(tag_filter_relaxed), params)
-            rows_check = result.mappings().all()
-        # We've consumed result; package back via a tiny adapter so the
-        # downstream code that expects ``result.mappings().all()`` keeps
-        # working without restructuring.
+            rows_check = await _run_with_kofn_cascade(tag_filter_relaxed)
+        # Package back via a tiny adapter so the downstream code that
+        # expects ``result.mappings().all()`` keeps working without restructuring.
         class _R:
             def __init__(self, rows): self._rows = rows
             def mappings(self):
@@ -2181,7 +2281,10 @@ async def _fetch_sibling_chunks_batch(
         "          UNNEST(CAST(:page_hi  AS int[]))  AS phi, "
         "          UNNEST(CAST(:excludes AS text[])) AS exclude_id "
         ") r "
-        "  ON m.document_id::text     = r.doc_id "
+        # Cast r.doc_id → uuid so Postgres can use the (document_id, paragraph_index,
+        # page_number) btree index. Casting m.document_id::text instead would force
+        # a full sequential scan on 882K rows per seed chunk (15s baseline).
+        "  ON m.document_id          = r.doc_id::uuid "
         " AND m.paragraph_index       BETWEEN r.lo  AND r.hi "
         " AND m.page_number           BETWEEN r.plo AND r.phi "
         " AND m.id::text              <> COALESCE(NULLIF(r.exclude_id, ''), "
