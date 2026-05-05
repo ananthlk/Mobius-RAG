@@ -254,7 +254,7 @@ export function RepositoryTab({
   const [selectedHost, setSelectedHost] = useState(UPLOADED_HOST)
 
   // ── Sidebar UI state ─────────────────────────────────────────────────────
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [_sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [entitySearch, setEntitySearch] = useState('')
   const [domainFilter, setDomainFilter] = useState<DomainFilter>('all')
 
@@ -268,7 +268,7 @@ export function RepositoryTab({
   const [, setSearchLoading] = useState(false)
 
   // ── Reader state ─────────────────────────────────────────────────────────
-  const [readerVisible, setReaderVisible] = useState(false)
+  const [_readerVisible, setReaderVisible] = useState(false)
   const [urlPreview, setUrlPreview] = useState<{ url: string; ingested: boolean } | null>(null)
   const [ingestingUrl, setIngestingUrl] = useState(false)
   // Local navigate-to (from clicking a search result chunk)
