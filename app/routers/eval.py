@@ -453,10 +453,11 @@ async def trigger_calibration(body: dict = Body(default={})):
         raise HTTPException(status_code=409, detail="another eval/calibration is already running")
     rel_bank = body.get("bank_path") or _DEFAULT_BANK_REL
     notes = body.get("notes") or "from-ui"
+    port = os.environ.get("PORT", "8080")
     endpoint = (
         body.get("endpoint")
         or os.environ.get("EVAL_TARGET_ENDPOINT")
-        or "http://localhost:8001/api/skills/v1/corpus_search_agent"
+        or f"http://localhost:{port}/api/skills/v1/corpus_search_agent"
     )
     asyncio.create_task(_run_calibration_task(rel_bank, notes, endpoint))
     return {
@@ -479,11 +480,13 @@ async def trigger_eval(body: dict = Body(default={})):
         raise HTTPException(status_code=409, detail="another eval is already running")
     rel_bank = body.get("bank_path") or _DEFAULT_BANK_REL
     notes = body.get("notes") or "from-ui"
-    # Default endpoint = same host. Allow override for cross-host runs.
+    # Default endpoint = self (same container, PORT env mirrors Cloud Run's
+    # --port 8080 convention; localhost:8001 was a local-dev artifact).
+    port = os.environ.get("PORT", "8080")
     endpoint = (
         body.get("endpoint")
         or os.environ.get("EVAL_TARGET_ENDPOINT")
-        or "http://localhost:8001/api/skills/v1/corpus_search_agent"
+        or f"http://localhost:{port}/api/skills/v1/corpus_search_agent"
     )
     asyncio.create_task(_run_eval_task(rel_bank, notes, endpoint))
     return {

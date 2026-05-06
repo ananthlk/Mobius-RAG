@@ -15,7 +15,7 @@ PROJECT_ID="${GCP_PROJECT_ID:-mobiusos-new}"
 REGION="${GCP_REGION:-us-central1}"
 SERVICE_NAME="mobius-rag"
 IMAGE_NAME="mobius-rag"
-CLOUD_SQL_INSTANCE="mobius-platform-db"
+CLOUD_SQL_INSTANCE="mobius-platform-dev-db"
 CLOUD_SQL_CONNECTION="${PROJECT_ID}:${REGION}:${CLOUD_SQL_INSTANCE}"
 
 if [[ -z "$DATABASE_PASSWORD" ]]; then
@@ -72,7 +72,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --set-env-vars="VERTEX_PROJECT_ID=${PROJECT_ID}" \
   --set-env-vars="VERTEX_LOCATION=${REGION}" \
   --set-env-vars="VERTEX_MODEL=gemini-1.5-pro" \
-  --set-env-vars="LLM_PROVIDER=vertex" \
+  --set-env-vars="CHAT_INTERNAL_LLM_URL=https://mobius-chat-ortabkknqa-uc.a.run.app/internal/skill-llm" \
   --project="$PROJECT_ID" \
   --quiet
 

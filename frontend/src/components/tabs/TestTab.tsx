@@ -33,6 +33,7 @@ const STRATEGY_OVERRIDES = [
 ] as const
 
 interface HistoryItem {
+  id?: string          // decision UUID from rag_routing_decisions (server items only)
   query: string
   caller_mode: string
   mode: string
@@ -59,18 +60,18 @@ export function TestTab() {
       return []
     }
   })
+  const [historyRefreshing, setHistoryRefreshing] = useState(false)
+  const [isStoredResult, setIsStoredResult] = useState(false)
   const serverSeeded = useRef(false)
 
-  // On mount: fetch recent routing decisions from the server so chat
-  // queries show up immediately without having to run anything locally.
-  useEffect(() => {
-    if (serverSeeded.current) return
-    serverSeeded.current = true
-    fetch(`${API_BASE}/api/routing/decisions?limit=30`)
+  function refreshHistory() {
+    setHistoryRefreshing(true)
+    fetch(`${API_BASE}/api/routing/decisions?limit=50`)
       .then((r) => r.ok ? r.json() : null)
       .then((data) => {
         if (!data?.decisions?.length) return
         const serverItems: HistoryItem[] = (data.decisions as any[]).map((d) => ({
+          id: d.id as string,
           query: d.query as string,
           caller_mode: (d.caller_mode as string) || 'chat.default',
           mode: '',
@@ -80,20 +81,24 @@ export function TestTab() {
           total_ms: (d.total_ms as number) || null,
         }))
         setHistory((local) => {
-          // Merge: local (pinned test runs) on top, server fills the rest.
-          // Deduplicate by query text, keeping the most recent occurrence.
-          const seen = new Set<string>()
-          const merged: HistoryItem[] = []
-          for (const item of [...local, ...serverItems]) {
-            if (!seen.has(item.query)) {
-              seen.add(item.query)
-              merged.push(item)
-            }
-          }
-          return merged.slice(0, 50)
+          // Server items are the authoritative ordered list (ts DESC from DB).
+          // Append local-only items (no server id, run from this tab) whose
+          // query text isn't already covered by a server item — dedup by id,
+          // NOT by query text, so the same query run twice both appear.
+          const serverQueryTexts = new Set(serverItems.map(i => i.query))
+          const localOnly = local.filter(i => !i.id && !serverQueryTexts.has(i.query))
+          return [...serverItems, ...localOnly].slice(0, 50)
         })
       })
       .catch(() => { /* silently ignore — server history is best-effort */ })
+      .finally(() => setHistoryRefreshing(false))
+  }
+
+  // On mount: seed history from server.
+  useEffect(() => {
+    if (serverSeeded.current) return
+    serverSeeded.current = true
+    refreshHistory()
   }, [])
 
   // Persist locally-run queries to localStorage.
@@ -111,6 +116,7 @@ export function TestTab() {
     setLoading(true)
     setError(null)
     setResponse(null)
+    setIsStoredResult(false)
     try {
       const body: Record<string, unknown> = {
         query: trimmed,
@@ -149,11 +155,64 @@ export function TestTab() {
     }
   }
 
-  function rerun(item: HistoryItem) {
+  async function loadStored(item: HistoryItem) {
     setQuery(item.query)
     setCallerMode(item.caller_mode as typeof CALLER_MODES[number])
     setStrategy(item.mode)
-    void run(item.query)
+    // If we have a server-side decision id, fetch the stored result
+    // without triggering a new run.
+    if (item.id) {
+      setLoading(true)
+      setError(null)
+      setResponse(null)
+      try {
+        const resp = await fetch(`${API_BASE}/api/routing/decisions/${item.id}`)
+        if (!resp.ok) throw new Error(`${resp.status}`)
+        const row = await resp.json() as Record<string, any>
+        // Reconstruct a partial AgentResponse from the stored decision columns.
+        const reconstructed: AgentResponse = {
+          confidence: row.confidence,
+          strategy_used: row.strategy_executed,
+          query_profile: {
+            query_type: row.query_type,
+            coverage: row.coverage,
+            tag_matches: row.tag_matches || [],
+            literal_anchors: row.literal_anchors || [],
+            untagged_meaningful_tokens: row.untagged_meaningful || [],
+            raw_query: (row.prefs_received as any)?.query || row.query,
+          },
+          routing: {
+            strategy: row.strategy_chosen,
+            executed_strategy: row.strategy_executed,
+            fallback: row.fallback_strategy,
+            query_class: row.query_class,
+            method: row.routing_method,
+            scores: row.scores || {},
+            self_assessments: row.self_assessments || {},
+            withdrawn: row.withdrawn || [],
+            prefs_resolved: row.prefs_resolved || {},
+            priors_version: row.priors_version,
+            fail_fast_reason: row.fail_fast_reason,
+          },
+          telemetry: {
+            total_ms: row.total_ms,
+            agent_id: row.agent_id,
+            ...(row.per_strategy_telemetry || {}),
+          } as any,
+        }
+        setResponse(reconstructed)
+        setIsStoredResult(true)
+      } catch (e) {
+        // Fall back to a fresh run if the stored fetch fails
+        void run(item.query)
+        return
+      } finally {
+        setLoading(false)
+      }
+    } else {
+      // Locally-run item with no stored id — just populate the input
+      // so the user can re-run it manually.
+    }
   }
 
   return (
@@ -216,7 +275,17 @@ export function TestTab() {
       <div className="test-body">
         {/* ── Recent queries (left) ── */}
         <div className="test-history">
-          <h3>Recent</h3>
+          <div className="test-history-header">
+            <h3>Recent</h3>
+            <button
+              className="btn-icon"
+              onClick={refreshHistory}
+              disabled={historyRefreshing}
+              title="Reload history from server"
+            >
+              {historyRefreshing ? '…' : '↺'}
+            </button>
+          </div>
           {history.length === 0 && (
             <div className="eval-empty">No recent queries found.</div>
           )}
@@ -224,8 +293,8 @@ export function TestTab() {
             <div
               key={i}
               className="history-row"
-              onClick={() => rerun(item)}
-              title={`Re-run as ${item.caller_mode}${item.mode ? ' / ' + item.mode : ''}`}
+              onClick={() => void loadStored(item)}
+              title={item.id ? 'Load stored result' : `Set query (no stored result)`}
             >
               <div className="history-query">{item.query}</div>
               <div className="history-meta">
@@ -255,7 +324,21 @@ export function TestTab() {
           )}
           {response && (
             <>
-              <RunSummaryHeader response={response} />
+              <div className="trace-run-header">
+                <RunSummaryHeader response={response} />
+                {isStoredResult && (
+                  <div className="stored-result-bar">
+                    <span className="badge mini dim">Stored result — routing &amp; scores only, no chunks</span>
+                    <button
+                      className="run-btn small"
+                      onClick={() => void run()}
+                      disabled={loading || !query.trim()}
+                    >
+                      ▶ Re-run live
+                    </button>
+                  </div>
+                )}
+              </div>
               <AgentPipelineTrace response={response} />
             </>
           )}

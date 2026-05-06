@@ -30,6 +30,9 @@ COPY app ./app/
 #            jobs fail with "Chroma required" at import time)
 RUN pip install --no-cache-dir -e ".[vertex,chroma]"
 
+# Copy eval bank (YAML query files + scripts needed by the trigger endpoints)
+COPY eval ./eval/
+
 # Copy frontend build (built locally before docker build)
 COPY frontend/dist ./frontend/dist/
 

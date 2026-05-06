@@ -124,6 +124,10 @@ COMMON_ENV=(
   "CHROMA_SSL=0"
   # chat Postgres (same Cloud SQL instance, mobius_chat database)
   "CHAT_DATABASE_URL=${CHAT_DB_URL_FOR_RAG}"
+  # Strategy (d) external web search — same service chat uses for
+  # google_search. Required for the corpus_search_agent to fall back
+  # to external sources when no corpus docs match the payer/query.
+  "CHAT_SKILLS_GOOGLE_SEARCH_URL=https://mobius-google-search-ortabkknqa-uc.a.run.app/search"
   # Auto-publish on embed: when an embedding_job completes, the worker
   # immediately copies vectors into rag_published_embeddings + chat
   # Postgres so the doc is queryable end-to-end without a separate

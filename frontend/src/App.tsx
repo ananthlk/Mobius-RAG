@@ -1448,7 +1448,7 @@ function App() {
               Repository
             </Tab>
             <Tab id="test" isActive={shellTab === 'test'} onClick={() => setShellTab('test')}>
-              Test
+              Chat Queries
             </Tab>
             <Tab id="eval" isActive={shellTab === 'eval'} onClick={() => setShellTab('eval')}>
               Eval
