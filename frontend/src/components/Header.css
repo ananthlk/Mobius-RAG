@@ -44,6 +44,28 @@
   text-decoration: none;
 }
 
+/* Sibling-module link (e.g. Lexicon Maintenance) — a touch more prominent
+   than the hub link since it's a cross-module call to action. */
+.app-header-module-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: var(--mobius-text-xs);
+  font-weight: 600;
+  color: var(--mobius-accent);
+  text-decoration: none;
+  padding: 0.2rem 0.55rem;
+  border: 1px solid var(--mobius-border);
+  border-radius: var(--mobius-radius-full);
+  transition: background 0.15s, border-color 0.15s;
+  letter-spacing: 0.02em;
+}
+.app-header-module-link:hover {
+  background: var(--mobius-bg-tertiary);
+  border-color: var(--mobius-accent);
+  text-decoration: none;
+}
+
 .app-header-brand {
   display: flex;
   align-items: center;

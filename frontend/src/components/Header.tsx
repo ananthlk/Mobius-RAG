@@ -53,6 +53,15 @@ export function Header({
               {'\u2190'} Module Hub
             </a>
           )}
+          {(import.meta.env?.VITE_LEXICON_URL as string | undefined) && (
+            <a
+              className="app-header-module-link"
+              href={import.meta.env.VITE_LEXICON_URL as string}
+              title="Open Lexicon Maintenance \u2014 curate the tags used for retrieval"
+            >
+              Lexicon Maintenance {'\u2197'}
+            </a>
+          )}
         </div>
         <div className="app-header-right">
           <button

@@ -80,8 +80,11 @@ if [[ -d frontend ]] && [[ -f frontend/package.json ]]; then
   # can override per-call by exporting these before invoking this script.
   : "${VITE_SCRAPER_API_BASE:=https://mobius-web-scraper-ortabkknqa-uc.a.run.app}"
   : "${VITE_API_BASE:=}"   # empty → same-origin (rag-self), correct for the deployed shell
-  export VITE_SCRAPER_API_BASE VITE_API_BASE
-  echo "--- frontend env: VITE_SCRAPER_API_BASE=$VITE_SCRAPER_API_BASE  VITE_API_BASE=${VITE_API_BASE:-<same-origin>} ---"
+  # Lexicon Maintenance lives on its own Cloud Run service; the header link
+  # is the natural path from the RAG dashboard into tag curation.
+  : "${VITE_LEXICON_URL:=https://mobius-lexicon-maintenance-ortabkknqa-uc.a.run.app}"
+  export VITE_SCRAPER_API_BASE VITE_API_BASE VITE_LEXICON_URL
+  echo "--- frontend env: VITE_SCRAPER_API_BASE=$VITE_SCRAPER_API_BASE  VITE_API_BASE=${VITE_API_BASE:-<same-origin>}  VITE_LEXICON_URL=$VITE_LEXICON_URL ---"
   (cd frontend && npm run build) || {
     echo "ERROR: frontend build failed; aborting deploy" >&2
     exit 1
