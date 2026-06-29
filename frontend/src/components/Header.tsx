@@ -5,6 +5,10 @@ import { PromptsModal } from './PromptsModal'
 
 import { API_BASE } from '../config'
 
+// Non-optional access so Vite statically inlines the value at build time.
+// (import.meta.env?.X with optional chaining is NOT inlined → always undefined.)
+const LEXICON_URL: string = (import.meta.env.VITE_LEXICON_URL as string | undefined) || ''
+
 interface HeaderProps {
   defaultLlmConfigVersion?: string | null
   onDefaultLlmConfigVersionChange?: (v: string | null) => void
@@ -53,10 +57,10 @@ export function Header({
               {'\u2190'} Module Hub
             </a>
           )}
-          {(import.meta.env?.VITE_LEXICON_URL as string | undefined) && (
+          {LEXICON_URL && (
             <a
               className="app-header-module-link"
-              href={import.meta.env.VITE_LEXICON_URL as string}
+              href={LEXICON_URL}
               title="Open Lexicon Maintenance \u2014 curate the tags used for retrieval"
             >
               Lexicon Maintenance {'\u2197'}
