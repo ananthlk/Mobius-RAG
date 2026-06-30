@@ -45,6 +45,14 @@ if "asyncpg" in DATABASE_URL:
             # service owns the backend — makes ops debugging the
             # "who's holding the lock?" question trivial.
             "application_name": "mobius-rag",
+            # pgvector HNSW recall: default ef_search=40 is below our
+            # wide-phase k=80, causing non-deterministic misses on sparse
+            # table chunks (e.g. timely-filing deadline table near the
+            # recall boundary). 100 gives a 25% buffer over k=80 with
+            # ~10% latency impact vs the 5x cost of ef_search=200.
+            # Set at connection init so it applies to every query on
+            # this connection without touching transaction state.
+            "hnsw.ef_search": "100",
         },
     }
 

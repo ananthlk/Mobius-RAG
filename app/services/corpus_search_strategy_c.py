@@ -759,6 +759,71 @@ def _section_topic(section: str | None) -> str:
     return _SECTION_NUMBER_RE.sub("", section).strip()
 
 
+def _meaningful_token_overlap(text: str, query: str) -> float:
+    """Fraction of meaningful query tokens that appear in text.
+
+    Used to decide whether the LLM's section name is semantically
+    related to the user's query.  High overlap → the section name
+    actually describes what the user asked about → trust it.
+    Low overlap → the LLM may have hallucinated the section name →
+    fall back to user_query BM25.
+    """
+    _STOP = frozenset({
+        "what", "is", "the", "how", "does", "a", "an", "of", "for",
+        "and", "or", "to", "in", "on", "with", "from", "by", "at",
+        "do", "can", "will", "be", "are", "was", "were", "that",
+    })
+    q_tokens = {
+        t for t in re.findall(r"[a-z0-9]+", query.lower())
+        if len(t) >= 4 and t not in _STOP
+    }
+    if not q_tokens:
+        return 0.0
+    text_tokens = set(re.findall(r"[a-z0-9]+", text.lower()))
+    return len(q_tokens & text_tokens) / len(q_tokens)
+
+
+def _section_token_overlap(text: str, section: str) -> float:
+    """Fraction of meaningful section-name tokens that appear in text.
+
+    Used to arbitrate between user-query BM25 and section-name BM25
+    when they disagree on which chunk to return.  The chunk that best
+    matches the LLM's *section name* wins — the section name is the
+    LLM's semantic pointer to the answer location, and it's more
+    precise than the user's question (which may contain payer/program
+    noise that matches many chunks equally well).
+
+    Example:
+      section "Claim Reconsideration and Appeals":
+        p.107 text has "reconsideration", "appeal" → high score → wins
+        p.122 (EDI clearinghouses) lacks those terms → low score → loses
+
+      section "Access Standards" (hallucinated for timely-filing):
+        p.85 text has "access", "standards" → high score
+        p.121 (timely filing table) lacks those terms → low score
+        → p.85 wins, but in this case BOTH candidates map to sections
+          that exist in the document, so the user_query result (p.121)
+          also gets a score — and since "timely", "filing", "deadline"
+          appear in p.121 but NOT "access"/"standards", the section
+          comparison still correctly prefers p.121 via the fallback.
+
+    Returns 0.0 when section is empty.
+    """
+    _STOP = frozenset({
+        "the", "a", "an", "of", "for", "and", "or", "to", "in",
+        "on", "with", "from", "by", "at", "is", "are", "be",
+        "general", "overview", "information",
+    })
+    sec_tokens = {
+        t for t in re.findall(r"[a-z0-9]+", section.lower())
+        if len(t) >= 4 and t not in _STOP
+    }
+    if not sec_tokens:
+        return 0.0
+    text_tokens = set(re.findall(r"[a-z0-9]+", text.lower()))
+    return len(sec_tokens & text_tokens) / len(sec_tokens)
+
+
 async def _retrieve_in_doc_by_query(
     db: AsyncSession,
     document_id: str,
@@ -767,25 +832,24 @@ async def _retrieve_in_doc_by_query(
 ) -> tuple[str | None, int | None, str]:
     """Run BM25 within the LLM-identified doc.
 
-    The LLM's role is doc identification. For in-doc retrieval, the
-    LLM's *section name* is usually the cleanest topic anchor (it
-    names the chapter/topic the answer lives under). User questions
-    add noise like "what does X say" / "tell me about" that BM25
-    spreads across many chunks.
+    User query runs first — it is the factual retrieval signal (what
+    the user actually asked) and is more reliable than the LLM's
+    section name guess, which may be hallucinated.  Classic failure
+    mode: "Access Standards" hallucinated as the section for a
+    timely-filing query → section BM25 finds p.85 (wrong); user_query
+    "timely filing deadline" finds p.121 (correct).
 
-    Priority:
-      1. LLM section name (if present, with leading numbering stripped)
-      2. User query (with the natural-language wrapper retained — BM25
-         will deweight common words on its own)
+    Section name is kept as a fallback in case the user query is too
+    broad to get a precise BM25 match within the document.
 
     Returns ``(text_excerpt, page_number, retrieval_method)``.
     """
-    candidates: list[tuple[str, str]] = []
     sec_topic = _section_topic(section)
-    if sec_topic and len(sec_topic) >= 4:
-        candidates.append((sec_topic, "by_section_topic"))
+    candidates: list[tuple[str, str]] = []
     if user_query:
         candidates.append((user_query, "by_user_query"))
+    if sec_topic and len(sec_topic) >= 4:
+        candidates.append((sec_topic, "by_section_topic"))
 
     for q, method in candidates:
         sub_req = CorpusSearchRequest(

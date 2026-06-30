@@ -2214,6 +2214,18 @@ async def list_documents(
     db: AsyncSession = Depends(get_db)
 ):
     """List all documents with extraction and chunking status. Chunking status is derived from the latest chunking_event when present to avoid fluctuation."""
+    # Hard cap: each row is ~1KB JSON; 2000 rows ≈ 2MB which is safe.
+    # Larger limits (e.g. 20000) cause the downstream IN-clause subqueries
+    # to time out — the connection dies after 60s returning 0 bytes, which
+    # the frontend sees as an empty corpus.
+    _MAX_LIMIT = 2000
+    limit = min(limit, _MAX_LIMIT)
+
+    # Real total count (cheap COUNT(*) — no JOIN needed)
+    total_count = (await db.execute(
+        select(func.count()).select_from(Document)
+    )).scalar_one()
+
     result = await db.execute(
         select(Document)
         .order_by(Document.created_at.desc())
@@ -2222,7 +2234,7 @@ async def list_documents(
     )
     documents = result.scalars().all()
     if not documents:
-        return {"total": 0, "documents": []}
+        return {"total": total_count, "documents": []}
 
     # Latest chunking event per document (by created_at desc, id desc) – single source of truth for status
     doc_ids = [doc.id for doc in documents]
@@ -2461,7 +2473,8 @@ async def list_documents(
         document_list.append(doc_item)
 
     return {
-        "total": len(document_list),
+        "total": total_count,   # real DB count, not just the page size
+        "returned": len(document_list),
         "documents": document_list
     }
 
@@ -3349,6 +3362,13 @@ async def get_document_status(
     pub_ev = last_publish_event.scalar_one_or_none()
     published_at_iso = pub_ev.published_at.isoformat() if pub_ev else None
 
+    # Count published chunks for this document (0 until embedding+publish completes).
+    _chunks_res = await db.execute(
+        text("SELECT COUNT(*) FROM rag_published_embeddings WHERE document_id = :did"),
+        {"did": str(doc_uuid)},
+    )
+    chunks_count = int(_chunks_res.scalar() or 0)
+
     return {
         "document_id": str(document.id),
         "filename": document.filename,
@@ -3363,6 +3383,7 @@ async def get_document_status(
         "problematic_pages": problematic_pages,
         "created_at": document.created_at.isoformat(),
         "published_at": published_at_iso,
+        "chunks_count": chunks_count,
         "expires_at": document.expires_at.isoformat() if document.expires_at else None,
     }
 
@@ -3698,6 +3719,38 @@ def _estimate_processing_seconds(ext: str, size_bytes: int, page_count: int) -> 
         return min(max(30, int(size_bytes / 200_000) * 3 + 15), 5 * 60)
 
 
+async def _inline_chunk_embed_publish(document_id) -> None:
+    """Poll for publish completion — used when workers are running but we want
+    to hold the upload response until the doc is ready (small files only).
+
+    The chunking and embedding workers run in separate Cloud Run instances and
+    communicate via DB polling loops — there is no direct callable entry point.
+    This helper polls the publish_events table every 2s for up to 90s.
+    The ChunkingJob was already queued by the caller before this runs, so the
+    workers will pick it up imminently.
+
+    Uses a fresh AsyncSessionLocal session per poll to avoid asyncpg
+    PreparedState errors that occur when reusing the HTTP request's db session
+    after multiple commit/rollback cycles.
+    """
+    import asyncio as _asyncio
+    from sqlalchemy import text as _text
+    from app.database import AsyncSessionLocal
+
+    doc_id_str = str(document_id)
+    for _ in range(45):   # 45 × 2s = 90s max
+        await _asyncio.sleep(2)
+        async with AsyncSessionLocal() as _sess:
+            res = await _sess.execute(
+                _text("SELECT published_at FROM publish_events WHERE document_id = CAST(:did AS uuid) ORDER BY published_at DESC LIMIT 1"),
+                {"did": doc_id_str},
+            )
+            row = res.fetchone()
+        if row and row[0]:
+            return   # Published — done
+    raise RuntimeError(f"timed out waiting for publish of {doc_id_str}")
+
+
 @app.post("/upload")
 async def upload_file(
     file: UploadFile,
@@ -3777,13 +3830,33 @@ async def upload_file(
         existing_doc = result.scalar_one_or_none()
         
         if existing_doc:
+            # Fetch publish state so chat can reuse the existing document without re-uploading.
+            _pub_ev_res = await db.execute(
+                select(PublishEvent)
+                .where(PublishEvent.document_id == existing_doc.id)
+                .order_by(PublishEvent.published_at.desc())
+                .limit(1)
+            )
+            _pub_ev = _pub_ev_res.scalar_one_or_none()
+            _published_at_iso = _pub_ev.published_at.isoformat() if _pub_ev else None
+            _chunks_count = int(_pub_ev.rows_written or 0) if _pub_ev else 0
+            # If rows_written is unreliable, cross-check with rag_published_embeddings count
+            if _chunks_count == 0:
+                _count_res = await db.execute(
+                    text("SELECT COUNT(*) FROM rag_published_embeddings WHERE document_id = :did"),
+                    {"did": str(existing_doc.id)},
+                )
+                _chunks_count = int(_count_res.scalar() or 0)
             raise HTTPException(
                 status_code=409,
                 detail={
                     "error": "duplicate_file",
                     "message": "This file has already been uploaded.",
+                    "document_id": str(existing_doc.id),
+                    "chunks_count": _chunks_count,
+                    "published_at": _published_at_iso,
                     "original_filename": existing_doc.filename,
-                    "help": "If you need to upload a different version, please rename the file first."
+                    "help": "If you need to upload a different version, please rename the file first.",
                 }
             )
         
@@ -3922,6 +3995,28 @@ async def upload_file(
                     _pc = 1
             else:
                 _pc = 1
+
+        # ── Chat fast-path: inline chunk+embed+publish for small files ──────
+        # For agent_scope=chat with ≤5 pages, run the full pipeline
+        # synchronously so the upload response already reflects published
+        # state. Chat's blocking poll (eta < 120s) then exits immediately
+        # on the first /status poll instead of waiting for workers.
+        # Larger files fall through to the background worker queue.
+        _is_chat = (agent_scope or "").lower() == "chat"
+        if _is_chat and document.status == "completed" and _pc <= 5:
+            try:
+                await _inline_chunk_embed_publish(document.id)
+                logger.info(
+                    "[upload] inline fast-path completed for doc=%s pages=%d",
+                    document.id, _pc,
+                )
+            except Exception as _fp_err:
+                logger.warning(
+                    "[upload] inline fast-path failed (non-fatal, workers will pick up): %s",
+                    _fp_err,
+                )
+                # Non-fatal: the ChunkingJob was already queued above, so
+                # background workers will still process this document.
         ext_lower = (file.filename.lower().rsplit(".", 1)[-1] if "." in file.filename else "")
         eta_seconds = _estimate_processing_seconds(ext_lower, len(contents), _pc)
         # ``stage`` distinguishes extraction-complete from full-pipeline-complete
