@@ -3724,39 +3724,6 @@ def _estimate_processing_seconds(ext: str, size_bytes: int, page_count: int) -> 
         return min(max(30, int(size_bytes / 200_000) * 3 + 15), 5 * 60)
 
 
-async def _inline_chunk_embed_publish(document_id) -> None:
-    """Poll for publish completion — used when workers are running but we want
-    to hold the upload response until the doc is ready (small files only).
-
-    The chunking and embedding workers run in separate Cloud Run instances and
-    communicate via DB polling loops — there is no direct callable entry point.
-    This helper polls the publish_events table every 2s for up to 90s.
-    The ChunkingJob was already queued by the caller before this runs, so the
-    workers will pick it up imminently.
-
-    Uses a fresh AsyncSessionLocal session per poll to avoid asyncpg
-    PreparedState errors that occur when reusing the HTTP request's db session
-    after multiple commit/rollback cycles.
-    """
-    import asyncio as _asyncio
-    from sqlalchemy import text as _text
-    from app.database import AsyncSessionLocal
-
-    doc_id_str = str(document_id)
-    for _ in range(24):   # 24 × 2s = 48s max — stays within Cloud Run LB 60s idle timeout
-        await _asyncio.sleep(2)
-        async with AsyncSessionLocal() as _sess:
-            res = await _sess.execute(
-                _text("SELECT published_at FROM publish_events WHERE document_id = CAST(:did AS uuid) ORDER BY published_at DESC LIMIT 1"),
-                {"did": doc_id_str},
-            )
-            row = res.fetchone()
-        if row and row[0]:
-            return   # Published — done
-    # Graceful timeout: workers will still pick it up; caller falls back to background path
-    raise RuntimeError(f"timed out waiting for publish of {doc_id_str}")
-
-
 @app.post("/upload")
 async def upload_file(
     file: UploadFile,
@@ -4024,27 +3991,6 @@ async def upload_file(
             else:
                 _pc = 1
 
-        # ── Chat fast-path: inline chunk+embed+publish for small files ──────
-        # For agent_scope=chat with ≤5 pages, run the full pipeline
-        # synchronously so the upload response already reflects published
-        # state. Chat's blocking poll (eta < 120s) then exits immediately
-        # on the first /status poll instead of waiting for workers.
-        # Larger files fall through to the background worker queue.
-        _is_chat = (agent_scope or "").lower() == "chat"
-        if _is_chat and document.status == "completed" and _pc <= 5:
-            try:
-                await _inline_chunk_embed_publish(document.id)
-                logger.info(
-                    "[upload] inline fast-path completed for doc=%s pages=%d",
-                    document.id, _pc,
-                )
-            except Exception as _fp_err:
-                logger.warning(
-                    "[upload] inline fast-path failed (non-fatal, workers will pick up): %s",
-                    _fp_err,
-                )
-                # Non-fatal: the ChunkingJob was already queued above, so
-                # background workers will still process this document.
         ext_lower = (file.filename.lower().rsplit(".", 1)[-1] if "." in file.filename else "")
         eta_seconds = _estimate_processing_seconds(ext_lower, len(contents), _pc)
         # ``stage`` distinguishes extraction-complete from full-pipeline-complete
