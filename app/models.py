@@ -143,6 +143,9 @@ class ChunkingJob(Base):
     # Used by retag jobs so lexicon re-tagging doesn't trigger re-embedding.
     skip_embedding = Column(String(10), nullable=True)  # 'true' | NULL
 
+    # Claim-order priority. Lower = claimed first (0=urgent chat uploads, 10=normal corpus).
+    priority = Column(Integer, default=10, nullable=False, server_default="10")
+
     # Resolved run config snapshot (set once at job start; never mutated).
     chunking_config_snapshot = Column(JSONB, nullable=True)
 

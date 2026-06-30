@@ -439,7 +439,7 @@ async def worker_loop():
                 result = await db.execute(
                     select(ChunkingJob)
                     .where(ChunkingJob.status == "pending")
-                    .order_by(ChunkingJob.created_at)
+                    .order_by(ChunkingJob.priority, ChunkingJob.created_at)
                     .limit(1)
                     .with_for_update(skip_locked=True)
                 )

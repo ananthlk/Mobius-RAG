@@ -380,6 +380,11 @@ async def _run_startup_migrations_background():
                 await migrate_se_nq()
             except Exception as migrate_err:
                 logger.warning(f"Startup migration (search_events.bm25_normalized_query) skipped: {migrate_err}")
+            try:
+                from app.migrations.add_chunking_job_priority import migrate as migrate_chunking_priority
+                await migrate_chunking_priority()
+            except Exception as migrate_err:
+                logger.warning(f"Startup migration (chunking_job priority) skipped: {migrate_err}")
 
             logger.info("✓ Startup migrations completed successfully")
         except Exception as e:
@@ -3957,6 +3962,7 @@ async def upload_file(
         if document.status == "completed":
             try:
                 from datetime import datetime as _dt
+                _is_chat_upload = (agent_scope or "").lower() == "chat"
                 auto_job = ChunkingJob(
                     document_id=document.id,
                     generator_id="B",       # Path B is lexicon-aware; matches Repository tab default
@@ -3967,6 +3973,7 @@ async def upload_file(
                     extraction_enabled="true",
                     created_at=_dt.utcnow(),
                     updated_at=_dt.utcnow(),
+                    priority=0 if _is_chat_upload else 10,
                 )
                 db.add(auto_job)
                 await db.commit()
