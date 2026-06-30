@@ -115,11 +115,15 @@ async def sync_document_to_retrieval_stores(
     chroma_token = _env_or_none("CHROMA_AUTH_TOKEN")
     chat_db_url = _env_or_none("CHAT_DATABASE_URL")
 
-    if chroma_disabled_for_pgvector:
+    if chroma_disabled_for_pgvector and not is_instant_rag:
+        # Corpus documents: pgvector migration means chat reads from pgvector.
+        # Skip Chroma write to avoid double-write lag. instant-rag uploads still
+        # need Chroma because chat's lazy_rag_search reads from Chroma via CHROMA_HOST
+        # (chat's CHAT_VECTOR_STORE=chroma path has not migrated to pgvector yet).
         result.chroma_status = "skipped"
-        result.skipped_reasons.append("VECTOR_STORE=pgvector (Chroma write gated off)")
+        result.skipped_reasons.append("VECTOR_STORE=pgvector (Chroma write gated off for corpus)")
         logger.info(
-            "[publish_sync] %s: skipping Chroma upsert (VECTOR_STORE=pgvector)",
+            "[publish_sync] %s: skipping Chroma upsert (VECTOR_STORE=pgvector, corpus doc)",
             document_id,
         )
         # Force-clear chroma_host so the upsert branch below is skipped.
