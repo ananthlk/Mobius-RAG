@@ -3738,7 +3738,7 @@ async def _inline_chunk_embed_publish(document_id) -> None:
     from app.database import AsyncSessionLocal
 
     doc_id_str = str(document_id)
-    for _ in range(45):   # 45 × 2s = 90s max
+    for _ in range(24):   # 24 × 2s = 48s max — stays within Cloud Run LB 60s idle timeout
         await _asyncio.sleep(2)
         async with AsyncSessionLocal() as _sess:
             res = await _sess.execute(
@@ -3748,6 +3748,7 @@ async def _inline_chunk_embed_publish(document_id) -> None:
             row = res.fetchone()
         if row and row[0]:
             return   # Published — done
+    # Graceful timeout: workers will still pick it up; caller falls back to background path
     raise RuntimeError(f"timed out waiting for publish of {doc_id_str}")
 
 
