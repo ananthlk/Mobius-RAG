@@ -96,6 +96,12 @@ GCS_BUCKET = os.getenv("GCS_BUCKET", "mobius-rag-uploads-mobiusos")
 CHAT_INTERNAL_LLM_URL = os.getenv("CHAT_INTERNAL_LLM_URL")
 MOBIUS_SKILL_LLM_INTERNAL_KEY = os.getenv("MOBIUS_SKILL_LLM_INTERNAL_KEY")
 
+# lexicon-maintenance service — after a document's candidates are extracted we
+# fire a best-effort call to its inline cleanup endpoint (deterministic rules +
+# catalog + bounded LLM triage). Unset → cleanup is skipped (no-op). Auth reuses
+# ADMIN_API_KEY (both services share the rag-admin-api-key secret).
+LEXICON_MAINTENANCE_URL = os.getenv("LEXICON_MAINTENANCE_URL")
+
 # Vertex settings used for:
 #  * embeddings (gemini-embedding-001)
 #  * direct-call fallback in local dev (no LLM manager proxy)

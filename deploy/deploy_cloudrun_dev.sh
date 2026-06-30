@@ -27,6 +27,9 @@ CLOUD_SQL_CONNECTION="${PROJECT_ID}:${REGION}:${CLOUD_SQL_INSTANCE}"
 # /internal/skill-llm — chat gates on MOBIUS_SKILL_LLM_INTERNAL_KEY.
 CHAT_INTERNAL_LLM_URL="https://mobius-chat-ortabkknqa-uc.a.run.app/internal/skill-llm"
 
+# lexicon-maintenance service — inline candidate cleanup after extraction.
+LEXICON_MAINTENANCE_URL="https://mobius-lexicon-maintenance-ortabkknqa-uc.a.run.app"
+
 # DB connection via Cloud SQL Unix socket (Cloud Run connector). Chat
 # uses `postgres@` (no password) with the auth-proxy; rag historically
 # uses `mobius_app` with a password. Keep the latter for parity with
@@ -116,6 +119,7 @@ COMMON_ENV=(
   "VERTEX_MODEL=gemini-2.5-flash"
   "EMBEDDING_PROVIDER=vertex"
   "CHAT_INTERNAL_LLM_URL=${CHAT_INTERNAL_LLM_URL}"
+  "LEXICON_MAINTENANCE_URL=${LEXICON_MAINTENANCE_URL}"
   # Vector store — pgvector is the prod backend post-cutover (2026-04-27).
   # Without this, vector_store.get_vector_store() falls back to Chroma when
   # CHROMA_HOST is set, silently re-routing to the unstable Chroma VM.

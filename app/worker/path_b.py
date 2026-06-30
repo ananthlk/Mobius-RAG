@@ -21,6 +21,53 @@ from app.worker import db as db_handler
 logger = logging.getLogger(__name__)
 
 
+async def _trigger_lexicon_cleanup(ctx: ChunkingRunContext, document_id: str, doc_log_id: str) -> None:
+    """Best-effort inline candidate cleanup via lexicon-maintenance, surfaced as a
+    visible pipeline step. Runs the fast pass (catalog propagation + deterministic
+    rules) synchronously so we can report real counts in the status stream, then
+    fires the bounded LLM triage of the residue in the background. Never raises."""
+    from app import config
+    base = getattr(config, "LEXICON_MAINTENANCE_URL", None)
+    if not base:
+        return
+    url = base.rstrip("/") + "/policy/candidates/process-document"
+    headers = {"Content-Type": "application/json"}
+    if getattr(config, "ADMIN_API_KEY", None):
+        headers["X-Admin-Key"] = config.ADMIN_API_KEY
+    await ctx.send_status(
+        message="Cleaning up lexicon candidates...",
+        user_message="Cleaning up new candidate terms (junk removal + dedup)...",
+    )
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=45.0) as client:
+            # Fast pass — catalog + deterministic rules, returns counts.
+            resp = await client.post(
+                url, json={"document_id": document_id, "llm_chunks": 0, "sync": True}, headers=headers,
+            )
+            data = resp.json() if resp.status_code == 200 else {}
+            cat = int(data.get("catalog_resolved", 0) or 0)
+            det = int(data.get("deterministic_rejected_phrases", 0) or 0)
+            rem = int(data.get("remaining_proposed", 0) or 0)
+            await ctx.send_status(
+                message=f"Lexicon cleanup: {cat} known + {det} junk auto-resolved, {rem} remaining.",
+                user_message=f"Cleaned {cat + det} candidate terms automatically; {rem} left for LLM review.",
+            )
+            logger.info("[%s] lexicon cleanup fast-pass: HTTP %s cat=%s det=%s rem=%s",
+                        doc_log_id, resp.status_code, cat, det, rem)
+            # Background LLM triage of the genuinely-new residue (fire-and-forget).
+            try:
+                await client.post(url, json={"document_id": document_id, "llm_chunks": 2}, headers=headers)
+            except Exception:
+                pass
+    except Exception as e:
+        logger.warning("[%s] lexicon cleanup (non-fatal): %s", doc_log_id, e)
+        await ctx.send_status(
+            message="Lexicon cleanup skipped (non-fatal).",
+            user_message="Candidate cleanup will run in the next batch pass.",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Per-doc timing accumulator (lives on PathBResources)
 # ---------------------------------------------------------------------------
@@ -347,10 +394,17 @@ async def finalise(ctx: ChunkingRunContext, resources: PathBResources | None) ->
             else:
                 pm, _refuted = res.get_phrase_to_tag_map(res.lexicon_snapshot)
             await res.extract_candidates_for_document(db, doc_uuid, run_id=None, phrase_map=pm)
+            # Commit so the freshly-extracted candidates are durable + visible to
+            # the lexicon-maintenance cleanup service (separate connection).
+            await db.commit()
             logger.info("[%s] Path B: candidate extraction complete", doc_id)
             await ctx.send_status(
                 message="Candidate extraction complete.",
                 user_message="Lexicon candidate extraction complete.",
             )
+            # Fire-and-forget inline cleanup: deterministic rules + catalog +
+            # bounded LLM triage on this document's candidates. Best-effort —
+            # never blocks or fails ingestion.
+            await _trigger_lexicon_cleanup(ctx, str(doc_uuid), doc_id)
         except Exception as cand_err:
             logger.warning("[%s] Path B candidate extraction (non-fatal): %s", doc_id, cand_err, exc_info=True)

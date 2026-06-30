@@ -198,13 +198,12 @@ function App() {
   const loadDocuments = async () => {
     setLoadingDocuments(true)
     try {
-      // ``/documents`` defaults to limit=100 server-side; with the corpus
-      // now > 8k docs, that truncation made every Repository entity card
-      // show 0 ingested/chunked/embedded/published unless the entity's
-      // docs happened to land in the most-recent 100. Fetch a large
-      // page so the pipeline strip can see the whole corpus. Long-term
-      // this should move to a server-side per-host aggregate endpoint.
-      const response = await fetch(`${API_BASE}/documents?limit=20000`)
+      // Server caps at 2000 rows — larger limits trigger IN-clause subqueries
+      // with thousands of UUIDs that time out after 60s returning 0 bytes,
+      // which the browser sees as an empty corpus ("No documents in corpus yet").
+      // The /documents endpoint now returns `total` = real DB count so the
+      // Corpus Health footer stays accurate even when the page is smaller.
+      const response = await fetch(`${API_BASE}/documents?limit=2000`)
       if (response.ok) {
         const data = await response.json()
         setDocuments(data.documents || [])
