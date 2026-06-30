@@ -9713,6 +9713,7 @@ class QueryRequest(BaseModel):
     """Request body for semantic query (embed + search + resolve)."""
     query: str
     k: int = 10
+    document_id: Optional[str] = None  # if set, scope search to this document only (instant-rag)
 
 
 class ChunkOut(BaseModel):
@@ -9770,11 +9771,12 @@ async def query_rag(
     # only have a sync ``search``; for those we offload to a worker thread
     # so we don't block the event loop or hit pgvector's RuntimeError.
     vector_store = get_vector_store()
+    doc_filter = (body.document_id or "").strip() or None
     if hasattr(vector_store, "asearch"):
-        results = await vector_store.asearch(query_embedding, k=k)
+        results = await vector_store.asearch(query_embedding, k=k, document_id=doc_filter)
     else:
         import asyncio as _asyncio
-        results = await _asyncio.to_thread(vector_store.search, query_embedding, k=k)
+        results = await _asyncio.to_thread(vector_store.search, query_embedding, k=k, document_id=doc_filter)
 
     if not results:
         return QueryResponse(chunks=[])
