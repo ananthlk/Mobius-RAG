@@ -12,7 +12,7 @@ import sys
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
@@ -439,7 +439,7 @@ async def worker_loop():
                 result = await db.execute(
                     select(ChunkingJob)
                     .where(ChunkingJob.status == "pending")
-                    .order_by(ChunkingJob.priority, ChunkingJob.created_at)
+                    .order_by(func.coalesce(ChunkingJob.priority, 10), ChunkingJob.created_at)
                     .limit(1)
                     .with_for_update(skip_locked=True)
                 )

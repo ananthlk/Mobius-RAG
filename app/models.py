@@ -144,7 +144,8 @@ class ChunkingJob(Base):
     skip_embedding = Column(String(10), nullable=True)  # 'true' | NULL
 
     # Claim-order priority. Lower = claimed first (0=urgent chat uploads, 10=normal corpus).
-    priority = Column(Integer, default=10, nullable=False, server_default="10")
+    # Nullable so INSERT succeeds before migration runs; server_default handles the DB default.
+    priority = Column(Integer, nullable=True, server_default="10")
 
     # Resolved run config snapshot (set once at job start; never mutated).
     chunking_config_snapshot = Column(JSONB, nullable=True)

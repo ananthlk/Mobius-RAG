@@ -3962,6 +3962,7 @@ async def upload_file(
         if document.status == "completed":
             try:
                 from datetime import datetime as _dt
+                from sqlalchemy import text as _text
                 _is_chat_upload = (agent_scope or "").lower() == "chat"
                 auto_job = ChunkingJob(
                     document_id=document.id,
@@ -3973,7 +3974,10 @@ async def upload_file(
                     extraction_enabled="true",
                     created_at=_dt.utcnow(),
                     updated_at=_dt.utcnow(),
-                    priority=0 if _is_chat_upload else 10,
+                    # priority is NOT set here — omit from INSERT so the query
+                    # succeeds even if the migration hasn't run yet (race window
+                    # at startup). server_default=10 handles normal jobs at the DB
+                    # level. Chat uploads get priority=0 via a separate UPDATE below.
                 )
                 db.add(auto_job)
                 await db.commit()
@@ -3981,6 +3985,16 @@ async def upload_file(
                     "[upload] auto-queued Path B chunking for doc %s (agent_scope=%s, unified-flow)",
                     document.id, agent_scope,
                 )
+                if _is_chat_upload:
+                    try:
+                        await db.execute(
+                            _text("UPDATE chunking_jobs SET priority = 0 WHERE id = CAST(:jid AS uuid)"),
+                            {"jid": str(auto_job.id)},
+                        )
+                        await db.commit()
+                    except Exception as _prio_err:
+                        await db.rollback()
+                        logger.debug("[upload] priority update skipped (migration pending?): %s", _prio_err)
             except Exception as auto_err:
                 logger.warning(
                     "[upload] auto-chunk queue failed (non-fatal): %s",

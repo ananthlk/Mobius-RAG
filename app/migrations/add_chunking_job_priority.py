@@ -42,8 +42,10 @@ async def migrate():
             "WHERE tablename = 'chunking_jobs' AND indexname = 'ix_chunking_jobs_status_priority_created'"
         )
         if not idx_exists:
+            # Regular (non-CONCURRENTLY) index — safe inside asyncpg transaction context.
+            # Table is small enough that a brief AccessShareLock during startup is acceptable.
             await conn.execute(
-                "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_chunking_jobs_status_priority_created "
+                "CREATE INDEX IF NOT EXISTS ix_chunking_jobs_status_priority_created "
                 "ON chunking_jobs (status, priority, created_at)"
             )
             print("  Created index ix_chunking_jobs_status_priority_created")
