@@ -41,6 +41,59 @@ COMMON_ABBREVIATIONS = frozenset({
     "inc", "llc", "ltd", "tel", "fax", "www", "http", "https", "org", "com", "gov", "edu",
 })
 
+# Generic English words the all-caps abbreviation matcher otherwise grabs from
+# headings / place names ("ORANGE COUNTY", "WEST PALM BEACH") and emits as
+# single-token candidates. Deliberately GENERIC only (directions, colors,
+# geo/civic, time, high-frequency words) — NO healthcare/domain terms — so real
+# acronyms (CCBHC, MFP) and domain words (MEDICAID) are still extracted. A token
+# whose lowercase form is in here is not a real abbreviation.
+COMMON_WORDS = frozenset({
+    # directions / position
+    "north", "south", "east", "west", "central", "northern", "southern",
+    "eastern", "western", "upper", "lower", "left", "right", "middle", "top",
+    "bottom", "front", "back", "side", "near", "far", "inner", "outer",
+    # colors
+    "orange", "blue", "red", "green", "white", "black", "gray", "grey",
+    "brown", "yellow", "purple", "pink", "gold", "silver",
+    # generic geo / civic
+    "county", "city", "town", "state", "district", "region", "area", "zone",
+    "beach", "lake", "river", "island", "park", "valley", "hill", "mount",
+    "mountain", "port", "bay", "gulf", "coast", "village", "borough", "ward",
+    "street", "road", "avenue", "drive", "lane", "court", "place", "square",
+    "creek", "springs", "heights", "grove", "ridge", "falls", "harbor",
+    # time
+    "january", "february", "march", "april", "june", "july", "august",
+    "september", "october", "november", "december", "monday", "tuesday",
+    "wednesday", "thursday", "friday", "saturday", "sunday", "today",
+    "yesterday", "tomorrow", "morning", "evening", "night", "week", "month",
+    "year", "day", "hour", "minute", "season", "spring", "summer", "autumn",
+    "winter", "annual", "monthly", "weekly", "daily",
+    # high-frequency generic nouns / adjectives / verbs
+    "secretary", "director", "manager", "officer", "office", "department",
+    "committee", "council", "board", "group", "team", "member", "members",
+    "person", "people", "name", "number", "list", "page", "section", "part",
+    "item", "items", "point", "level", "type", "form", "table", "figure",
+    "example", "case", "cases", "issue", "issues", "topic", "subject",
+    "matter", "thing", "things", "way", "ways", "kind", "sort", "set",
+    "value", "values", "result", "results", "amount", "total", "rate",
+    "rates", "cost", "costs", "price", "prices", "size", "range", "scale",
+    "order", "system", "process", "method", "plan", "plans", "program",
+    "project", "service", "services", "product", "products", "company",
+    "business", "market", "industry", "sector", "field", "line", "lines",
+    "unit", "units", "site", "sites", "location", "building",
+    "center", "school", "college", "university", "church", "baptist",
+    "methodist", "catholic", "general", "national", "regional", "local",
+    "public", "private", "main", "major", "minor", "primary", "secondary",
+    "new", "old", "good", "bad", "best", "first", "second", "third",
+    "last", "next", "high", "low", "large", "small", "great", "long",
+    "short", "full", "empty", "open", "close", "early", "late",
+    "more", "most", "less", "least", "many", "much", "few", "several",
+    "gains", "loss", "win", "report", "reports", "data", "information",
+    "use", "used", "make", "made", "take", "give", "get", "see", "know",
+    "think", "find", "work", "call", "need", "want", "show", "ask", "help",
+    "move", "play", "run", "turn", "start", "stop",
+})
+
 # Regex patterns for junk candidates that should never be proposed.
 _JUNK_PATTERNS = re.compile(
     r"^(?:"
@@ -470,7 +523,7 @@ async def extract_candidates_for_document(
     for text, is_heading in line_data:
         for m in _ABBREV_PATTERN.findall(text):
             norm = m.lower()
-            if norm in known or norm in COMMON_ABBREVIATIONS or len(norm) < 2:
+            if norm in known or norm in COMMON_ABBREVIATIONS or norm in COMMON_WORDS or len(norm) < 2:
                 continue
             prev = abbrev_weighted.get(norm, (0, 0))
             if is_heading:
