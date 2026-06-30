@@ -295,7 +295,10 @@ async def publish_document(document_id: UUID, db: AsyncSession, generator_id: st
     sync_summary: str | None = None
     try:
         from app.services.publish_sync import sync_document_to_retrieval_stores
-        sync_res = await sync_document_to_retrieval_stores(document_id, db)
+        sync_res = await sync_document_to_retrieval_stores(
+            document_id, db,
+            is_instant_rag=doc.expires_at is not None,
+        )
         sync_summary = (
             f"sync: chunks={sync_res.chunks_synced} "
             f"chroma={sync_res.chroma_status} "

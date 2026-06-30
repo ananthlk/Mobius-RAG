@@ -87,6 +87,7 @@ async def sync_document_to_retrieval_stores(
     db: AsyncSession,
     *,
     chroma_collection: str = "published_rag",
+    is_instant_rag: bool = False,
 ) -> SyncResult:
     """Sync all rows for ``document_id`` from ``rag_published_embeddings``
     to Chroma + chat Postgres. Idempotent (Chroma upsert + Postgres
@@ -209,11 +210,10 @@ async def sync_document_to_retrieval_stores(
             "document_program":         program,
             "document_authority_level": auth_lvl,
             "source_type":              src_type,
-            # Critical: distinguishes approved corpus from user uploads.
-            # chat's filter is {"instant_rag": {"$ne": "true"}}; setting
-            # "true" here would make the chunk invisible to the corpus
-            # search.
-            "instant_rag":              "false",
+            # Distinguishes approved corpus from user uploads.
+            # Corpus search filters out instant_rag="true"; thread_corpus_search
+            # filters FOR instant_rag="true". Set based on upload origin.
+            "instant_rag":              "true" if is_instant_rag else "false",
         })
 
         pg_rows.append((
