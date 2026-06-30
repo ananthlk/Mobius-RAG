@@ -3966,7 +3966,13 @@ async def upload_file(
                 _is_chat_upload = (agent_scope or "").lower() == "chat"
                 auto_job = ChunkingJob(
                     document_id=document.id,
-                    generator_id="B",       # Path B is lexicon-aware; matches Repository tab default
+                    # Chat uploads: Path A (generator="A") runs LLM extraction directly
+                    # on the raw page text — required for documents with no prior
+                    # policy_lines (first-time processing). Path B (generator="B")
+                    # only processes pre-existing policy_lines, so it produces
+                    # 0 paragraphs for fresh chat uploads.
+                    # Non-chat uploads: Path B is the standard corpus ingestion path.
+                    generator_id="A" if _is_chat_upload else "B",
                     status="pending",
                     threshold="0.6",
                     critique_enabled="true",
