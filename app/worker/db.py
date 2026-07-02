@@ -339,8 +339,13 @@ async def clear_policy_for_document(db: AsyncSession, doc_uuid: UUID) -> None:
         # work. Cheap index lookup, and avoids hundreds of no-op
         # batch DELETEs on re-runs where a prior coordinator already
         # cleared everything before crashing mid-chunking.
+        # NB: cast the bound param to ::uuid. document_id is a uuid column;
+        # binding a text param forces ``document_id::text = $1``, which cannot
+        # use the (document_id) index → full seq scan of the ~12M-row table
+        # (7s+ standalone, minutes under concurrency → statement timeout). The
+        # explicit ::uuid keeps it a uuid=uuid index lookup.
         existing = await db.execute(
-            text("SELECT 1 FROM policy_lines WHERE document_id = :doc_id LIMIT 1"),
+            text("SELECT 1 FROM policy_lines WHERE document_id = CAST(:doc_id AS uuid) LIMIT 1"),
             {"doc_id": str(doc_uuid)},
         )
         if existing.first() is None:
@@ -352,23 +357,18 @@ async def clear_policy_for_document(db: AsyncSession, doc_uuid: UUID) -> None:
             await db.commit()
             return
 
-        # Delete policy_lines in batches using ctid for efficient paging
-        # (works even when (document_id) index is skewed).
-        deleted_lines = 0
-        while True:
-            res = await db.execute(
-                text(
-                    "DELETE FROM policy_lines WHERE ctid IN ("
-                    "SELECT ctid FROM policy_lines "
-                    "WHERE document_id = :doc_id LIMIT :lim)"
-                ),
-                {"doc_id": str(doc_uuid), "lim": batch_size},
-            )
-            await db.commit()
-            n = res.rowcount or 0
-            deleted_lines += n
-            if n < batch_size:
-                break
+        # Single index-scan delete (O(n)). The previous ctid-batched loop was
+        # O(n²) on big docs: each 500-row batch's subquery had to skip every
+        # dead tuple left by prior batches, so a 100k-line doc spent minutes
+        # crawling dead index entries. One DELETE keyed on the (document_id)
+        # index deletes all of a doc's lines in a single pass — seconds even for
+        # the 270k-line giants, well under the statement_timeout.
+        res = await db.execute(
+            text("DELETE FROM policy_lines WHERE document_id = CAST(:doc_id AS uuid)"),
+            {"doc_id": str(doc_uuid)},
+        )
+        await db.commit()
+        deleted_lines = res.rowcount or 0
 
         # policy_paragraphs is a much smaller sibling; do it unbatched.
         res2 = await db.execute(

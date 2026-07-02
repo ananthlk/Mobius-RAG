@@ -196,8 +196,11 @@ async def run_matrix(
     repeats: int = 1,
     concurrency: int = 6,
 ) -> None:
-    data = yaml.safe_load(bank_path.read_text())
-    queries = data["queries"] if isinstance(data, dict) and "queries" in data else data
+    # Use load_bank (NOT raw yaml) so the rubric fields (golden_answer/must_facts/
+    # bonus/forbidden) are folded into each query's ``expected`` — otherwise the
+    # judge silently runs in keyword mode and the whole matrix is mis-scored.
+    from eval.run import load_bank
+    queries, _bank_sha = load_bank(bank_path)
     n_cells = len(queries) * len(strategies) * repeats
     logger.info("Loaded %d queries from %s", len(queries), bank_path)
     logger.info("Strategies: %s  repeats: %d  total cells: %d  | endpoint: %s",

@@ -1,0 +1,112 @@
+[
+ {
+  "qid": "cmhc001",
+  "strategy": "c",
+  "latency_ms": 10400
+ },
+ {
+  "qid": "cmhc002",
+  "error": "TimeoutError",
+  "latency_ms": 35144
+ },
+ {
+  "qid": "cmhc003",
+  "strategy": "a",
+  "latency_ms": 5698
+ },
+ {
+  "qid": "cmhc004",
+  "strategy": "a",
+  "latency_ms": 843
+ },
+ {
+  "qid": "cmhc005",
+  "strategy": "a",
+  "latency_ms": 17283
+ },
+ {
+  "qid": "cmhc006",
+  "strategy": "b",
+  "latency_ms": 4868
+ },
+ {
+  "qid": "cmhc007",
+  "strategy": "c",
+  "latency_ms": 7578
+ },
+ {
+  "qid": "cmhc008",
+  "strategy": "d",
+  "latency_ms": 11171
+ },
+ {
+  "qid": "cmhc009",
+  "strategy": "e",
+  "latency_ms": 252
+ },
+ {
+  "qid": "cmhc010",
+  "strategy": "a",
+  "latency_ms": 1072
+ },
+ {
+  "qid": "cmhc011",
+  "strategy": "b",
+  "latency_ms": 6512
+ },
+ {
+  "qid": "cmhc012",
+  "strategy": "b",
+  "latency_ms": 6438
+ },
+ {
+  "qid": "cmhc013",
+  "strategy": "b",
+  "latency_ms": 5155
+ },
+ {
+  "qid": "cmhc014",
+  "strategy": "b",
+  "latency_ms": 5808
+ },
+ {
+  "qid": "cmhc015",
+  "strategy": "a",
+  "latency_ms": 5383
+ },
+ {
+  "qid": "cmhc016",
+  "strategy": "b",
+  "latency_ms": 7178
+ },
+ {
+  "qid": "cmhc017",
+  "strategy": "a",
+  "latency_ms": 3077
+ },
+ {
+  "qid": "cmhc018",
+  "strategy": "a",
+  "latency_ms": 1611
+ },
+ {
+  "qid": "cmhc019",
+  "error": "TimeoutError",
+  "latency_ms": 35140
+ },
+ {
+  "qid": "cmhc020",
+  "strategy": "a",
+  "latency_ms": 1805
+ },
+ {
+  "qid": "cmhc021",
+  "strategy": "e",
+  "latency_ms": 127
+ },
+ {
+  "qid": "cmhc022",
+  "strategy": "a",
+  "latency_ms": 1487
+ }
+]

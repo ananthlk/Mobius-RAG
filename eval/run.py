@@ -66,6 +66,25 @@ def load_bank(path: Path) -> tuple[list[dict[str, Any]], str]:
     queries = data.get("queries") or []
     if not isinstance(queries, list):
         raise ValueError("queries.yaml must contain top-level 'queries' list")
+    # Normalize: the cmhc rubric bank stores golden_answer / must_facts /
+    # bonus_facts / forbidden_facts (and keyword-bank fields) as SIBLINGS of
+    # ``expected``, but the judge + deterministic_checks read them from INSIDE
+    # ``expected``. Without this fold the judge never sees golden_answer and
+    # silently runs in keyword mode — the whole rubric (must/bonus/forbidden)
+    # scoring path is dead. Fold siblings in without clobbering existing keys.
+    _EXPECTED_KEYS = (
+        "golden_answer", "must_facts", "bonus_facts", "forbidden_facts",
+        "golden_citation", "answer_keywords", "must_cite_doc",
+        "must_cite_url_contains", "fail_fast_reason", "notes",
+    )
+    for q in queries:
+        if not isinstance(q, dict):
+            continue
+        exp = dict(q.get("expected") or {})
+        for k in _EXPECTED_KEYS:
+            if k in q and k not in exp:
+                exp[k] = q[k]
+        q["expected"] = exp
     return queries, sha
 
 

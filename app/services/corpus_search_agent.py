@@ -2040,6 +2040,22 @@ _STRATEGY_PARAMS: dict[str, dict[str, Any]] = {
     },
 }
 
+# When the tag cascade yields a WIDE pool (>500 docs), vector_broad
+# NARROWS it before BM25 ranks within. The narrow must land the pool at
+# BM25's designed tight-pool size (~500 docs) — NOT collapse it to the
+# handful of docs vector_broad's top answer-chunks happen to cover.
+# Narrowing to ~6 and then breaking skips BM25 entirely, which negates
+# strategy (a). So: pull enough chunks to cover ~500 distinct docs, keep
+# the top _POOL_NARROW_TARGET by rerank, then let BM25 rank within them.
+_POOL_NARROW_TARGET = 500     # size a HUGE pool is narrowed DOWN to before BM25
+_NARROW_HARVEST_K = 750       # chunks to pull on the narrow pass so ~500 docs survive dedup
+# Pools with ≤_POOL_WIDE_MAX docs are ranked DIRECTLY by BM25 (bm25_in_pool
+# first — strategy (a)'s precision intent). ts_rank_cd handles ~1-2k docs
+# fine, and BM25 keyword ranking is what distinguishes the answer doc from
+# verbose-but-similar policy PDFs that vector embeddings score high. Only
+# genuinely huge pools (>this) get the vector-narrow-then-BM25 treatment.
+_POOL_WIDE_MAX = 2000
+
 
 def _strategy_order_for(
     profile: QueryProfile,
@@ -2082,9 +2098,12 @@ def _strategy_order_for(
         # No lexicon signal → vector against AHCA fallback or unrestricted.
         return ["vector_broad"]
 
-    # CONCEPTUAL / MIXED — depends on pool size
-    _TIGHT_POOL_MAX = 500
-    if 0 < pool_size <= _TIGHT_POOL_MAX:
+    # CONCEPTUAL / MIXED — depends on pool size. Pools up to _POOL_WIDE_MAX
+    # are BM25-ranked directly (bm25_in_pool first); only genuinely huge
+    # pools defer to vector_broad for narrowing. Running vector_broad first
+    # on a moderate pool lets verbose policy PDFs "succeed" on embedding
+    # similarity and short-circuit BM25 — the exact cmhc004/017 regression.
+    if 0 < pool_size <= _POOL_WIDE_MAX:
         # Narrow→Relax→Narrow flow: BM25 ranks within vetted pool.
         # If BM25's rerank is weak, vector_in_pool finds semantic
         # matches without leaving the pool.
@@ -2092,7 +2111,7 @@ def _strategy_order_for(
             return ["bm25_in_pool", "vector_in_pool", "phrase_strict"]
         return ["bm25_in_pool", "vector_in_pool"]
 
-    # Wide pool or no pool — vector_broad needed to narrow before
+    # HUGE pool or no pool — vector_broad needed to narrow before
     # ranking. The bootstrap_pool logic upstream will swap
     # vector_broad to first AND harvest its doc_ids so the next
     # strategy (bm25_in_pool) operates on a narrowed set.
@@ -2672,14 +2691,43 @@ async def corpus_search_agent(
         if strategy_used not in _tried:
             _tried.append(strategy_used)
 
+        # Explicit mode override (A/B-test / calibration knob): honour the
+        # forced strategy VERBATIM — never cascade to another arm on a low/empty
+        # result. The docstring above says overrides "suppress retry without
+        # cascading", but the loop computed ``_is_override`` and never used it,
+        # so a forced strategy that returned thin results silently fell through
+        # to a router-chosen arm (forced c → executed a). That made
+        # forced-strategy calibration measure the WRONG cell. Return attempt-0's
+        # result as-is so each (query, strategy) cell reflects THAT strategy's
+        # true performance, including its failures.
+        if _is_override:
+            return response
+
         # Terminal: e=fail-fast (off-scope, retrying won't help),
         #            d=external (highest-recall tier, nothing beyond this).
         if strategy_used in ("e", "d"):
             return response
 
         # Success: corpus chunks returned with decent confidence — done.
+        #
+        # ...OR the top chunk is strongly ranked. The ``confidence`` LABEL is
+        # non-deterministic across identical retrievals (natural-path b computes
+        # it via _aggregate_confidence → sometimes "low"; forced-b via the
+        # override path → "high"), so gating purely on the label DISCARDS a
+        # router-chosen strategy that returned real, well-ranked chunks and
+        # re-routes to a worse arm (the canonical-blend b-never-picked bug:
+        # router correctly picks b, cascade throws its 7 chunks away on a
+        # "low" coin-flip). top_rerank is objective and stable — if the top
+        # chunk clears the HIGH bar, this retrieval succeeded, label aside.
         n_chunks = len(response.chunks or [])
-        if n_chunks > 0 and response.confidence in ("high", "medium"):
+        top_rerank = max(
+            (getattr(c, "rerank_score", 0.0) or 0.0 for c in (response.chunks or [])),
+            default=0.0,
+        )
+        if n_chunks > 0 and (
+            response.confidence in ("high", "medium")
+            or top_rerank >= _HYBRID_RERANK_HIGH
+        ):
             return response
 
         # Low / empty result — store best and retry if budget allows.
@@ -3429,12 +3477,17 @@ async def _corpus_search_agent_impl(
     # Skipped for:
     #   * VAGUE — already starts with vector_broad by design
     #   * literal anchors — phrase_strict super-boost finds doc by name
-    #   * tight pool (≤500 docs) — hybrid is fast enough
-    _POOL_TIGHT_THRESHOLD = 500
+    #   * moderate pool (≤_POOL_WIDE_MAX docs) — BM25 runs directly on the
+    #     whole pool; ts_rank_cd handles ~1-2k docs fine (the PRE-regression
+    #     behaviour that correctly ranked the answer). Vector-narrow is ONLY
+    #     for pools so large that BM25 dilutes/slows (the L4_AHCA=2052 / 343k
+    #     case). Narrowing a moderate pool to the ~6 docs vector's top chunks
+    #     cover — when a few huge multi-topic docs dominate the chunk set —
+    #     silently drops the answer doc before BM25 ever sees it.
     pool_was_empty = (effective_pool is None or len(effective_pool) == 0)
     pool_was_wide = (
         effective_pool is not None
-        and len(effective_pool) > _POOL_TIGHT_THRESHOLD
+        and len(effective_pool) > _POOL_WIDE_MAX
     )
     should_bootstrap_pool = (
         (pool_was_empty or pool_was_wide)
@@ -3592,6 +3645,10 @@ async def _corpus_search_agent_impl(
     seen_doc_ids: set[str] = set()
 
     for strategy in order:
+        # A narrowing vector_broad pass is PREP for BM25 (harvest a ~500-doc
+        # pool), not a terminal answer. Track it so we DON'T break the loop
+        # on it — otherwise BM25 never runs on the narrowed pool.
+        just_narrowed = False
         params = _STRATEGY_PARAMS[strategy]
         # bm25_in_pool and vector_in_pool reuse the "hybrid" query text
         # (full cleaned core, noise stripped — but j-tags KEPT, since
@@ -3603,9 +3660,21 @@ async def _corpus_search_agent_impl(
             else strategy
         )
         query_text = getattr(queries, query_attr)
+        # WIDE-pool narrow pass pulls many chunks so it can hand BM25 a real
+        # ~500-doc pool (not the ~6 the top answer-chunks cover). All other
+        # passes use the normal k.
+        _is_narrow_pass = (
+            should_bootstrap_pool
+            and strategy == "vector_broad"
+            and pool_was_wide
+        )
+        sub_k = (
+            _NARROW_HARVEST_K if _is_narrow_pass
+            else request.k * params["k_multiplier"]
+        )
         sub_request = CorpusSearchRequest(
             query=query_text,
-            k=request.k * params["k_multiplier"],
+            k=sub_k,
             mode=params["mode"],
             tag_mode=params["tag_mode"],
             filters=request.filters,
@@ -3701,16 +3770,32 @@ async def _corpus_search_agent_impl(
             and (pool_was_empty or pool_was_wide)
             and chunks
         ):
-            harvested_doc_ids = list({c.document_id for c in chunks if c.document_id})
+            # Distinct docs in rerank order (chunks arrive sorted by rerank
+            # desc). For a WIDE pool, keep the top _POOL_NARROW_TARGET most-
+            # relevant docs so BM25 ranks within a real ~500-doc pool; for an
+            # EMPTY pool (bootstrap seed) keep whatever vector surfaced.
+            seen: set[str] = set()
+            ordered_docs: list[str] = []
+            for c in chunks:
+                d = c.document_id
+                if d and d not in seen:
+                    seen.add(d)
+                    ordered_docs.append(d)
+            harvested_doc_ids = (
+                ordered_docs[:_POOL_NARROW_TARGET] if pool_was_wide else ordered_docs
+            )
             if len(harvested_doc_ids) >= 3:
                 prior_size = len(effective_pool) if effective_pool else 0
                 effective_pool = harvested_doc_ids
                 pool_was_empty = False
                 pool_was_wide = False  # don't harvest again
+                # PREP pass — do NOT terminate the loop on it; BM25 must still
+                # run on the narrowed pool (that's the whole point of (a)).
+                just_narrowed = True
                 logger.info(
                     "[%s] [trace:bootstrap_pool] vector_broad surfaced %d distinct "
-                    "docs → narrowing subsequent strategies (was pool=%d)",
-                    agent_id, len(harvested_doc_ids), prior_size,
+                    "docs → narrowed subsequent strategies to %d (was pool=%d)",
+                    agent_id, len(ordered_docs), len(harvested_doc_ids), prior_size,
                 )
 
         # Keep the best chunks across strategies (rough quality proxy:
@@ -3718,7 +3803,7 @@ async def _corpus_search_agent_impl(
         # take its chunks; otherwise we keep whichever has a better
         # score so the planner gets *something* if all strategies fail.
         quality = top_rerank + 0.05 * len({c.document_id for c in chunks[:10]})
-        if succeeded:
+        if succeeded and not just_narrowed:
             best_chunks = chunks
             best_chunk_quality = quality
             break  # success → stop the loop

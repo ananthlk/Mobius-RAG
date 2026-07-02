@@ -1,0 +1,144 @@
+bank_version: cmhc_v1.1_consensus_validated
+queries:
+- id: cmhc001
+  persona: billing
+  payer_specificity: strict
+  query: What is the timely filing deadline for Sunshine Health FL Medicaid claims?
+  expected:
+    strategy: a
+    query_class: tight_pool
+  golden_answer: 'For Sunshine Health Florida Medicaid the timely filing window
+
+    depends on the provider''s network status. Participating providers
+
+    must submit initial claims within 180 days from the date of
+
+    service; non-participating providers have 365 days. Days are
+
+    calculated from the date of service to the date the claim is
+
+    received by Sunshine Health. Reconsiderations and claim disputes
+
+    must be received within 90 days of the original Explanation of
+
+    Payment (or 180 days for non-participating providers).
+
+    Coordination-of-Benefits (secondary) claims have 90 days from the
+
+    date of the primary payer''s EOP regardless of network status. If
+
+    a claim is denied for timely filing the provider cannot bill the
+
+    member.
+
+    '
+  must_facts:
+  - 180 days for participating providers (initial claims)
+  - 365 days for non-participating providers (initial claims)
+  - Sunshine Health is the payer in question
+  bonus_facts:
+  - Reconsiderations / claim disputes within 90 days of the original EOP for participating providers
+  - Reconsiderations / claim disputes within 180 days of the original EOP for non-participating providers
+  - Coordination-of-benefits / secondary claims have 90 days from the primary payer's EOP
+  - Days are calculated from date of service to the date the claim is received by Sunshine Health
+  - If a claim is denied for timely filing, the provider cannot bill the member
+  forbidden_facts:
+  - No timely filing limit applies
+  - All claims have a 1-year window regardless of network status
+  - Timely filing window is the same for participating and non-participating providers
+  - Reconsiderations have an unlimited window
+  golden_citation:
+    document: SH-PRO-PE-MFC-Training.pdf
+    section: Timely Filing Table (page 29)
+  externally_verified: true
+  notes: Verified against the corpus chunk (SH-PRO-PE-MFC-Training.pdf p.29). Primary axis is participating vs non-participating, NOT a single 180d standard. Earlier external rule about newborn/retroactive eligibility may apply on top but the network-status split is the canonical Sunshine policy.
+- id: cmhc002
+  persona: um
+  payer_specificity: strict
+  query: Does Sunshine Health require prior authorization for residential substance use treatment under code H0019?
+  expected:
+    strategy: a
+    query_class: tight_pool
+  golden_answer: 'Yes — Sunshine Health requires prior authorization for services
+
+    billed under H0019 (alcohol and drug management, treatment, and
+
+    rehabilitation, behavioral health residential). The PA request
+
+    should include the ASAM Level of Care determination (residential
+
+    criteria typically map to Level 3.1, 3.5, or 3.7), current
+
+    clinical assessment, and proposed treatment plan. Submit via the
+
+    Sunshine provider portal or fax. Standard PA decision is 14 days;
+
+    expedited (urgent) is 72 hours. Sunshine treats residential SUD
+
+    PA as a condition of payment.
+
+    '
+  must_facts:
+  - Yes, prior authorization is required for H0019
+  - Sunshine Health is the payer being asked about
+  bonus_facts:
+  - H0019 is the residential SUD treatment code (alcohol and drug management / rehabilitation)
+  - PA is required from Day 1 of service for residential treatment
+  - ASAM Level of Care determination should match residential criteria (Level 3.1, 3.5, or 3.7)
+  - 14-day standard turnaround for PA decisions
+  - 72-hour expedited turnaround for urgent requests
+  - Submit via Sunshine provider portal or fax
+  - Submission must include current clinical assessment and treatment plan
+  forbidden_facts:
+  - No prior authorization required for H0019
+  - H0019 is an outpatient-only code
+  - PA only required after 30 days of treatment
+  - Generic ASAM Level 1 or 2 satisfies residential PA
+  golden_citation:
+    document: FL_SunshineHealth_Caid_PAReq_CMS19_CMS21_MMA_AIP.pdf
+    section: Behavioral Health & Substance Use — Alcohol and drug management, treatment, and rehabilitation
+  externally_verified: true
+  notes: Verified against corpus chunk (FL_SunshineHealth_Caid_PAReq p.3). The corpus only confirms the basic 'PA required for H0019' fact; ASAM-specificity and Day-1 detail are bonus_facts because they come from external practitioner knowledge, not the doc.
+- id: cmhc003
+  persona: front_end
+  payer_specificity: strict
+  query: Does Aetna Better Health Florida require a referral for outpatient behavioral health therapy?
+  expected:
+    strategy: a
+    query_class: tight_pool
+  golden_answer: 'No — Aetna Better Health Florida members do not need a PCP
+
+    referral to access outpatient behavioral health services, BUT
+
+    self-referral applies ONLY to in-network providers. Out-of-network
+
+    behavioral health requires prior authorization from Aetna Better
+
+    Health (Aetna is more restrictive than Sunshine on out-of-network
+
+    BH access). Members can self-refer to in-network providers for
+
+    routine therapy (90791 intake, 90834/90837 individual therapy,
+
+    90847 family therapy).
+
+    '
+  must_facts:
+  - No PCP referral is required for outpatient behavioral health therapy
+  - Aetna Better Health FL is the payer
+  - Self-referral applies ONLY to in-network providers
+  bonus_facts:
+  - Members can self-refer to in-network providers
+  - Out-of-network behavioral health requires prior authorization from Aetna
+  - Covers 90791 intake, 90834 / 90837 individual therapy, 90847 family therapy
+  - Aetna Better Health is more restrictive on out-of-network BH access than Sunshine
+  forbidden_facts:
+  - PCP referral required for outpatient therapy
+  - Members must call member services first
+  - All behavioral health requires prior authorization
+  - Out-of-network providers are accessible via self-referral
+  golden_citation:
+    document: Aetna Better Health Provider Manual
+    section: Behavioral Health Access > Referrals and Self-Referral
+  externally_verified: true
+  notes: intake staff hits this every shift — in-network/out-of-network distinction matters for routing

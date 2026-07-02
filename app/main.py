@@ -482,6 +482,32 @@ app.add_middleware(
 )
 
 
+def _platform_user(request: Request) -> "str | None":
+    """Verify a mobius-os platform JWT (Authorization: Bearer …) — the same
+    central auth chat uses (HS256, shared JWT_SECRET, type='access'). Returns the
+    user id (sub) if valid, else None. This lets a signed-in platform user
+    authorize admin endpoints with no separate key, identically to lexicon."""
+    import os
+    secret = os.environ.get("JWT_SECRET") or ""
+    if not secret:
+        return None
+    auth = request.headers.get("authorization") or ""
+    if not auth.lower().startswith("bearer "):
+        return None
+    token = auth[7:].strip()
+    if not token:
+        return None
+    try:
+        import jwt as _jwt
+        payload = _jwt.decode(token, secret, algorithms=["HS256"], options={"verify_exp": True})
+        if payload.get("type") != "access":
+            return None
+        sub = payload.get("sub")
+        return str(sub) if sub else None
+    except Exception:
+        return None
+
+
 @app.middleware("http")
 async def _admin_auth_middleware(request: Request, call_next):
     """Gate /admin/* behind ADMIN_API_KEY.
@@ -505,14 +531,18 @@ async def _admin_auth_middleware(request: Request, call_next):
                 status_code=503,
             )
         if ADMIN_API_KEY:
-            presented = request.headers.get("x-admin-key") or ""
-            # constant-time compare
-            import hmac as _hmac
-            if not _hmac.compare_digest(presented, ADMIN_API_KEY):
-                return JSONResponse(
-                    {"error": "unauthorized", "detail": "invalid or missing X-Admin-Key"},
-                    status_code=401,
-                )
+            # A signed-in PLATFORM user (mobius-os JWT, Bearer) is accepted as an
+            # alternative to the service-to-service X-Admin-Key — same central
+            # auth chat uses, so a logged-in user needs no separate key.
+            if not _platform_user(request):
+                presented = request.headers.get("x-admin-key") or ""
+                # constant-time compare
+                import hmac as _hmac
+                if not _hmac.compare_digest(presented, ADMIN_API_KEY):
+                    return JSONResponse(
+                        {"error": "unauthorized", "detail": "invalid or missing X-Admin-Key"},
+                        status_code=401,
+                    )
     return await call_next(request)
 
 
@@ -2949,6 +2979,734 @@ async def retag_status(db: AsyncSession = Depends(get_db)):
         "current": current,
         "untagged": untagged,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# In-place retag: recompute p/d/j tags on EXISTING policy_lines / paragraphs /
+# document_tags via UPDATE-by-PK — no delete+reinsert. A retag only changes
+# TAGS (the line text + embeddings are unchanged), so rebuilding rows is
+# wasteful and, at corpus scale, the delete-heavy Path B clear thrashes the
+# 2-vCPU DB's buffer pool (multi-minute stalls → statement timeouts). This
+# path touches only the JSONB tag columns, keyed by primary key, so it stays
+# cheap and index-free of any seq scan. Sync psycopg2 in a daemon thread so it
+# survives the request; poll /admin/retag-in-place/status.
+# ─────────────────────────────────────────────────────────────────────────
+_RETAG_INPLACE: dict = {
+    "running": False, "stop": False, "total": 0, "done": 0, "errors": 0,
+    "lines_updated": 0, "started_at": None, "finished_at": None,
+    "last_doc": None, "revision": None,
+}
+
+
+def _retag_inplace_dsn() -> str:
+    from app.config import DATABASE_URL
+    return (DATABASE_URL
+            .replace("postgresql+asyncpg://", "postgresql://")
+            .replace("postgresql+psycopg2://", "postgresql://"))
+
+
+class _AhoCorasick:
+    """Minimal pure-Python Aho-Corasick automaton for multi-pattern SUBSTRING
+    search in one O(text) pass. Replaces the O(lines × phrases) brute force in
+    the tag matcher — 5,054 phrase checks per line collapse to a single scan,
+    which is the difference between minutes and seconds on the giant handbooks
+    (up to 270k lines). Returns the set of pattern indices that occur in text.
+    """
+
+    __slots__ = ("goto", "fail", "out")
+
+    def __init__(self, patterns: list[str]):
+        self.goto: list[dict] = [{}]
+        self.fail: list[int] = [0]
+        self.out: list[list[int]] = [[]]
+        for idx, w in enumerate(patterns):
+            if not w:
+                continue
+            node = 0
+            for ch in w:
+                nxt = self.goto[node].get(ch)
+                if nxt is None:
+                    nxt = len(self.goto)
+                    self.goto.append({})
+                    self.fail.append(0)
+                    self.out.append([])
+                    self.goto[node][ch] = nxt
+                node = nxt
+            self.out[node].append(idx)
+        self._build()
+
+    def _build(self) -> None:
+        from collections import deque
+        q: deque = deque()
+        for _ch, nxt in self.goto[0].items():
+            self.fail[nxt] = 0
+            q.append(nxt)
+        while q:
+            r = q.popleft()
+            for ch, u in self.goto[r].items():
+                q.append(u)
+                f = self.fail[r]
+                while f and ch not in self.goto[f]:
+                    f = self.fail[f]
+                self.fail[u] = self.goto[f].get(ch, 0)
+                if self.out[self.fail[u]]:
+                    self.out[u] = self.out[u] + self.out[self.fail[u]]
+        # Freeze goto[0] to a plain dict lookup with default 0 at root.
+
+    def search(self, text: str) -> set:
+        found: set = set()
+        goto = self.goto
+        fail = self.fail
+        out = self.out
+        node = 0
+        for ch in text:
+            while node and ch not in goto[node]:
+                node = fail[node]
+            node = goto[node].get(ch, 0)
+            o = out[node]
+            if o:
+                found.update(o)
+        return found
+
+
+def _run_retag_inplace(document_ids, limit: int, only_stale: bool, max_lines: int = 0) -> None:
+    import psycopg2 as _pg
+    import psycopg2.extras as _extras
+    import json as _json
+    from types import SimpleNamespace
+    from datetime import datetime as _dt
+    from app.services.policy_path_b import (
+        get_phrase_to_tag_map, _normalize_phrase, _phrase_in_text,
+        _merge_tag_counts, _count_tags,
+    )
+    st = _RETAG_INPLACE
+    conn = None
+    try:
+        conn = _pg.connect(_retag_inplace_dsn(), connect_timeout=15)
+        conn.autocommit = False
+        cur = conn.cursor()
+        cur.execute("SET statement_timeout = 120000")
+
+        # 1) Lexicon snapshot (active entries) + current revision.
+        cur.execute("SELECT COALESCE(revision,0) FROM policy_lexicon_meta "
+                    "ORDER BY updated_at DESC NULLS LAST LIMIT 1")
+        row = cur.fetchone()
+        revision = int(row[0]) if row else 0
+        st["revision"] = revision
+        cur.execute("SELECT kind, code, spec FROM policy_lexicon_entries WHERE active = true")
+        p_tags, d_tags, j_tags = {}, {}, {}
+        for kind, code, spec in cur.fetchall():
+            spec = spec if isinstance(spec, dict) else {}
+            bucket = p_tags if kind == "p" else (d_tags if kind == "d" else j_tags)
+            bucket[str(code)] = spec
+        snap = SimpleNamespace(p_tags=p_tags, d_tags=d_tags, j_tags=j_tags,
+                               meta={"revision": revision})
+        phrase_map, refuted_map = get_phrase_to_tag_map(snap)
+        conn.commit()
+
+        # Aho-Corasick over all phrases → one O(line) scan instead of iterating
+        # all ~5k phrases per line. Semantics kept identical to
+        # _apply_tags_to_line_text: substring match for long phrases, and short
+        # (<=4 char) phrases still word-boundary-verified; refuted words still
+        # suppress. Built once, reused for every line of every doc.
+        phrase_items = list(phrase_map.items())   # [(phrase, (kind, code, score)), ...]
+        _ac = _AhoCorasick([p for p, _ in phrase_items])
+
+        def _ac_tags(line_text: str):
+            norm = _normalize_phrase(line_text)
+            if not norm:
+                return {}, {}, {}
+            p_t: dict = {}
+            d_t: dict = {}
+            j_t: dict = {}
+            for idx in _ac.search(norm):
+                phrase, (kind, code, score) = phrase_items[idx]
+                # Short phrases matched as substrings must still pass a word
+                # boundary check (parity with _phrase_in_text).
+                if len(phrase) <= 4 and not _phrase_in_text(phrase, norm):
+                    continue
+                if refuted_map:
+                    rw = refuted_map.get((kind, code))
+                    if rw and any(_phrase_in_text(w, norm) for w in rw):
+                        continue
+                target = p_t if kind == "p" else (d_t if kind == "d" else j_t)
+                if code not in target or score > target[code]:
+                    target[code] = score
+            return p_t, d_t, j_t
+
+        # 2) Target document set.
+        if document_ids:
+            target = list(document_ids)
+        elif only_stale:
+            cur.execute("SELECT document_id::text FROM document_tags "
+                        "WHERE lexicon_revision IS DISTINCT FROM %s", (revision,))
+            target = [r[0] for r in cur.fetchall()]
+        else:
+            cur.execute("SELECT DISTINCT document_id::text FROM policy_lines")
+            target = [r[0] for r in cur.fetchall()]
+        # Order SMALL docs first (one grouped count, indexed by document_id) so
+        # the bulk of the corpus lands in minutes and the handful of giant docs
+        # (up to ~270k lines — tagging is O(lines × phrases)) don't block the
+        # queue behind them. max_lines optionally DEFERS giants to a later run.
+        docs = list(target)
+        try:
+            cur.execute(
+                "SELECT document_id::text, count(*) AS c FROM policy_lines "
+                "WHERE document_id = ANY(%s::uuid[]) GROUP BY document_id "
+                "ORDER BY c ASC", (target,))
+            sized = cur.fetchall()
+            if max_lines and max_lines > 0:
+                sized = [(d, c) for (d, c) in sized if int(c) <= max_lines]
+            docs = [d for (d, _c) in sized]
+        except Exception as oe:  # noqa: BLE001
+            logger.warning("[retag-inplace] size-order failed, unordered: %s", oe)
+        if limit and limit > 0:
+            docs = docs[:limit]
+        conn.commit()
+        st.update({"total": len(docs), "done": 0, "errors": 0, "lines_updated": 0})
+
+        upd_lines = ("UPDATE policy_lines SET p_tags=%s::jsonb, d_tags=%s::jsonb, "
+                     "j_tags=%s::jsonb WHERE id=%s::uuid")
+        upd_paras = ("UPDATE policy_paragraphs SET p_tags=%s::jsonb, d_tags=%s::jsonb, "
+                     "j_tags=%s::jsonb WHERE id=%s::uuid")
+
+        # 3) Per doc: recompute in Python, UPDATE tag columns by PK.
+        for doc_id in docs:
+            if st.get("stop"):
+                break
+            try:
+                cur.execute("SELECT id::text, text, paragraph_id::text FROM policy_lines "
+                            "WHERE document_id = %s::uuid", (doc_id,))
+                rows = cur.fetchall()
+                line_updates = []
+                para_agg: dict = {}          # paragraph_id -> (aggp, aggd, aggj)
+                for lid, text, pid in rows:
+                    pt, dt_, jt = _ac_tags(text or "")
+                    line_updates.append((
+                        _json.dumps(pt) if pt else None,
+                        _json.dumps(dt_) if dt_ else None,
+                        _json.dumps(jt) if jt else None,
+                        lid,
+                    ))
+                    ap, ad, aj = para_agg.get(pid, ({}, {}, {}))
+                    para_agg[pid] = (
+                        _merge_tag_counts(ap, _count_tags(pt)),
+                        _merge_tag_counts(ad, _count_tags(dt_)),
+                        _merge_tag_counts(aj, _count_tags(jt)),
+                    )
+                if line_updates:
+                    _extras.execute_batch(cur, upd_lines, line_updates, page_size=500)
+                para_updates = [
+                    (_json.dumps(ap) if ap else None, _json.dumps(ad) if ad else None,
+                     _json.dumps(aj) if aj else None, pid)
+                    for pid, (ap, ad, aj) in para_agg.items() if pid
+                ]
+                if para_updates:
+                    _extras.execute_batch(cur, upd_paras, para_updates, page_size=500)
+                # Document-level aggregate.
+                dp, dd, dj = {}, {}, {}
+                for ap, ad, aj in para_agg.values():
+                    dp = _merge_tag_counts(dp, ap)
+                    dd = _merge_tag_counts(dd, ad)
+                    dj = _merge_tag_counts(dj, aj)
+                cur.execute(
+                    "UPDATE document_tags SET p_tags=%s::jsonb, d_tags=%s::jsonb, "
+                    "j_tags=%s::jsonb, lexicon_revision=%s, tagged_at=NOW() "
+                    "WHERE document_id=%s::uuid",
+                    (_json.dumps(dp) if dp else None, _json.dumps(dd) if dd else None,
+                     _json.dumps(dj) if dj else None, revision, doc_id),
+                )
+                if cur.rowcount == 0:
+                    cur.execute(
+                        "INSERT INTO document_tags (document_id, p_tags, d_tags, j_tags, "
+                        "lexicon_revision, tagged_at) VALUES (%s::uuid, %s::jsonb, %s::jsonb, "
+                        "%s::jsonb, %s, NOW())",
+                        (doc_id, _json.dumps(dp) if dp else None, _json.dumps(dd) if dd else None,
+                         _json.dumps(dj) if dj else None, revision),
+                    )
+                conn.commit()
+                st["done"] += 1
+                st["lines_updated"] += len(line_updates)
+                st["last_doc"] = doc_id
+            except Exception as de:  # noqa: BLE001
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                st["errors"] += 1
+                logger.warning("[retag-inplace] doc %s failed: %s", doc_id, de)
+        cur.close()
+    except Exception as e:  # noqa: BLE001
+        logger.error("[retag-inplace] fatal: %s", e, exc_info=True)
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        st["running"] = False
+        st["finished_at"] = _dt.utcnow().isoformat()
+
+
+@app.post("/admin/retag-in-place")
+def retag_in_place(body: dict = Body(default={})) -> dict:
+    """Recompute p/d/j tags on existing rows (UPDATE-by-PK; no delete+reinsert).
+    Body: {only_stale?: bool=true, limit?: int, document_ids?: [uuid]}.
+    Background; poll /admin/retag-in-place/status."""
+    import threading
+    from datetime import datetime as _dt
+    if _RETAG_INPLACE.get("running"):
+        return {"status": "already_running", **_RETAG_INPLACE}
+    ids = body.get("document_ids") or None
+    try:
+        limit = int(body.get("limit", 0) or 0)
+    except (ValueError, TypeError):
+        limit = 0
+    only_stale = bool(body.get("only_stale", True))
+    try:
+        max_lines = int(body.get("max_lines", 0) or 0)
+    except (ValueError, TypeError):
+        max_lines = 0
+    _RETAG_INPLACE.update({
+        "running": True, "stop": False, "total": 0, "done": 0, "errors": 0,
+        "lines_updated": 0, "started_at": _dt.utcnow().isoformat(),
+        "finished_at": None, "last_doc": None, "revision": None,
+    })
+    threading.Thread(target=_run_retag_inplace, args=(ids, limit, only_stale, max_lines),
+                     daemon=True).start()
+    return {"status": "started", "only_stale": only_stale, "limit": limit, "max_lines": max_lines}
+
+
+@app.get("/admin/retag-in-place/status")
+def retag_in_place_status() -> dict:
+    return dict(_RETAG_INPLACE)
+
+
+@app.post("/admin/retag-in-place/stop")
+def retag_in_place_stop() -> dict:
+    _RETAG_INPLACE["stop"] = True
+    return {"status": "stopping", **_RETAG_INPLACE}
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# One-touch data integrity: a single report of every corpus health gap, and
+# a single remediate action that queues the right fix for each. Powers the
+# "Check integrity" / "Fix all" buttons in the Repository tab so operators
+# don't hand-run publish/re-embed/re-chunk/retag steps.
+# ─────────────────────────────────────────────────────────────────────────
+_INTEGRITY_REMEDIATE: dict = {
+    "running": False, "step": None, "started_at": None, "finished_at": None,
+    "pruned_jobs": 0, "stuck_reset": 0, "rechunk_enqueued": 0,
+    "reembed_enqueued": 0, "retag_triggered": False,
+    "sitemap_backfilled": False, "metadata_backfilled": False, "error": None,
+}
+
+
+def _self_post(path: str, timeout: int = 300) -> bool:
+    """POST to this service's own admin endpoint (reuses tested async handlers
+    from the sync remediate thread). Auth via the service's X-Admin-Key."""
+    import urllib.request
+    import os
+    key = os.environ.get("ADMIN_API_KEY", "")
+    port = os.environ.get("PORT", "8080")
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}", method="POST",
+        headers={"X-Admin-Key": key, "Content-Type": "application/json"}, data=b"{}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return 200 <= r.status < 300
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[integrity-remediate] self-POST %s failed: %s", path, exc)
+        return False
+
+
+@app.get("/admin/integrity/report")
+def integrity_report() -> dict:
+    """One-call corpus-integrity snapshot for the ops UI. Every gap plus the
+    fix each needs. Fast indexed counts (sync psycopg2)."""
+    import psycopg2 as _pg
+    conn = _pg.connect(_retag_inplace_dsn(), connect_timeout=15)
+    try:
+        cur = conn.cursor()
+        cur.execute("SET statement_timeout = 60000")
+
+        def one(sql: str, args: tuple = ()) -> int:
+            cur.execute(sql, args)
+            row = cur.fetchone()
+            return int(row[0] or 0) if row else 0
+
+        documents_total = one("SELECT count(*) FROM documents")
+        published = one("SELECT count(DISTINCT document_id) FROM rag_published_embeddings")
+        unpublished = one(
+            "SELECT count(*) FROM documents d WHERE NOT EXISTS "
+            "(SELECT 1 FROM rag_published_embeddings e WHERE e.document_id=d.id)")
+        need_publish = one(
+            "SELECT count(*) FROM documents d WHERE NOT EXISTS "
+            "(SELECT 1 FROM rag_published_embeddings e WHERE e.document_id=d.id) "
+            "AND EXISTS (SELECT 1 FROM chunk_embeddings ce WHERE ce.document_id=d.id)")
+        need_embed = one(
+            "SELECT count(*) FROM documents d WHERE NOT EXISTS "
+            "(SELECT 1 FROM rag_published_embeddings e WHERE e.document_id=d.id) "
+            "AND NOT EXISTS (SELECT 1 FROM chunk_embeddings ce WHERE ce.document_id=d.id) "
+            "AND EXISTS (SELECT 1 FROM embeddable_units eu WHERE eu.document_id=d.id)")
+        # Docs with no chunks at all — split by whether source pages survive:
+        # WITH pages → fast deterministic re-chunk (Path B); WITHOUT → re-ingest.
+        need_rechunk = one(
+            "SELECT count(*) FROM documents d WHERE NOT EXISTS "
+            "(SELECT 1 FROM rag_published_embeddings e WHERE e.document_id=d.id) "
+            "AND NOT EXISTS (SELECT 1 FROM embeddable_units eu WHERE eu.document_id=d.id) "
+            "AND EXISTS (SELECT 1 FROM document_pages dp WHERE dp.document_id=d.id)")
+        need_reingest = one(
+            "SELECT count(*) FROM documents d WHERE NOT EXISTS "
+            "(SELECT 1 FROM rag_published_embeddings e WHERE e.document_id=d.id) "
+            "AND NOT EXISTS (SELECT 1 FROM embeddable_units eu WHERE eu.document_id=d.id) "
+            "AND NOT EXISTS (SELECT 1 FROM document_pages dp WHERE dp.document_id=d.id)")
+        failed_docs = one("SELECT count(*) FROM documents WHERE status='failed'")
+        stuck_docs = one("SELECT count(*) FROM documents WHERE status IN ('extracting','extracted')")
+        blocked_jobs = one("SELECT count(*) FROM chunking_jobs WHERE status='blocked'")
+        cancelled_jobs = one("SELECT count(*) FROM chunking_jobs WHERE status='cancelled'")
+        cur.execute("SELECT COALESCE(revision,0) FROM policy_lexicon_meta "
+                    "ORDER BY updated_at DESC NULLS LAST LIMIT 1")
+        r = cur.fetchone()
+        cur_rev = int(r[0]) if r else 0
+        stale_tags = one("SELECT count(*) FROM document_tags "
+                         "WHERE lexicon_revision IS DISTINCT FROM %s", (cur_rev,))
+        # The other integrity dimensions (mirror /pipeline_health).
+        sitemap_orphans = one(
+            "SELECT count(*) FROM documents d WHERE NOT EXISTS "
+            "(SELECT 1 FROM discovered_sources ds WHERE ds.ingested_doc_id=d.id)")
+        metadata_orphans = one(
+            "SELECT count(*) FROM documents d WHERE d.payer IS NULL OR d.payer='' "
+            "OR (d.state IS NULL AND d.program IS NULL)")
+
+        # Per-stage latency (completed jobs, last 24h) so the ops UI can see
+        # how long each stage takes and spot a slow/stuck stage at a glance.
+        def _lat(table: str) -> dict:
+            try:
+                cur.execute(
+                    f"SELECT count(*), "
+                    f"round(avg(EXTRACT(EPOCH FROM (completed_at-started_at)))::numeric,1), "
+                    f"round(max(EXTRACT(EPOCH FROM (completed_at-started_at)))::numeric,1) "
+                    f"FROM {table} WHERE status='completed' AND started_at IS NOT NULL "
+                    f"AND completed_at > NOW() - INTERVAL '24 hours'")
+                rr = cur.fetchone()
+                return {"count": int(rr[0] or 0),
+                        "avg_s": float(rr[1] or 0), "max_s": float(rr[2] or 0)}
+            except Exception:
+                return {"count": 0, "avg_s": 0.0, "max_s": 0.0}
+        latency = {"chunking": _lat("chunking_jobs"), "embedding": _lat("embedding_jobs")}
+        cur.close()
+
+        actionable = unpublished + failed_docs + stuck_docs + blocked_jobs + stale_tags
+        status = "green" if actionable == 0 else (
+            "red" if (unpublished + failed_docs) >= 200 else "yellow")
+        return {
+            "status": status,
+            "documents_total": documents_total,
+            "published": published,
+            "current_lexicon_revision": cur_rev,
+            "gaps": {
+                "unpublished_total": unpublished,
+                "need_publish": need_publish,           # have vectors, not published
+                "need_embed": need_embed,               # have chunks, no vectors
+                "need_rechunk": need_rechunk,            # no chunks, HAS pages → Path B (deterministic)
+                "need_reingest": need_reingest,          # no chunks, NO pages → needs re-ingest
+                "failed_docs": failed_docs,
+                "stuck_docs": stuck_docs,               # extracting/extracted
+                "blocked_jobs": blocked_jobs,
+                "cancelled_jobs_prunable": cancelled_jobs,
+                "stale_tags": stale_tags,               # need in-place retag
+                "sitemap_orphans": sitemap_orphans,     # no discovered_sources row
+                "metadata_orphans": metadata_orphans,   # missing payer/state/program
+            },
+            "latency": latency,                         # per-stage seconds (24h)
+        }
+    finally:
+        conn.close()
+
+
+def _run_integrity_remediate() -> None:
+    import psycopg2 as _pg
+    import threading
+    from datetime import datetime as _dt
+    st = _INTEGRITY_REMEDIATE
+    conn = None
+    try:
+        conn = _pg.connect(_retag_inplace_dsn(), connect_timeout=15)
+        conn.autocommit = True
+        cur = conn.cursor()
+        cur.execute("SET statement_timeout = 120000")
+
+        # 1) Prune historical cancelled jobs (keeps the claim query fast).
+        st["step"] = "prune"
+        cur.execute("DELETE FROM chunking_jobs WHERE status='cancelled'")
+        st["pruned_jobs"] = cur.rowcount or 0
+
+        # 2) Reset stuck docs so they re-chunk cleanly.
+        st["step"] = "reset_stuck"
+        cur.execute("UPDATE documents SET status='failed' "
+                    "WHERE status IN ('extracting','extracted')")
+        st["stuck_reset"] = cur.rowcount or 0
+
+        # 3) Enqueue re-chunk via the DETERMINISTIC lexicon path (generator 'B',
+        #    extraction_enabled='false') — NOT the LLM extraction path (gen 'A').
+        #    Path B builds paragraphs/lines + embeddable_units + applies lexicon
+        #    tags at ~ms/paragraph (no LLM), then embeds + auto-publishes.
+        #    Only docs that HAVE pages can be chunked; pageless docs need a full
+        #    re-ingest (out of scope here). skip_embedding='false' so the new
+        #    chunks get embedded + published.
+        st["step"] = "enqueue_rechunk"
+        cur.execute(
+            """
+            INSERT INTO chunking_jobs
+              (id, document_id, generator_id, threshold, status, extraction_enabled,
+               critique_enabled, max_retries, skip_embedding, failure_count,
+               created_at, updated_at, priority)
+            SELECT gen_random_uuid(), d.id, 'B', '0.6', 'pending', 'false',
+                   'false', 3, 'false', 0, NOW(), NOW(), 20
+            FROM documents d
+            WHERE (d.status = 'failed'
+                   OR NOT EXISTS (SELECT 1 FROM embeddable_units eu WHERE eu.document_id=d.id))
+              AND NOT EXISTS (SELECT 1 FROM rag_published_embeddings e WHERE e.document_id=d.id)
+              AND EXISTS (SELECT 1 FROM document_pages dp WHERE dp.document_id=d.id)
+              AND NOT EXISTS (SELECT 1 FROM chunking_jobs cj WHERE cj.document_id=d.id
+                              AND cj.generator_id='B' AND cj.status IN ('pending','processing'))
+            """
+        )
+        st["rechunk_enqueued"] = cur.rowcount or 0
+
+        # 4) Enqueue re-embed for unpublished docs that already have chunks
+        #    (embeddable_units) — the embed worker auto-publishes on completion.
+        st["step"] = "enqueue_reembed"
+        cur.execute(
+            """
+            INSERT INTO embedding_jobs
+              (id, document_id, status, generator_id, created_at, updated_at)
+            SELECT gen_random_uuid(), d.id, 'pending', 'B', NOW(), NOW()
+            FROM documents d
+            WHERE NOT EXISTS (SELECT 1 FROM rag_published_embeddings e WHERE e.document_id=d.id)
+              AND EXISTS (SELECT 1 FROM embeddable_units eu WHERE eu.document_id=d.id)
+              AND NOT EXISTS (SELECT 1 FROM embedding_jobs ej WHERE ej.document_id=d.id
+                              AND ej.status IN ('pending','processing'))
+            """
+        )
+        st["reembed_enqueued"] = cur.rowcount or 0
+        cur.close()
+
+        # 5) Kick the in-place retag for any stale tags (idempotent; reuses the
+        #    retag thread + AC matcher).
+        st["step"] = "retag"
+        if not _RETAG_INPLACE.get("running"):
+            _RETAG_INPLACE.update({
+                "running": True, "stop": False, "total": 0, "done": 0, "errors": 0,
+                "lines_updated": 0, "started_at": _dt.utcnow().isoformat(),
+                "finished_at": None, "last_doc": None, "revision": None,
+            })
+            threading.Thread(target=_run_retag_inplace, args=(None, 0, True, 0),
+                             daemon=True).start()
+            st["retag_triggered"] = True
+
+        # 6) Backfill the other integrity dimensions — reuse the tested async
+        #    endpoints via a self-POST (sitemap: synthetic discovered_sources
+        #    rows; metadata: infer state/program from payer).
+        st["step"] = "backfill_sitemap"
+        st["sitemap_backfilled"] = _self_post("/admin/backfill_sitemap?dry_run=false&max_docs=20000")
+        st["step"] = "backfill_metadata"
+        st["metadata_backfilled"] = _self_post("/admin/backfill_metadata?dry_run=false&max_docs=20000")
+    except Exception as e:  # noqa: BLE001
+        st["error"] = str(e)[:300]
+        logger.error("[integrity-remediate] fatal: %s", e, exc_info=True)
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        st["step"] = "done"
+        st["running"] = False
+        st["finished_at"] = _dt.utcnow().isoformat()
+
+
+@app.post("/admin/integrity/remediate")
+def integrity_remediate() -> dict:
+    """One-touch fix: prune cancelled jobs, reset stuck docs, enqueue re-chunk
+    (failed/no-chunk) + re-embed (have-chunks) jobs, and trigger the in-place
+    retag. The worker fleet then drains the queued jobs at its own pace — this
+    call only queues the work, it does not block. Poll
+    /admin/integrity/remediate/status."""
+    import threading
+    from datetime import datetime as _dt
+    if _INTEGRITY_REMEDIATE.get("running"):
+        return {"status": "already_running", **_INTEGRITY_REMEDIATE}
+    _INTEGRITY_REMEDIATE.update({
+        "running": True, "step": "starting", "started_at": _dt.utcnow().isoformat(),
+        "finished_at": None, "pruned_jobs": 0, "stuck_reset": 0,
+        "rechunk_enqueued": 0, "reembed_enqueued": 0, "retag_triggered": False,
+        "error": None,
+    })
+    threading.Thread(target=_run_integrity_remediate, daemon=True).start()
+    return {"status": "started"}
+
+
+@app.get("/admin/integrity/remediate/status")
+def integrity_remediate_status() -> dict:
+    return dict(_INTEGRITY_REMEDIATE)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Build embeddable_units directly from EXISTING policy_lines — no delete, no
+# rebuild, no re-tag. For docs that already have correct policy_lines (from the
+# retag) but lack embeddable_units, the full Path-B re-chunk wastefully deletes
+# + rebuilds 100k+ lines (minutes/doc). This just copies line text + tags into
+# embeddable_units (set-based INSERT...SELECT, ~ms/doc) and queues embedding,
+# which auto-publishes. Sync psycopg2 background; poll /status.
+# ─────────────────────────────────────────────────────────────────────────
+_BUILD_EU: dict = {
+    "running": False, "stop": False, "total": 0, "done": 0, "errors": 0,
+    "eu_rows": 0, "embed_queued": 0, "started_at": None, "finished_at": None,
+    "last_doc": None,
+}
+
+
+def _run_build_eu(limit: int) -> None:
+    import psycopg2 as _pg
+    from datetime import datetime as _dt
+    st = _BUILD_EU
+    conn = None
+    try:
+        conn = _pg.connect(_retag_inplace_dsn(), connect_timeout=15)
+        conn.autocommit = True
+        cur = conn.cursor()
+        cur.execute("SET statement_timeout = 120000")
+        # Docs that HAVE policy_lines but NO embeddable_units and aren't published.
+        cur.execute(
+            """
+            SELECT d.document_id::text FROM (
+                SELECT DISTINCT pl.document_id FROM policy_lines pl
+            ) d
+            WHERE NOT EXISTS (SELECT 1 FROM embeddable_units eu WHERE eu.document_id=d.document_id)
+              AND NOT EXISTS (SELECT 1 FROM rag_published_embeddings e WHERE e.document_id=d.document_id)
+            """
+        )
+        docs = [r[0] for r in cur.fetchall()]
+        if limit and limit > 0:
+            docs = docs[:limit]
+        st.update({"total": len(docs), "done": 0, "errors": 0,
+                   "eu_rows": 0, "embed_queued": 0})
+
+        for doc_id in docs:
+            if st.get("stop"):
+                break
+            try:
+                # 1) Copy existing policy_lines → embeddable_units (set-based).
+                cur.execute(
+                    """
+                    INSERT INTO embeddable_units
+                      (id, document_id, generator_id, source_type, source_id, text,
+                       page_number, paragraph_index, section_path, metadata, status, created_at)
+                    SELECT gen_random_uuid(), pl.document_id, 'B', 'policy_line', pl.id,
+                           btrim(pl.text), pl.page_number, pp.order_index, NULL,
+                           jsonb_build_object('p_tags', pl.p_tags, 'd_tags', pl.d_tags),
+                           'pending', NOW()
+                    FROM policy_lines pl
+                    JOIN policy_paragraphs pp ON pp.id = pl.paragraph_id
+                    WHERE pl.document_id = %s::uuid AND btrim(COALESCE(pl.text,'')) <> ''
+                    """,
+                    (doc_id,),
+                )
+                eu_n = cur.rowcount or 0
+                # 2) Cancel any redundant pending re-chunk job for this doc.
+                cur.execute(
+                    "UPDATE chunking_jobs SET status='cancelled' WHERE document_id=%s::uuid "
+                    "AND generator_id='B' AND status IN ('pending','processing')",
+                    (doc_id,),
+                )
+                # 3) Queue an embedding job (embed worker auto-publishes on done).
+                cur.execute(
+                    "INSERT INTO embedding_jobs (id, document_id, status, generator_id, "
+                    "created_at, updated_at) SELECT gen_random_uuid(), %s::uuid, 'pending', "
+                    "'B', NOW(), NOW() WHERE NOT EXISTS (SELECT 1 FROM embedding_jobs ej "
+                    "WHERE ej.document_id=%s::uuid AND ej.status IN ('pending','processing'))",
+                    (doc_id, doc_id),
+                )
+                st["embed_queued"] += (cur.rowcount or 0)
+                st["done"] += 1
+                st["eu_rows"] += eu_n
+                st["last_doc"] = doc_id
+            except Exception as de:  # noqa: BLE001
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                st["errors"] += 1
+                logger.warning("[build-eu] doc %s failed: %s", doc_id, de)
+        cur.close()
+    except Exception as e:  # noqa: BLE001
+        logger.error("[build-eu] fatal: %s", e, exc_info=True)
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        st["running"] = False
+        st["finished_at"] = _dt.utcnow().isoformat()
+
+
+@app.post("/admin/build-eu-from-lines")
+def build_eu_from_lines(body: dict = Body(default={})) -> dict:
+    """Backfill embeddable_units from existing policy_lines (no delete/rebuild),
+    then queue embedding. Body: {limit?: int}. Background; poll /status."""
+    import threading
+    from datetime import datetime as _dt
+    if _BUILD_EU.get("running"):
+        return {"status": "already_running", **_BUILD_EU}
+    try:
+        limit = int(body.get("limit", 0) or 0)
+    except (ValueError, TypeError):
+        limit = 0
+    _BUILD_EU.update({
+        "running": True, "stop": False, "total": 0, "done": 0, "errors": 0,
+        "eu_rows": 0, "embed_queued": 0, "started_at": _dt.utcnow().isoformat(),
+        "finished_at": None, "last_doc": None,
+    })
+    threading.Thread(target=_run_build_eu, args=(limit,), daemon=True).start()
+    return {"status": "started", "limit": limit}
+
+
+@app.get("/admin/build-eu-from-lines/status")
+def build_eu_status() -> dict:
+    return dict(_BUILD_EU)
+
+
+# ══ Nightly pipeline orchestrator (the whole loop behind one UI button) ═══════
+@app.post("/admin/nightly/run")
+def nightly_run(body: dict = Body(default={})) -> dict:
+    """Kick off the full corpus+lexicon loop (bracketed by eval) in a background
+    thread. Body: {include_eval(bool, default true), dry_run, skip_infra,
+    embed_budget_min, quiesce_budget_min, eval_bank}."""
+    from app import nightly_orchestrator as _nly
+    opts = {
+        "include_eval": bool(body.get("include_eval", True)),
+        "dry_run": bool(body.get("dry_run", False)),
+        "skip_infra": bool(body.get("skip_infra", False)),
+        "embed_budget_min": int(body.get("embed_budget_min", 60)),
+        "quiesce_budget_min": int(body.get("quiesce_budget_min", 20)),
+        "eval_bank": body.get("eval_bank", "eval/queries_cmhc.yaml"),
+    }
+    return _nly.start(opts)
+
+
+@app.get("/admin/nightly/status")
+def nightly_status() -> dict:
+    from app import nightly_orchestrator as _nly
+    return _nly.status()
+
+
+@app.post("/admin/nightly/stop")
+def nightly_stop() -> dict:
+    from app import nightly_orchestrator as _nly
+    return _nly.stop()
 
 
 @app.patch("/documents/{document_id}")

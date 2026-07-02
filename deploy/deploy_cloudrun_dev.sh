@@ -148,6 +148,7 @@ COMMON_SECRETS=(
   "MOBIUS_SKILL_LLM_INTERNAL_KEY=mobius-skill-llm-internal-key:latest"
   "ADMIN_API_KEY=rag-admin-api-key:latest"
   "CHROMA_AUTH_TOKEN=chroma-auth-token:latest"
+  "JWT_SECRET=jwt-secret:latest"
 )
 
 join_with() { local IFS="$1"; shift; echo "$*"; }
@@ -189,8 +190,10 @@ deploy_service() {
   gcloud run deploy "$name" "${flags[@]}"
 }
 
-# 3. API service (autoscales, minScale=0)
-deploy_service "mobius-rag" "" 0 10 "" "1Gi"
+# 3. API service. minScale=1 + no-cpu-throttling so fire-and-forget background
+#    tasks (the eval/calibration runner, which streams for ~30-40 min) keep CPU
+#    and aren't killed when the instance would otherwise scale down / throttle.
+deploy_service "mobius-rag" "" 1 10 "no" "1Gi"
 
 # 4. Chunking worker. Self-polling supervisor (FOR UPDATE SKIP LOCKED
 #    handles dedup across instances), so Cloud Run autoscaling never

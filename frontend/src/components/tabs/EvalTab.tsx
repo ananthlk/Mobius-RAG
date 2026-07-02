@@ -122,6 +122,8 @@ export function EvalTab() {
   const [runs, setRuns] = useState<EvalRunRow[]>([])
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
   const [runDetail, setRunDetail] = useState<{ run: EvalRunRow; results: EvalResultRow[] } | null>(null)
+  // 5-axis calibration summary (present only for forced-strategy calibration runs).
+  const [calibSummary, setCalibSummary] = useState<any>(null)
   const [expandedResultId, setExpandedResultId] = useState<string | null>(null)
   const [resultDetailCache, setResultDetailCache] = useState<Record<string, ResultDetail>>({})
   const [loading, setLoading] = useState(false)
@@ -293,11 +295,18 @@ export function EvalTab() {
     setExpandedResultId(null)
     setResultDetailCache({})
     setFilter(null)
+    setCalibSummary(null)
     fetch(`${API_BASE}/api/eval/runs/${selectedRunId}`)
       .then((r) => r.json())
       .then((d) => setRunDetail(d))
       .catch((e) => setError(`run detail: ${e}`))
       .finally(() => setLoading(false))
+    // 5-axis summary — populated only when the run has forced-strategy
+    // calibration cells (fact_checker metrics); otherwise strategies is empty.
+    fetch(`${API_BASE}/api/eval/runs/${selectedRunId}/calibration_summary`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setCalibSummary(d && Object.keys(d.strategies || {}).length ? d : null))
+      .catch(() => setCalibSummary(null))
   }, [selectedRunId])
 
   // Expand-on-click: lazy fetch full drilldown for selected result.
@@ -467,6 +476,7 @@ export function EvalTab() {
         {runDetail && (
           <>
             <RunHeader run={runDetail.run} />
+            {calibSummary && <CalibrationSummaryPanel data={calibSummary} />}
             <PRCurvePanel runId={runDetail.run.id} />
             <PipelineFunnel
               results={runDetail.results}
@@ -485,6 +495,56 @@ export function EvalTab() {
             />
           </>
         )}
+      </div>
+    </div>
+  )
+}
+
+// ── Calibration summary (5-axis + oracle) ───────────────────────────────
+
+function CalibrationSummaryPanel({ data }: { data: any }) {
+  const order = ['a', 'b', 'c', 'd', 'natural']
+  const strats = order.filter((s) => data.strategies?.[s])
+  const label = (s: string) => (s === 'natural' ? 'router' : s)
+  const fmt = (v: any, d = 2) => (v === null || v === undefined ? '—' : Number(v).toFixed(d))
+  const ms = (v: any) => (v === null || v === undefined ? '—' : `${Math.round(v)}ms`)
+  return (
+    <div style={{ border: '1px solid var(--border, #333)', borderRadius: 6, padding: 12, margin: '8px 0' }}>
+      <div style={{ fontWeight: 600, marginBottom: 6 }}>
+        🎯 Retrieval Calibration — 5-axis (chunk-only recall)
+      </div>
+      <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
+        <thead>
+          <tr style={{ textAlign: 'right', opacity: 0.7 }}>
+            <th style={{ textAlign: 'left' }}>strategy</th>
+            <th>answer-rate</th><th>recall</th><th>precision</th><th>contra/cell</th>
+            <th>median lat</th><th>p95 lat</th><th>n</th>
+          </tr>
+        </thead>
+        <tbody>
+          {strats.map((s) => {
+            const c = data.strategies[s]
+            return (
+              <tr key={s} style={{ textAlign: 'right', borderTop: '1px solid var(--border, #2a2a2a)' }}>
+                <td style={{ textAlign: 'left', fontWeight: 600 }}>{label(s)}</td>
+                <td>{fmt(c.answer_rate)}</td>
+                <td style={{ fontWeight: 600 }}>{fmt(c.recall)}</td>
+                <td>{fmt(c.precision)}</td>
+                <td style={{ color: c.contra_per_cell > 0 ? 'var(--warn, #d88)' : undefined }}>{fmt(c.contra_per_cell)}</td>
+                <td>{ms(c.median_latency_ms)}</td>
+                <td>{ms(c.p95_latency_ms)}</td>
+                <td style={{ opacity: 0.6 }}>{c.n}</td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+      <div style={{ marginTop: 8, fontSize: 13 }}>
+        <b>Oracle recall</b> {fmt(data.oracle_recall)} &nbsp;·&nbsp;
+        router {fmt(data.router_recall)} &nbsp;·&nbsp;
+        best single {fmt(data.best_single_recall)} &nbsp;·&nbsp;
+        <b>routing headroom {fmt(data.routing_headroom)}</b> (oracle − router)
+        <span style={{ opacity: 0.6 }}> &nbsp;({data.n_queries} queries)</span>
       </div>
     </div>
   )

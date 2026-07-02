@@ -21,6 +21,7 @@ dependencies = [
     "google-auth-oauthlib",
     "markdown>=3.5",
     "xhtml2pdf>=0.2.15",
+    "PyJWT>=2.8.0",
 ]
 
 [project.optional-dependencies]

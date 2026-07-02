@@ -57,6 +57,7 @@ import yaml  # noqa: E402
 
 from eval.judge import adjudicate  # noqa: E402
 from eval.run import insert_run, insert_result, finalize_run, _strip_nulls  # noqa: E402
+from app.services.fact_checker import check_facts  # noqa: E402  — retrieval critic (chunk-only recall)
 
 
 logging.basicConfig(
@@ -66,7 +67,10 @@ logging.basicConfig(
 logger = logging.getLogger("calibrate")
 
 
-STRATEGIES = ["a", "b", "c", "d"]   # (e) is a gate, not a competing strategy
+STRATEGIES = ["a", "b", "c", "d", "natural"]   # a-d forced; "natural" = router decides.
+# The 4 forced paths give per-strategy priors + the derived oracle (per-query max);
+# "natural" is the router's ACTUAL pick — measured alongside so a run shows
+# router-vs-oracle-vs-strategy in one place. "e" is a gate, not a competing path.
 
 
 # ---------------------------------------------------------------------------
@@ -95,8 +99,10 @@ async def call_agent(
     body: dict[str, Any] = {
         "query": query,
         "k": 5,
-        "mode": forced_strategy,        # forces the strategy
+        "skip_synthesis": True,         # retrieval-only — we score the CHUNKS, not the synthesized answer
     }
+    if forced_strategy != "natural":
+        body["mode"] = forced_strategy  # force the strategy; "natural" → router decides
     if caller_mode:
         body["caller_mode"] = caller_mode
 
@@ -322,54 +328,101 @@ async def run_calibration(
             # behind the abstain veil. Fixing here removes the post-hoc
             # backfill the analyst was doing manually.
             expected_strategy = (expected or {}).get("strategy")
+            must_facts = (expected or {}).get("must_facts") or []
+            forbidden = (expected or {}).get("forbidden_facts") or []
+            chunks = response.get("chunks") or []
+            recall_val: float | None = None
+            precision_val: float | None = None
+            n_cited: int | None = None
+            n_contra = 0
             if skip_judge:
-                verdict, score, reasoning, model = (
-                    "unable_to_verify", 0.5, "skipped", "skipped",
-                )
-                judge_ms = 0
+                verdict, score, reasoning, model, judge_ms = (
+                    "unable_to_verify", 0.5, "skipped", "skipped", 0)
             elif not answered:
                 if expected_strategy == "e":
                     verdict, score, reasoning, model = (
                         "correct", 1.0,
                         "abstain matched expected fail-fast",
-                        "deterministic/abstain",
-                    )
+                        "deterministic/abstain")
                 else:
-                    # ``false_negative`` is the parallel of
-                    # ``honest_abstain`` for SILENT abstains: the agent
-                    # produced no answer at all on a query where one
-                    # was expected. Distinct from ``wrong`` (an
-                    # assertively wrong claim) and from
-                    # ``honest_abstain`` (an explicit "I don't know
-                    # from these passages"). Scored 0.10 — penalised
-                    # more than honest_abstain (didn't try) but kept
-                    # separate from the wrong-answer band so the PR
-                    # curve can distinguish failure modes.
+                    # Silent abstain on an answerable query. NOTE: whether
+                    # this is an honest abstain (nothing retrievable) or a
+                    # failure-to-answer is resolved downstream by joining
+                    # recall — recall≈0 here (no chunks) means honest.
                     verdict, score, reasoning, model = (
                         "false_negative", 0.10,
                         "false negative — silently abstained on answerable query",
-                        "deterministic/abstain",
-                    )
+                        "deterministic/abstain")
                 judge_ms = 0
+                recall_val = 0.0
+            elif must_facts:
+                # RETRIEVAL scoring: are the golden facts present in the CHUNKS?
+                # (chunk-only fact_checker — answer-independent, so a strategy
+                # isn't penalised for a synthesizer that failed to use a chunk.)
+                try:
+                    fc = await asyncio.wait_for(
+                        check_facts(query=text, must_facts=must_facts,
+                                    chunks=chunks, forbidden_facts=forbidden),
+                        timeout=judge_timeout_s)
+                    recall_val = fc.score
+                    n_contra = sum(1 for v in fc.verdicts if v.contradicted)
+                    # Precision = distinct chunks that were RELEVANT (cited as
+                    # supporting a golden fact). Indexed to the THEORETICAL MAX
+                    # so it reads on a true [0,1] scale: a query with n_facts
+                    # golden facts can cite at most min(n_chunks, n_facts) chunks
+                    # (raw cited/n_chunks caps at n_facts/n_chunks ≈ 0.4-0.6 even
+                    # for perfect retrieval, which silently discounts gains).
+                    # theoretical_max = min(n_chunks, n_facts)/n_chunks →
+                    # precision_score = cited / min(n_chunks, n_facts), clamped 1.
+                    cited = {v.passage for v in fc.verdicts if v.support > 0 and v.passage}
+                    n_cited = len(cited)
+                    denom = min(len(chunks), len(must_facts)) or 1
+                    precision_val = round(min(1.0, n_cited / denom), 3)
+                    score = recall_val
+                    verdict = ("correct" if recall_val >= 0.67
+                               else "partial" if recall_val >= 0.34 else "wrong")
+                    reasoning = fc.reasoning
+                    model = fc.model
+                    judge_ms = fc.elapsed_ms
+                except asyncio.TimeoutError:
+                    verdict, score, reasoning, model, judge_ms = (
+                        "unable_to_verify", 0.5,
+                        f"factcheck_timeout after {judge_timeout_s}s",
+                        "timeout", int(judge_timeout_s * 1000))
+                    logger.warning("[%s/%s] fact_checker timed out", qid, strategy)
+                except Exception as exc:
+                    verdict, score, reasoning, model, judge_ms = (
+                        "unable_to_verify", 0.5, f"factcheck_error: {exc}", "error", 0)
             else:
+                # Legacy bank (no must_facts) → answer-quality judge fallback.
                 try:
                     verdict, score, reasoning, model, judge_ms = await asyncio.wait_for(
                         adjudicate(text, expected, response),
-                        timeout=judge_timeout_s,
-                    )
+                        timeout=judge_timeout_s)
                 except asyncio.TimeoutError:
                     verdict, score, reasoning, model, judge_ms = (
                         "unable_to_verify", 0.5,
                         f"judge_timeout after {judge_timeout_s}s",
-                        "timeout", int(judge_timeout_s * 1000),
-                    )
-                    logger.warning("[%s/%s] judge timed out", qid, strategy)
+                        "timeout", int(judge_timeout_s * 1000))
                 except Exception as exc:
                     verdict, score, reasoning, model, judge_ms = (
-                        "unable_to_verify", 0.5, f"judge_error: {exc}", "error", 0,
-                    )
+                        "unable_to_verify", 0.5, f"judge_error: {exc}", "error", 0)
 
             total_ms = (response.get("telemetry") or {}).get("total_ms") or elapsed_ms
+
+            # Calibration metrics for the summary endpoint (5-axis aggregation).
+            response["_calibration"] = {
+                "recall": recall_val,               # facts present in chunks (None if not scored)
+                "precision": precision_val,          # indexed: cited / min(n_chunks, n_facts) ∈ [0,1]
+                "n_cited": (n_cited if must_facts and recall_val is not None else None),  # raw components
+                "n_facts": (len(must_facts) or None),          # for transparency + post-hoc recompute
+                "n_contradicted": n_contra,          # chunks asserting a wrong fact (retrieval error)
+                "answered": answered,                # attempted vs abstained (answer-rate axis)
+                "strategy": strategy,
+                "query_class": qclass,
+                "latency_ms": total_ms,
+                "n_chunks": len(chunks),
+            }
 
             chunks_summary = []
             for c in (response.get("chunks") or [])[:5]:

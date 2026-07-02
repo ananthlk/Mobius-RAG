@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
 import { API_BASE } from '../../config'
 import { EntityCard } from './repository/EntityCard'
 import { ReaderSlideOut } from './repository/ReaderSlideOut'
@@ -249,6 +249,40 @@ function StatusPanel({ documents, onRefresh }: StatusPanelProps) {
   const [health, setHealth] = useState<any>(null)
   const [expanded, setExpanded] = useState(false)
   const [stageExpanded, setStageExpanded] = useState<Record<string, boolean>>({})
+
+  // ── One-touch data integrity (check + fix all) ──────────────────────────
+  const [integ, setInteg] = useState<any>(null)
+  const [integBusy, setIntegBusy] = useState(false)
+  const [remediate, setRemediate] = useState<any>(null)
+  const [integErr, setIntegErr] = useState<string | null>(null)
+
+  const checkIntegrity = async () => {
+    setIntegBusy(true); setIntegErr(null)
+    try {
+      const r = await fetch(`${API_BASE}/admin/integrity/report`)
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      setInteg(await r.json())
+    } catch (e) { setIntegErr(String(e)) } finally { setIntegBusy(false) }
+  }
+
+  const runRemediate = async () => {
+    if (!confirm('Fix all integrity gaps? This prunes cancelled jobs, resets stuck docs, and queues re-chunk / re-embed / retag work for the workers to drain.')) return
+    setIntegBusy(true); setIntegErr(null)
+    try {
+      const r = await fetch(`${API_BASE}/admin/integrity/remediate`, { method: 'POST' })
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      // Poll status until the queueing pass finishes (fast — it only enqueues).
+      for (let i = 0; i < 30; i++) {
+        await new Promise(res => setTimeout(res, 1500))
+        const s = await fetch(`${API_BASE}/admin/integrity/remediate/status`)
+        if (s.ok) {
+          const st = await s.json(); setRemediate(st)
+          if (!st.running) break
+        }
+      }
+      await checkIntegrity()
+    } catch (e) { setIntegErr(String(e)) } finally { setIntegBusy(false) }
+  }
 
   useEffect(() => {
     let alive = true
@@ -659,7 +693,266 @@ function StatusPanel({ documents, onRefresh }: StatusPanelProps) {
           </button>
         </div>
       )}
+
+      {/* ── One-touch data integrity ─────────────────────────────────────── */}
+      <div style={{ padding: '0 12px 14px' }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
+          <strong style={{ fontSize: 12, color: 'var(--mobius-text-secondary)' }}>Data integrity</strong>
+          {integ && <Dot s={integ.status} title={`Integrity: ${integ.status}`} />}
+          <button type="button" disabled={integBusy}
+            style={{ fontSize: 11, padding: '0.2rem 0.6rem', border: '1px solid var(--mobius-border)',
+                     borderRadius: 'var(--mobius-radius-sm)', background: 'var(--mobius-bg-secondary)',
+                     color: 'var(--mobius-text-secondary)', cursor: integBusy ? 'default' : 'pointer' }}
+            onClick={checkIntegrity}>{integBusy ? 'Checking…' : 'Check integrity'}</button>
+          {integ && (integ.gaps?.unpublished_total > 0 || integ.gaps?.failed_docs > 0 ||
+                     integ.gaps?.stuck_docs > 0 || integ.gaps?.stale_tags > 0 ||
+                     integ.gaps?.cancelled_jobs_prunable > 0 || integ.gaps?.sitemap_orphans > 0 ||
+                     integ.gaps?.metadata_orphans > 0) && (
+            <button type="button" disabled={integBusy}
+              style={{ fontSize: 11, padding: '0.2rem 0.6rem', border: '1px solid #ef4444',
+                       borderRadius: 'var(--mobius-radius-sm)', background: 'rgba(239,68,68,0.08)',
+                       color: '#b91c1c', cursor: integBusy ? 'default' : 'pointer' }}
+              onClick={runRemediate}>{integBusy ? 'Working…' : 'Fix all'}</button>
+          )}
+        </div>
+        {integErr && <div style={{ fontSize: 11, color: '#b91c1c' }}>{integErr}</div>}
+        {integ && (
+          <div style={{ fontSize: 11, color: 'var(--mobius-text-secondary)', display: 'grid',
+                        gridTemplateColumns: '1fr auto', gap: '1px 10px' }}>
+            {([
+              ['Published', `${integ.published} / ${integ.documents_total}`],
+              ['Need publish (have vectors)', integ.gaps?.need_publish],
+              ['Need re-embed (have chunks)', integ.gaps?.need_embed],
+              ['Need re-chunk (has pages · Path B)', integ.gaps?.need_rechunk],
+              ['Need re-ingest (no pages)', integ.gaps?.need_reingest],
+              ['Stuck (extracting/extracted)', integ.gaps?.stuck_docs],
+              ['Blocked jobs', integ.gaps?.blocked_jobs],
+              ['Cancelled jobs (prunable)', integ.gaps?.cancelled_jobs_prunable],
+              ['Stale tags (need retag)', integ.gaps?.stale_tags],
+              ['Sitemap orphans', integ.gaps?.sitemap_orphans],
+              ['Metadata orphans', integ.gaps?.metadata_orphans],
+            ] as [string, any][]).map(([label, val]) => (
+              <Fragment key={label}>
+                <span>{label}</span>
+                <span style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums',
+                               color: (typeof val === 'number' && val > 0) ? '#b45309' : 'inherit' }}>
+                  {val ?? '—'}
+                </span>
+              </Fragment>
+            ))}
+          </div>
+        )}
+        {integ?.latency && (
+          <div style={{ fontSize: 11, color: 'var(--mobius-text-secondary)', marginTop: 6 }}>
+            Latency (24h): chunk {integ.latency.chunking?.avg_s ?? 0}s avg / {integ.latency.chunking?.max_s ?? 0}s max
+            · embed {integ.latency.embedding?.avg_s ?? 0}s avg / {integ.latency.embedding?.max_s ?? 0}s max
+          </div>
+        )}
+        {remediate && (
+          <div style={{ fontSize: 11, color: 'var(--mobius-text-secondary)', marginTop: 6 }}>
+            Fix: pruned {remediate.pruned_jobs}, reset {remediate.stuck_reset}, re-chunk {remediate.rechunk_enqueued},
+            re-embed {remediate.reembed_enqueued}{remediate.retag_triggered ? ', retag queued' : ''}
+            {remediate.sitemap_backfilled ? ', sitemap fixed' : ''}{remediate.metadata_backfilled ? ', metadata fixed' : ''}
+            {remediate.running ? ' …' : ' ✓'}
+            {remediate.error && <span style={{ color: '#b91c1c' }}> — {remediate.error}</span>}
+          </div>
+        )}
+      </div>
     </>
+  )
+}
+
+// ── PipelinePanel — one-button nightly loop with live stage tracker ──────────
+const _STEP_ORDER = ['infra_up', 'baseline_eval', 'publish', 'retag', 'chunk',
+  'embed', 'gate', 'freeze', 'final_eval', 'push', 'infra_down', 'lift']
+
+const _stepColor = (s?: string) =>
+  s === 'done' ? '#10b981' : s === 'running' ? '#3b82f6'
+    : s === 'failed' ? '#ef4444' : s === 'skipped' ? '#94a3b8' : '#cbd5e1'
+
+function _fmtDur(a?: string | null, b?: string | null): string {
+  if (!a) return ''
+  const end = b ? new Date(b).getTime() : Date.now()
+  const s = Math.max(0, (end - new Date(a).getTime()) / 1000)
+  if (s < 60) return `${Math.round(s)}s`
+  if (s < 3600) return `${Math.round(s / 60)}m`
+  return `${(s / 3600).toFixed(1)}h`
+}
+
+function PipelinePanel({ documents, onRefresh }: StatusPanelProps) {
+  const [nly, setNly] = useState<any>(null)
+  const [rep, setRep] = useState<any>(null)
+  const [includeEval, setIncludeEval] = useState(true)
+  const [dryRun, setDryRun] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const running = !!nly?.running
+
+  const fetchStatus = async () => {
+    try { const r = await fetch(`${API_BASE}/admin/nightly/status`); if (r.ok) setNly(await r.json()) } catch { /* ignore */ }
+  }
+  const fetchReport = async () => {
+    try { const r = await fetch(`${API_BASE}/admin/integrity/report`); if (r.ok) setRep(await r.json()) } catch { /* ignore */ }
+  }
+  useEffect(() => { fetchStatus(); fetchReport() }, [])
+  useEffect(() => {
+    const id = setInterval(() => { fetchStatus(); if (!running) fetchReport() }, running ? 4000 : 15000)
+    return () => clearInterval(id)
+  }, [running])
+
+  const run = async () => {
+    const msg = `Run nightly pipeline?${includeEval ? '\nIncludes the eval bracket (~50 min).' : ''}${dryRun ? '\n(dry run — no mutations)' : ''}`
+    if (!confirm(msg)) return
+    setBusy(true)
+    try {
+      await fetch(`${API_BASE}/admin/nightly/run`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ include_eval: includeEval, dry_run: dryRun }),
+      })
+      await fetchStatus()
+    } finally { setBusy(false) }
+  }
+  const stop = async () => {
+    if (!confirm('Stop the running pipeline after the current step?')) return
+    await fetch(`${API_BASE}/admin/nightly/stop`, { method: 'POST' })
+    await fetchStatus()
+  }
+
+  const steps: any[] = nly?.steps || []
+  const lift = nly?.lift
+  const gaps = rep?.gaps || {}
+  const openGaps = ['unpublished_total', 'failed_docs', 'stuck_docs', 'blocked_jobs', 'stale_tags']
+    .reduce((a, k) => a + (gaps[k] || 0), 0)
+  const lastLift = lift?.router_recall?.delta
+  const card = (label: string, value: any, sub?: string, color?: string) => (
+    <div style={{ background: 'var(--mobius-surface-elevated, #f8fafc)', borderRadius: 8, padding: '10px 14px' }}>
+      <div style={{ fontSize: 12, color: 'var(--mobius-text-secondary)' }}>{label}</div>
+      <div style={{ fontSize: 22, fontWeight: 600, color: color || 'inherit' }}>{value}
+        {sub && <span style={{ fontSize: 12, color: 'var(--mobius-text-secondary)', fontWeight: 400 }}> {sub}</span>}</div>
+    </div>
+  )
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {/* header + actions */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+        <div>
+          <div style={{ fontSize: 15, fontWeight: 600 }}>Nightly pipeline</div>
+          <div style={{ fontSize: 12, color: 'var(--mobius-text-secondary)' }}>Corpus + lexicon → RAG → chat, bracketed by eval</div>
+        </div>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+          <label style={{ fontSize: 12, color: 'var(--mobius-text-secondary)', display: 'flex', gap: 4, alignItems: 'center' }}>
+            <input type="checkbox" checked={includeEval} disabled={running} onChange={e => setIncludeEval(e.target.checked)} /> eval bracket</label>
+          <label style={{ fontSize: 12, color: 'var(--mobius-text-secondary)', display: 'flex', gap: 4, alignItems: 'center' }}>
+            <input type="checkbox" checked={dryRun} disabled={running} onChange={e => setDryRun(e.target.checked)} /> dry run</label>
+          {running ? (
+            <button type="button" onClick={stop}
+              style={{ padding: '7px 14px', borderRadius: 8, border: '1px solid #ef4444', color: '#ef4444', background: 'transparent', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Stop</button>
+          ) : (
+            <button type="button" onClick={run} disabled={busy}
+              style={{ padding: '7px 14px', borderRadius: 8, border: 'none', color: '#fff', background: '#2563eb', fontSize: 13, fontWeight: 600, cursor: busy ? 'wait' : 'pointer' }}>
+              {busy ? 'Starting…' : '▶ Run pipeline'}</button>
+          )}
+        </div>
+      </div>
+
+      {/* metric cards */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0,1fr))', gap: 12 }}>
+        {card('Published', (rep?.published ?? '—').toLocaleString?.() ?? rep?.published ?? '—', rep ? `/ ${rep.documents_total?.toLocaleString?.()}` : '')}
+        {card('Lexicon rev', rep?.current_lexicon_revision ?? '—')}
+        {card('Open gaps', rep ? openGaps : '—')}
+        {card('Last lift Δrouter', typeof lastLift === 'number' ? `${lastLift >= 0 ? '+' : ''}${lastLift.toFixed(3)}` : '—', '',
+          typeof lastLift === 'number' ? (lastLift >= 0 ? '#10b981' : '#ef4444') : undefined)}
+      </div>
+
+      {/* live stage tracker */}
+      {steps.length > 0 && (
+        <div style={{ background: 'var(--mobius-surface, #fff)', border: '1px solid var(--mobius-border, #e2e8f0)', borderRadius: 12, padding: '12px 16px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, fontWeight: 600, marginBottom: 10 }}>
+            <span>Run progress</span>
+            <span style={{ color: 'var(--mobius-text-secondary)', fontWeight: 400 }}>
+              {nly?.running ? `running · ${_fmtDur(nly?.started_at)}` : nly?.finished_at ? `done · ${_fmtDur(nly?.started_at, nly?.finished_at)}` : 'idle'}
+              {nly?.error ? ` · error: ${nly.error}` : ''}
+            </span>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column' }}>
+            {[...steps].sort((a, b) => _STEP_ORDER.indexOf(a.key) - _STEP_ORDER.indexOf(b.key)).map(s => {
+              const log: string[] = s.log || []
+              const hasDetail = log.length > 0 || s.started_at
+              const summaryRow = (
+                <span style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13, flex: 1 }}>
+                  <span style={{ width: 9, height: 9, borderRadius: 999, background: _stepColor(s.status), flexShrink: 0 }} />
+                  <span style={{ width: 150, fontWeight: s.status === 'running' ? 600 : 400 }}>{s.label}</span>
+                  <span style={{ flex: 1, color: 'var(--mobius-text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.detail || (s.status === 'pending' ? '—' : s.status)}</span>
+                  <span style={{ color: 'var(--mobius-text-secondary)', fontSize: 12 }}>{s.status === 'running' || s.status === 'done' || s.status === 'failed' ? _fmtDur(s.started_at, s.ended_at) : ''}</span>
+                </span>
+              )
+              const body = (
+                <div style={{ margin: '2px 0 8px 19px', padding: '8px 10px', background: 'var(--mobius-surface-elevated, #f8fafc)', borderRadius: 6, fontSize: 12 }}>
+                  <div style={{ color: 'var(--mobius-text-secondary)', marginBottom: 6 }}>
+                    status <b style={{ color: _stepColor(s.status) }}>{s.status}</b>
+                    {s.started_at && <> · started {new Date(s.started_at).toLocaleTimeString()}</>}
+                    {s.ended_at && <> · ended {new Date(s.ended_at).toLocaleTimeString()}</>}
+                    {(s.key === 'baseline_eval' || s.key === 'final_eval') && nly?.eval_run_id && s.status === 'running' && <> · run {String(nly.eval_run_id).slice(0, 8)}</>}
+                  </div>
+                  {s.key === 'gate' && nly?.gate && (
+                    <div style={{ fontFamily: 'monospace', marginBottom: 6 }}>
+                      published {nly.gate.published}/{nly.gate.documents_total} · frac {nly.gate.frac} · stale_tags {nly.gate.stale_tags} → {nly.gate.passed ? 'PASS' : 'FAIL'}
+                    </div>
+                  )}
+                  {log.length > 0 ? (
+                    <div style={{ fontFamily: 'monospace', whiteSpace: 'pre-wrap', lineHeight: 1.5, maxHeight: 220, overflow: 'auto', color: 'var(--mobius-text-secondary)' }}>
+                      {log.join('\n')}
+                    </div>
+                  ) : <div style={{ color: 'var(--mobius-text-secondary)' }}>no log yet</div>}
+                </div>
+              )
+              return hasDetail ? (
+                <details key={s.key} style={{ padding: '3px 0' }}>
+                  <summary style={{ cursor: 'pointer', listStyle: 'none', display: 'flex', alignItems: 'center' }}>{summaryRow}</summary>
+                  {body}
+                </details>
+              ) : (
+                <div key={s.key} style={{ padding: '5px 0', display: 'flex' }}>{summaryRow}</div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* eval bracket */}
+      {lift && (
+        <div style={{ background: 'var(--mobius-surface, #fff)', border: '1px solid var(--mobius-border, #e2e8f0)', borderRadius: 12, padding: '12px 16px' }}>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Eval bracket — baseline → final</div>
+          <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
+            <thead><tr style={{ color: 'var(--mobius-text-secondary)', fontSize: 12 }}>
+              <td>metric</td><td style={{ textAlign: 'right' }}>baseline</td><td style={{ textAlign: 'right' }}>final</td><td style={{ textAlign: 'right' }}>Δ</td></tr></thead>
+            <tbody>
+              {['router_recall', 'oracle_recall', 'best_single_recall', 'routing_headroom'].map(k => {
+                const row = lift[k] || {}
+                const d = row.delta
+                return (
+                  <tr key={k}>
+                    <td style={{ padding: '4px 0' }}>{k}</td>
+                    <td style={{ textAlign: 'right' }}>{row.baseline ?? '—'}</td>
+                    <td style={{ textAlign: 'right' }}>{row.final ?? '—'}</td>
+                    <td style={{ textAlign: 'right', color: typeof d === 'number' ? (d >= 0 ? '#10b981' : '#ef4444') : 'inherit' }}>
+                      {typeof d === 'number' ? `${d >= 0 ? '+' : ''}${d.toFixed(3)}` : '—'}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* legacy integrity/health — demoted to a collapsed section */}
+      <details style={{ fontSize: 13 }}>
+        <summary style={{ cursor: 'pointer', color: 'var(--mobius-text-secondary)', padding: '4px 0' }}>Integrity + pipeline health (details)</summary>
+        <div style={{ marginTop: 8 }}>
+          <StatusPanel documents={documents} onRefresh={onRefresh} />
+        </div>
+      </details>
+    </div>
   )
 }
 
@@ -1181,7 +1474,7 @@ export function RepositoryTab({
           {/* Status tab */}
           {rightTab === 'status' && (
             <div className="repo-tab-pane repo-status-pane">
-              <StatusPanel documents={documents} onRefresh={onRefresh} />
+              <PipelinePanel documents={documents} onRefresh={onRefresh} />
             </div>
           )}
         </div>

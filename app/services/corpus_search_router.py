@@ -197,7 +197,7 @@ QueryClass = Literal[
     "vague",              # VAGUE classification (no tags, no literals)
 ]
 
-PRIORS_VERSION = "v1.2.7.2026-05-05"
+PRIORS_VERSION = "v2.1.2026-07-01-canonical-blend"  # +canonical/factual prior blend for b/d niche (run 41b5c5e7)
 
 # v1.2 update — derived from N=5 strategy×query verdict matrix
 # (eval/calibration/strategy_matrix_n5_20260503-183648.json) with
@@ -239,77 +239,108 @@ PRIORS_VERSION = "v1.2.7.2026-05-05"
 #   • vague: all four drop sharply (means 0.0). Cmhc009 routes to (e)
 #     fail-fast.
 _BASE_PRIORS: dict[StrategyId, dict[QueryClass, StrategyPrior]] = {
-    "a": {  # BM25 cascade — POST SQL-FIX: retrieval is fully deterministic (confirmed in
-            # N=3 a-only matrix). Within-cell σ now equals judge σ (~0.18); after
-            # Pythagorean correction, strategy σ ≈ 0 on every class. Means also
-            # bumped because the deterministic top-K is the principled BM25 winner,
-            # not a random truncation — cmhc006/a went from 0.90 σ=0.22 to 1.0 σ=0.
-        # N=3 post-fix on cmhc002/005/008: pooled mean 0.61, within-σ 0.19 → corrected σ ≈ 0.05
-        "literal_anchor": StrategyPrior(["structured"], accuracy=0.610, accuracy_std=0.000, recall_capacity=0.55, speed=0.95),
-        # N=3 post-fix on cmhc001/006/007/010: pooled mean 0.69, within-σ 0.09 → corrected σ < 0 → clamp 0
-        "tight_pool":     StrategyPrior(["structured"], accuracy=0.690, accuracy_std=0.000, recall_capacity=0.65, speed=0.95),
-        # N=3 post-fix on cmhc003/004: pooled mean 0.92, within-σ 0.14 → corrected σ < 0 → clamp 0
-        "wide_pool":      StrategyPrior(["structured"], accuracy=0.920, accuracy_std=0.000, recall_capacity=0.40, speed=0.80),
-        # BM25 keyword search misses conceptual synonymy — low accuracy, low recall.
-        # Speed advantage is marginal when (b) vector-broad is nearby in latency.
-        "conceptual":     StrategyPrior(["structured"], accuracy=0.25,  accuracy_std=0.000, recall_capacity=0.25, speed=0.85),
-        "exploratory":    StrategyPrior(["structured"], accuracy=0.55,  accuracy_std=0.20, recall_capacity=0.35, speed=0.85),
-        "vague":          StrategyPrior(["structured"], accuracy=0.000, accuracy_std=0.000, recall_capacity=0.25, speed=0.85),
+    "a": {
+        "literal_anchor": StrategyPrior(['structured'], accuracy=0.329, accuracy_std=0.229, recall_capacity=1, speed=0.07),  # calib n=7
+        "tight_pool": StrategyPrior(['structured'], accuracy=0.5, accuracy_std=0.126, recall_capacity=1, speed=0.72),  # calib n=8
+        "wide_pool": StrategyPrior(['structured'], accuracy=0.667, accuracy_std=0.105, recall_capacity=1, speed=0.62),  # calib n=6
+        "conceptual": StrategyPrior(['structured'], accuracy=0.405, accuracy_std=0.194, recall_capacity=0.905, speed=0.94),  # calib n=21
+        "exploratory": StrategyPrior(['structured'], accuracy=0.55, accuracy_std=0.2, recall_capacity=0.35, speed=0.85),  # (no calib data — kept)
+        "vague": StrategyPrior(['structured'], accuracy=0.0, accuracy_std=0.0, recall_capacity=0, speed=0.95),  # calib n=4
     },
-    "b": {  # Wide → Themes → Narrow — vector-led, wins on paraphrasable conceptual queries
-        # N=5 mean=0.533, σ_total=0.129 → BELOW judge floor → σ_strategy=0 (truly deterministic)
-        "literal_anchor": StrategyPrior(["structured", "essay"], accuracy=0.533, accuracy_std=0.000, recall_capacity=0.55, speed=0.80),
-        # N=5 mean=0.500, σ_total=0.513 → σ_strategy=0.479 (real bimodal: hit-or-miss on tight pools)
-        "tight_pool":     StrategyPrior(["structured", "essay"], accuracy=0.500, accuracy_std=0.479, recall_capacity=0.70, speed=0.85),
-        # N=5 mean=0.730, σ_total=0.271 → σ_strategy=0.201
-        "wide_pool":      StrategyPrior(["structured", "essay"], accuracy=0.730, accuracy_std=0.201, recall_capacity=0.75, speed=0.80),
-        # Vector-broad excels at conceptual queries — semantic similarity captures
-        # paraphrase and definition better than any keyword approach.
-        "conceptual":     StrategyPrior(["structured", "essay"], accuracy=0.70,  accuracy_std=0.15, recall_capacity=0.80, speed=0.80),
-        "exploratory":    StrategyPrior(["structured", "essay"], accuracy=0.75,  accuracy_std=0.20, recall_capacity=0.85, speed=0.85),
-        "vague":          StrategyPrior(["structured", "essay"], accuracy=0.000, accuracy_std=0.000, recall_capacity=0.65, speed=0.85),
+    "b": {
+        "literal_anchor": StrategyPrior(['structured', 'essay'], accuracy=0.474, accuracy_std=0.264, recall_capacity=1, speed=0.12),  # calib n=7
+        "tight_pool": StrategyPrior(['structured', 'essay'], accuracy=0.334, accuracy_std=0.357, recall_capacity=0.5, speed=0.3),  # calib n=8
+        "wide_pool": StrategyPrior(['structured', 'essay'], accuracy=0.3, accuracy_std=0.298, recall_capacity=0.6, speed=0.3),  # calib n=5
+        "conceptual": StrategyPrior(['structured', 'essay'], accuracy=0.317, accuracy_std=0.401, recall_capacity=0.476, speed=0.23),  # calib n=21
+        "exploratory": StrategyPrior(['structured', 'essay'], accuracy=0.75, accuracy_std=0.2, recall_capacity=0.85, speed=0.85),  # (no calib data — kept)
+        "vague": StrategyPrior(['structured', 'essay'], accuracy=0.0, accuracy_std=0.0, recall_capacity=0, speed=0.95),  # calib n=4
     },
-    "c": {  # Reverse RAG — bimodal: empty on retrieval miss OR LLM-prior hits
-        # N=5 mean=0.273, σ_total=0.413 → σ_strategy=0.371 (high — bimodal answer pattern)
-        "literal_anchor": StrategyPrior(["essay", "structured"], accuracy=0.273, accuracy_std=0.371, recall_capacity=0.55, speed=0.40, cost_per_call=0.02),
-        # N=5 mean=0.575, σ_total=0.335 → σ_strategy=0.281
-        "tight_pool":     StrategyPrior(["essay", "structured"], accuracy=0.575, accuracy_std=0.281, recall_capacity=0.60, speed=0.40, cost_per_call=0.02),
-        # N=5 mean=0.350, σ_total=0.337 → σ_strategy=0.283 (often returns empty)
-        "wide_pool":      StrategyPrior(["essay", "structured"], accuracy=0.350, accuracy_std=0.283, recall_capacity=0.55, speed=0.40, cost_per_call=0.02),
-        # LLM parametric prior is reliable for policy/clinical conceptual questions
-        # (stable knowledge, not time-sensitive). Accuracy higher, std lower than wide_pool
-        # because conceptual answers don't depend on exact corpus coverage.
-        "conceptual":     StrategyPrior(["essay", "structured"], accuracy=0.75,  accuracy_std=0.15, recall_capacity=0.70, speed=0.40, cost_per_call=0.02),
-        "exploratory":    StrategyPrior(["essay", "structured"], accuracy=0.60,  accuracy_std=0.30, recall_capacity=0.85, speed=0.40, cost_per_call=0.02),
-        "vague":          StrategyPrior(["essay", "structured"], accuracy=0.000, accuracy_std=0.000, recall_capacity=0.50, speed=0.40, cost_per_call=0.02),
+    "c": {
+        "literal_anchor": StrategyPrior(['essay', 'structured'], accuracy=0.0, accuracy_std=0.0, recall_capacity=0.714, speed=0.05, cost_per_call=0.02),  # calib n=7
+        "tight_pool": StrategyPrior(['essay', 'structured'], accuracy=0.107, accuracy_std=0.142, recall_capacity=0.857, speed=0.12, cost_per_call=0.02),  # calib n=7
+        "wide_pool": StrategyPrior(['essay', 'structured'], accuracy=0.0, accuracy_std=0.0, recall_capacity=0.5, speed=0.09, cost_per_call=0.02),  # calib n=6
+        "conceptual": StrategyPrior(['essay', 'structured'], accuracy=0.233, accuracy_std=0.278, recall_capacity=0.55, speed=0.09, cost_per_call=0.02),  # calib n=20
+        "exploratory": StrategyPrior(['essay', 'structured'], accuracy=0.6, accuracy_std=0.3, recall_capacity=0.85, speed=0.4, cost_per_call=0.02),  # (no calib data — kept)
+        "vague": StrategyPrior(['essay', 'structured'], accuracy=0.0, accuracy_std=0.0, recall_capacity=0, speed=0.95, cost_per_call=0.02),  # calib n=4
     },
-    "d": {  # External (Google + scrape) — moderate recall, dominated by SERP variance.
-            #
-            # IMPORTANT: ``recall_capacity`` here is "P(useful retrieval)", NOT
-            # "P(any retrieval"). The old v1.1 values of 0.95–1.0 reflected the
-            # latter ("Google always returns something") and double-counted with
-            # ``accuracy``: in the v1.2 first-pass routing, (d) won cmhc006 and
-            # cmhc010 over (a) purely on its 0.95 recall × 0.95 demand (≈ 0.90
-            # contribution) even though its empirical accuracy was lower. The
-            # post-v1.2 baseline regressed cmhc006 from CORR(1.00) → UNAB(0.50)
-            # because of this. Fix: collapse recall_capacity to the empirical
-            # accuracy floor — which is the rate at which (d) ACTUALLY produces
-            # a useful retrieval, not the rate at which Google returns ANY URL.
-        # N=5 mean=0.533, σ_total=0.229 → σ_strategy=0.135. Recall: 0.95 → 0.53 (= empirical accuracy).
-        "literal_anchor": StrategyPrior(["essay", "structured"], accuracy=0.533, accuracy_std=0.135, recall_capacity=0.53, speed=0.65, cost_per_call=0.03),
-        # N=5 mean=0.650, σ_total=0.287 → σ_strategy=0.221. Recall: 0.95 → 0.65.
-        "tight_pool":     StrategyPrior(["essay", "structured"], accuracy=0.650, accuracy_std=0.221, recall_capacity=0.65, speed=0.65, cost_per_call=0.03),
-        # N=5 mean=0.600, σ_total=0.211 → σ_strategy=0.105. Recall: 1.00 → 0.60.
-        "wide_pool":      StrategyPrior(["essay", "structured"], accuracy=0.600, accuracy_std=0.105, recall_capacity=0.60, speed=0.65, cost_per_call=0.03),
-        # External search is poor at explanatory/conceptual queries — SERP tends
-        # to return procedure docs and forms rather than definitions or policy rationale.
-        # Lower accuracy and recall than c (LLM prior) for this question shape.
-        "conceptual":     StrategyPrior(["essay", "structured"], accuracy=0.50,  accuracy_std=0.20, recall_capacity=0.55, speed=0.65, cost_per_call=0.03),
-        # No empirical data; halve old optimistic values to match the principle.
-        "exploratory":    StrategyPrior(["essay", "structured"], accuracy=0.50,  accuracy_std=0.20, recall_capacity=0.50, speed=0.65, cost_per_call=0.03),
-        "vague":          StrategyPrior(["essay", "structured"], accuracy=0.000, accuracy_std=0.000, recall_capacity=0.20, speed=0.65, cost_per_call=0.03),
+    "d": {
+        "literal_anchor": StrategyPrior(['essay', 'structured'], accuracy=0.22, accuracy_std=0.228, recall_capacity=1, speed=0.08, cost_per_call=0.03),  # calib n=5
+        "tight_pool": StrategyPrior(['essay', 'structured'], accuracy=0.719, accuracy_std=0.318, recall_capacity=1, speed=0.12, cost_per_call=0.03),  # calib n=8
+        "wide_pool": StrategyPrior(['essay', 'structured'], accuracy=0.25, accuracy_std=0.175, recall_capacity=1, speed=0.19, cost_per_call=0.03),  # calib n=6
+        "conceptual": StrategyPrior(['essay', 'structured'], accuracy=0.436, accuracy_std=0.339, recall_capacity=0.905, speed=0.17, cost_per_call=0.03),  # calib n=21
+        "exploratory": StrategyPrior(['essay', 'structured'], accuracy=0.5, accuracy_std=0.2, recall_capacity=0.5, speed=0.65, cost_per_call=0.03),  # (no calib data — kept)
+        "vague": StrategyPrior(['essay', 'structured'], accuracy=0.0, accuracy_std=0.0, recall_capacity=0, speed=0.95, cost_per_call=0.03),  # calib n=4
     },
 }
+
+
+# ============================================================================
+# Canonical-vs-factual prior blend
+# ============================================================================
+#
+# The 6 pool/anchor classes above split queries by SHAPE, not by whether the
+# answer lives in a canonical policy theme vs a precise fact snippet. That
+# axis is orthogonal, and it's where strategy (b) lives: on the run-41b5c5e7
+# baseline, (b) recall is BIMODAL — ~0.51 on canonical queries (a clean
+# J-payor × D-topic tag pair resolving to a moderate ~100-500 doc pool, e.g.
+# the Sunshine-Health prior-authorization cluster cmhc002/006/011/018) but
+# ~0.03 on factual queries. The single pool-class prior averages these to
+# ~0.3, which is simultaneously too LOW to ever let (b) win its niche and too
+# HIGH for factual queries — so (b) is never picked at all.
+#
+# Fix: measure a CANONICAL prior profile (below) and blend it into the
+# pool-class prior by a continuous canonicality weight w∈[0,1]. w=0 leaves the
+# factual (pool-class) prior untouched; w=1 uses the canonical profile. This
+# lifts (b) AND (d) — both are canonical-theme tools — exactly on the class
+# where they beat (a), without touching factual routing (where (b) stays ~0).
+# Numbers are measured recall/answer_rate/latency from the canonical cells of
+# run 41b5c5e7 (fixed-retrieval baseline, locked judge).
+_CANONICAL_PRIORS: dict[StrategyId, StrategyPrior] = {
+    "a": StrategyPrior(['structured'],            accuracy=0.467, accuracy_std=0.125, recall_capacity=1.00, speed=0.98),                     # calib n=10
+    "b": StrategyPrior(['structured', 'essay'],   accuracy=0.508, accuracy_std=0.377, recall_capacity=0.70, speed=0.75),                     # calib n=10 — the niche
+    "c": StrategyPrior(['essay', 'structured'],   accuracy=0.033, accuracy_std=0.100, recall_capacity=0.40, speed=0.12, cost_per_call=0.02), # calib n=10
+    "d": StrategyPrior(['essay', 'structured'],   accuracy=0.600, accuracy_std=0.367, recall_capacity=1.00, speed=0.48, cost_per_call=0.03), # calib n=10
+}
+
+
+def _canonicality(profile_features: dict[str, Any]) -> float:
+    """Continuous [0,1] weight — how much this query looks like a *canonical
+    policy* question (answer spread across a coherent theme) vs a *factual*
+    lookup. Gated on a J×D tag pair (payer × topic = a real policy exists),
+    peaked on a moderate pool (~100-500 docs = one coherent theme), and off
+    for VAGUE queries (no signal). Codes/anchors do NOT force factual —
+    cmhc002 has HCPCS H0019 yet is canonical (the PA policy is the answer)."""
+    if not (profile_features.get("has_j_tag") and profile_features.get("has_d_tag")):
+        return 0.0
+    if profile_features.get("query_type") == "VAGUE":
+        return 0.0
+    pool = int(profile_features.get("pool_size", 0) or 0)
+    if pool <= 0:
+        return 0.0
+    # Soft pool membership: plateau at [100,500], linear taper to 0 at 50 / 900.
+    if 100 <= pool <= 500:
+        pool_w = 1.0
+    elif pool < 100:
+        pool_w = max(0.0, (pool - 50) / 50.0)
+    else:
+        pool_w = max(0.0, (900 - pool) / 400.0)
+    return pool_w
+
+
+def _blend_prior(base: StrategyPrior, canon: StrategyPrior, w: float) -> StrategyPrior:
+    """Linear interpolation of the numeric prior fields toward the canonical
+    profile by weight w. w=0 → base (factual/pool-class) prior unchanged."""
+    if w <= 0.0:
+        return base
+    return StrategyPrior(
+        shape_capabilities=base.shape_capabilities,
+        accuracy=(1 - w) * base.accuracy + w * canon.accuracy,
+        recall_capacity=(1 - w) * base.recall_capacity + w * canon.recall_capacity,
+        speed=(1 - w) * base.speed + w * canon.speed,
+        cost_per_call=base.cost_per_call,
+        accuracy_std=(1 - w) * base.accuracy_std + w * canon.accuracy_std,
+        recall_std=(1 - w) * base.recall_std + w * canon.recall_std,
+    )
 
 
 # ============================================================================
@@ -484,6 +515,10 @@ def decide(
         )
 
     qclass = derive_query_class(profile_features)
+    # Canonicality weight: blends the pool-class prior toward the canonical
+    # profile (lifts b/d on J×D-pair moderate-pool policy queries). 0 for
+    # factual queries → no change to existing routing.
+    w_canon = _canonicality(profile_features)
     self_assessments = self_assessments or {}
     excluded_strategies: set[str] = set(prior_strategies_tried or [])
 
@@ -497,7 +532,7 @@ def decide(
     recall_demand = resolved.recall_demand or 0.5
 
     for sid in ("a", "b", "c", "d"):
-        prior = _BASE_PRIORS[sid][qclass]
+        prior = _blend_prior(_BASE_PRIORS[sid][qclass], _CANONICAL_PRIORS[sid], w_canon)
 
         # Exclude strategies already tried in this thread — re-invocation
         # path. Scored zero so they sort last and never win.

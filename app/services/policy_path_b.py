@@ -332,19 +332,121 @@ async def build_paragraph_and_lines(
     return para, lines
 
 
+class _AhoCorasick:
+    """Multi-pattern substring search in one O(text) pass — replaces the
+    O(lines × phrases) brute force in the tagger. With ~5k lexicon phrases this
+    is the difference between minutes and seconds per giant doc (worker Path B
+    chunking of 2000+ paragraph handbooks). Returns matched pattern indices."""
+
+    __slots__ = ("goto", "fail", "out")
+
+    def __init__(self, patterns: list[str]):
+        self.goto: list[dict] = [{}]
+        self.fail: list[int] = [0]
+        self.out: list[list[int]] = [[]]
+        for idx, w in enumerate(patterns):
+            if not w:
+                continue
+            node = 0
+            for ch in w:
+                nxt = self.goto[node].get(ch)
+                if nxt is None:
+                    nxt = len(self.goto)
+                    self.goto.append({})
+                    self.fail.append(0)
+                    self.out.append([])
+                    self.goto[node][ch] = nxt
+                node = nxt
+            self.out[node].append(idx)
+        self._build()
+
+    def _build(self) -> None:
+        from collections import deque
+        q: deque = deque()
+        for _ch, nxt in self.goto[0].items():
+            self.fail[nxt] = 0
+            q.append(nxt)
+        while q:
+            r = q.popleft()
+            for ch, u in self.goto[r].items():
+                q.append(u)
+                f = self.fail[r]
+                while f and ch not in self.goto[f]:
+                    f = self.fail[f]
+                self.fail[u] = self.goto[f].get(ch, 0)
+                if self.out[self.fail[u]]:
+                    self.out[u] = self.out[u] + self.out[self.fail[u]]
+
+    def search(self, text: str) -> set:
+        found: set = set()
+        goto = self.goto
+        fail = self.fail
+        out = self.out
+        node = 0
+        for ch in text:
+            while node and ch not in goto[node]:
+                node = fail[node]
+            node = goto[node].get(ch, 0)
+            o = out[node]
+            if o:
+                found.update(o)
+        return found
+
+
+# Single-entry cache: the phrase_map is the same object for every paragraph of
+# a job, so build the automaton once per job (keyed by identity) and reuse it.
+_AC_CACHE: dict = {"key": None, "ac": None, "items": None}
+
+
+def _ac_for(phrase_map: dict):
+    key = id(phrase_map)
+    if _AC_CACHE["key"] != key:
+        items = list(phrase_map.items())
+        _AC_CACHE["key"] = key
+        _AC_CACHE["items"] = items
+        _AC_CACHE["ac"] = _AhoCorasick([p for p, _ in items])
+    return _AC_CACHE["ac"], _AC_CACHE["items"]
+
+
 async def apply_lexicon_to_lines(
     lines: list,
     phrase_map: dict[str, tuple[str, str, float]],
     refuted_map: RefutedMap | None = None,
 ) -> int:
-    """Set p_tags, d_tags, j_tags on each line in place. Caller should commit. Returns count of lines that got at least one tag."""
+    """Set p_tags, d_tags, j_tags on each line in place. Caller should commit.
+    Returns count of lines that got at least one tag.
+
+    Uses an Aho-Corasick automaton (built once per phrase_map) instead of the
+    O(phrases) per-line loop. Results are IDENTICAL to _apply_tags_to_line_text:
+    long phrases match as substrings, short (<=4 char) phrases are still
+    word-boundary-verified, and refuted words still suppress."""
+    ac, phrase_items = _ac_for(phrase_map)
     n_with_tags = 0
     for line in lines:
-        p_tags, d_tags, j_tags = _apply_tags_to_line_text(line.text or "", phrase_map, refuted_map)
-        line.p_tags = p_tags if p_tags else None
-        line.d_tags = d_tags if d_tags else None
-        line.j_tags = j_tags if j_tags else None
-        if p_tags or d_tags or j_tags:
+        norm = _normalize_phrase(line.text or "")
+        if not norm:
+            line.p_tags = None
+            line.d_tags = None
+            line.j_tags = None
+            continue
+        p_t: dict = {}
+        d_t: dict = {}
+        j_t: dict = {}
+        for idx in ac.search(norm):
+            phrase, (kind, code, score) = phrase_items[idx]
+            if len(phrase) <= 4 and not _phrase_in_text(phrase, norm):
+                continue
+            if refuted_map:
+                rw = refuted_map.get((kind, code))
+                if rw and any(_phrase_in_text(w, norm) for w in rw):
+                    continue
+            target = p_t if kind == "p" else (d_t if kind == "d" else j_t)
+            if code not in target or score > target[code]:
+                target[code] = score
+        line.p_tags = p_t if p_t else None
+        line.d_tags = d_t if d_t else None
+        line.j_tags = j_t if j_t else None
+        if p_t or d_t or j_t:
             n_with_tags += 1
     return n_with_tags
 

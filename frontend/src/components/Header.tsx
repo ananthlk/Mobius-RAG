@@ -4,6 +4,7 @@ import { LLMConfigModal } from './LLMConfigModal'
 import { PromptsModal } from './PromptsModal'
 
 import { API_BASE } from '../config'
+import { withPlatformToken } from '../platformToken'
 
 // Non-optional access so Vite statically inlines the value at build time.
 // (import.meta.env?.X with optional chaining is NOT inlined → always undefined.)
@@ -60,7 +61,7 @@ export function Header({
           {LEXICON_URL && (
             <a
               className="app-header-module-link"
-              href={LEXICON_URL}
+              href={withPlatformToken(LEXICON_URL)}
               title="Open Lexicon Maintenance \u2014 curate the tags used for retrieval"
             >
               Lexicon Maintenance {'\u2197'}

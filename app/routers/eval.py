@@ -103,6 +103,102 @@ async def get_eval_run(run_id: str):
     return {"run": dict(run_row), "results": results_list}
 
 
+@router.get("/eval/runs/{run_id}/calibration_summary")
+async def get_calibration_summary(run_id: str):
+    """5-axis per-strategy summary + oracle for a forced-strategy calibration run.
+
+    Reads ``full_response->'_calibration'`` (recall / answered / contradiction /
+    latency) that ``run_calibration`` stamps per cell, aggregates by strategy, and
+    computes the per-query oracle (best recall per query) + routing headroom.
+    """
+    import collections
+    import statistics
+    from app.database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as db:
+        rows = (await db.execute(sql_text(
+            """
+            SELECT query_id, strategy_chosen AS strategy,
+                   full_response->'_calibration' AS calib
+            FROM rag_eval_results
+            WHERE run_id::text = :id
+              AND full_response -> '_calibration' IS NOT NULL
+            """
+        ), {"id": run_id})).mappings().all()
+
+    per: dict = collections.defaultdict(lambda: {"recall": [], "prec": [], "answered": 0, "n": 0, "contra": 0, "lat": []})
+    byq: dict = collections.defaultdict(dict)   # base qid -> {strategy: recall}
+    for r in rows:
+        c = r["calib"] or {}
+        s = r["strategy"] or c.get("strategy")
+        if not s:
+            continue
+        p = per[s]
+        p["n"] += 1
+        if c.get("answered"):
+            p["answered"] += 1
+        p["contra"] += (c.get("n_contradicted") or 0)
+        if c.get("latency_ms"):
+            p["lat"].append(c["latency_ms"])
+        if c.get("precision") is not None:
+            p["prec"].append(c["precision"])
+        rec = c.get("recall")
+        if rec is not None:
+            p["recall"].append(rec)
+            if s in ("a", "b", "c", "d"):   # oracle is the max over the FORCED paths only
+                byq[(r["query_id"] or "").split("/")[0]][s] = rec
+
+    # Weighted composite: recall-leaning, with indexed precision + latency as
+    # tradeoff axes. precision is already indexed to [0,1] (cited/min(k,facts))
+    # so recall and precision are on the same scale — the weights mean what they
+    # say. speed = 1/(1+lat_s) is latency-sensitive at the sub-second scale.
+    _W_RECALL, _W_PREC, _W_SPEED = 0.45, 0.30, 0.25
+
+    def _agg(p: dict) -> dict:
+        lat = sorted(p["lat"])
+        recall = round(statistics.mean(p["recall"]), 3) if p["recall"] else 0.0
+        prec = round(statistics.mean(p["prec"]), 3) if p["prec"] else None
+        med_lat = int(statistics.median(lat)) if lat else None
+        speed = round(1.0 / (1.0 + (med_lat or 0) / 1000.0), 3) if med_lat is not None else None
+        composite = (
+            round(_W_RECALL * recall + _W_PREC * (prec or 0.0) + _W_SPEED * (speed or 0.0), 3)
+            if med_lat is not None else None
+        )
+        return {
+            "n": p["n"],
+            "answer_rate": round(p["answered"] / p["n"], 3) if p["n"] else None,
+            "recall": recall,
+            "precision": prec,
+            "contra_per_cell": round(p["contra"] / p["n"], 3) if p["n"] else None,
+            "median_latency_ms": med_lat,
+            "p95_latency_ms": int(lat[min(len(lat) - 1, int(0.95 * len(lat)))]) if lat else None,
+            "speed": speed,
+            "composite": composite,
+        }
+
+    strategies = {s: _agg(p) for s, p in sorted(per.items())}   # includes 'natural' (the router)
+    oracle_vals = [max(v.values()) for v in byq.values() if v]
+    oracle_recall = round(statistics.mean(oracle_vals), 3) if oracle_vals else None
+    router = strategies.get("natural")
+    router_recall = router["recall"] if router else None
+    best_single = max((strategies[s]["recall"] for s in ("a", "b", "c", "d") if s in strategies), default=0.0)
+    # Headroom is oracle − ROUTER (what the router leaves on the table); fall back
+    # to oracle − best-single-forced when the router path wasn't run.
+    headroom_ref = router_recall if router_recall is not None else best_single
+    return {
+        "run_id": run_id,
+        "n_queries": len(byq),
+        "strategies": strategies,
+        "oracle_recall": oracle_recall,
+        "router_recall": router_recall,
+        "best_single_recall": round(best_single, 3),
+        "routing_headroom": (round(oracle_recall - headroom_ref, 3)
+                             if oracle_recall is not None else None),
+        "composite_weights": {"recall": _W_RECALL, "precision": _W_PREC, "speed": _W_SPEED},
+        "router_composite": (router.get("composite") if router else None),
+    }
+
+
 @router.get("/eval/results/{result_id}")
 async def get_eval_result(result_id: str):
     """Single result with the full chunks_summary + llm_answer + linked
