@@ -17,8 +17,10 @@ GET /api/routing/decisions/{id}    — single routing-decision drill-down
 from __future__ import annotations
 
 import asyncio
+import collections
 import logging
 import os
+import statistics
 import time
 from pathlib import Path
 from typing import Any
@@ -32,6 +34,80 @@ from app.database import get_db  # noqa: F401  (kept for future use)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["eval"])
+
+
+# ---------------------------------------------------------------------------
+# Shared calibration aggregation — one implementation so calibration_summary,
+# timeline, and compare all compute metrics identically.
+# ---------------------------------------------------------------------------
+
+# Weighted composite: recall-leaning, indexed precision + latency as tradeoffs.
+# precision is already indexed to [0,1] (cited/min(k,facts)) so it's on the same
+# scale as recall; speed = 1/(1+lat_s) is latency-sensitive sub-second.
+_W_RECALL, _W_PREC, _W_SPEED = 0.45, 0.30, 0.25
+
+
+def _summarize_cells(rows: list) -> dict:
+    """Aggregate rag_eval_results cells (each a mapping with query_id, strategy,
+    calib) into the 5-axis + oracle + router + composite summary."""
+    per: dict = collections.defaultdict(
+        lambda: {"recall": [], "prec": [], "answered": 0, "n": 0, "contra": 0, "lat": []})
+    byq: dict = collections.defaultdict(dict)   # base qid -> {strategy: recall}
+    for r in rows:
+        c = r["calib"] or {}
+        s = r["strategy"] or c.get("strategy")
+        if not s:
+            continue
+        p = per[s]
+        p["n"] += 1
+        if c.get("answered"):
+            p["answered"] += 1
+        p["contra"] += (c.get("n_contradicted") or 0)
+        if c.get("latency_ms"):
+            p["lat"].append(c["latency_ms"])
+        if c.get("precision") is not None:
+            p["prec"].append(c["precision"])
+        rec = c.get("recall")
+        if rec is not None:
+            p["recall"].append(rec)
+            if s in ("a", "b", "c", "d"):
+                byq[(r["query_id"] or "").split("/")[0]][s] = rec
+
+    def _agg(p: dict) -> dict:
+        lat = sorted(p["lat"])
+        recall = round(statistics.mean(p["recall"]), 3) if p["recall"] else 0.0
+        prec = round(statistics.mean(p["prec"]), 3) if p["prec"] else None
+        med_lat = int(statistics.median(lat)) if lat else None
+        speed = round(1.0 / (1.0 + (med_lat or 0) / 1000.0), 3) if med_lat is not None else None
+        composite = (round(_W_RECALL * recall + _W_PREC * (prec or 0.0) + _W_SPEED * (speed or 0.0), 3)
+                     if med_lat is not None else None)
+        return {
+            "n": p["n"],
+            "answer_rate": round(p["answered"] / p["n"], 3) if p["n"] else None,
+            "recall": recall, "precision": prec,
+            "contra_per_cell": round(p["contra"] / p["n"], 3) if p["n"] else None,
+            "median_latency_ms": med_lat,
+            "p95_latency_ms": int(lat[min(len(lat) - 1, int(0.95 * len(lat)))]) if lat else None,
+            "speed": speed, "composite": composite,
+        }
+
+    strategies = {s: _agg(p) for s, p in sorted(per.items())}
+    oracle_vals = [max(v.values()) for v in byq.values() if v]
+    oracle = round(statistics.mean(oracle_vals), 3) if oracle_vals else None
+    router_s = strategies.get("natural")
+    router_recall = router_s["recall"] if router_s else None
+    best_single = max((strategies[s]["recall"] for s in ("a", "b", "c", "d") if s in strategies), default=0.0)
+    ref = router_recall if router_recall is not None else best_single
+    return {
+        "n_queries": len(byq),
+        "strategies": strategies,
+        "oracle_recall": oracle,
+        "router_recall": router_recall,
+        "best_single_recall": round(best_single, 3),
+        "routing_headroom": (round(oracle - ref, 3) if oracle is not None else None),
+        "composite_weights": {"recall": _W_RECALL, "precision": _W_PREC, "speed": _W_SPEED},
+        "router_composite": (router_s.get("composite") if router_s else None),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -111,8 +187,6 @@ async def get_calibration_summary(run_id: str):
     latency) that ``run_calibration`` stamps per cell, aggregates by strategy, and
     computes the per-query oracle (best recall per query) + routing headroom.
     """
-    import collections
-    import statistics
     from app.database import AsyncSessionLocal
 
     async with AsyncSessionLocal() as db:
@@ -125,77 +199,185 @@ async def get_calibration_summary(run_id: str):
               AND full_response -> '_calibration' IS NOT NULL
             """
         ), {"id": run_id})).mappings().all()
+        meta = (await db.execute(sql_text(
+            "SELECT ts, notes, config_dump->'fingerprint' AS fingerprint "
+            "FROM rag_eval_runs WHERE id::text = :id"
+        ), {"id": run_id})).mappings().first()
 
-    per: dict = collections.defaultdict(lambda: {"recall": [], "prec": [], "answered": 0, "n": 0, "contra": 0, "lat": []})
-    byq: dict = collections.defaultdict(dict)   # base qid -> {strategy: recall}
-    for r in rows:
-        c = r["calib"] or {}
-        s = r["strategy"] or c.get("strategy")
-        if not s:
-            continue
-        p = per[s]
-        p["n"] += 1
-        if c.get("answered"):
-            p["answered"] += 1
-        p["contra"] += (c.get("n_contradicted") or 0)
-        if c.get("latency_ms"):
-            p["lat"].append(c["latency_ms"])
-        if c.get("precision") is not None:
-            p["prec"].append(c["precision"])
-        rec = c.get("recall")
-        if rec is not None:
-            p["recall"].append(rec)
-            if s in ("a", "b", "c", "d"):   # oracle is the max over the FORCED paths only
-                byq[(r["query_id"] or "").split("/")[0]][s] = rec
+    summary = _summarize_cells(rows)
+    summary["run_id"] = run_id
+    summary["ts"] = meta["ts"] if meta else None
+    summary["notes"] = meta["notes"] if meta else None
+    summary["fingerprint"] = (meta["fingerprint"] if meta else None)
+    return summary
 
-    # Weighted composite: recall-leaning, with indexed precision + latency as
-    # tradeoff axes. precision is already indexed to [0,1] (cited/min(k,facts))
-    # so recall and precision are on the same scale — the weights mean what they
-    # say. speed = 1/(1+lat_s) is latency-sensitive at the sub-second scale.
-    _W_RECALL, _W_PREC, _W_SPEED = 0.45, 0.30, 0.25
 
-    def _agg(p: dict) -> dict:
-        lat = sorted(p["lat"])
-        recall = round(statistics.mean(p["recall"]), 3) if p["recall"] else 0.0
-        prec = round(statistics.mean(p["prec"]), 3) if p["prec"] else None
-        med_lat = int(statistics.median(lat)) if lat else None
-        speed = round(1.0 / (1.0 + (med_lat or 0) / 1000.0), 3) if med_lat is not None else None
-        composite = (
-            round(_W_RECALL * recall + _W_PREC * (prec or 0.0) + _W_SPEED * (speed or 0.0), 3)
-            if med_lat is not None else None
-        )
-        return {
-            "n": p["n"],
-            "answer_rate": round(p["answered"] / p["n"], 3) if p["n"] else None,
-            "recall": recall,
-            "precision": prec,
-            "contra_per_cell": round(p["contra"] / p["n"], 3) if p["n"] else None,
-            "median_latency_ms": med_lat,
-            "p95_latency_ms": int(lat[min(len(lat) - 1, int(0.95 * len(lat)))]) if lat else None,
-            "speed": speed,
-            "composite": composite,
-        }
+# ---------------------------------------------------------------------------
+# Observability — timeline, A/B compare, drift (fingerprint-aware)
+# ---------------------------------------------------------------------------
 
-    strategies = {s: _agg(p) for s, p in sorted(per.items())}   # includes 'natural' (the router)
-    oracle_vals = [max(v.values()) for v in byq.values() if v]
-    oracle_recall = round(statistics.mean(oracle_vals), 3) if oracle_vals else None
-    router = strategies.get("natural")
-    router_recall = router["recall"] if router else None
-    best_single = max((strategies[s]["recall"] for s in ("a", "b", "c", "d") if s in strategies), default=0.0)
-    # Headroom is oracle − ROUTER (what the router leaves on the table); fall back
-    # to oracle − best-single-forced when the router path wasn't run.
-    headroom_ref = router_recall if router_recall is not None else best_single
+# Fingerprint dims compared when attributing a delta; >1 changed ⇒ confounded.
+_FINGERPRINT_DIMS = [
+    "priors_version", "lexicon_revision", "agent_revision",
+    "retrieval_config_hash", "judge_model", "bank_hash",
+]
+
+
+async def _fetch_cells_by_run(db, run_ids: list[str]) -> dict:
+    """Return {run_id: [cell mappings]} for the given runs in one query."""
+    by_run: dict = collections.defaultdict(list)
+    if not run_ids:
+        return by_run
+    cells = (await db.execute(sql_text(
+        """
+        SELECT run_id::text AS run_id, query_id, strategy_chosen AS strategy,
+               full_response->'_calibration' AS calib
+        FROM rag_eval_results
+        WHERE run_id::text = ANY(:ids)
+          AND full_response -> '_calibration' IS NOT NULL
+        """
+    ), {"ids": run_ids})).mappings().all()
+    for c in cells:
+        by_run[c["run_id"]].append(c)
+    return by_run
+
+
+@router.get("/eval/timeline")
+async def eval_timeline(limit: int = Query(30, ge=1, le=100)):
+    """Version-annotated trend: completed runs newest-first with their
+    fingerprint + headline metrics (router_recall / composite / oracle). The UI
+    plots these over time and marks each fingerprint change."""
+    from app.database import AsyncSessionLocal
+    async with AsyncSessionLocal() as db:
+        runs = (await db.execute(sql_text(
+            "SELECT id::text AS id, ts, notes, config_dump->'fingerprint' AS fp "
+            "FROM rag_eval_runs WHERE completed_at IS NOT NULL "
+            "ORDER BY ts DESC LIMIT :lim"
+        ), {"lim": limit})).mappings().all()
+        by_run = await _fetch_cells_by_run(db, [r["id"] for r in runs])
+
+    out = []
+    for r in runs:
+        s = _summarize_cells(by_run.get(r["id"], []))
+        out.append({
+            "run_id": r["id"], "ts": r["ts"], "notes": r["notes"],
+            "fingerprint": r["fp"],
+            "n_queries": s["n_queries"],
+            "router_recall": s["router_recall"],
+            "router_composite": s["router_composite"],
+            "oracle_recall": s["oracle_recall"],
+            "routing_headroom": s["routing_headroom"],
+        })
+    return {"runs": out}
+
+
+@router.get("/eval/compare")
+async def eval_compare(a: str, b: str):
+    """A/B — 'what changed and what didn't'. Fingerprint diff + a confound guard
+    (>1 dim changed, or either run not fingerprint_stable ⇒ not attributable),
+    aggregate deltas, and per-query router-recall movers with retrieval change."""
+    from app.database import AsyncSessionLocal
+    async with AsyncSessionLocal() as db:
+        metas = (await db.execute(sql_text(
+            "SELECT id::text AS id, ts, notes, config_dump->'fingerprint' AS fp "
+            "FROM rag_eval_runs WHERE id::text = ANY(:ids)"
+        ), {"ids": [a, b]})).mappings().all()
+        by_run = await _fetch_cells_by_run(db, [a, b])
+    meta = {m["id"]: m for m in metas}
+    if a not in meta or b not in meta:
+        raise HTTPException(status_code=404, detail="run not found")
+
+    fp_a, fp_b = (meta[a]["fp"] or {}), (meta[b]["fp"] or {})
+    changed = [d for d in _FINGERPRINT_DIMS if fp_a.get(d) != fp_b.get(d)]
+    unstable = (fp_a.get("stable") is False) or (fp_b.get("stable") is False)
+    confounded = len(changed) > 1 or unstable
+
+    sa, sb = _summarize_cells(by_run.get(a, [])), _summarize_cells(by_run.get(b, []))
+
+    # Per-query router-recall movers (natural path).
+    def router_by_q(rows):
+        out = {}
+        for r in rows:
+            base, _, strat = (r["query_id"] or "").rpartition("/")
+            if strat == "natural" and (r["calib"] or {}).get("recall") is not None:
+                out[base] = r["calib"]["recall"]
+        return out
+    ra, rb = router_by_q(by_run.get(a, [])), router_by_q(by_run.get(b, []))
+    movers = []
+    for q in sorted(set(ra) | set(rb)):
+        va, vb = ra.get(q), rb.get(q)
+        if va is not None and vb is not None and abs(vb - va) > 1e-9:
+            movers.append({"query": q, "a": va, "b": vb, "delta": round(vb - va, 3)})
+    movers.sort(key=lambda m: abs(m["delta"]), reverse=True)
+
+    def deltas(x, y):
+        keys = ["router_recall", "router_composite", "oracle_recall", "routing_headroom"]
+        return {k: (round((y[k] or 0) - (x[k] or 0), 3) if y.get(k) is not None and x.get(k) is not None else None)
+                for k in keys}
+
     return {
-        "run_id": run_id,
-        "n_queries": len(byq),
-        "strategies": strategies,
-        "oracle_recall": oracle_recall,
-        "router_recall": router_recall,
-        "best_single_recall": round(best_single, 3),
-        "routing_headroom": (round(oracle_recall - headroom_ref, 3)
-                             if oracle_recall is not None else None),
-        "composite_weights": {"recall": _W_RECALL, "precision": _W_PREC, "speed": _W_SPEED},
-        "router_composite": (router.get("composite") if router else None),
+        "a": {"run_id": a, "ts": meta[a]["ts"], "notes": meta[a]["notes"], "fingerprint": fp_a, "summary": sa},
+        "b": {"run_id": b, "ts": meta[b]["ts"], "notes": meta[b]["notes"], "fingerprint": fp_b, "summary": sb},
+        "fingerprint_diff": {d: {"a": fp_a.get(d), "b": fp_b.get(d)} for d in changed},
+        "confounded": confounded,
+        "confound_reason": (
+            "not attributable: " + (", ".join(
+                ([f"{len(changed)} dims changed ({', '.join(changed)})"] if len(changed) > 1 else [])
+                + (["a run not fingerprint_stable"] if fp_a.get("stable") is False else [])
+                + (["b run not fingerprint_stable"] if fp_b.get("stable") is False else [])
+            )) if confounded else None
+        ),
+        "deltas": deltas(sa, sb),
+        "query_movers": movers,
+    }
+
+
+@router.get("/eval/drift")
+async def eval_drift(metric: str = "router_recall", min_runs: int = Query(3, ge=2, le=50)):
+    """Drift = metric moved with the fingerprint UNCHANGED. Groups completed
+    runs by (priors_version, lexicon_revision, retrieval_config_hash), computes
+    the mean ± 2σ band per group, and flags the latest run in the largest group
+    if it falls outside the band. Needs ≥ min_runs same-config runs for a band."""
+    if metric not in ("router_recall", "router_composite", "oracle_recall"):
+        raise HTTPException(status_code=400, detail="metric must be router_recall|router_composite|oracle_recall")
+    from app.database import AsyncSessionLocal
+    async with AsyncSessionLocal() as db:
+        runs = (await db.execute(sql_text(
+            "SELECT id::text AS id, ts, config_dump->'fingerprint' AS fp "
+            "FROM rag_eval_runs WHERE completed_at IS NOT NULL ORDER BY ts DESC LIMIT 60"
+        ), {})).mappings().all()
+        by_run = await _fetch_cells_by_run(db, [r["id"] for r in runs])
+
+    groups: dict = collections.defaultdict(list)
+    for r in runs:
+        fp = r["fp"] or {}
+        key = (fp.get("priors_version"), fp.get("lexicon_revision"), fp.get("retrieval_config_hash"))
+        val = _summarize_cells(by_run.get(r["id"], [])).get(metric)
+        if val is not None:
+            groups[key].append({"run_id": r["id"], "ts": r["ts"], "value": val})
+
+    # Report the largest same-config group (most statistical power).
+    best_key, best = None, []
+    for k, v in groups.items():
+        if len(v) > len(best):
+            best_key, best = k, v
+    if len(best) < min_runs:
+        return {"metric": metric, "status": "insufficient_data",
+                "detail": f"largest same-config group has {len(best)} runs; need ≥{min_runs}",
+                "groups": {str(k): len(v) for k, v in groups.items()}}
+    vals = [x["value"] for x in best]
+    mean = statistics.mean(vals)
+    sd = statistics.pstdev(vals) if len(vals) > 1 else 0.0
+    latest = max(best, key=lambda x: x["ts"])
+    band = (round(mean - 2 * sd, 3), round(mean + 2 * sd, 3))
+    breached = not (band[0] <= latest["value"] <= band[1])
+    return {
+        "metric": metric,
+        "fingerprint_group": {"priors_version": best_key[0], "lexicon_revision": best_key[1],
+                              "retrieval_config_hash": best_key[2]},
+        "n_runs": len(best), "mean": round(mean, 3), "std": round(sd, 3),
+        "band_2sigma": band, "latest": {"run_id": latest["run_id"], "value": latest["value"]},
+        "status": "DRIFT" if breached else "in_band",
     }
 
 

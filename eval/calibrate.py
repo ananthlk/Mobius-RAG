@@ -56,7 +56,7 @@ if str(_repo_root) not in sys.path:
 import yaml  # noqa: E402
 
 from eval.judge import adjudicate  # noqa: E402
-from eval.run import insert_run, insert_result, finalize_run, _strip_nulls  # noqa: E402
+from eval.run import insert_run, insert_result, finalize_run, _strip_nulls, _conn  # noqa: E402
 from app.services.fact_checker import check_facts  # noqa: E402  — retrieval critic (chunk-only recall)
 
 
@@ -208,6 +208,76 @@ def speed_prior(mean_ms: int | None, all_means: list[int]) -> float:
 # Main
 # ---------------------------------------------------------------------------
 
+_JUDGE_MODEL_LOCKED = "gemini-2.5-pro"  # locked adjudicator stage rag_eval_adjudicate
+
+
+async def _capture_fingerprint(endpoint: str, bank_version: str) -> dict[str, Any]:
+    """Capture the run's version fingerprint from AUTHORITATIVE sources — the
+    provenance foundation for eval observability. Invocation-agnostic: every
+    caller of run_calibration inherits this, so a result can't be stored
+    without its fingerprint. Agent identity comes from the DEPLOYED agent's
+    /version (NOT the local driver — the mixed-build guard); corpus/lexicon
+    state from the DB; judge + bank from config.
+    """
+    fp: dict[str, Any] = {"judge_model": _JUDGE_MODEL_LOCKED, "bank_hash": bank_version}
+    base = endpoint.split("/api/")[0]
+    try:
+        def _get() -> dict:
+            req = urllib.request.Request(base + "/version")
+            with urllib.request.urlopen(req, timeout=20) as r:
+                return json.loads(r.read())
+        v = await asyncio.to_thread(_get)
+        fp["agent_revision"] = v.get("revision")
+        fp["agent_git_sha"] = v.get("git_sha")
+        fp["priors_version"] = v.get("priors_version")
+        fp["retrieval_config_hash"] = v.get("retrieval_config_hash")
+    except Exception as exc:                       # /version unreachable → record the miss
+        fp["agent_version_error"] = f"{type(exc).__name__}: {exc}"
+    try:
+        conn = await _conn()
+        try:
+            row = await conn.fetchrow(
+                "SELECT max(lexicon_revision) lex, max(tagged_at) snap FROM document_tags"
+            )
+            fp["lexicon_revision"] = row["lex"]
+            fp["corpus_snapshot_at"] = row["snap"].isoformat() if row["snap"] else None
+        finally:
+            await conn.close()
+    except Exception as exc:
+        fp["corpus_state_error"] = f"{type(exc).__name__}: {exc}"
+    return fp
+
+
+async def _finalize_fingerprint_stable(run_id: str) -> None:
+    """Set fingerprint.stable — did every cell run on ONE build? Reads each
+    cell's response priors_version; >1 distinct ⇒ the run straddled a deploy
+    (mixed-build confound) ⇒ flag it so the dashboard excludes it from
+    attribution. Turns the trap that cost us hours into a data flag."""
+    try:
+        conn = await _conn()
+        try:
+            row = await conn.fetchrow(
+                """
+                SELECT count(DISTINCT full_response->'routing'->>'priors_version') n,
+                       array_agg(DISTINCT full_response->'routing'->>'priors_version')
+                         FILTER (WHERE full_response->'routing'->>'priors_version' IS NOT NULL) vs
+                FROM rag_eval_results WHERE run_id::text = $1
+                """, run_id)
+            stable = (row["n"] or 0) <= 1
+            await conn.execute(
+                """
+                UPDATE rag_eval_runs SET config_dump = jsonb_set(
+                    jsonb_set(coalesce(config_dump, '{}'::jsonb),
+                              '{fingerprint,stable}', $2::jsonb),
+                    '{fingerprint,observed_priors_versions}', $3::jsonb)
+                WHERE id::text = $1
+                """, run_id, json.dumps(stable), json.dumps(row["vs"] or []))
+        finally:
+            await conn.close()
+    except Exception as exc:
+        logger.warning("fingerprint_stable finalize failed for %s: %s", run_id, exc)
+
+
 async def run_calibration(
     bank: list[dict[str, Any]],
     endpoint: str,
@@ -232,6 +302,11 @@ async def run_calibration(
     # "calibration-…" so the EvalTab can distinguish; the 88 results
     # will share this run_id.
     n_total_planned = len(bank) * len(STRATEGIES)
+    # Provenance fingerprint — captured HERE (in the eval agent), so every
+    # invocation path (button / driver / nightly / cron) stamps it identically.
+    fingerprint = await _capture_fingerprint(endpoint, bank_version)
+    # Prefer the DEPLOYED agent's priors_version over the caller-supplied one.
+    priors_version = fingerprint.get("priors_version") or priors_version
     run_id = await insert_run(
         bank_path=bank_path,
         bank_version=bank_version,
@@ -243,6 +318,7 @@ async def run_calibration(
             "judge_timeout_s": judge_timeout_s,
             "agent_timeout_s": agent_timeout_s,
             "n_strategies_per_query": len(STRATEGIES),
+            "fingerprint": fingerprint,
         },
         n_queries=n_total_planned,
     )
@@ -490,6 +566,8 @@ async def run_calibration(
         for r in raw_rows
     ]
     await finalize_run(run_id, summary_rows)
+    # Mixed-build guard: flag the run confounded if cells straddled a deploy.
+    await _finalize_fingerprint_stable(run_id)
 
     cells = aggregate(raw_rows)
     return run_id, raw_rows, cells
