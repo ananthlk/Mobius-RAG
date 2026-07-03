@@ -1731,6 +1731,16 @@
   border-left: 2px solid var(--rag-accent, #4a6cf7);
   padding-left: 14px;
 }
+.repo-nav-payor-row {
+  padding: 7px 10px 7px 12px;
+  font-size: 13px;
+  border-bottom: none;
+}
+.repo-nav-payor-row.active {
+  background: var(--mobius-bg-accent, #eff6ff);
+  border-left: 2px solid var(--rag-accent, #4a6cf7);
+  padding-left: 10px;
+}
 
 .repo-nav-dot {
   width: 7px;
@@ -1870,4 +1880,350 @@
 .repo-search-results-area {
   flex: 1;
   overflow-y: auto;
+}
+
+/* ── Pipeline pips ───────────────────────────────────────────── */
+.pipeline-pips {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: var(--mobius-space-sm);
+  flex-shrink: 0;
+}
+.pip {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: var(--mobius-radius-sm);
+  font-size: var(--mobius-text-xs);
+  font-family: var(--mobius-font-sans);
+  font-weight: 700;
+  line-height: 14px;
+  text-align: center;
+  color: var(--mobius-accent-text);
+  letter-spacing: 0;
+}
+.pip-done { background: var(--mobius-success); }
+.pip-fail { background: var(--mobius-error); }
+.pip-todo { background: var(--mobius-border); color: var(--mobius-text-muted); }
+.pip-flag {
+  display: inline-block;
+  font-size: var(--mobius-text-xs);
+  color: var(--mobius-warning);
+  margin-left: 2px;
+  line-height: 14px;
+}
+
+/* ── Sitemap panel ───────────────────────────────────────────── */
+.repo-sitemap-pane {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.repo-sitemap-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--mobius-space-base) var(--mobius-space-md);
+  border-bottom: 1px solid var(--mobius-border);
+  flex-shrink: 0;
+}
+.repo-sitemap-title {
+  font-size: var(--mobius-text-sm);
+  font-family: var(--mobius-font-sans);
+  font-weight: 600;
+  color: var(--mobius-text-primary);
+}
+.repo-sitemap-count {
+  font-size: var(--mobius-text-xs);
+  font-family: var(--mobius-font-sans);
+  color: var(--mobius-text-muted);
+}
+.repo-sitemap-loading,
+.repo-sitemap-empty {
+  padding: var(--mobius-space-xl) var(--mobius-space-md);
+  font-size: var(--mobius-text-sm);
+  font-family: var(--mobius-font-sans);
+  color: var(--mobius-text-muted);
+  text-align: center;
+}
+.repo-sitemap-table-wrap {
+  flex: 1;
+  overflow: auto;
+}
+.repo-sitemap-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--mobius-text-xs);
+  font-family: var(--mobius-font-sans);
+}
+.repo-sitemap-table th {
+  position: sticky;
+  top: 0;
+  background: var(--mobius-bg-card);
+  padding: var(--mobius-space-xs) var(--mobius-space-md);
+  text-align: left;
+  font-weight: 600;
+  color: var(--mobius-text-muted);
+  border-bottom: 1px solid var(--mobius-border);
+  white-space: nowrap;
+  box-shadow: var(--mobius-shadow-sm);
+}
+.repo-sitemap-table td {
+  padding: var(--mobius-space-xs) var(--mobius-space-md);
+  border-bottom: 1px solid var(--mobius-border-light);
+  vertical-align: middle;
+  color: var(--mobius-text-secondary);
+}
+.repo-sitemap-table tr:hover td {
+  background: var(--mobius-bg-hover);
+}
+.repo-sitemap-source-name {
+  font-family: var(--mobius-font-mono);
+  font-size: var(--mobius-text-xs);
+  color: var(--mobius-text-primary);
+  word-break: break-all;
+}
+.repo-sitemap-badge {
+  display: inline-block;
+  padding: 2px var(--mobius-space-sm);
+  border-radius: var(--mobius-radius-full);
+  font-size: var(--mobius-text-xs);
+  font-family: var(--mobius-font-sans);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.badge-ingested {
+  background: color-mix(in srgb, var(--mobius-success) 12%, transparent);
+  color: var(--mobius-success);
+}
+.badge-missing {
+  background: color-mix(in srgb, var(--mobius-warning) 15%, transparent);
+  color: var(--mobius-text-secondary);
+}
+
+/* ── Back button (sitemap / search results) ──────────────────── */
+.repo-pane-back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--mobius-space-xs);
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--mobius-accent);
+  font-size: var(--mobius-text-sm);
+  font-family: var(--mobius-font-sans);
+  padding: var(--mobius-space-xs) 0 var(--mobius-space-xs) var(--mobius-space-sm);
+  margin-bottom: var(--mobius-space-xs);
+  flex-shrink: 0;
+}
+.repo-pane-back-btn:hover {
+  color: var(--mobius-accent-hover);
+  text-decoration: underline;
+}
+
+/* ── Doc panel (3-view: Read / Tags / Info) ──────────────────── */
+.repo-doc-panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.repo-doc-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--mobius-space-xs) var(--mobius-space-md);
+  border-bottom: 1px solid var(--mobius-border);
+  flex-shrink: 0;
+  min-height: 36px;
+}
+.repo-doc-tabs {
+  display: flex;
+  gap: 2px;
+  background: var(--mobius-bg-secondary);
+  border-radius: var(--mobius-radius-sm);
+  padding: 2px;
+}
+.repo-doc-tab {
+  padding: 3px 12px;
+  border: none;
+  background: none;
+  border-radius: calc(var(--mobius-radius-sm) - 1px);
+  font-size: var(--mobius-text-xs);
+  font-family: var(--mobius-font-sans);
+  font-weight: 500;
+  color: var(--mobius-text-muted);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+.repo-doc-tab:hover { color: var(--mobius-text-primary); }
+.repo-doc-tab.active {
+  background: var(--mobius-bg-card);
+  color: var(--mobius-text-primary);
+  font-weight: 600;
+  box-shadow: var(--mobius-shadow-sm);
+}
+.repo-doc-view {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.repo-doc-view--reader { overflow: hidden; }
+
+/* ── Tag analytics view ──────────────────────────────────────── */
+.repo-doc-view--analytics {
+  overflow-y: auto;
+  padding: var(--mobius-space-md);
+}
+.repo-analytics-empty {
+  padding: var(--mobius-space-xl);
+  text-align: center;
+  font-size: var(--mobius-text-sm);
+  color: var(--mobius-text-muted);
+  font-family: var(--mobius-font-sans);
+}
+.repo-analytics-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--mobius-space-sm);
+  flex-wrap: wrap;
+  margin-bottom: var(--mobius-space-md);
+  padding-bottom: var(--mobius-space-sm);
+  border-bottom: 1px solid var(--mobius-border);
+}
+.repo-analytics-stat {
+  font-size: var(--mobius-text-xs);
+  font-family: var(--mobius-font-sans);
+  font-weight: 600;
+  color: var(--mobius-text-secondary);
+}
+.repo-analytics-sep { color: var(--mobius-border-medium); font-size: var(--mobius-text-xs); }
+.repo-analytics-section { margin-bottom: var(--mobius-space-lg); }
+.repo-analytics-section-title {
+  font-size: var(--mobius-text-xs);
+  font-family: var(--mobius-font-sans);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--mobius-text-muted);
+  margin-bottom: var(--mobius-space-sm);
+}
+.repo-analytics-tag-list { display: flex; flex-direction: column; gap: 6px; }
+.repo-analytics-tag-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--mobius-space-sm);
+  flex-wrap: wrap;
+}
+.repo-analytics-tag-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: var(--mobius-radius-full);
+  font-size: var(--mobius-text-xs);
+  font-family: var(--mobius-font-sans);
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+  min-width: 80px;
+}
+.tag-j {
+  background: color-mix(in srgb, var(--mobius-accent) 12%, transparent);
+  color: var(--mobius-accent);
+}
+.tag-p {
+  background: color-mix(in srgb, var(--mobius-success) 12%, transparent);
+  color: var(--mobius-success);
+}
+.tag-d {
+  background: color-mix(in srgb, var(--mobius-warning) 15%, transparent);
+  color: var(--mobius-text-secondary);
+}
+.repo-analytics-tag-count {
+  font-size: var(--mobius-text-xs);
+  font-family: var(--mobius-font-mono);
+  color: var(--mobius-text-muted);
+  flex-shrink: 0;
+  min-width: 28px;
+}
+.repo-analytics-page-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  flex: 1;
+}
+.repo-analytics-page-chip {
+  padding: 1px 5px;
+  border: 1px solid var(--mobius-border);
+  border-radius: var(--mobius-radius-sm);
+  background: var(--mobius-bg-secondary);
+  font-size: 10px;
+  font-family: var(--mobius-font-mono);
+  color: var(--mobius-accent);
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+}
+.repo-analytics-page-chip:hover {
+  background: color-mix(in srgb, var(--mobius-accent) 10%, transparent);
+  border-color: var(--mobius-accent);
+}
+.repo-analytics-page-more {
+  font-size: 10px;
+  color: var(--mobius-text-muted);
+  font-family: var(--mobius-font-sans);
+  align-self: center;
+}
+
+/* ── Info / metadata view ────────────────────────────────────── */
+.repo-doc-view--metadata {
+  overflow-y: auto;
+  padding: var(--mobius-space-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--mobius-space-md);
+}
+.repo-meta-section { display: flex; flex-direction: column; gap: 4px; }
+.repo-meta-section-title {
+  font-size: var(--mobius-text-xs);
+  font-family: var(--mobius-font-sans);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--mobius-text-muted);
+  margin-bottom: 2px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--mobius-border);
+}
+.repo-meta-row {
+  display: flex;
+  gap: var(--mobius-space-sm);
+  padding: 3px 0;
+  font-size: var(--mobius-text-xs);
+  font-family: var(--mobius-font-sans);
+}
+.repo-meta-label {
+  width: 110px;
+  flex-shrink: 0;
+  color: var(--mobius-text-muted);
+  font-weight: 500;
+}
+.repo-meta-value { color: var(--mobius-text-primary); word-break: break-word; }
+.repo-meta-status { font-weight: 600; }
+.repo-meta-status--completed { color: var(--mobius-success); }
+.repo-meta-status--failed    { color: var(--mobius-error); }
+.repo-meta-status--in_progress { color: var(--mobius-accent); }
+.repo-meta-status--none, .repo-meta-status--pending { color: var(--mobius-text-muted); }
+.repo-meta-pipeline-pips {
+  padding-top: var(--mobius-space-sm);
+  border-top: 1px solid var(--mobius-border);
+}
+
+/* sitemap row click hint */
+.sitemap-row-ingested:hover td { background: color-mix(in srgb, var(--mobius-accent) 6%, transparent); }
+
+/* reader-slideout inside flex doc-view needs flex:1, not height:100% */
+.repo-doc-view--reader .reader-slideout {
+  flex: 1;
+  height: auto;
+  min-height: 0;
 }

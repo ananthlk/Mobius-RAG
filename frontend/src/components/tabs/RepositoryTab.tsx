@@ -25,6 +25,11 @@ interface DocLike {
   display_name?: string | null
   payer?: string | null
   state?: string | null
+  program?: string | null
+  authority_level?: string | null
+  effective_date?: string | null
+  termination_date?: string | null
+  status?: string | null
   extraction_status?: string
   chunking_status?: string | null
   embedding_status?: string | null
@@ -266,7 +271,8 @@ function StatusPanel({ documents, onRefresh }: StatusPanelProps) {
   }
 
   const runRemediate = async () => {
-    if (!confirm('Fix all integrity gaps? This prunes cancelled jobs, resets stuck docs, and queues re-chunk / re-embed / retag work for the workers to drain.')) return
+    // No confirm() — blocked in the platform iframe (see PipelinePanel.run).
+    // Fix-all is idempotent remediation, safe to trigger directly.
     setIntegBusy(true); setIntegErr(null)
     try {
       const r = await fetch(`${API_BASE}/admin/integrity/remediate`, { method: 'POST' })
@@ -780,49 +786,109 @@ function _fmtDur(a?: string | null, b?: string | null): string {
 }
 
 function PipelinePanel({ documents, onRefresh }: StatusPanelProps) {
-  const [nly, setNly] = useState<any>(null)
   const [rep, setRep] = useState<any>(null)
+  const [runs, setRuns] = useState<any[]>([])
+  const [nly, setNly] = useState<any>(null)          // GLOBAL orchestrator status (the live run, if any)
+  const [selId, setSelId] = useState<string | null>(null)
+  const [detail, setDetail] = useState<any>(null)    // fetched detail for a SELECTED past run
   const [includeEval, setIncludeEval] = useState(true)
   const [dryRun, setDryRun] = useState(false)
   const [busy, setBusy] = useState(false)
-  const running = !!nly?.running
+  const [runErr, setRunErr] = useState<string | null>(null)
 
-  const fetchStatus = async () => {
-    try { const r = await fetch(`${API_BASE}/admin/nightly/status`); if (r.ok) setNly(await r.json()) } catch { /* ignore */ }
-  }
+  // "A run is actually executing" comes from the live orchestrator — NOT from
+  // whichever history row is selected (a killed run persists a stale running flag).
+  const globalRunning = !!nly?.running
+  const liveRunId = nly?.run_id
+  const viewingLive = globalRunning && !!liveRunId && (selId === liveRunId || !selId)
+  // What the right pane shows: the live orchestrator state when viewing the active
+  // run, else the fetched (past) run detail.
+  const shownDetail = viewingLive ? nly : detail
+
   const fetchReport = async () => {
     try { const r = await fetch(`${API_BASE}/admin/integrity/report`); if (r.ok) setRep(await r.json()) } catch { /* ignore */ }
   }
-  useEffect(() => { fetchStatus(); fetchReport() }, [])
+  const fetchNly = async () => {
+    try { const r = await fetch(`${API_BASE}/admin/nightly/status`); if (r.ok) setNly(await r.json()) } catch { /* ignore */ }
+  }
+  const fetchRuns = async () => {
+    try { const r = await fetch(`${API_BASE}/admin/nightly/runs`); if (r.ok) { const j = await r.json(); setRuns(j.runs || []) } } catch { /* ignore */ }
+  }
+  const fetchDetail = async (id: string) => {
+    try { const r = await fetch(`${API_BASE}/admin/nightly/runs/${id}`); if (r.ok) setDetail(await r.json()) } catch { /* ignore */ }
+  }
+  useEffect(() => { fetchReport(); fetchNly(); fetchRuns() }, [])
+  // Selection: follow the live run when one is executing; otherwise keep the
+  // current selection or default to the newest.
   useEffect(() => {
-    const id = setInterval(() => { fetchStatus(); if (!running) fetchReport() }, running ? 4000 : 15000)
-    return () => clearInterval(id)
-  }, [running])
+    if (globalRunning && liveRunId) setSelId(liveRunId)
+    else setSelId(prev => prev || runs[0]?.id || null)
+  }, [globalRunning, liveRunId, runs])
+  // Fetch detail only for a SELECTED PAST run (the live run comes from nly).
+  useEffect(() => { if (selId && !viewingLive) fetchDetail(selId) }, [selId, viewingLive])
+  useEffect(() => {
+    const iv = setInterval(() => {
+      fetchNly(); fetchRuns()
+      if (selId && !viewingLive) fetchDetail(selId)
+      if (!globalRunning) fetchReport()
+    }, globalRunning ? 4000 : 12000)
+    return () => clearInterval(iv)
+  }, [selId, globalRunning, liveRunId, viewingLive])
 
   const run = async () => {
-    const msg = `Run nightly pipeline?${includeEval ? '\nIncludes the eval bracket (~50 min).' : ''}${dryRun ? '\n(dry run — no mutations)' : ''}`
-    if (!confirm(msg)) return
-    setBusy(true)
+    // No confirm() dialog: this app runs inside the platform iframe, which
+    // blocks window.confirm/alert (no allow-modals) — a confirm() gate would
+    // silently return false and the run would never fire. The dry-run / eval
+    // toggles make intent explicit instead.
+    setBusy(true); setRunErr(null)
     try {
-      await fetch(`${API_BASE}/admin/nightly/run`, {
+      const r = await fetch(`${API_BASE}/admin/nightly/run`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ include_eval: includeEval, dry_run: dryRun }),
       })
-      await fetchStatus()
+      if (!r.ok) {
+        const body = await r.text().catch(() => '')
+        setRunErr(r.status === 401 || r.status === 403
+          ? 'Not authenticated — open the RAG app from the platform (chat tool tile), not a bare URL.'
+          : `Run failed: HTTP ${r.status}${body ? ` — ${body.slice(0, 160)}` : ''}`)
+        return
+      }
+      const j = await r.json()
+      if (j.status === 'already_running') { setRunErr('A run is already in progress.') }
+      if (j.run_id) setSelId(j.run_id)
+      await Promise.all([fetchNly(), fetchRuns()])   // flip the button to Stop + track the live run
+    } catch (e) {
+      setRunErr(`Run failed: ${String(e)}`)
     } finally { setBusy(false) }
   }
   const stop = async () => {
-    if (!confirm('Stop the running pipeline after the current step?')) return
-    await fetch(`${API_BASE}/admin/nightly/stop`, { method: 'POST' })
-    await fetchStatus()
+    setRunErr(null)
+    try {
+      const r = await fetch(`${API_BASE}/admin/nightly/stop`, { method: 'POST' })
+      if (!r.ok) setRunErr(`Stop failed: HTTP ${r.status}`)
+      await fetchNly()   // reflect the stop in the button immediately
+    } catch (e) { setRunErr(`Stop failed: ${String(e)}`) }
+  }
+  const resume = async (fromId: string) => {
+    setBusy(true); setRunErr(null)
+    try {
+      const r = await fetch(`${API_BASE}/admin/nightly/run`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ include_eval: includeEval, dry_run: dryRun, resume_from: fromId }),
+      })
+      if (!r.ok) {
+        setRunErr(r.status === 401 || r.status === 403 ? 'Not authenticated — reload the page.' : `Resume failed: HTTP ${r.status}`)
+        return
+      }
+      const j = await r.json()
+      if (j.run_id) setSelId(j.run_id)
+      await Promise.all([fetchNly(), fetchRuns()])
+    } catch (e) { setRunErr(`Resume failed: ${String(e)}`) } finally { setBusy(false) }
   }
 
-  const steps: any[] = nly?.steps || []
-  const lift = nly?.lift
   const gaps = rep?.gaps || {}
-  const openGaps = ['unpublished_total', 'failed_docs', 'stuck_docs', 'blocked_jobs', 'stale_tags']
-    .reduce((a, k) => a + (gaps[k] || 0), 0)
-  const lastLift = lift?.router_recall?.delta
+  const openGaps = ['unpublished_total', 'failed_docs', 'stuck_docs', 'blocked_jobs', 'stale_tags'].reduce((a, k) => a + (gaps[k] || 0), 0)
+  const lastLift = runs.find(r => typeof r.router_delta === 'number')?.router_delta
   const card = (label: string, value: any, sub?: string, color?: string) => (
     <div style={{ background: 'var(--mobius-surface-elevated, #f8fafc)', borderRadius: 8, padding: '10px 14px' }}>
       <div style={{ fontSize: 12, color: 'var(--mobius-text-secondary)' }}>{label}</div>
@@ -830,32 +896,19 @@ function PipelinePanel({ documents, onRefresh }: StatusPanelProps) {
         {sub && <span style={{ fontSize: 12, color: 'var(--mobius-text-secondary)', fontWeight: 400 }}> {sub}</span>}</div>
     </div>
   )
+  const fmtWhen = (iso?: string | null) => iso ? new Date(iso).toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'
+  const steps: any[] = shownDetail?.steps || []
+  const lift = shownDetail?.lift
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      {/* header + actions */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
-        <div>
-          <div style={{ fontSize: 15, fontWeight: 600 }}>Nightly pipeline</div>
-          <div style={{ fontSize: 12, color: 'var(--mobius-text-secondary)' }}>Corpus + lexicon → RAG → chat, bracketed by eval</div>
-        </div>
-        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-          <label style={{ fontSize: 12, color: 'var(--mobius-text-secondary)', display: 'flex', gap: 4, alignItems: 'center' }}>
-            <input type="checkbox" checked={includeEval} disabled={running} onChange={e => setIncludeEval(e.target.checked)} /> eval bracket</label>
-          <label style={{ fontSize: 12, color: 'var(--mobius-text-secondary)', display: 'flex', gap: 4, alignItems: 'center' }}>
-            <input type="checkbox" checked={dryRun} disabled={running} onChange={e => setDryRun(e.target.checked)} /> dry run</label>
-          {running ? (
-            <button type="button" onClick={stop}
-              style={{ padding: '7px 14px', borderRadius: 8, border: '1px solid #ef4444', color: '#ef4444', background: 'transparent', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Stop</button>
-          ) : (
-            <button type="button" onClick={run} disabled={busy}
-              style={{ padding: '7px 14px', borderRadius: 8, border: 'none', color: '#fff', background: '#2563eb', fontSize: 13, fontWeight: 600, cursor: busy ? 'wait' : 'pointer' }}>
-              {busy ? 'Starting…' : '▶ Run pipeline'}</button>
-          )}
-        </div>
+      {/* header */}
+      <div>
+        <div style={{ fontSize: 15, fontWeight: 600 }}>Nightly pipeline</div>
+        <div style={{ fontSize: 12, color: 'var(--mobius-text-secondary)' }}>Corpus + lexicon → RAG → chat, bracketed by eval</div>
       </div>
 
-      {/* metric cards */}
+      {/* metric cards (current corpus) */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0,1fr))', gap: 12 }}>
         {card('Published', (rep?.published ?? '—').toLocaleString?.() ?? rep?.published ?? '—', rep ? `/ ${rep.documents_total?.toLocaleString?.()}` : '')}
         {card('Lexicon rev', rep?.current_lexicon_revision ?? '—')}
@@ -864,86 +917,142 @@ function PipelinePanel({ documents, onRefresh }: StatusPanelProps) {
           typeof lastLift === 'number' ? (lastLift >= 0 ? '#10b981' : '#ef4444') : undefined)}
       </div>
 
-      {/* live stage tracker */}
-      {steps.length > 0 && (
-        <div style={{ background: 'var(--mobius-surface, #fff)', border: '1px solid var(--mobius-border, #e2e8f0)', borderRadius: 12, padding: '12px 16px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, fontWeight: 600, marginBottom: 10 }}>
-            <span>Run progress</span>
-            <span style={{ color: 'var(--mobius-text-secondary)', fontWeight: 400 }}>
-              {nly?.running ? `running · ${_fmtDur(nly?.started_at)}` : nly?.finished_at ? `done · ${_fmtDur(nly?.started_at, nly?.finished_at)}` : 'idle'}
-              {nly?.error ? ` · error: ${nly.error}` : ''}
-            </span>
+      {/* two columns: left = new run + history · right = selected run detail */}
+      <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start' }}>
+        {/* LEFT RAIL */}
+        <div style={{ width: 234, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{ border: '1px solid var(--mobius-border, #e2e8f0)', borderRadius: 12, padding: '12px 14px' }}>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>New run</div>
+            <label style={{ fontSize: 12, color: 'var(--mobius-text-secondary)', display: 'flex', gap: 6, alignItems: 'center', marginBottom: 4 }}>
+              <input type="checkbox" checked={includeEval} disabled={globalRunning} onChange={e => setIncludeEval(e.target.checked)} /> eval bracket (~50 min)</label>
+            <label style={{ fontSize: 12, color: 'var(--mobius-text-secondary)', display: 'flex', gap: 6, alignItems: 'center', marginBottom: 10 }}>
+              <input type="checkbox" checked={dryRun} disabled={globalRunning} onChange={e => setDryRun(e.target.checked)} /> dry run</label>
+            {globalRunning ? (
+              <button type="button" onClick={stop}
+                style={{ width: '100%', padding: '8px 0', borderRadius: 8, border: '1px solid #ef4444', color: '#ef4444', background: 'transparent', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Stop run</button>
+            ) : (
+              <button type="button" onClick={run} disabled={busy}
+                style={{ width: '100%', padding: '8px 0', borderRadius: 8, border: 'none', color: '#fff', background: '#2563eb', fontSize: 13, fontWeight: 600, cursor: busy ? 'wait' : 'pointer' }}>
+                {busy ? 'Starting…' : '▶ Run pipeline'}</button>
+            )}
+            {runErr && (
+              <div style={{ marginTop: 8, fontSize: 12, color: '#b91c1c', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 6, padding: '6px 8px' }}>{runErr}</div>
+            )}
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column' }}>
-            {[...steps].sort((a, b) => _STEP_ORDER.indexOf(a.key) - _STEP_ORDER.indexOf(b.key)).map(s => {
-              const log: string[] = s.log || []
-              const hasDetail = log.length > 0 || s.started_at
-              const summaryRow = (
-                <span style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13, flex: 1 }}>
-                  <span style={{ width: 9, height: 9, borderRadius: 999, background: _stepColor(s.status), flexShrink: 0 }} />
-                  <span style={{ width: 150, fontWeight: s.status === 'running' ? 600 : 400 }}>{s.label}</span>
-                  <span style={{ flex: 1, color: 'var(--mobius-text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.detail || (s.status === 'pending' ? '—' : s.status)}</span>
-                  <span style={{ color: 'var(--mobius-text-secondary)', fontSize: 12 }}>{s.status === 'running' || s.status === 'done' || s.status === 'failed' ? _fmtDur(s.started_at, s.ended_at) : ''}</span>
-                </span>
-              )
-              const body = (
-                <div style={{ margin: '2px 0 8px 19px', padding: '8px 10px', background: 'var(--mobius-surface-elevated, #f8fafc)', borderRadius: 6, fontSize: 12 }}>
-                  <div style={{ color: 'var(--mobius-text-secondary)', marginBottom: 6 }}>
-                    status <b style={{ color: _stepColor(s.status) }}>{s.status}</b>
-                    {s.started_at && <> · started {new Date(s.started_at).toLocaleTimeString()}</>}
-                    {s.ended_at && <> · ended {new Date(s.ended_at).toLocaleTimeString()}</>}
-                    {(s.key === 'baseline_eval' || s.key === 'final_eval') && nly?.eval_run_id && s.status === 'running' && <> · run {String(nly.eval_run_id).slice(0, 8)}</>}
+
+          <div style={{ border: '1px solid var(--mobius-border, #e2e8f0)', borderRadius: 12, padding: '8px 8px', maxHeight: 380, overflow: 'auto' }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--mobius-text-secondary)', padding: '4px 6px' }}>History</div>
+            {runs.length === 0 && <div style={{ fontSize: 12, color: 'var(--mobius-text-secondary)', padding: '6px' }}>no runs yet</div>}
+            {runs.map(rn => {
+              const sel = rn.id === selId
+              const d = rn.router_delta
+              return (
+                <div key={rn.id} onClick={() => setSelId(rn.id)}
+                  style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '7px 6px', borderRadius: 8, cursor: 'pointer',
+                    background: sel ? 'var(--mobius-surface-elevated, #eef2ff)' : 'transparent' }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 999, flexShrink: 0, background: _stepColor(rn.status === 'done' ? 'done' : rn.status === 'running' ? 'running' : rn.status === 'failed' ? 'failed' : 'skipped') }} />
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ fontSize: 12, fontWeight: sel ? 600 : 400 }}>{fmtWhen(rn.started_at)}</div>
+                    <div style={{ fontSize: 11, color: 'var(--mobius-text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {rn.status}{rn.dry_run ? ' · dry' : ''}{rn.include_eval ? ' · eval' : ''}
+                      {typeof d === 'number' ? ` · Δ${d >= 0 ? '+' : ''}${d.toFixed(3)}` : ''}</div>
                   </div>
-                  {s.key === 'gate' && nly?.gate && (
-                    <div style={{ fontFamily: 'monospace', marginBottom: 6 }}>
-                      published {nly.gate.published}/{nly.gate.documents_total} · frac {nly.gate.frac} · stale_tags {nly.gate.stale_tags} → {nly.gate.passed ? 'PASS' : 'FAIL'}
-                    </div>
-                  )}
-                  {log.length > 0 ? (
-                    <div style={{ fontFamily: 'monospace', whiteSpace: 'pre-wrap', lineHeight: 1.5, maxHeight: 220, overflow: 'auto', color: 'var(--mobius-text-secondary)' }}>
-                      {log.join('\n')}
-                    </div>
-                  ) : <div style={{ color: 'var(--mobius-text-secondary)' }}>no log yet</div>}
                 </div>
-              )
-              return hasDetail ? (
-                <details key={s.key} style={{ padding: '3px 0' }}>
-                  <summary style={{ cursor: 'pointer', listStyle: 'none', display: 'flex', alignItems: 'center' }}>{summaryRow}</summary>
-                  {body}
-                </details>
-              ) : (
-                <div key={s.key} style={{ padding: '5px 0', display: 'flex' }}>{summaryRow}</div>
               )
             })}
           </div>
         </div>
-      )}
 
-      {/* eval bracket */}
-      {lift && (
-        <div style={{ background: 'var(--mobius-surface, #fff)', border: '1px solid var(--mobius-border, #e2e8f0)', borderRadius: 12, padding: '12px 16px' }}>
-          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Eval bracket — baseline → final</div>
-          <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
-            <thead><tr style={{ color: 'var(--mobius-text-secondary)', fontSize: 12 }}>
-              <td>metric</td><td style={{ textAlign: 'right' }}>baseline</td><td style={{ textAlign: 'right' }}>final</td><td style={{ textAlign: 'right' }}>Δ</td></tr></thead>
-            <tbody>
-              {['router_recall', 'oracle_recall', 'best_single_recall', 'routing_headroom'].map(k => {
-                const row = lift[k] || {}
-                const d = row.delta
-                return (
-                  <tr key={k}>
-                    <td style={{ padding: '4px 0' }}>{k}</td>
-                    <td style={{ textAlign: 'right' }}>{row.baseline ?? '—'}</td>
-                    <td style={{ textAlign: 'right' }}>{row.final ?? '—'}</td>
-                    <td style={{ textAlign: 'right', color: typeof d === 'number' ? (d >= 0 ? '#10b981' : '#ef4444') : 'inherit' }}>
-                      {typeof d === 'number' ? `${d >= 0 ? '+' : ''}${d.toFixed(3)}` : '—'}</td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
+        {/* RIGHT DETAIL */}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          {!shownDetail ? (
+            <div style={{ fontSize: 13, color: 'var(--mobius-text-secondary)', padding: '24px 0', textAlign: 'center' }}>Select a run to see its stages and eval bracket.</div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div style={{ background: 'var(--mobius-surface, #fff)', border: '1px solid var(--mobius-border, #e2e8f0)', borderRadius: 12, padding: '12px 16px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 13, fontWeight: 600, marginBottom: 10 }}>
+                  <span>Run progress</span>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--mobius-text-secondary)', fontWeight: 400 }}>
+                    <span>
+                      {shownDetail.running ? `running · ${_fmtDur(shownDetail.started_at)}` : shownDetail.finished_at ? `${(shownDetail.error ? 'failed' : 'done')} · ${_fmtDur(shownDetail.started_at, shownDetail.finished_at)}` : 'idle'}
+                      {shownDetail.error ? ` · ${shownDetail.error}` : ''}
+                    </span>
+                    {!globalRunning && shownDetail.error && selId && (
+                      <button type="button" onClick={() => resume(selId)} disabled={busy}
+                        style={{ border: '1px solid #2563eb', color: '#2563eb', background: 'transparent', borderRadius: 6, fontSize: 12, fontWeight: 600, padding: '3px 10px', cursor: busy ? 'wait' : 'pointer' }}>
+                        {busy ? 'Resuming…' : '↻ Resume from failure'}</button>
+                    )}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  {[...steps].sort((a, b) => _STEP_ORDER.indexOf(a.key) - _STEP_ORDER.indexOf(b.key)).map(s => {
+                    const log: string[] = s.log || []
+                    const hasDetail = log.length > 0 || s.started_at
+                    const summaryRow = (
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13, flex: 1 }}>
+                        <span style={{ width: 9, height: 9, borderRadius: 999, background: _stepColor(s.status), flexShrink: 0 }} />
+                        <span style={{ width: 150, fontWeight: s.status === 'running' ? 600 : 400 }}>{s.label}</span>
+                        <span style={{ flex: 1, color: 'var(--mobius-text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.detail || (s.status === 'pending' ? '—' : s.status)}</span>
+                        <span style={{ color: 'var(--mobius-text-secondary)', fontSize: 12 }}>{s.status === 'running' || s.status === 'done' || s.status === 'failed' ? _fmtDur(s.started_at, s.ended_at) : ''}</span>
+                      </span>
+                    )
+                    const body = (
+                      <div style={{ margin: '2px 0 8px 19px', padding: '8px 10px', background: 'var(--mobius-surface-elevated, #f8fafc)', borderRadius: 6, fontSize: 12 }}>
+                        <div style={{ color: 'var(--mobius-text-secondary)', marginBottom: 6 }}>
+                          status <b style={{ color: _stepColor(s.status) }}>{s.status}</b>
+                          {s.started_at && <> · started {new Date(s.started_at).toLocaleTimeString()}</>}
+                          {s.ended_at && <> · ended {new Date(s.ended_at).toLocaleTimeString()}</>}
+                          {(s.key === 'baseline_eval' || s.key === 'final_eval') && shownDetail?.eval_run_id && s.status === 'running' && <> · run {String(shownDetail.eval_run_id).slice(0, 8)}</>}
+                        </div>
+                        {s.key === 'gate' && shownDetail?.gate && (
+                          <div style={{ fontFamily: 'monospace', marginBottom: 6 }}>
+                            published {shownDetail.gate.published}/{shownDetail.gate.documents_total} · frac {shownDetail.gate.frac} · stale_tags {shownDetail.gate.stale_tags} → {shownDetail.gate.passed ? 'PASS' : 'FAIL'}
+                          </div>
+                        )}
+                        {log.length > 0 ? (
+                          <div style={{ fontFamily: 'monospace', whiteSpace: 'pre-wrap', lineHeight: 1.5, maxHeight: 220, overflow: 'auto', color: 'var(--mobius-text-secondary)' }}>{log.join('\n')}</div>
+                        ) : <div style={{ color: 'var(--mobius-text-secondary)' }}>no log yet</div>}
+                      </div>
+                    )
+                    return hasDetail ? (
+                      <details key={s.key} style={{ padding: '3px 0' }}>
+                        <summary style={{ cursor: 'pointer', listStyle: 'none', display: 'flex', alignItems: 'center' }}>{summaryRow}</summary>
+                        {body}
+                      </details>
+                    ) : (
+                      <div key={s.key} style={{ padding: '5px 0', display: 'flex' }}>{summaryRow}</div>
+                    )
+                  })}
+                </div>
+              </div>
+
+              {lift && (
+                <div style={{ background: 'var(--mobius-surface, #fff)', border: '1px solid var(--mobius-border, #e2e8f0)', borderRadius: 12, padding: '12px 16px' }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Eval bracket — baseline → final</div>
+                  <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
+                    <thead><tr style={{ color: 'var(--mobius-text-secondary)', fontSize: 12 }}>
+                      <td>metric</td><td style={{ textAlign: 'right' }}>baseline</td><td style={{ textAlign: 'right' }}>final</td><td style={{ textAlign: 'right' }}>Δ</td></tr></thead>
+                    <tbody>
+                      {['router_recall', 'oracle_recall', 'best_single_recall', 'routing_headroom'].map(k => {
+                        const row = lift[k] || {}; const d = row.delta
+                        return (
+                          <tr key={k}>
+                            <td style={{ padding: '4px 0' }}>{k}</td>
+                            <td style={{ textAlign: 'right' }}>{row.baseline ?? '—'}</td>
+                            <td style={{ textAlign: 'right' }}>{row.final ?? '—'}</td>
+                            <td style={{ textAlign: 'right', color: typeof d === 'number' ? (d >= 0 ? '#10b981' : '#ef4444') : 'inherit' }}>
+                              {typeof d === 'number' ? `${d >= 0 ? '+' : ''}${d.toFixed(3)}` : '—'}</td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
         </div>
-      )}
+      </div>
 
       {/* legacy integrity/health — demoted to a collapsed section */}
       <details style={{ fontSize: 13 }}>
@@ -960,7 +1069,7 @@ function PipelinePanel({ documents, onRefresh }: StatusPanelProps) {
 
 export function RepositoryTab({
   documents,
-  documentsLoading = false,
+  documentsLoading: _documentsLoading = false,
   selectedDocumentId,
   navigateToRead,
   onNavigateToReadConsumed,
@@ -979,11 +1088,10 @@ export function RepositoryTab({
   // ── Search state ─────────────────────────────────────────────────────────
   const [searchQuery, setSearchQuery] = useState('')
   const [searchMode, setSearchMode] = useState<SearchMode>('corpus')
-  // Search moved to Test tab (2026-04-29). State + useEffect kept stubbed
-  // so the rest of the file's references compile, but the UI is gone.
-  const [, setSearchResults] = useState<CorpusChunk[] | null>(null)
-  const [, setSearchTelemetry] = useState<SearchTelemetry | null>(null)
-  const [, setSearchLoading] = useState(false)
+  // Corpus search — live in the Library "Search corpus" mode.
+  const [searchResults, setSearchResults] = useState<CorpusChunk[] | null>(null)
+  const [searchTelemetry, setSearchTelemetry] = useState<SearchTelemetry | null>(null)
+  const [searchLoading, setSearchLoading] = useState(false)
 
   // ── Reader state ─────────────────────────────────────────────────────────
   const [urlPreview, setUrlPreview] = useState<{ url: string; ingested: boolean } | null>(null)
@@ -992,21 +1100,48 @@ export function RepositoryTab({
   const [localNavigateTo, setLocalNavigateTo] = useState<NavigateToRead | null>(null)
 
   // ── New layout state ─────────────────────────────────────────────────────
-  const [leftCollapsed, setLeftCollapsed] = useState(false)
-  const [rightTab, setRightTab] = useState<'reader' | 'search' | 'status'>('reader')
+  const [pageTab, setPageTab] = useState<'library' | 'pipeline'>('library')
+  const [libMode, setLibMode] = useState<'browse' | 'search'>('browse')
+  const [viewingDoc, setViewingDoc] = useState(false)  // reader open (over search results in search mode)
 
-  // Auto-open reader tab when an external navigateToRead arrives
+  // Auto-open the reader when an external navigateToRead arrives
   useEffect(() => {
-    if (navigateToRead) setRightTab('reader')
+    if (navigateToRead) { setPageTab('library'); setViewingDoc(true) }
   }, [navigateToRead])
 
   // ── Browse panel state ───────────────────────────────────────────────────
   const [browseSearch, setBrowseSearch] = useState('')
-  const [payerFilter, setPayerFilter] = useState('')
+  const [_payerFilter, setPayerFilter] = useState('')
   const [stateFilter, setStateFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
   // Track which payer groups are collapsed
-  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({})
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({ __other__: true })
+
+  // ── Payor-filtered doc loading ────────────────────────────────────────────
+  // Canonical managed care payors — always shown in nav even if 0 docs
+  const MANAGED_CARE_PAYORS = [
+    'Sunshine Health',
+    'Simply Healthcare',
+    'United Healthcare',
+    'Aetna',
+    'Molina Healthcare of Florida',
+  ]
+  const [payerDocs, setPayerDocs] = useState<DocLike[]>([])
+  const [payerDocsLoading, setPayerDocsLoading] = useState(false)
+  const [activePayer, setActivePayer] = useState<string | null>(null)
+
+  const selectPayer = (payer: string | null) => {
+    setActivePayer(payer)
+    setPayerFilter(payer ?? '')
+    if (payer === null) { setPayerDocs([]); return }
+    setPayerDocsLoading(true)
+    const param = payer === '' ? '&payer=' : `&payer=${encodeURIComponent(payer)}`
+    fetch(`${API_BASE}/documents?limit=500${param}`)
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then(d => setPayerDocs((d.documents || []) as DocLike[]))
+      .catch(() => setPayerDocs([]))
+      .finally(() => setPayerDocsLoading(false))
+  }
 
   // ── Load aggregate stats ─────────────────────────────────────────────────
   useEffect(() => {
@@ -1160,7 +1295,8 @@ export function RepositoryTab({
     setUrlPreview(null)
     setLocalNavigateTo(pageNumber != null ? { documentId, pageNumber, citeText } : null)
     onDocumentSelect(documentId)
-    setRightTab('reader')  // auto-switch to reader tab
+    setPageTab('library')
+    setViewingDoc(true)   // show the reader (over search results if in search mode)
   }
 
   // @ts-ignore — search UI moved to Test tab.
@@ -1175,13 +1311,14 @@ export function RepositoryTab({
   const openUrlPreview = (url: string, ingested: boolean) => {
     setUrlPreview({ url, ingested })
     setLocalNavigateTo(null)
-    setRightTab('reader')
+    setPageTab('library')
+    setViewingDoc(true)
   }
 
   const closeReader = () => {
     setUrlPreview(null)
     setLocalNavigateTo(null)
-    // don't change rightTab — stay on reader tab showing empty state
+    setViewingDoc(false)   // back to the doc list / search results
   }
 
   const handleIngestUrl = async (url: string) => {
@@ -1204,20 +1341,18 @@ export function RepositoryTab({
   const activeNavigateTo = navigateToRead ?? localNavigateTo
 
   // ── Browse: filter + group logic ─────────────────────────────────────────
+  // When a managed care payor is active, use the freshly loaded payerDocs; otherwise use the sample
+  const browseSource = activePayer !== null ? payerDocs : documents
+
   const filteredDocs = useMemo(() => {
     const q = browseSearch.toLowerCase()
-    return documents.filter((d) => {
-      // text search
+    return browseSource.filter((d) => {
       if (q) {
         const haystack = [d.display_name, d.filename, d.payer, d.state]
           .filter(Boolean).join(' ').toLowerCase()
         if (!haystack.includes(q)) return false
       }
-      // payer filter
-      if (payerFilter && (d.payer ?? '') !== payerFilter) return false
-      // state filter
       if (stateFilter && (d.state ?? '') !== stateFilter) return false
-      // status filter
       if (statusFilter) {
         const docStatus = d.published_at
           ? 'published'
@@ -1228,37 +1363,96 @@ export function RepositoryTab({
       }
       return true
     })
-  }, [documents, browseSearch, payerFilter, stateFilter, statusFilter])
+  }, [browseSource, browseSearch, stateFilter, statusFilter])
 
-  // Group by payer
+  // Group non-managed-care docs by payer for the "Other" section
   const groupedDocs = useMemo(() => {
+    if (activePayer !== null) return {}   // payor mode: flat list, no groups needed
     const groups: Record<string, DocLike[]> = {}
     for (const d of filteredDocs) {
-      const key = d.payer || d.state || '(untagged)'
+      const key = d.payer || '(untagged)'
+      if (MANAGED_CARE_PAYORS.includes(key)) continue   // shown in pinned section
       if (!groups[key]) groups[key] = []
       groups[key].push(d)
     }
     return groups
-  }, [filteredDocs])
+  }, [filteredDocs, activePayer])
+
+  // Counts for managed care payors from the full document sample
+  const managedCareCounts = useMemo(() => {
+    const counts: Record<string, number> = {}
+    for (const p of MANAGED_CARE_PAYORS) counts[p] = 0
+    for (const d of documents) {
+      if (d.payer && MANAGED_CARE_PAYORS.includes(d.payer)) counts[d.payer]++
+    }
+    return counts
+  }, [documents])
 
   // Unique filter options
-  const uniquePayers = useMemo(() =>
-    Array.from(new Set(documents.map((d) => d.payer).filter(Boolean) as string[])).sort(),
-    [documents])
   const uniqueStates = useMemo(() =>
     Array.from(new Set(documents.map((d) => d.state).filter(Boolean) as string[])).sort(),
     [documents])
 
-  // Age formatter
-  const fmtAge = (iso: string | null | undefined) => {
-    if (!iso) return ''
-    const diff = Date.now() - new Date(iso).getTime()
-    const days = Math.floor(diff / 86400000)
-    if (days === 0) return 'today'
-    if (days === 1) return '1d'
-    if (days < 30) return `${days}d`
-    const months = Math.floor(days / 30)
-    return `${months}mo`
+  // ── Payor sitemap (sources for selected payor) ───────────────────────────
+  const [payorSources, setPayorSources] = useState<any[]>([])
+  const [sourcesLoading, setSourcesLoading] = useState(false)
+
+  useEffect(() => {
+    if (!activePayer) { setPayorSources([]); return }
+    setSourcesLoading(true)
+    fetch(`${API_BASE}/sources/search?q=${encodeURIComponent(activePayer)}&limit=200`)
+      .then(r => r.ok ? r.json() : [])
+      .then(d => setPayorSources(Array.isArray(d) ? d : []))
+      .catch(() => setPayorSources([]))
+      .finally(() => setSourcesLoading(false))
+  }, [activePayer])
+
+  // ── Doc view (read / tags / info) ───────────────────────────────────────
+  const [docView, setDocView] = useState<'reader' | 'analytics' | 'metadata'>('reader')
+  const [analyticsData, setAnalyticsData] = useState<any>(null)
+  const [analyticsLoading, setAnalyticsLoading] = useState(false)
+
+  // Reset to reader whenever a new doc is opened
+  useEffect(() => {
+    if (selectedDocumentId) {
+      setDocView('reader')
+      setAnalyticsData(null)
+    }
+  }, [selectedDocumentId])
+
+  const loadAnalytics = (docId: string) => {
+    if (analyticsData?.document_id === docId) return   // already loaded
+    setAnalyticsLoading(true)
+    fetch(`${API_BASE}/documents/${docId}/policy-line-tags`)
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then(d => setAnalyticsData(d))
+      .catch(() => setAnalyticsData(null))
+      .finally(() => setAnalyticsLoading(false))
+  }
+
+  // Aggregate policy-line-tags into { tag, count, pages[] } per tag type
+  const aggregateTags = (lines: any[], key: 'j_tags' | 'p_tags' | 'd_tags') => {
+    const map: Record<string, { count: number; pages: Set<number>; topScore: number }> = {}
+    for (const line of lines || []) {
+      const tags = line[key]
+      if (!tags) continue
+      for (const [tag, score] of Object.entries(tags) as [string, number][]) {
+        if (!map[tag]) map[tag] = { count: 0, pages: new Set(), topScore: 0 }
+        map[tag].count++
+        map[tag].pages.add(line.page_number)
+        if (score > map[tag].topScore) map[tag].topScore = score
+      }
+    }
+    return Object.entries(map)
+      .map(([tag, { count, pages, topScore }]) => ({ tag, count, pages: [...pages].sort((a, b) => a - b), topScore }))
+      .sort((a, b) => b.count - a.count)
+  }
+
+  const jumpToPage = (pageNumber: number) => {
+    if (!selectedDocumentId) return
+    setDocView('reader')
+    setViewingDoc(true)
+    setLocalNavigateTo({ documentId: selectedDocumentId, pageNumber, citeText: undefined })
   }
 
   // Status dot class
@@ -1269,11 +1463,24 @@ export function RepositoryTab({
     return 'pending'
   }
 
-  // Selected doc
-  const selectedDoc = useMemo(
-    () => documents.find((d) => d.id === selectedDocumentId) ?? null,
-    [documents, selectedDocumentId],
-  )
+  // Pipeline progress pips: extract → chunk → embed → publish
+  const PipelinePips = ({ d }: { d: DocLike }) => {
+    const steps = [
+      { key: 'E', done: d.extraction_status === 'completed', failed: d.extraction_status === 'failed', label: 'Extract: ' + (d.extraction_status ?? '—') },
+      { key: 'C', done: d.chunking_status === 'completed', failed: d.chunking_status === 'failed', label: 'Chunk: ' + (d.chunking_status ?? '—') },
+      { key: 'M', done: d.embedding_status === 'completed', failed: d.embedding_status === 'failed', label: 'Embed: ' + (d.embedding_status ?? '—') },
+      { key: 'P', done: !!d.published_at, failed: false, label: d.published_at ? `Published (${(d as any).published_rows ?? '?'} rows)` : 'Not published' },
+    ]
+    const allDone = steps.every(s => s.done)
+    return (
+      <span className="pipeline-pips" title={steps.map(s => s.label).join('\n')}>
+        {steps.map(s => (
+          <span key={s.key} className={`pip ${s.failed ? 'pip-fail' : s.done ? 'pip-done' : 'pip-todo'}`}>{s.key}</span>
+        ))}
+        {!allDone && <span className="pip-flag">!</span>}
+      </span>
+    )
+  }
 
   // Suppress unused vars from original code that are now no longer used in render
   void statsLoading
@@ -1290,195 +1497,444 @@ export function RepositoryTab({
   void openUrlPreview
 
   // ── Render ────────────────────────────────────────────────────────────────
+  const CorpusResults = _CorpusSearchResults
+  const searchInput = libMode === 'search' ? searchQuery : browseSearch
   return (
-    <div className={`repo-layout${leftCollapsed ? ' nav-collapsed' : ''}`}>
-      {/* Left nav */}
-      <div className="repo-nav">
-        {/* Toggle rail — always visible */}
-        <div className="repo-nav-rail">
+    <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 56px)', overflow: 'hidden', background: 'var(--mobius-bg-primary)' }}>
+      {/* ── Top-level tabs: Library | Pipeline ── */}
+      <div className="repo-page-tabs" style={{ display: 'flex', gap: 4, alignItems: 'center', flexShrink: 0, borderBottom: '1px solid var(--mobius-border, #e2e8f0)', padding: '0 8px' }}>
+        {(['library', 'pipeline'] as const).map((t) => (
           <button
-            className="repo-nav-toggle"
-            onClick={() => setLeftCollapsed(v => !v)}
-            title={leftCollapsed ? 'Expand panel' : 'Collapse panel'}
-          >
-            {leftCollapsed ? '›' : '‹'}
-          </button>
-        </div>
-
-        {/* Nav content — hidden when collapsed */}
-        {!leftCollapsed && (
-          <div className="repo-nav-content">
-            {/* Search + filters */}
-            <div className="repo-nav-search">
-              <input
-                type="search"
-                placeholder="Search documents, payer…"
-                value={browseSearch}
-                onChange={(e) => setBrowseSearch(e.target.value)}
-              />
-              <div className="repo-nav-filters">
-                <select value={payerFilter} onChange={(e) => setPayerFilter(e.target.value)}>
-                  <option value="">Payer ▾</option>
-                  {uniquePayers.map((p) => <option key={p} value={p}>{p}</option>)}
-                </select>
-                <select value={stateFilter} onChange={(e) => setStateFilter(e.target.value)}>
-                  <option value="">State ▾</option>
-                  {uniqueStates.map((s) => <option key={s} value={s}>{s}</option>)}
-                </select>
-                <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
-                  <option value="">Status ▾</option>
-                  <option value="published">published</option>
-                  <option value="processing">processing</option>
-                  <option value="failed">failed</option>
-                </select>
-              </div>
-            </div>
-
-            {/* Doc count badge */}
-            <div className="repo-nav-count">
-              {filteredDocs.length.toLocaleString()} document{filteredDocs.length !== 1 ? 's' : ''}
-              {documents.length > filteredDocs.length && ` of ${documents.length.toLocaleString()}`}
-            </div>
-
-            {/* Document list grouped by payer */}
-            {filteredDocs.length === 0 ? (
-              <div className="repo-nav-empty">
-                {documentsLoading ? 'Loading…' : documents.length === 0 ? 'No documents yet.' : 'No matches.'}
-              </div>
-            ) : (
-              <ul className="repo-nav-list">
-                {Object.entries(groupedDocs).map(([group, docs]) => {
-                  const isCollapsed = !!collapsedGroups[group]
-                  return (
-                    <li key={group}>
-                      <div
-                        className="repo-nav-group-header"
-                        onClick={() => setCollapsedGroups(prev => ({ ...prev, [group]: !prev[group] }))}
-                      >
-                        <span className="repo-nav-group-arrow">{isCollapsed ? '▶' : '▼'}</span>
-                        <span className="repo-nav-group-name">{group}</span>
-                        <span className="repo-nav-group-count">{docs.length}</span>
-                      </div>
-                      {!isCollapsed && docs.map((d) => (
-                        <div
-                          key={d.id}
-                          className={`repo-nav-doc${d.id === selectedDocumentId ? ' active' : ''}`}
-                          onClick={() => openDocument(d.id)}
-                          title={d.display_name || d.filename}
-                        >
-                          <span className={`repo-nav-dot ${statusDotClass(d)}`} />
-                          <span className="repo-nav-doc-name">{d.display_name || d.filename}</span>
-                          {d.published_at && (
-                            <span className="repo-nav-doc-age">{fmtAge(d.published_at)}</span>
-                          )}
-                        </div>
-                      ))}
-                    </li>
-                  )
-                })}
-              </ul>
-            )}
-          </div>
+            key={t}
+            onClick={() => setPageTab(t)}
+            style={{
+              background: 'none', border: 'none', cursor: 'pointer', padding: '10px 16px',
+              fontSize: 14, fontWeight: pageTab === t ? 600 : 400,
+              color: pageTab === t ? 'var(--mobius-text-primary, #0f172a)' : 'var(--mobius-text-secondary)',
+              borderBottom: pageTab === t ? '2px solid #2563eb' : '2px solid transparent',
+            }}
+          >{t === 'library' ? 'Library' : 'Pipeline'}</button>
+        ))}
+        <div style={{ flex: 1 }} />
+        {onRefresh && pageTab === 'library' && (
+          <button onClick={onRefresh} title="Refresh documents"
+            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--mobius-text-secondary)', fontSize: 16, padding: '6px 10px' }}>↺</button>
         )}
       </div>
 
-      {/* Right main area */}
-      <div className="repo-main-area">
-        {/* Tab bar */}
-        <div className="repo-right-tabs">
-          {(['reader', 'search', 'status'] as const).map((tab) => (
-            <button
-              key={tab}
-              className={`repo-right-tab-btn${rightTab === tab ? ' active' : ''}`}
-              onClick={() => setRightTab(tab)}
-            >
-              {tab === 'reader'
-                ? selectedDoc
-                  ? `Reader · ${(selectedDoc.display_name || selectedDoc.filename).slice(0, 28)}${(selectedDoc.display_name || selectedDoc.filename).length > 28 ? '…' : ''}`
-                  : 'Reader'
-                : tab === 'search' ? 'Search'
-                : 'Status'}
-            </button>
-          ))}
-          {/* Refresh button on the right */}
-          {onRefresh && (
-            <button
-              className="repo-right-refresh"
-              onClick={onRefresh}
-              title="Refresh documents"
-            >↺</button>
-          )}
+      {pageTab === 'pipeline' ? (
+        <div className="repo-pipeline-body" style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '14px 16px' }}>
+          <PipelinePanel documents={documents} onRefresh={onRefresh} />
         </div>
+      ) : (
+        <div className="repo-body" style={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden' }}>
+          {/* ── LEFT: browse / search controls ── */}
+          <div className="repo-nav" style={{ width: 258, flexShrink: 0, borderRight: '1px solid var(--mobius-border, #e2e8f0)' }}>
+            <div className="repo-nav-content">
+              {/* mode toggle */}
+              <div style={{ display: 'flex', border: '1px solid var(--mobius-border, #e2e8f0)', borderRadius: 8, overflow: 'hidden', margin: '10px 10px 8px' }}>
+                {(['browse', 'search'] as const).map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => { setLibMode(m); if (m === 'search') setViewingDoc(false) }}
+                    style={{
+                      flex: 1, padding: '7px 0', fontSize: 12.5, cursor: 'pointer', border: 'none',
+                      background: libMode === m ? '#2563eb' : 'transparent',
+                      color: libMode === m ? '#fff' : 'var(--mobius-text-secondary)',
+                      fontWeight: libMode === m ? 600 : 400,
+                    }}
+                  >{m === 'browse' ? 'Browse' : 'Search corpus'}</button>
+                ))}
+              </div>
 
-        {/* Tab content */}
-        <div className="repo-right-content">
-          {/* Reader tab */}
-          {rightTab === 'reader' && (
-            <div className="repo-tab-pane">
-              {!selectedDocumentId && !urlPreview ? (
-                <div className="repo-reader-empty">
-                  <p>Select a document from the left panel to open it.</p>
-                </div>
-              ) : (
-                <ReaderSlideOut
-                  documents={documents}
-                  selectedDocumentId={selectedDocumentId}
-                  navigateToRead={activeNavigateTo}
-                  onNavigateToReadConsumed={() => {
-                    onNavigateToReadConsumed()
-                    setLocalNavigateTo(null)
-                  }}
-                  onDocumentSelect={onDocumentSelect}
-                  urlPreview={urlPreview}
-                  onIngestUrl={handleIngestUrl}
-                  ingestingUrl={ingestingUrl}
-                  onClose={closeReader}
-                />
-              )}
-            </div>
-          )}
-
-          {/* Search tab */}
-          {rightTab === 'search' && (
-            <div className="repo-tab-pane repo-search-pane-wrap">
-              <div className="repo-search-bar-row">
+              {/* search + filters */}
+              <div className="repo-nav-search">
                 <input
                   type="search"
-                  className="repo-search-input-main"
-                  placeholder="Search corpus semantically…"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder={libMode === 'search' ? 'Search corpus content…' : 'Search documents, payer…'}
+                  value={searchInput}
+                  onChange={(e) => libMode === 'search' ? setSearchQuery(e.target.value) : setBrowseSearch(e.target.value)}
                 />
-                <div className="repo-search-mode-btns">
-                  {(['corpus', 'precision', 'recall'] as const).map((m) => (
-                    <button
-                      key={m}
-                      className={`repo-search-mode-btn${searchMode === m ? ' active' : ''}`}
-                      onClick={() => setSearchMode(m)}
-                    >
-                      {m === 'corpus' ? 'Hybrid' : m === 'precision' ? 'BM25' : 'Semantic'}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div className="repo-search-results-area">
-                {!searchQuery.trim() && (
-                  <div className="repo-reader-empty">
-                    <p>Type to search corpus content semantically.</p>
+                {libMode === 'search' && (
+                  <div className="repo-search-mode-btns" style={{ display: 'flex', gap: 5, margin: '8px 0' }}>
+                    {(['corpus', 'precision', 'recall'] as const).map((m) => (
+                      <button key={m} className={`repo-search-mode-btn${searchMode === m ? ' active' : ''}`} onClick={() => setSearchMode(m)}>
+                        {m === 'corpus' ? 'Hybrid' : m === 'precision' ? 'BM25' : 'Semantic'}
+                      </button>
+                    ))}
                   </div>
                 )}
+                <div className="repo-nav-filters">
+                  <select value={stateFilter} onChange={(e) => setStateFilter(e.target.value)}>
+                    <option value="">State ▾</option>
+                    {uniqueStates.map((s) => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                  <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+                    <option value="">Status ▾</option>
+                    <option value="published">published</option>
+                    <option value="processing">processing</option>
+                    <option value="failed">failed</option>
+                  </select>
+                </div>
               </div>
-            </div>
-          )}
 
-          {/* Status tab */}
-          {rightTab === 'status' && (
-            <div className="repo-tab-pane repo-status-pane">
-              <PipelinePanel documents={documents} onRefresh={onRefresh} />
+              {libMode === 'browse' ? (
+                <>
+                  {/* ── Managed care payor pins ── */}
+                  <div style={{ padding: '6px 10px 2px', fontSize: 11, fontWeight: 600, color: 'var(--mobius-text-secondary)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                    Managed Care
+                  </div>
+                  <ul className="repo-nav-list" style={{ marginBottom: 0 }}>
+                    {/* "All docs" row */}
+                    <li>
+                      <div
+                        className={`repo-nav-doc repo-nav-payor-row${activePayer === null ? ' active' : ''}`}
+                        onClick={() => selectPayer(null)}
+                      >
+                        <span className="repo-nav-doc-name" style={{ fontWeight: activePayer === null ? 600 : 400 }}>All documents</span>
+                        <span className="repo-nav-doc-age">{documents.length.toLocaleString()}</span>
+                      </div>
+                    </li>
+                    {MANAGED_CARE_PAYORS.map((p) => (
+                      <li key={p}>
+                        <div
+                          className={`repo-nav-doc repo-nav-payor-row${activePayer === p ? ' active' : ''}`}
+                          onClick={() => selectPayer(activePayer === p ? null : p)}
+                        >
+                          <span className="repo-nav-doc-name" style={{ fontWeight: activePayer === p ? 600 : 400 }}>{p}</span>
+                          <span className="repo-nav-doc-age">
+                            {activePayer === p && payerDocsLoading ? '…' : (managedCareCounts[p] || 0)}
+                          </span>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+
+                  {/* ── Doc list for active payor ── */}
+                  {activePayer !== null && (
+                    <>
+                      <div style={{ padding: '8px 10px 2px', fontSize: 11, fontWeight: 600, color: 'var(--mobius-text-secondary)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                        {activePayer} — {filteredDocs.length} doc{filteredDocs.length !== 1 ? 's' : ''}
+                      </div>
+                      <ul className="repo-nav-list">
+                        {payerDocsLoading ? (
+                          <li><div className="repo-nav-empty">Loading…</div></li>
+                        ) : filteredDocs.length === 0 ? (
+                          <li><div className="repo-nav-empty">No documents yet for this payor.</div></li>
+                        ) : filteredDocs.map((d) => (
+                          <li key={d.id}>
+                            <div
+                              className={`repo-nav-doc${d.id === selectedDocumentId ? ' active' : ''}`}
+                              onClick={() => openDocument(d.id)}
+                              title={d.display_name || d.filename}
+                            >
+                              <span className={`repo-nav-dot ${statusDotClass(d)}`} />
+                              <span className="repo-nav-doc-name">{d.display_name || d.filename}</span>
+                              <PipelinePips d={d} />
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    </>
+                  )}
+
+                  {/* ── Other sources (collapsed by default) ── */}
+                  {activePayer === null && (
+                    <ul className="repo-nav-list">
+                      <li>
+                        <div
+                          className="repo-nav-group-header"
+                          onClick={() => setCollapsedGroups(prev => ({ ...prev, __other__: !prev.__other__ }))}
+                          style={{ marginTop: 8 }}
+                        >
+                          <span className="repo-nav-group-arrow">{collapsedGroups.__other__ ? '▶' : '▼'}</span>
+                          <span className="repo-nav-group-name">Other sources</span>
+                          <span className="repo-nav-group-count">{Object.values(groupedDocs).reduce((n, g) => n + g.length, 0)}</span>
+                        </div>
+                        {!collapsedGroups.__other__ && Object.entries(groupedDocs).sort(([a], [b]) => a.localeCompare(b)).map(([group, docs]) => {
+                          const isCollapsed = !!collapsedGroups[group]
+                          return (
+                            <Fragment key={group}>
+                              <div
+                                className="repo-nav-group-header"
+                                style={{ paddingLeft: 20, fontSize: 12 }}
+                                onClick={() => setCollapsedGroups(prev => ({ ...prev, [group]: !prev[group] }))}
+                              >
+                                <span className="repo-nav-group-arrow">{isCollapsed ? '▶' : '▼'}</span>
+                                <span className="repo-nav-group-name">{group}</span>
+                                <span className="repo-nav-group-count">{docs.length}</span>
+                              </div>
+                              {!isCollapsed && docs.map((d) => (
+                                <div
+                                  key={d.id}
+                                  className={`repo-nav-doc${d.id === selectedDocumentId ? ' active' : ''}`}
+                                  style={{ paddingLeft: 28 }}
+                                  onClick={() => openDocument(d.id)}
+                                  title={d.display_name || d.filename}
+                                >
+                                  <span className={`repo-nav-dot ${statusDotClass(d)}`} />
+                                  <span className="repo-nav-doc-name">{d.display_name || d.filename}</span>
+                                  <PipelinePips d={d} />
+                                </div>
+                              ))}
+                            </Fragment>
+                          )
+                        })}
+                      </li>
+                    </ul>
+                  )}
+                </>
+              ) : (
+                <div className="repo-nav-count">
+                  {searchQuery.trim()
+                    ? (searchLoading ? 'Searching…' : `${searchResults?.length ?? 0} chunk result${(searchResults?.length ?? 0) !== 1 ? 's' : ''}`)
+                    : 'Type to search corpus content.'}
+                </div>
+              )}
             </div>
-          )}
+          </div>
+
+          {/* ── RIGHT: search results OR reader ── */}
+          <div className="repo-main-area" style={{ flex: 1, minWidth: 0 }}>
+            <div className="repo-right-content">
+              {libMode === 'search' && !viewingDoc ? (
+                <div className="repo-tab-pane repo-search-pane-wrap" style={{ overflowY: 'auto', padding: '4px 12px 12px' }}>
+                  {!searchQuery.trim() ? (
+                    <div className="repo-reader-empty">
+                      <p>Search the corpus by content — Hybrid, BM25, or Semantic. Click a hit to open the document at that page.</p>
+                    </div>
+                  ) : (
+                    <CorpusResults
+                      query={searchQuery}
+                      mode={searchMode}
+                      chunks={searchResults}
+                      loading={searchLoading}
+                      telemetry={searchTelemetry}
+                      onOpenChunk={(c) => openDocument(c.document_id, c.page_number ?? undefined, c.text.slice(0, 120))}
+                    />
+                  )}
+                </div>
+              ) : (activePayer !== null && !viewingDoc && !urlPreview && !selectedDocumentId) ? (
+                // payor active, no doc open → sitemap
+                <div className="repo-tab-pane repo-sitemap-pane">
+                  <div className="repo-sitemap-header">
+                    <span className="repo-sitemap-title">Source sitemap — {activePayer}</span>
+                    <span className="repo-sitemap-count">
+                      {sourcesLoading ? 'Loading…' : `${payorSources.length} source${payorSources.length !== 1 ? 's' : ''}`}
+                    </span>
+                  </div>
+                  {sourcesLoading ? (
+                    <div className="repo-sitemap-loading">Loading sources…</div>
+                  ) : payorSources.length === 0 ? (
+                    <div className="repo-sitemap-empty">No discovered sources for {activePayer}.</div>
+                  ) : (
+                    <div className="repo-sitemap-table-wrap">
+                      <table className="repo-sitemap-table">
+                        <thead>
+                          <tr>
+                            <th>Source</th>
+                            <th>Type</th>
+                            <th>Authority</th>
+                            <th>Status</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {payorSources.map((s, i) => {
+                            const name = s.filename || s.url || s.source_url || '—'
+                            const short = name.length > 60 ? '…' + name.slice(-57) : name
+                            const ingested = s.ingested_doc_id != null
+                            return (
+                              <tr key={i} className={ingested ? 'sitemap-row-ingested' : 'sitemap-row-missing'}
+                                onClick={() => {
+                                  if (ingested && s.ingested_doc_id) openDocument(s.ingested_doc_id)
+                                }}
+                                style={{ cursor: ingested ? 'pointer' : 'default' }}
+                              >
+                                <td title={name}><span className="repo-sitemap-source-name">{short}</span></td>
+                                <td>{s.source_type || '—'}</td>
+                                <td>{s.authority_level || '—'}</td>
+                                <td>
+                                  <span className={`repo-sitemap-badge ${ingested ? 'badge-ingested' : 'badge-missing'}`}>
+                                    {ingested ? 'ingested' : 'not ingested'}
+                                  </span>
+                                </td>
+                              </tr>
+                            )
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              ) : (selectedDocumentId || urlPreview) ? (
+                // doc open → 3-view panel (Read / Tags / Info)
+                <div className="repo-tab-pane repo-doc-panel">
+                  {/* top bar: back + view tabs */}
+                  <div className="repo-doc-topbar">
+                    {libMode === 'search' ? (
+                      <button onClick={() => setViewingDoc(false)} className="repo-pane-back-btn">‹ Results</button>
+                    ) : activePayer !== null ? (
+                      <button onClick={closeReader} className="repo-pane-back-btn">‹ {activePayer}</button>
+                    ) : <span />}
+                    {selectedDocumentId && (
+                      <div className="repo-doc-tabs">
+                        <button
+                          className={`repo-doc-tab${docView === 'reader' ? ' active' : ''}`}
+                          onClick={() => { setDocView('reader'); setViewingDoc(true) }}
+                        >Read</button>
+                        <button
+                          className={`repo-doc-tab${docView === 'analytics' ? ' active' : ''}`}
+                          onClick={() => { setDocView('analytics'); loadAnalytics(selectedDocumentId) }}
+                        >Tags</button>
+                        <button
+                          className={`repo-doc-tab${docView === 'metadata' ? ' active' : ''}`}
+                          onClick={() => setDocView('metadata')}
+                        >Info</button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Read view */}
+                  {docView === 'reader' && (
+                    <div className="repo-doc-view repo-doc-view--reader">
+                      <ReaderSlideOut
+                        documents={documents}
+                        selectedDocumentId={selectedDocumentId}
+                        navigateToRead={activeNavigateTo}
+                        onNavigateToReadConsumed={() => { onNavigateToReadConsumed(); setLocalNavigateTo(null) }}
+                        onDocumentSelect={onDocumentSelect}
+                        urlPreview={urlPreview}
+                        onIngestUrl={handleIngestUrl}
+                        ingestingUrl={ingestingUrl}
+                        onClose={closeReader}
+                      />
+                    </div>
+                  )}
+
+                  {/* Tags analytics view */}
+                  {docView === 'analytics' && (
+                    <div className="repo-doc-view repo-doc-view--analytics">
+                      {analyticsLoading ? (
+                        <div className="repo-analytics-empty">Loading tag data…</div>
+                      ) : !analyticsData ? (
+                        <div className="repo-analytics-empty">No tag data available for this document.</div>
+                      ) : (() => {
+                        const lines = analyticsData.lines || []
+                        const jTags = aggregateTags(lines, 'j_tags')
+                        const pTags = aggregateTags(lines, 'p_tags')
+                        const dTags = aggregateTags(lines, 'd_tags')
+                        const total = analyticsData.total || 0
+                        return (
+                          <>
+                            <div className="repo-analytics-summary">
+                              <span className="repo-analytics-stat">{total} tagged paragraphs</span>
+                              <span className="repo-analytics-sep">·</span>
+                              <span className="repo-analytics-stat">{jTags.length} jurisdictions</span>
+                              <span className="repo-analytics-sep">·</span>
+                              <span className="repo-analytics-stat">{pTags.length} policy tags</span>
+                              <span className="repo-analytics-sep">·</span>
+                              <span className="repo-analytics-stat">{dTags.length} domain tags</span>
+                            </div>
+
+                            {[
+                              { label: 'Jurisdiction (j:)', tags: jTags, cls: 'tag-j' },
+                              { label: 'Policy (p:)', tags: pTags, cls: 'tag-p' },
+                              { label: 'Domain (d:)', tags: dTags, cls: 'tag-d' },
+                            ].map(({ label, tags, cls }) => tags.length > 0 && (
+                              <div key={label} className="repo-analytics-section">
+                                <div className="repo-analytics-section-title">{label}</div>
+                                <div className="repo-analytics-tag-list">
+                                  {tags.map(({ tag, count, pages }) => (
+                                    <div key={tag} className="repo-analytics-tag-row">
+                                      <span className={`repo-analytics-tag-pill ${cls}`}>{tag}</span>
+                                      <span className="repo-analytics-tag-count">{count}×</span>
+                                      <div className="repo-analytics-page-chips">
+                                        {pages.slice(0, 12).map(pg => (
+                                          <button
+                                            key={pg}
+                                            className="repo-analytics-page-chip"
+                                            onClick={() => jumpToPage(pg)}
+                                            title={`Jump to page ${pg}`}
+                                          >p{pg}</button>
+                                        ))}
+                                        {pages.length > 12 && (
+                                          <span className="repo-analytics-page-more">+{pages.length - 12}</span>
+                                        )}
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            ))}
+                          </>
+                        )
+                      })()}
+                    </div>
+                  )}
+
+                  {/* Info / metadata view */}
+                  {docView === 'metadata' && (() => {
+                    const doc = documents.find(d => d.id === selectedDocumentId)
+                    if (!doc) return <div className="repo-analytics-empty">Document not found.</div>
+                    const fields: [string, string | null | undefined][] = [
+                      ['Filename', doc.filename],
+                      ['Display name', doc.display_name],
+                      ['Payer', doc.payer],
+                      ['State', doc.state],
+                      ['Program', (doc as any).program],
+                      ['Authority', (doc as any).authority_level],
+                      ['Effective date', (doc as any).effective_date],
+                      ['Termination date', (doc as any).termination_date],
+                      ['Status', doc.status],
+                    ]
+                    return (
+                      <div className="repo-doc-view repo-doc-view--metadata">
+                        <div className="repo-meta-section">
+                          <div className="repo-meta-section-title">Classification</div>
+                          {fields.map(([label, val]) => val ? (
+                            <div key={label} className="repo-meta-row">
+                              <span className="repo-meta-label">{label}</span>
+                              <span className="repo-meta-value">{val}</span>
+                            </div>
+                          ) : null)}
+                        </div>
+                        <div className="repo-meta-section">
+                          <div className="repo-meta-section-title">Pipeline</div>
+                          <div className="repo-meta-row">
+                            <span className="repo-meta-label">Extraction</span>
+                            <span className={`repo-meta-status repo-meta-status--${doc.extraction_status || 'none'}`}>{doc.extraction_status || '—'}</span>
+                          </div>
+                          <div className="repo-meta-row">
+                            <span className="repo-meta-label">Chunking</span>
+                            <span className={`repo-meta-status repo-meta-status--${doc.chunking_status || 'none'}`}>{doc.chunking_status || '—'}</span>
+                          </div>
+                          <div className="repo-meta-row">
+                            <span className="repo-meta-label">Embedding</span>
+                            <span className={`repo-meta-status repo-meta-status--${doc.embedding_status || 'none'}`}>{doc.embedding_status || '—'}</span>
+                          </div>
+                          <div className="repo-meta-row">
+                            <span className="repo-meta-label">Published</span>
+                            <span className="repo-meta-value">{doc.published_at ? new Date(doc.published_at).toLocaleDateString() : '—'}</span>
+                          </div>
+                        </div>
+                        <div className="repo-meta-pipeline-pips">
+                          <PipelinePips d={doc} />
+                        </div>
+                      </div>
+                    )
+                  })()}
+                </div>
+              ) : (
+                <div className="repo-tab-pane">
+                  <div className="repo-reader-empty">
+                    <p>Select a document from the left to open it.</p>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   )
 }

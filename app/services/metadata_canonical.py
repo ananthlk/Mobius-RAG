@@ -60,7 +60,7 @@ _PAYER_CANONICAL: dict[str, str] = {
     "molina":         "Molina Healthcare",
     "molina healthcare": "Molina Healthcare",
     "aetna":          "Aetna",
-    "aetna better health": "Aetna Better Health",
+    "aetna better health": "Aetna",
     "centene":        "Centene",
     "wellcare":       "WellCare",
     "simply healthcare": "Simply Healthcare",
