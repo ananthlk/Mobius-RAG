@@ -86,7 +86,12 @@ if [[ -d frontend ]] && [[ -f frontend/package.json ]]; then
   # Lexicon Maintenance lives on its own Cloud Run service; the header link
   # is the natural path from the RAG dashboard into tag curation.
   : "${VITE_LEXICON_URL:=https://mobius-lexicon-maintenance-ortabkknqa-uc.a.run.app}"
-  export VITE_SCRAPER_API_BASE VITE_API_BASE VITE_LEXICON_URL
+  # DEV ONLY: lets the app self-mint a platform token when a long session
+  # outlives the launcher token (avoids /admin/* 401s). Points at a SAME-ORIGIN
+  # RAG proxy (/dev/mint-token) that server-side calls chat's mint-dev-token —
+  # avoids browser CORS. NEVER set in prod; the proxy is also ENV-gated off there.
+  : "${VITE_DEV_MINT_URL:=/dev/mint-token}"
+  export VITE_SCRAPER_API_BASE VITE_API_BASE VITE_LEXICON_URL VITE_DEV_MINT_URL
   echo "--- frontend env: VITE_SCRAPER_API_BASE=$VITE_SCRAPER_API_BASE  VITE_API_BASE=${VITE_API_BASE:-<same-origin>}  VITE_LEXICON_URL=$VITE_LEXICON_URL ---"
   (cd frontend && npm run build) || {
     echo "ERROR: frontend build failed; aborting deploy" >&2
@@ -112,6 +117,10 @@ CHAT_DB_URL_FOR_RAG="postgresql+psycopg2://postgres:${DB_PASS_ENC}@/mobius_chat?
 
 COMMON_ENV=(
   "ENV=staging"
+  # DEV ONLY: enables /dev/mint-token so the SPA can self-mint a platform token
+  # (long sessions outlive the launcher token → /admin/* 401 → UI blanks). This is
+  # the dev deploy script; prod/staging deploys must NOT set this.
+  "ALLOW_DEV_MINT=1"
   "DATABASE_URL=${DB_URL}"
   "GCS_BUCKET=mobius-rag-uploads-dev"
   "VERTEX_PROJECT_ID=${PROJECT_ID}"
@@ -190,10 +199,14 @@ deploy_service() {
   gcloud run deploy "$name" "${flags[@]}"
 }
 
-# 3. API service. minScale=1 + no-cpu-throttling so fire-and-forget background
-#    tasks (the eval/calibration runner, which streams for ~30-40 min) keep CPU
-#    and aren't killed when the instance would otherwise scale down / throttle.
-deploy_service "mobius-rag" "" 1 10 "no" "1Gi"
+# 3. API service. min=max=1 (single instance) — REQUIRED: in-process background
+#    state lives in memory on ONE instance (the eval/calibration runner AND the
+#    nightly orchestrator's live status). At max>1, Cloud Run can route the
+#    status poll to a different instance than the one running the job (empty
+#    status) and can kill the instance mid-eval when it scales down (the 13/110
+#    stall we hit). no-cpu-throttling keeps the long background task alive.
+#    Dev-scale only; a multi-instance prod needs DB-backed job state instead.
+deploy_service "mobius-rag" "" 1 1 "no" "2Gi"   # 2Gi: publishing a giant doc (~9k embeddings) OOM'd at 1Gi
 
 # 4. Chunking worker. Self-polling supervisor (FOR UPDATE SKIP LOCKED
 #    handles dedup across instances), so Cloud Run autoscaling never
@@ -210,7 +223,7 @@ deploy_service "mobius-rag-chunking-worker" \
 #    the heavy lifting remotely).
 deploy_service "mobius-rag-embedding-worker" \
   "uvicorn,app.worker_server_embedding:app,--host,0.0.0.0,--port,8080" \
-  1 1 "no" "1Gi"
+  1 1 "no" "2Gi"   # 2Gi: auto-publish-on-embed loads a giant's ~9k embeddings; OOM'd at 1Gi
 
 # 6. Print URLs
 echo ""

@@ -180,10 +180,20 @@ async def call_agent(
 # ---------------------------------------------------------------------------
 
 async def _conn() -> asyncpg.Connection:
-    url = os.environ.get("DATABASE_URL", "").replace("+asyncpg", "")
-    if not url:
-        from app.config import DATABASE_URL
-        url = DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
+    # DB URL selection must survive three environments (payor-agent diagnosis,
+    # 2026-07-03). The raw ``DATABASE_URL`` env commonly points at the DIRECT
+    # Cloud SQL IP (34.135.72.145:5432), FIREWALLED from local dev → asyncpg
+    # connect times out (Errno 60) and the background insert_run dies silently
+    # (the /eval/trigger "no row ever appears" bug). But we can't just switch to
+    # ``app.config.DATABASE_URL`` either — in some checkouts (incl. this one) it
+    # ALSO resolves to the direct IP (env lacks CHAT_RAG_DATABASE_URL). So:
+    # honour an explicit local/proxy override first (the persistent driver sets
+    # 127.0.0.1:5433), else the app's resolved URL (correct in-cloud where the
+    # direct IP is reachable). Local dev needs the cloud-sql-proxy on 5433.
+    from app.config import DATABASE_URL as _APP_DB_URL
+    env = os.environ.get("DATABASE_URL", "")
+    url = env if ("127.0.0.1" in env or "localhost" in env) else _APP_DB_URL
+    url = url.replace("postgresql+asyncpg://", "postgresql://").replace("+asyncpg", "")
     return await asyncpg.connect(url)
 
 

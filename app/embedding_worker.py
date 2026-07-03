@@ -165,9 +165,8 @@ async def process_embedding_job(job: EmbeddingJob, db: AsyncSession) -> None:
             # TODO: load from embedding config registry (similar to LLM)
             pass
         provider = get_embedding_provider(config)
-        texts = [t for _, _, t in items]
 
-        # Delete existing embeddings for this document + generator (NULL treated as "A")
+        # Generator scope (NULL treated as "A")
         gen = (getattr(job, "generator_id", None) or "A").strip().upper() or "A"
         if gen not in ("A", "B"):
             gen = "A"
@@ -176,11 +175,30 @@ async def process_embedding_job(job: EmbeddingJob, db: AsyncSession) -> None:
             where_gen = or_(ChunkEmbedding.generator_id.is_(None), ChunkEmbedding.generator_id == "A")
         else:
             where_gen = (ChunkEmbedding.generator_id == "B")
-        await db.execute(delete(ChunkEmbedding).where(ChunkEmbedding.document_id == doc_uuid, where_gen))
+
+        # INCREMENTAL embed: skip items that already have an embedding so a
+        # restarted / re-run job RESUMES instead of re-embedding the whole doc.
+        # Giants (9k–18k items) were looping — every interruption (worker restart,
+        # DB bounce) wiped partial progress via the old blanket DELETE, so they
+        # never converged. Now we only DELETE orphans (source no longer present →
+        # content changed) and embed just the missing items.
         vector_store = get_vector_store()
-        vector_store.delete_by_document(str(job.document_id))
-        await db.commit()
-        logger.info("[JOB %s] Cleared existing embeddings, starting %d items", job.id, len(items))
+        existing_rows = await db.execute(
+            select(ChunkEmbedding.source_id)
+            .where(ChunkEmbedding.document_id == doc_uuid, where_gen))
+        existing_ids = {str(r[0]) for r in existing_rows}
+        current_ids = {sid for (_, sid, _) in items}
+        orphan_ids = existing_ids - current_ids
+        if orphan_ids:
+            await db.execute(delete(ChunkEmbedding).where(
+                ChunkEmbedding.document_id == doc_uuid, where_gen,
+                ChunkEmbedding.source_id.in_([UUID(x) for x in orphan_ids])))
+            await db.commit()
+        already = len(existing_ids) - len(orphan_ids)
+        items = [it for it in items if it[1] not in existing_ids]
+        texts = [t for _, _, t in items]
+        logger.info("[JOB %s] Incremental: %d already embedded, %d orphans cleared, %d to embed",
+                    job.id, already, len(orphan_ids), len(items))
 
         # Stream embedding_start event for live updates
         ev_start = ChunkingEvent(

@@ -1,0 +1,96 @@
+bank_version: payor_aetna_v1_registry_truth
+# Registry-vs-chat agreement probe. Each must_fact is a VERIFIED value from the
+# payor readiness registry (seeds/payor_readiness/aetna_better_health_fl.yaml).
+# The eval runs each query through the full chat agent (corpus_search_agent) and
+# the judge scores whether chat reproduces the registry truth.
+queries:
+- id: abhfl_timely_filing
+  persona: billing
+  payer_specificity: strict
+  query: What is the timely filing deadline for Aetna Better Health of Florida Medicaid claims?
+  golden_answer: >
+    Aetna Better Health of Florida requires initial claims to be filed within
+    180 days of the date of service. For inpatient claims the date of service is
+    the discharge date. Corrected claims may be resubmitted within 180 days of
+    the paid date.
+  must_facts:
+  - 180 days from the date of service
+  - Aetna Better Health of Florida
+  bonus_facts:
+  - inpatient date of service is the discharge date
+
+- id: abhfl_provider_services_phone
+  persona: billing
+  payer_specificity: strict
+  query: What is the Provider Services phone number for Aetna Better Health of Florida?
+  golden_answer: "Provider Services for Aetna Better Health of Florida is 1-800-441-5501 (TTY 711)."
+  must_facts:
+  - 1-800-441-5501
+  - Aetna Better Health of Florida
+
+- id: abhfl_prior_auth_how
+  persona: clinical
+  payer_specificity: strict
+  query: How does a provider submit a prior authorization to Aetna Better Health of Florida?
+  golden_answer: >
+    Providers submit prior authorization to Aetna Better Health of Florida
+    through the provider portal (Availity) or by completing the PA request form
+    for the service type and attaching supporting documentation.
+  must_facts:
+  - prior authorization
+  - Aetna Better Health of Florida
+  bonus_facts:
+  - Availity
+  - provider portal
+
+- id: abhfl_edi_payer_id
+  persona: billing
+  payer_specificity: strict
+  query: What is the EDI payer ID for submitting claims to Aetna Better Health of Florida?
+  golden_answer: "The EDI payer ID for Aetna Better Health of Florida is 128FL."
+  must_facts:
+  - 128FL
+  - Aetna Better Health of Florida
+
+- id: abhfl_appeals_fax
+  persona: billing
+  payer_specificity: strict
+  query: What fax number is used to file a provider appeal with Aetna Better Health of Florida?
+  golden_answer: "Provider appeals to Aetna Better Health of Florida are faxed to 860-607-7894."
+  must_facts:
+  - 860-607-7894
+  - Aetna Better Health of Florida
+
+- id: abhfl_portal
+  persona: billing
+  payer_specificity: strict
+  query: What online portal do providers use for Aetna Better Health of Florida?
+  golden_answer: "Aetna Better Health of Florida providers use the Availity provider portal."
+  must_facts:
+  - Availity
+  - Aetna Better Health of Florida
+
+- id: abhfl_provider_manual_exists
+  persona: billing
+  payer_specificity: strict
+  query: Where can I find the Aetna Better Health of Florida provider manual and what claim disputes are ineligible?
+  golden_answer: >
+    The Aetna Better Health of Florida 2025 Provider Manual (Comprehensive
+    Long-Term Care) describes claim dispute resolution, including claims that are
+    ineligible (e.g., claims below the minimum dispute amounts).
+  must_facts:
+  - Aetna Better Health of Florida
+  - provider manual
+  bonus_facts:
+  - ineligible claims
+
+- id: abhfl_member_benefit_ltc
+  persona: clinical
+  payer_specificity: strict
+  query: What long-term care benefits are covered under the Aetna Better Health of Florida member handbook?
+  golden_answer: >
+    The Aetna Better Health of Florida LTC member handbook describes covered
+    long-term care services and member benefits.
+  must_facts:
+  - Aetna Better Health of Florida
+  - long-term care

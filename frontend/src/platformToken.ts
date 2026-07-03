@@ -49,38 +49,68 @@ export function withPlatformToken(url: string): string {
   return url + (url.includes('#') ? '&' : '#') + 't=' + encodeURIComponent(tok)
 }
 
-/** Install a one-time fetch shim that attaches `Authorization: Bearer <token>`
- *  to SAME-ORIGIN requests (the RAG API) when a platform token is present and
- *  the caller hasn't set its own Authorization. This authenticates the app's
- *  existing bare-`fetch` admin calls without editing each call site, and never
- *  leaks the token to cross-origin hosts. No-op when there is no token. */
+/** Persist a token to sessionStorage. */
+function setPlatformToken(tok: string): void {
+  try { if (tok) sessionStorage.setItem(STORAGE_KEY, tok) } catch { /* ignore */ }
+}
+
+// DEV convenience: when set (by the dev deploy's VITE_DEV_MINT_URL build arg),
+// the app can mint a platform token itself so a long dev session doesn't 401
+// once the launcher token expires. Unset in prod → auto-mint never happens.
+const DEV_MINT_URL = (import.meta.env?.VITE_DEV_MINT_URL as string | undefined) || ''
+
+/** Mint a fresh dev token from the configured mint endpoint (dev only). */
+async function mintDevToken(): Promise<string> {
+  if (!DEV_MINT_URL) return ''
+  try {
+    const r = await fetch(DEV_MINT_URL, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    })
+    if (!r.ok) return ''
+    const tok = ((await r.json()) as { access_token?: string }).access_token || ''
+    if (tok) setPlatformToken(tok)
+    return tok
+  } catch { return '' }
+}
+
+/** Ensure a token exists at startup — mint one in dev if the tab has none. */
+export async function ensureDevToken(): Promise<void> {
+  if (getPlatformToken()) return
+  await mintDevToken()
+}
+
+/** Install a fetch shim that attaches `Authorization: Bearer <token>` to
+ *  SAME-ORIGIN requests (the RAG API) when a platform token is present and the
+ *  caller hasn't set its own Authorization — authenticating the app's bare
+ *  `fetch` admin calls without editing each call site, never leaking the token
+ *  cross-origin. Reads the token DYNAMICALLY each call (so a freshly-minted
+ *  token is picked up), and in dev re-mints + retries once on a 401. */
 export function installAuthFetch(): void {
-  const tok = getPlatformToken()
-  if (!tok || typeof window === 'undefined' || !window.fetch) return
+  if (typeof window === 'undefined' || !window.fetch) return
   const orig = window.fetch.bind(window)
-  window.fetch = (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+  const urlOf = (input: RequestInfo | URL): string =>
+    typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request).url
+  const withAuth = (tok: string, base?: RequestInit, input?: RequestInfo | URL): RequestInit => {
+    const headers = new Headers(base?.headers ?? (input instanceof Request ? input.headers : undefined))
+    if (tok && !headers.has('Authorization')) headers.set('Authorization', `Bearer ${tok}`)
+    return { ...base, headers }
+  }
+  window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    let sameOrigin = false
     try {
-      const url =
-        typeof input === 'string' ? input
-        : input instanceof URL ? input.href
-        : (input as Request).url
-      // Same-origin only: a leading '/' (relative) or our own origin. Anything
-      // absolute to another host (scraper API, external pages) is left alone.
-      const sameOrigin =
-        url.startsWith('/') ||
-        url.startsWith(window.location.origin)
-      if (sameOrigin) {
-        const headers = new Headers(
-          init?.headers ?? (input instanceof Request ? input.headers : undefined),
-        )
-        if (!headers.has('Authorization')) {
-          headers.set('Authorization', `Bearer ${tok}`)
-          init = { ...init, headers }
-        }
-      }
-    } catch {
-      /* fall through to the original fetch unmodified */
+      const url = urlOf(input)
+      sameOrigin = url.startsWith('/') || url.startsWith(window.location.origin)
+    } catch { /* leave sameOrigin false */ }
+    if (!sameOrigin) return orig(input as RequestInfo, init)
+
+    const tok = getPlatformToken()
+    let res = await orig(input as RequestInfo, tok ? withAuth(tok, init, input) : init)
+    // Dev: an /admin/* call 401'd → token missing/expired → mint fresh + retry
+    // once. Scoped to /admin/ so the mint call itself can't recurse.
+    if (res.status === 401 && DEV_MINT_URL && urlOf(input).includes('/admin/')) {
+      const fresh = await mintDevToken()
+      if (fresh) res = await orig(input as RequestInfo, withAuth(fresh, init, input))
     }
-    return orig(input as RequestInfo, init)
+    return res
   }
 }

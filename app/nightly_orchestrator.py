@@ -46,6 +46,7 @@ _STEP_DEFS = [
 ]
 
 _NIGHTLY: dict = {
+    "run_id": None,
     "running": False,
     "stop": False,
     "started_at": None,
@@ -103,6 +104,21 @@ def _step(key: str, status: str, detail: str | None = None) -> None:
             break
     if status == "running":
         _NIGHTLY["current"] = key
+    # Persist live state continuously so the tracker survives an instance recycle
+    # (in-memory _NIGHTLY is lost on restart; the DB copy is what get_run falls
+    # back to). Throttled so tight-ish poll loops don't hammer the DB.
+    _persist_throttled()
+
+
+import time as _time
+_LAST_PERSIST = [0.0]
+
+
+def _persist_throttled(min_gap_s: float = 4.0) -> None:
+    now = _time.monotonic()
+    if now - _LAST_PERSIST[0] >= min_gap_s:
+        _LAST_PERSIST[0] = now
+        _persist()
 
 
 def _log(key: str, msg: str) -> None:
@@ -118,6 +134,20 @@ def _log(key: str, msg: str) -> None:
 
 def _stopping() -> bool:
     return bool(_NIGHTLY.get("stop"))
+
+
+def _try(fn, default=None):
+    """Run fn(); on any exception, log it and return `default` instead of
+    propagating. Used to keep a transient HTTP/DB blip or a slow best-effort
+    call (e.g. the giant-doc publish sweep) from aborting the whole run."""
+    try:
+        return fn()
+    except Exception as exc:  # noqa: BLE001
+        try:
+            _log(_NIGHTLY.get("current", ""), f"non-fatal: {str(exc)[:140]}")
+        except Exception:
+            pass
+        return default
 
 
 # ── HTTP helpers (RAG = localhost self-calls; admin is open on dev) ───────────
@@ -137,12 +167,23 @@ def _http(method: str, url: str, body: dict | None = None,
     return json.loads(raw) if raw else {}
 
 
+def _admin_headers() -> dict:
+    """Self-calls to /admin/* pass through the admin-auth middleware, so the
+    orchestrator authenticates to its own service with ADMIN_API_KEY."""
+    try:
+        from app.config import ADMIN_API_KEY
+        return {"X-Admin-Key": ADMIN_API_KEY} if ADMIN_API_KEY else {}
+    except Exception:
+        return {}
+
+
 def _rag_get(path: str, timeout: int = 120) -> dict:
-    return _http("GET", _base() + path, timeout=timeout)
+    return _http("GET", _base() + path, headers=_admin_headers(), timeout=timeout)
 
 
 def _rag_post(path: str, body: dict | None = None, timeout: int = 120) -> dict:
-    return _http("POST", _base() + path, body=body if body is not None else {}, timeout=timeout)
+    return _http("POST", _base() + path, body=body if body is not None else {},
+                 headers=_admin_headers(), timeout=timeout)
 
 
 # ── Eval bracket (trigger → poll with stall guard → summary) ─────────────────
@@ -201,12 +242,14 @@ def _compute_lift(base: dict | None, fin: dict | None) -> dict | None:
 
 # ── Lexicon service (publish QA→RAG, push RAG→Chat) ──────────────────────────
 def _lex_token() -> str | None:
-    """Mint a dev platform token for the lexicon service (dev only)."""
-    chat = os.getenv("CHAT_BASE_URL")
-    if not chat:
+    """Mint a platform token for the lexicon service. Derives the chat base from
+    CHAT_BASE_URL or (dev) CHAT_INTERNAL_LLM_URL — same source as /dev/mint-token."""
+    from app.config import CHAT_INTERNAL_LLM_URL
+    base = os.getenv("CHAT_BASE_URL") or (CHAT_INTERNAL_LLM_URL or "").split("/internal")[0]
+    if not base:
         return None
     try:
-        r = _http("POST", f"{chat}/chat/admin/mint-dev-token", body={}, timeout=30)
+        r = _http("POST", base.rstrip("/") + "/chat/admin/mint-dev-token", body={}, timeout=30)
         return r.get("access_token")
     except Exception as exc:
         logger.warning("[nightly] mint token failed: %s", exc)
@@ -214,13 +257,19 @@ def _lex_token() -> str | None:
 
 
 def _lex_call(path: str, body: dict) -> dict | None:
+    """Call the lexicon service. Returns the JSON, None if not configured, or
+    {"_error": ...} on failure — NEVER raises, so a LEX hiccup can't abort a run
+    that already did expensive work (e.g. the baseline eval)."""
     from app.config import LEXICON_MAINTENANCE_URL
     if not LEXICON_MAINTENANCE_URL:
         return None
     tok = _lex_token()
     headers = {"Authorization": f"Bearer {tok}"} if tok else {}
-    return _http("POST", LEXICON_MAINTENANCE_URL.rstrip("/") + path, body=body,
-                 headers=headers, timeout=120)
+    try:
+        return _http("POST", LEXICON_MAINTENANCE_URL.rstrip("/") + path, body=body,
+                     headers=headers, timeout=120)
+    except Exception as exc:
+        return {"_error": str(exc)}
 
 
 # ── Infra (delegated; graceful no-op if not configured) ──────────────────────
@@ -270,8 +319,10 @@ def _run_nightly(opts: dict) -> None:
         if _stopping():
             raise RuntimeError("stopped")
 
-        # A — baseline eval
-        if include_eval and not dry_run:
+        # A — baseline eval (resume: reuse the prior result, don't re-run ~32 min)
+        if _done("baseline_eval"):
+            _log("baseline_eval", "resumed — reused prior result")
+        elif include_eval and not dry_run:
             _step("baseline_eval", "running")
             _NIGHTLY["baseline"] = _run_eval(f"nightly-baseline-{date_tag}", bank)
             _step("baseline_eval", "done" if _NIGHTLY["baseline"] else "failed",
@@ -287,13 +338,20 @@ def _run_nightly(opts: dict) -> None:
             dry = _lex_call("/policy/lexicon/publish", {"dry_run": True})
             if dry is None:
                 _step("publish", "skipped", "lexicon svc not configured")
+            elif dry.get("_error"):
+                # LEX unreachable/401 — don't abort; corpus steps proceed on the
+                # prior revision (spec §7: Step-1 failure may allow Steps 2-7).
+                _step("publish", "failed", f"lexicon: {str(dry['_error'])[:80]} (continuing on prior rev)")
             else:
                 qa = dry.get("qa_revision"); rag = dry.get("rag_revision_before")
                 if qa is not None and rag is not None and int(qa) <= int(rag):
                     _step("publish", "skipped", f"already current (rev {rag})")
                 else:
-                    _lex_call("/policy/lexicon/publish", {"dry_run": False})
-                    _step("publish", "done", f"rev {rag}→{qa}")
+                    res = _lex_call("/policy/lexicon/publish", {"dry_run": False})
+                    if res and res.get("_error"):
+                        _step("publish", "failed", f"lexicon: {str(res['_error'])[:80]} (continuing on prior rev)")
+                    else:
+                        _step("publish", "done", f"rev {rag}→{qa}")
         if _stopping():
             raise RuntimeError("stopped")
 
@@ -326,20 +384,28 @@ def _run_nightly(opts: dict) -> None:
         if dry_run:
             _step("embed", "skipped", "dry run")
         else:
-            _rag_post("/admin/db/execute", {"sql":
+            _try(lambda: _rag_post("/admin/db/execute", {"sql":
                 "UPDATE embedding_jobs SET status='pending', started_at=NULL "
-                "WHERE status='processing' AND now()-started_at > interval '10 min'"}, timeout=60)
+                "WHERE status='processing' AND now()-started_at > interval '10 min'"}, timeout=60))
             t = 0
+            pub = None
             while t < embed_budget * 60 and not _stopping():
-                pend = (((_rag_post("/admin/db/execute",
+                # Transient DB/report blips must not abort the whole run — a
+                # single failed poll just retries next tick.
+                rec = _try(lambda: _rag_post("/admin/db/execute",
                         {"sql": "SELECT count(*) AS n FROM embedding_jobs WHERE status='pending'"},
-                        timeout=60).get("records") or [{}])[0]).get("n"))
-                pub = _rag_get("/admin/integrity/report", timeout=60).get("published")
+                        timeout=60)) or {}
+                pend = ((rec.get("records") or [{}])[0]).get("n")
+                pub = (_try(lambda: _rag_get("/admin/integrity/report", timeout=60)) or {}).get("published", pub)
                 _step("embed", "running", f"pending {pend} · published {pub}")
                 if str(pend) == "0":
                     break
                 time.sleep(60); t += 60
-            _rag_post("/admin/publish_unpublished?limit=500", {}, timeout=120)
+            # Best-effort backstop publish for NON-giant docs. Giants publish via
+            # the worker's background auto-publish (they can take >60s each, which
+            # would blow this request's timeout) — so a failure/timeout here is
+            # NON-FATAL and must never abort the run.
+            _try(lambda: _rag_post("/admin/publish_unpublished?limit=500", {}, timeout=120))
             _step("embed", "done", f"published {pub}")
         if _stopping():
             raise RuntimeError("stopped")
@@ -397,9 +463,13 @@ def _run_nightly(opts: dict) -> None:
             _step("push", "skipped", "gate failed — not pushing partial corpus")
         else:
             res = _lex_call("/policy/lexicon/push-to-chat", {"dry_run": False})
-            _NIGHTLY["push_done"] = res is not None
-            _step("push", "done" if res is not None else "skipped",
-                  "pushed" if res is not None else "lexicon svc not configured")
+            if res is None:
+                _step("push", "skipped", "lexicon svc not configured")
+            elif res.get("_error"):
+                _step("push", "failed", f"lexicon: {str(res['_error'])[:80]}")
+            else:
+                _NIGHTLY["push_done"] = True
+                _step("push", "done", "pushed")
 
         # 0' — revert infra
         _step("infra_down", "running")
@@ -427,21 +497,51 @@ def _run_nightly(opts: dict) -> None:
         _NIGHTLY["running"] = False
         _NIGHTLY["finished_at"] = _now()
         _NIGHTLY["current"] = None
+        _persist()   # durable snapshot for run history
 
 
 # ── Public API (called by the thin main.py routes) ───────────────────────────
 def start(opts: dict) -> dict:
+    import uuid
     if _NIGHTLY.get("running"):
         return {"status": "already_running", **status()}
+    # Resume: carry over a prior run's COMPLETED steps + baseline so we don't
+    # re-run expensive work (esp. the ~32-min baseline eval). Steps that weren't
+    # done are reset to pending and re-executed from where the run failed.
+    prior_baseline = None
+    prior_steps_by_key: dict = {}
+    resume_from = opts.get("resume_from")
+    if resume_from:
+        prior = get_run(resume_from)
+        if isinstance(prior, dict) and prior.get("steps"):
+            prior_baseline = prior.get("baseline")
+            prior_steps_by_key = {s["key"]: s for s in prior["steps"]}
     _NIGHTLY.update({
+        "run_id": str(uuid.uuid4()),
         "running": True, "stop": False, "started_at": _now(), "finished_at": None,
         "current": None, "error": None, "opts": opts,
-        "eval_run_id": None, "baseline": None, "final": None, "lift": None,
+        "eval_run_id": None, "baseline": prior_baseline, "final": None, "lift": None,
         "gate": None, "push_done": False,
     })
-    _init_steps()
+    if prior_steps_by_key:
+        _NIGHTLY["steps"] = []
+        for k, lbl in _STEP_DEFS:
+            p = prior_steps_by_key.get(k)
+            if p and p.get("status") in ("done", "skipped"):
+                _NIGHTLY["steps"].append({**p, "label": lbl})   # keep completed
+            else:
+                _NIGHTLY["steps"].append({"key": k, "label": lbl, "status": "pending",
+                                          "detail": "", "started_at": None, "ended_at": None, "log": []})
+    else:
+        _init_steps()
+    _persist()   # record the run as 'running' so it appears in history immediately
     threading.Thread(target=_run_nightly, args=(opts,), daemon=True).start()
     return status()
+
+
+def _done(key: str) -> bool:
+    """True if a step is already complete (used to skip it on a resumed run)."""
+    return any(s["key"] == key and s["status"] in ("done", "skipped") for s in _NIGHTLY["steps"])
 
 
 def stop() -> dict:
@@ -451,5 +551,107 @@ def stop() -> dict:
 
 def status() -> dict:
     return {k: _NIGHTLY[k] for k in (
-        "running", "stop", "started_at", "finished_at", "current", "error",
+        "run_id", "running", "stop", "started_at", "finished_at", "current", "error",
         "opts", "steps", "eval_run_id", "baseline", "final", "lift", "gate", "push_done")}
+
+
+# ── Run history (durable across the frequent single-instance restarts) ────────
+def _dsn() -> str:
+    from app.config import DATABASE_URL
+    return (DATABASE_URL
+            .replace("postgresql+asyncpg://", "postgresql://")
+            .replace("postgresql+psycopg2://", "postgresql://"))
+
+
+def _ensure_table() -> None:
+    import psycopg2
+    conn = psycopg2.connect(_dsn(), connect_timeout=15)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS nightly_runs ("
+            "id text PRIMARY KEY, started_at timestamptz, finished_at timestamptz, "
+            "status text, dry_run boolean, include_eval boolean, "
+            "router_delta double precision, state jsonb, created_at timestamptz DEFAULT now())")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _persist() -> None:
+    """Snapshot the current run into nightly_runs (upsert by run_id)."""
+    import json as _j
+    import psycopg2
+    rid = _NIGHTLY.get("run_id")
+    if not rid:
+        return
+    try:
+        _ensure_table()
+        run_status = ("running" if _NIGHTLY.get("running")
+                      else "failed" if _NIGHTLY.get("error")
+                      else "stopped" if _NIGHTLY.get("stop") else "done")
+        rd = ((_NIGHTLY.get("lift") or {}).get("router_recall") or {}).get("delta")
+        conn = psycopg2.connect(_dsn(), connect_timeout=15)
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO nightly_runs (id, started_at, finished_at, status, dry_run, "
+            "include_eval, router_delta, state) VALUES (%s,%s,%s,%s,%s,%s,%s,%s) "
+            "ON CONFLICT (id) DO UPDATE SET finished_at=EXCLUDED.finished_at, "
+            "status=EXCLUDED.status, router_delta=EXCLUDED.router_delta, state=EXCLUDED.state",
+            (rid, _NIGHTLY.get("started_at"), _NIGHTLY.get("finished_at"), run_status,
+             bool(_NIGHTLY["opts"].get("dry_run")), bool(_NIGHTLY["opts"].get("include_eval")),
+             rd, _j.dumps(status())))
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        logger.warning("[nightly] persist failed: %s", exc)
+
+
+def list_runs(limit: int = 30) -> dict:
+    import psycopg2
+    try:
+        _ensure_table()
+        conn = psycopg2.connect(_dsn(), connect_timeout=15)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, started_at, finished_at, status, dry_run, include_eval, router_delta "
+            "FROM nightly_runs ORDER BY started_at DESC NULLS LAST LIMIT %s", (limit,))
+        live = _NIGHTLY.get("run_id") if _NIGHTLY.get("running") else None
+        runs = []
+        for r in cur.fetchall():
+            # A 'running' row that isn't the live in-memory run is stale (killed) —
+            # report it as 'failed' so the history never shows a dead run as running.
+            st = r[3]
+            if st == "running" and r[0] != live:
+                st = "failed"
+            runs.append({"id": r[0],
+                         "started_at": r[1].isoformat() if r[1] else None,
+                         "finished_at": r[2].isoformat() if r[2] else None,
+                         "status": st, "dry_run": r[4], "include_eval": r[5], "router_delta": r[6]})
+        conn.close()
+        return {"runs": runs}
+    except Exception as exc:
+        return {"runs": [], "error": str(exc)}
+
+
+def get_run(run_id: str) -> dict:
+    # The live current run is freshest in memory; past runs come from the table.
+    if _NIGHTLY.get("run_id") == run_id and _NIGHTLY.get("running"):
+        return status()
+    import psycopg2
+    try:
+        conn = psycopg2.connect(_dsn(), connect_timeout=15)
+        cur = conn.cursor()
+        cur.execute("SELECT state FROM nightly_runs WHERE id=%s", (run_id,))
+        r = cur.fetchone()
+        conn.close()
+        if not r:
+            return {"error": "not found"}
+        state = r[0] if isinstance(r[0], dict) else {}
+        # A run that isn't the live in-memory one CANNOT be running (single
+        # instance, one run at a time). Killed runs persist a stale running=true;
+        # force it false so the UI never shows a dead run as live.
+        state["running"] = False
+        return state
+    except Exception as exc:
+        return {"error": str(exc)}

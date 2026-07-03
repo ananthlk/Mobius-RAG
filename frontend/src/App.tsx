@@ -198,16 +198,26 @@ function App() {
   const loadDocuments = async () => {
     setLoadingDocuments(true)
     try {
-      // Server caps at 2000 rows — larger limits trigger IN-clause subqueries
-      // with thousands of UUIDs that time out after 60s returning 0 bytes,
-      // which the browser sees as an empty corpus ("No documents in corpus yet").
-      // The /documents endpoint now returns `total` = real DB count so the
-      // Corpus Health footer stays accurate even when the page is smaller.
-      const response = await fetch(`${API_BASE}/documents?limit=2000`)
-      if (response.ok) {
+      // The /documents endpoint caps a single request at 2000 rows (larger
+      // limits expand the enrichment IN-clauses to thousands of UUIDs and time
+      // out). To show the WHOLE corpus in the reader we paginate: fetch fixed
+      // 2000-row pages by `skip` until we've pulled `total` (returned by the
+      // endpoint). ~5 fast requests for a 9k-doc corpus.
+      const PAGE = 2000
+      const all: any[] = []
+      let skip = 0
+      let total = Infinity
+      for (let guard = 0; guard < 100 && all.length < total; guard++) {
+        const response = await fetch(`${API_BASE}/documents?skip=${skip}&limit=${PAGE}`)
+        if (!response.ok) break
         const data = await response.json()
-        setDocuments(data.documents || [])
+        total = typeof data.total === 'number' ? data.total : all.length
+        const page = data.documents || []
+        all.push(...page)
+        if (page.length < PAGE) break
+        skip += PAGE
       }
+      setDocuments(all)
     } catch (err) {
       setError('Failed to load documents')
     } finally {

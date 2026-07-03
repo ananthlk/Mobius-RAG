@@ -1,0 +1,369 @@
+# =============================================================================
+# Payor Readiness Catalogue — Aetna Better Health of Florida (Medicaid)
+# =============================================================================
+# This is the human-reviewable source of truth for one payor. A loader upserts
+# each `asset` / `api` entry into the Postgres tables payor_readiness_asset /
+# payor_api_capability (see docs/payor-readiness-registry-spec.md).
+#
+# Status legend (asset.status):
+#   present | partial | missing | stale | out_of_compliance | needs_auth | n_a
+# verified_via:  rag_probe | web | human
+# confidence:    high | medium | low
+# -----------------------------------------------------------------------------
+# Refresh cadence:  corpus=quarterly, surface=180d (see per-asset ttl_days)
+# Last assessed:    2026-07-03  (rag_probe against :8001 + web validation)
+# Assessed by:      payor-platform-agent
+# -----------------------------------------------------------------------------
+
+payor:
+  # Canonical MUST match the stack's payor key, NOT the marketing name.
+  # Authoritative sources agree on "Aetna": lexicon j-tag j:payor.aetna
+  # (corpus_search.py:941), curator classifier aetnabetterhealth.com→("Aetna","FL")
+  # (app/curator/classifier.py), metadata_canonical["aetna"]="Aetna". The plan
+  # "Aetna Better Health of Florida" is identified by the (payor,state,program)
+  # TRIPLE — payer alone is ambiguous (aetna.com commercial also → "Aetna").
+  canonical: "Aetna"
+  j_tag: "j:payor.aetna"
+  display_name: "Aetna Better Health of Florida"   # human label only, not the key
+  parent: "Aetna / CVS Health"
+  state: FL
+  program: Medicaid
+  plan_lines:
+    - medicaid_managed_care_mma
+    - comprehensive_long_term_care_ltc
+  notes: |
+    Rows below reflect the MMA/Comprehensive LTC line. A 2026-07-03 assessment
+    found 3 Aetna docs already in the RAG corpus but UNTAGGED (payer=NULL), so
+    filtered retrieval returned 0 — see gaps.corpus_untagged.
+
+# =============================================================================
+# CORPUS ASSETS — must be ingested + queryable in RAG
+# =============================================================================
+assets:
+
+  - asset_type: provider_manual
+    layer: corpus
+    required: true
+    status: present            # in corpus, but see gap: needs payer tag
+    label: "ABHFL 2025 Provider Manual (MMA + Comprehensive LTC)"
+    source_url: "https://www.aetnabetterhealth.com/content/dam/aetna/medicaid/florida/provider/pdf/abhfl_medicaid_comprehensive_ltc_provider_manual.pdf"
+    retrieved_from: "abhfl_medicaid_comprehensive_ltc_provider_manual.pdf"
+    verified_via: rag_probe
+    confidence: high
+    ttl_days: 365
+    last_verified_at: 2026-07-03
+    probe_question: "Aetna Better Health of Florida provider manual"
+    must_facts:
+      - "Aetna Better Health of Florida"
+      - "2025 Provider Manual"
+    gap: "COVERAGE_UNTAGGED — corpus doc has payer=NULL; retag payer='Aetna Better Health', state=FL."
+
+  - asset_type: member_handbook
+    layer: corpus
+    required: true
+    status: partial
+    label: "ABHFL LTC Member Handbook"
+    source_url: null            # confirm canonical URL
+    retrieved_from: "abhfl_medicaid_ltc_member_handbook.pdf"
+    verified_via: rag_probe
+    confidence: medium
+    ttl_days: 365
+    last_verified_at: 2026-07-03
+    probe_question: "Aetna Better Health Florida member handbook covered benefits"
+    must_facts:
+      - "Aetna Better Health of Florida"
+      - "member handbook"
+    gap: "MMA member handbook not confirmed in corpus — only the LTC handbook present."
+
+  - asset_type: medical_policies
+    layer: corpus
+    required: true
+    status: missing
+    label: "Aetna Clinical Policy Bulletins (FL Medicaid applicability)"
+    source_url: null
+    verified_via: rag_probe
+    confidence: high
+    ttl_days: 90
+    last_verified_at: 2026-07-03
+    probe_question: "Aetna Better Health Florida clinical medical policy medical necessity"
+    must_facts:
+      - "Aetna"
+      - "medical necessity"
+    gap: "No distinct medical-policy doc in corpus. Aetna uses Clinical Policy Bulletins (CPBs) — locate FL-applicable set."
+
+  - asset_type: um_policies
+    layer: corpus
+    required: true
+    status: missing
+    label: "ABHFL prior-authorization requirements / UM criteria"
+    source_url: "https://www.aetnabetterhealth.com/florida/providers/prior-authorization.html"
+    verified_via: web
+    confidence: medium
+    ttl_days: 90
+    last_verified_at: 2026-07-03
+    probe_question: "Aetna Better Health Florida services requiring prior authorization"
+    must_facts:
+      - "prior authorization"
+      - "Aetna Better Health of Florida"
+    gap: "PA requirements live on the website + PA forms; not ingested as a corpus doc. Ingest the PA list."
+
+  - asset_type: billing_manual
+    layer: corpus
+    required: true
+    status: partial
+    label: "ABHFL Billing & Claims Processing training"
+    source_url: "https://www.aetnabetterhealth.com/content/dam/aetna/medicaid/florida/provider/pdf/abhfl_claims_training_powerpoint.pdf"
+    verified_via: web
+    confidence: medium
+    ttl_days: 180
+    last_verified_at: 2026-07-03
+    probe_question: "Aetna Better Health Florida billing claims submission EDI"
+    must_facts:
+      - "claims"
+      - "Aetna Better Health of Florida"
+    gap: "Only a claims-training deck located, not a formal EDI companion guide. Confirm/ingest."
+
+  - asset_type: fee_schedule
+    layer: corpus
+    required: false
+    status: missing
+    ttl_days: 90
+    last_verified_at: 2026-07-03
+    probe_question: "Aetna Better Health Florida Medicaid fee schedule reimbursement rates"
+    gap: "No fee schedule in corpus. Ties to DOGE FL Medicaid rate work."
+
+# =============================================================================
+# SURFACE ASSETS — operational endpoints / contacts (tracked, not embedded)
+# All values below are web-validated 2026-07-03; confidence medium pending
+# confirmation against the official Quick Reference Guide PDF (aetna.com 403s
+# automated fetch — human/curator to confirm from the QRG).
+# QRG: .../florida/provider/pdf/abhfl_quick_reference_guide.pdf
+# =============================================================================
+
+  - asset_type: provider_login_url
+    layer: surface
+    required: true
+    status: present
+    value: "https://www.aetnabetterhealth.com/florida/providers/portal.html"
+    verified_via: web
+    confidence: high
+    ttl_days: 180
+    last_verified_at: 2026-07-03
+    probe_question: "Aetna Better Health Florida provider portal login"
+
+  - asset_type: supported_portal
+    layer: surface
+    required: true
+    status: present
+    value: "Availity Essentials"
+    notes: "Portal is Availity Essentials. Availity registration/help: 1-800-282-4548. Online claim submission routed via Office Ally (requires Office Ally account)."
+    verified_via: web
+    confidence: high
+    ttl_days: 180
+    last_verified_at: 2026-07-03
+    probe_question: "Does Aetna Better Health Florida use Availity portal"
+    must_facts: ["Availity"]
+
+  - asset_type: eligibility_check_url
+    layer: surface
+    required: true
+    status: present
+    value: "https://www.aetnabetterhealth.com/florida/providers/portal.html"
+    notes: "Real-time eligibility via Availity (payer 128FL supports Eligibility/Benefits + Prime Eligibility)."
+    verified_via: web
+    confidence: medium
+    ttl_days: 180
+    last_verified_at: 2026-07-03
+    probe_question: "How do I check member eligibility for Aetna Better Health Florida"
+
+  - asset_type: authorization_check_url
+    layer: surface
+    required: true
+    status: present
+    value: "https://www.aetnabetterhealth.com/florida/providers/prior-authorization.html"
+    notes: "PA via Provider Portal (Availity) or PA request form by type; attach supporting docs."
+    verified_via: web
+    confidence: medium
+    ttl_days: 180
+    last_verified_at: 2026-07-03
+    probe_question: "How to submit a prior authorization to Aetna Better Health Florida"
+
+  - asset_type: customer_support_phone
+    layer: surface
+    required: true
+    status: present
+    value: "1-800-441-5501"           # Provider Services (Medicaid/MMA); TTY 711
+    notes: |
+      Provider Services (MMA): 1-800-441-5501 (TTY 711).
+      Provider Relations: 1-844-528-5815.  Pharmacy help desk: 1-866-693-4445.
+      Availity registration/help: 1-800-282-4548.
+      LTC-line Provider Services number NOT yet separately confirmed — verify on QRG.
+    verified_via: web
+    confidence: medium
+    ttl_days: 180
+    last_verified_at: 2026-07-03
+    probe_question: "Aetna Better Health Florida provider services phone number"
+    must_facts: ["1-800-441-5501", "Aetna Better Health of Florida"]
+
+  - asset_type: claims_fax
+    layer: surface
+    required: false
+    status: present
+    value: "1-844-235-1340"           # Provider services / claims fax
+    verified_via: web
+    confidence: medium
+    ttl_days: 180
+    last_verified_at: 2026-07-03
+    probe_question: "Aetna Better Health Florida claims fax number"
+
+  - asset_type: appeals_fax
+    layer: surface
+    required: false
+    status: present
+    value: "860-607-7894"             # Appeals fax (Grievance fax: 1-888-684-4928)
+    notes: |
+      Appeals fax 860-607-7894; Grievance fax 1-888-684-4928.
+      Appeals/Grievance mailing: Aetna Better Health of Florida, PO Box 81139,
+      5801 Postal Road, Cleveland, OH 44181.
+      Emails: FLAppealsandGrievances@AETNA.com, FLMedicaidProviderRelations@Aetna.com.
+      ⚠ A "Grievance and Appeals Address Change" provider bulletin exists —
+      confirm the current PO Box before relying on the address (compliance risk).
+    verified_via: web
+    confidence: medium
+    ttl_days: 180
+    last_verified_at: 2026-07-03
+    probe_question: "Aetna Better Health Florida provider appeal fax number and address"
+
+  - asset_type: edi_payer_id
+    layer: surface
+    required: true
+    status: present
+    value: "128FL"
+    notes: |
+      Payer ID 128FL = Aetna Better Health of Florida (claim.md): Professional/1500,
+      Institutional/UB, Secondary, Eligibility/Benefits, ERA supported.
+      Alt IDs seen: 7265, 8678. Caution: Aetna corporate uses 60054 for many ABH
+      plans — pull the payer ID from the member card to disambiguate.
+    verified_via: web
+    confidence: high
+    ttl_days: 365
+    last_verified_at: 2026-07-03
+    probe_question: "Aetna Better Health Florida EDI payer ID for claims"
+    must_facts: ["128FL"]
+
+  - asset_type: provider_site_map
+    layer: surface
+    required: true
+    status: missing
+    verified_via: rag_probe
+    confidence: high
+    ttl_days: 30
+    last_verified_at: 2026-07-03
+    gap: "No ABHFL URLs in scripts/curator/sitemap_data_v0.json (only Sunshine Health + AHCA present). Seed a crawl from aetnabetterhealth.com/florida."
+
+# Operational reference fact (not an asset row, but registry-answerable):
+reference_facts:
+  timely_filing:
+    value: "180 days from date of service (participating); inpatient = discharge date; 180 days from paid date to resubmit a corrected claim."
+    verified_via: web
+    confidence: medium
+    source_url: "https://www.aetnabetterhealth.com/florida/providers/file-submit-claims.html"
+    last_verified_at: 2026-07-03
+
+# =============================================================================
+# API CAPABILITIES  ->  payor_api_capability
+# =============================================================================
+apis:
+  - capability: eligibility_270_271
+    required: true
+    status: available
+    transport: availity
+    confidence: medium
+    notes: "Payer 128FL supports Eligibility/Benefits + Prime Eligibility via Availity/clearinghouse."
+    last_verified_at: 2026-07-03
+  - capability: auth_278
+    required: true
+    status: partial
+    transport: portal_only
+    confidence: low
+    notes: "PA via Availity portal / PA forms confirmed; real-time 278 EDI availability not confirmed."
+    last_verified_at: 2026-07-03
+  - capability: claims_837
+    required: true
+    status: available
+    transport: clearinghouse
+    confidence: high
+    notes: "128FL Professional (837P) + Institutional (837I) + Secondary. Online submission via Office Ally."
+    last_verified_at: 2026-07-03
+  - capability: era_835
+    required: true
+    status: available
+    transport: clearinghouse
+    confidence: high
+    notes: "ERA supported for payer 128FL."
+    last_verified_at: 2026-07-03
+  - capability: roster_feed
+    required: false
+    status: gap
+    confidence: low
+    notes: "Provider roster/credentialing feed not established — ties to credentialing/roster module."
+    last_verified_at: 2026-07-03
+
+# =============================================================================
+# OPEN GAPS  ->  each produces one work-order signal (spec §6)
+# =============================================================================
+gaps:
+  corpus_untagged:
+    severity: high
+    to: rag_agent            # RAG agent confirmed 2026-07-03; owns this fix
+    description: |
+      3 Aetna docs have payer=NULL/state=NULL/program=NULL — direct file uploads
+      skip the scraper's hostname-inference path, so the ("aetna better
+      health","FL","Medicaid") rule never fired. Filter returns 0 because
+      publish.py freezes _str_or_empty(doc.payer)="" into document_payer at
+      publish time (retag/Path B does NOT touch payer — lexicon topics only).
+    fix_pipeline:                # per doc; NO bulk payer-classification endpoint
+      - "PATCH /documents/{id}  -> payer='Aetna' (NOT 'Aetna Better Health' — must match j:payor.aetna), state='FL', program='Medicaid'"
+      - "POST  /documents/{id}/publish  -> re-freezes document_payer into rag_published_embeddings rows"
+    naming_note: |
+      CORRECTION to earlier instruction: canonical is 'Aetna', not 'Aetna Better
+      Health'. If the 3 docs were already PATCHed to 'Aetna Better Health', they
+      need re-PATCH to 'Aetna' + re-publish, else the j:payor.aetna tag filter and
+      the structured payer filter disagree.
+    docs: [abhfl_medicaid_comprehensive_ltc_provider_manual.pdf, abhfl_medicaid_ltc_member_handbook.pdf, "Aetna_Better_Health_of_Florida__Inc..pdf"]
+  inc_pdf_no_text:
+    severity: medium
+    to: rag_agent
+    description: |
+      'Aetna_Better_Health_of_Florida__Inc..pdf' extracted only its cover text
+      layer (1 short chunk across 32 hits) — an OCR-only PDF that fooled the
+      extractor. extraction_status='completed' so the content-less gate passes
+      it. RAG agent to flag needs_ocr (gate should check chunk_count/text_len,
+      not just extraction_status).
+  # NOTE: the document_name=None seen in the pgvector admin probe is COSMETIC —
+  # the model stores document_filename/document_display_name, not document_name;
+  # the probe field maps to no column. Embeddings + text are intact. No fix.
+  mma_member_handbook_missing:
+    severity: medium
+    to: rag_curator
+    description: "Only the LTC member handbook is in corpus; locate + ingest the MMA member handbook."
+  medical_policies_missing:
+    severity: medium
+    to: rag_curator
+    description: "Ingest FL-applicable Aetna Clinical Policy Bulletins."
+  pa_list_missing:
+    severity: medium
+    to: rag_curator
+    description: "Ingest the ABHFL prior-authorization requirements list (currently website-only)."
+  sitemap_seed:
+    severity: medium
+    to: rag_curator
+    description: "Seed sitemap_data_v0.json with aetnabetterhealth.com/florida crawl."
+  appeals_address_verify:
+    severity: low
+    to: human
+    description: "Confirm current Grievance & Appeals PO Box (an address-change bulletin exists)."
+  surface_values_confirm:
+    severity: low
+    to: human
+    description: "Confirm all surface phone/fax values against the official Quick Reference Guide PDF (aetna.com blocks automated fetch)."

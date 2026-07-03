@@ -111,6 +111,24 @@ async def publish_document(document_id: UUID, db: AsyncSession, generator_id: st
     if not embeddings:
         raise ValueError(f"No chunk embeddings for this document (generator_id={gen}); run embedding first")
 
+    # Batch-load the source rows once (dict lookup in the loop) instead of a
+    # per-embedding SELECT. A giant doc has ~9k embeddings; the old per-row
+    # fetch meant ~9k sequential round-trips, which blew the request timeout
+    # (503) and stalled the worker's auto-publish. Two set-based queries here
+    # keep publish O(1) round-trips regardless of doc size.
+    hier_by_id: dict = {}
+    fact_by_id: dict = {}
+    _hier_res = await db.execute(
+        select(HierarchicalChunk).where(HierarchicalChunk.document_id == document_id)
+    )
+    for _c in _hier_res.scalars().all():
+        hier_by_id[_c.id] = _c
+    _fact_res = await db.execute(
+        select(ExtractedFact).where(ExtractedFact.document_id == document_id)
+    )
+    for _f in _fact_res.scalars().all():
+        fact_by_id[_f.id] = _f
+
     # Document metadata (contract: empty string when null)
     doc_filename = _str_or_empty(doc.filename)
     doc_display_name = _str_or_empty(doc.display_name)
@@ -136,10 +154,7 @@ async def publish_document(document_id: UUID, db: AsyncSession, generator_id: st
         source_verification_status = ""
 
         if ce.source_type == "hierarchical":
-            chunk_result = await db.execute(
-                select(HierarchicalChunk).where(HierarchicalChunk.id == ce.source_id)
-            )
-            chunk = chunk_result.scalar_one_or_none()
+            chunk = hier_by_id.get(ce.source_id)
             if not chunk:
                 continue
             text = _build_text_for_chunk(chunk)
@@ -150,10 +165,7 @@ async def publish_document(document_id: UUID, db: AsyncSession, generator_id: st
             summary = _str_or_empty(chunk.summary)
             source_verification_status = "n/a"
         else:
-            fact_result = await db.execute(
-                select(ExtractedFact).where(ExtractedFact.id == ce.source_id)
-            )
-            fact = fact_result.scalar_one_or_none()
+            fact = fact_by_id.get(ce.source_id)
             if not fact:
                 continue
             text = _build_text_for_fact(fact)
@@ -162,10 +174,7 @@ async def publish_document(document_id: UUID, db: AsyncSession, generator_id: st
             summary = _str_or_empty(fact.fact_text)
             source_verification_status = _str_or_empty(getattr(fact, "verification_status", None) or "")
             if getattr(fact, "hierarchical_chunk_id", None):
-                hc_result = await db.execute(
-                    select(HierarchicalChunk).where(HierarchicalChunk.id == fact.hierarchical_chunk_id)
-                )
-                hc = hc_result.scalar_one_or_none()
+                hc = hier_by_id.get(fact.hierarchical_chunk_id)
                 if hc:
                     section_path = _str_or_empty(hc.section_path)
                     chapter_path = _str_or_empty(hc.chapter_path)
@@ -218,6 +227,11 @@ async def publish_document(document_id: UUID, db: AsyncSession, generator_id: st
     # ``pgvector.sqlalchemy.Vector`` adapter is not a runtime dep —
     # see pyproject.toml). Same text-form cast as the migration
     # backfill uses (app/migrations/add_pgvector_columns.py).
+    # Batch the vec writes as one executemany instead of ~9k awaited UPDATEs
+    # (the second O(N) round-trip loop that timed out giant publishes). asyncpg
+    # pipelines the parameter list, so this is one driver round-trip regardless
+    # of row count. Chunked to bound peak memory of the text-form vectors.
+    _vec_params: list[dict] = []
     for row in rows:
         emb = row.embedding
         if not isinstance(emb, list) or not emb:
@@ -226,23 +240,33 @@ async def publish_document(document_id: UUID, db: AsyncSession, generator_id: st
             text_form = "[" + ",".join(repr(float(x)) for x in emb) + "]"
         except (TypeError, ValueError):
             continue
+        _vec_params.append({"vec": text_form, "id": str(row.id)})
+    _vec_stmt = sa_text(
+        "UPDATE rag_published_embeddings "
+        "SET embedding_vec = CAST(:vec AS vector) "
+        "WHERE id = CAST(:id AS uuid)"
+    )
+    for _i in range(0, len(_vec_params), 1000):
+        _batch = _vec_params[_i : _i + 1000]
         try:
-            await db.execute(
-                sa_text(
-                    "UPDATE rag_published_embeddings "
-                    "SET embedding_vec = CAST(:vec AS vector) "
-                    "WHERE id = CAST(:id AS uuid)"
-                ),
-                {"vec": text_form, "id": str(row.id)},
-            )
+            await db.execute(_vec_stmt, _batch)
         except Exception:
-            # Best-effort: JSONB write already succeeded; retrieval
-            # filters out rows where embedding_vec IS NULL, so a
-            # missed row just sits out until the next publish.
+            # Best-effort per-batch fallback: retrieval filters out rows where
+            # embedding_vec IS NULL, so a missed row just sits out until the
+            # next publish. Retry the batch row-by-row so one bad vector does
+            # not sink the whole batch.
             import logging as _logging
             _logging.getLogger(__name__).exception(
-                "[publish] embedding_vec UPDATE failed for id=%s; JSONB row kept", row.id,
+                "[publish] embedding_vec batch UPDATE failed (rows %d-%d); retrying row-by-row",
+                _i, _i + len(_batch),
             )
+            for _p in _batch:
+                try:
+                    await db.execute(_vec_stmt, _p)
+                except Exception:
+                    _logging.getLogger(__name__).exception(
+                        "[publish] embedding_vec UPDATE failed for id=%s; JSONB row kept", _p["id"],
+                    )
 
     # Integrity check: count rows in rag_published_embeddings for this document
     expected_count = len(rows)

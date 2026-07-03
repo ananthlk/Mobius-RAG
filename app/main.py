@@ -551,6 +551,59 @@ def health_check():
     return {"status": "ok"}
 
 
+@app.api_route("/dev/mint-token", methods=["GET", "POST"])
+def dev_mint_token():
+    """DEV ONLY: proxy chat's mint-dev-token so the RAG SPA can self-authenticate
+    when a long dev session outlives the launcher token (same-origin → no CORS).
+    Gated behind the explicit ALLOW_DEV_MINT env (set only on the dev deploy) — NOT
+    on ENV, because our dev service is labelled ENV=staging. Off (404) everywhere the
+    flag isn't set. Not under /admin so it's reachable without a token — safe only
+    because chat's mint-dev-token is itself dev-open."""
+    import os as _os
+    from app.config import CHAT_INTERNAL_LLM_URL
+    if _os.getenv("ALLOW_DEV_MINT", "").strip().lower() not in ("1", "true", "yes"):
+        raise HTTPException(status_code=404, detail="not found")
+    base = (CHAT_INTERNAL_LLM_URL or "").split("/internal")[0] or \
+        "https://mobius-chat-ortabkknqa-uc.a.run.app"
+    import urllib.request
+    import json as _json
+    try:
+        req = urllib.request.Request(
+            base + "/chat/admin/mint-dev-token", data=b"{}", method="POST",
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return _json.loads(r.read().decode() or "{}")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"mint failed: {exc}")
+
+
+@app.get("/version")
+def version_fingerprint():
+    """Authoritative agent-identity for eval provenance. The eval harness hits
+    a DEPLOYED agent over HTTP, so run_calibration reads THIS (not the driver's
+    local checkout) to stamp each run's fingerprint — the mixed-build guard."""
+    import os as _os
+    from app.services.corpus_search_router import PRIORS_VERSION
+    from app.services import corpus_search_agent as _csa
+    retrieval_config = {
+        "pool_wide_max": getattr(_csa, "_POOL_WIDE_MAX", None),
+        "pool_narrow_target": getattr(_csa, "_POOL_NARROW_TARGET", None),
+        "rerank_high_bar": getattr(_csa, "_HYBRID_RERANK_HIGH", None),
+        "narrow_harvest_k": getattr(_csa, "_NARROW_HARVEST_K", None),
+    }
+    cfg_hash = hashlib.sha256(
+        json.dumps(retrieval_config, sort_keys=True, default=str).encode()
+    ).hexdigest()[:12]
+    return {
+        "revision": _os.environ.get("K_REVISION", "local"),
+        "service": _os.environ.get("K_SERVICE", "mobius-rag"),
+        "git_sha": _os.environ.get("GIT_SHA", ""),  # injected at build if available
+        "priors_version": PRIORS_VERSION,
+        "retrieval_config": retrieval_config,
+        "retrieval_config_hash": cfg_hash,
+    }
+
+
 @app.get("/health/deep")
 async def health_deep(db: AsyncSession = Depends(get_db)):
     """Deep health check for autoscaler + alerting.
@@ -663,11 +716,14 @@ async def _cascade_delete_document(db: AsyncSession, doc_uuid) -> None:
         "DELETE FROM processing_errors WHERE document_id = :doc_id",
         "DELETE FROM extracted_facts WHERE document_id = :doc_id",
         "DELETE FROM hierarchical_chunks WHERE document_id = :doc_id",
+        "DELETE FROM embeddable_units WHERE document_id = :doc_id",
         "DELETE FROM chunking_results WHERE document_id = :doc_id",
         "DELETE FROM chunk_embeddings WHERE document_id = :doc_id",
         "DELETE FROM rag_published_embeddings WHERE document_id = :doc_id",
         "DELETE FROM publish_events WHERE document_id = :doc_id",
         "DELETE FROM document_pages WHERE document_id = :doc_id",
+        "DELETE FROM document_tags WHERE document_id = :doc_id",
+        "DELETE FROM document_text_tags WHERE document_id = :doc_id",
         "DELETE FROM documents WHERE id = :doc_id",
     ):
         await db.execute(_text(stmt), {"doc_id": doc_uuid})
@@ -2246,6 +2302,7 @@ def _chunking_status_from_latest_event(event_type: str, event_data: dict) -> tup
 async def list_documents(
     skip: int = 0,
     limit: int = 100,
+    payer: str | None = None,
     db: AsyncSession = Depends(get_db)
 ):
     """List all documents with extraction and chunking status. Chunking status is derived from the latest chunking_event when present to avoid fluctuation."""
@@ -2256,13 +2313,21 @@ async def list_documents(
     _MAX_LIMIT = 2000
     limit = min(limit, _MAX_LIMIT)
 
+    base_query = select(Document)
+    count_query = select(func.count()).select_from(Document)
+    if payer is not None:
+        if payer == "":
+            base_query = base_query.where(Document.payer.is_(None))
+            count_query = count_query.where(Document.payer.is_(None))
+        else:
+            base_query = base_query.where(Document.payer == payer)
+            count_query = count_query.where(Document.payer == payer)
+
     # Real total count (cheap COUNT(*) — no JOIN needed)
-    total_count = (await db.execute(
-        select(func.count()).select_from(Document)
-    )).scalar_one()
+    total_count = (await db.execute(count_query)).scalar_one()
 
     result = await db.execute(
-        select(Document)
+        base_query
         .order_by(Document.created_at.desc())
         .offset(skip)
         .limit(limit)
@@ -3335,32 +3400,38 @@ def integrity_report() -> dict:
             row = cur.fetchone()
             return int(row[0] or 0) if row else 0
 
-        documents_total = one("SELECT count(*) FROM documents")
+        # ``needs_ocr`` docs are scanned PDFs with no extractable text layer — they
+        # can never chunk/embed/publish until an OCR step exists. Quarantined so
+        # they don't hold the publish-fraction gate below threshold. Excluded from
+        # documents_total AND every unpublished/need_* count below.
+        _NQ = "status IS DISTINCT FROM 'needs_ocr'"
+        needs_ocr = one("SELECT count(*) FROM documents WHERE status='needs_ocr'")
+        documents_total = one(f"SELECT count(*) FROM documents WHERE {_NQ}")
         published = one("SELECT count(DISTINCT document_id) FROM rag_published_embeddings")
         unpublished = one(
             "SELECT count(*) FROM documents d WHERE NOT EXISTS "
-            "(SELECT 1 FROM rag_published_embeddings e WHERE e.document_id=d.id)")
+            f"(SELECT 1 FROM rag_published_embeddings e WHERE e.document_id=d.id) AND d.{_NQ}")
         need_publish = one(
             "SELECT count(*) FROM documents d WHERE NOT EXISTS "
             "(SELECT 1 FROM rag_published_embeddings e WHERE e.document_id=d.id) "
-            "AND EXISTS (SELECT 1 FROM chunk_embeddings ce WHERE ce.document_id=d.id)")
+            f"AND EXISTS (SELECT 1 FROM chunk_embeddings ce WHERE ce.document_id=d.id) AND d.{_NQ}")
         need_embed = one(
             "SELECT count(*) FROM documents d WHERE NOT EXISTS "
             "(SELECT 1 FROM rag_published_embeddings e WHERE e.document_id=d.id) "
             "AND NOT EXISTS (SELECT 1 FROM chunk_embeddings ce WHERE ce.document_id=d.id) "
-            "AND EXISTS (SELECT 1 FROM embeddable_units eu WHERE eu.document_id=d.id)")
+            f"AND EXISTS (SELECT 1 FROM embeddable_units eu WHERE eu.document_id=d.id) AND d.{_NQ}")
         # Docs with no chunks at all — split by whether source pages survive:
         # WITH pages → fast deterministic re-chunk (Path B); WITHOUT → re-ingest.
         need_rechunk = one(
             "SELECT count(*) FROM documents d WHERE NOT EXISTS "
             "(SELECT 1 FROM rag_published_embeddings e WHERE e.document_id=d.id) "
             "AND NOT EXISTS (SELECT 1 FROM embeddable_units eu WHERE eu.document_id=d.id) "
-            "AND EXISTS (SELECT 1 FROM document_pages dp WHERE dp.document_id=d.id)")
+            f"AND EXISTS (SELECT 1 FROM document_pages dp WHERE dp.document_id=d.id) AND d.{_NQ}")
         need_reingest = one(
             "SELECT count(*) FROM documents d WHERE NOT EXISTS "
             "(SELECT 1 FROM rag_published_embeddings e WHERE e.document_id=d.id) "
             "AND NOT EXISTS (SELECT 1 FROM embeddable_units eu WHERE eu.document_id=d.id) "
-            "AND NOT EXISTS (SELECT 1 FROM document_pages dp WHERE dp.document_id=d.id)")
+            f"AND NOT EXISTS (SELECT 1 FROM document_pages dp WHERE dp.document_id=d.id) AND d.{_NQ}")
         failed_docs = one("SELECT count(*) FROM documents WHERE status='failed'")
         stuck_docs = one("SELECT count(*) FROM documents WHERE status IN ('extracting','extracted')")
         blocked_jobs = one("SELECT count(*) FROM chunking_jobs WHERE status='blocked'")
@@ -3411,6 +3482,7 @@ def integrity_report() -> dict:
                 "need_embed": need_embed,               # have chunks, no vectors
                 "need_rechunk": need_rechunk,            # no chunks, HAS pages → Path B (deterministic)
                 "need_reingest": need_reingest,          # no chunks, NO pages → needs re-ingest
+                "needs_ocr": needs_ocr,                  # scanned, no text layer — quarantined (excl. from gate)
                 "failed_docs": failed_docs,
                 "stuck_docs": stuck_docs,               # extracting/extracted
                 "blocked_jobs": blocked_jobs,
@@ -3467,6 +3539,7 @@ def _run_integrity_remediate() -> None:
             FROM documents d
             WHERE (d.status = 'failed'
                    OR NOT EXISTS (SELECT 1 FROM embeddable_units eu WHERE eu.document_id=d.id))
+              AND d.status IS DISTINCT FROM 'needs_ocr'   -- scanned/quarantined: no text layer, would loop w/ 0 EU
               AND NOT EXISTS (SELECT 1 FROM rag_published_embeddings e WHERE e.document_id=d.id)
               AND EXISTS (SELECT 1 FROM document_pages dp WHERE dp.document_id=d.id)
               AND NOT EXISTS (SELECT 1 FROM chunking_jobs cj WHERE cj.document_id=d.id
@@ -3693,6 +3766,7 @@ def nightly_run(body: dict = Body(default={})) -> dict:
         "embed_budget_min": int(body.get("embed_budget_min", 60)),
         "quiesce_budget_min": int(body.get("quiesce_budget_min", 20)),
         "eval_bank": body.get("eval_bank", "eval/queries_cmhc.yaml"),
+        "resume_from": body.get("resume_from"),   # run_id to resume completed steps from
     }
     return _nly.start(opts)
 
@@ -3707,6 +3781,20 @@ def nightly_status() -> dict:
 def nightly_stop() -> dict:
     from app import nightly_orchestrator as _nly
     return _nly.stop()
+
+
+@app.get("/admin/nightly/runs")
+def nightly_runs(limit: int = 30) -> dict:
+    """Recent pipeline runs (newest first) for the history rail."""
+    from app import nightly_orchestrator as _nly
+    return _nly.list_runs(limit=limit)
+
+
+@app.get("/admin/nightly/runs/{run_id}")
+def nightly_run_detail(run_id: str) -> dict:
+    """Full saved state (steps/eval/lift/gate) of one past or current run."""
+    from app import nightly_orchestrator as _nly
+    return _nly.get_run(run_id)
 
 
 @app.patch("/documents/{document_id}")
@@ -11632,6 +11720,10 @@ async def delete_document_cascade(
             {"doc_id": doc_uuid}
         )
         await db.execute(
+            text("DELETE FROM embeddable_units WHERE document_id = :doc_id"),
+            {"doc_id": doc_uuid}
+        )
+        await db.execute(
             text("DELETE FROM chunking_results WHERE document_id = :doc_id"),
             {"doc_id": doc_uuid}
         )
@@ -11649,6 +11741,14 @@ async def delete_document_cascade(
         )
         await db.execute(
             text("DELETE FROM document_pages WHERE document_id = :doc_id"),
+            {"doc_id": doc_uuid}
+        )
+        await db.execute(
+            text("DELETE FROM document_tags WHERE document_id = :doc_id"),
+            {"doc_id": doc_uuid}
+        )
+        await db.execute(
+            text("DELETE FROM document_text_tags WHERE document_id = :doc_id"),
             {"doc_id": doc_uuid}
         )
         await db.execute(
