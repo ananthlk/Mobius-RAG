@@ -201,7 +201,8 @@ class CorpusSearchResponse(BaseModel):
 # Authority-level weight map  (matches reranker_v1.yaml authority_level signal)
 # ---------------------------------------------------------------------------
 _AUTHORITY_WEIGHTS: dict[str, float] = {
-    "contract_source_of_truth": 1.0,
+    "contract_source_of_truth": 1.0,   # provider/member/billing manuals, UM/auth policies
+    "payer_website":            0.75,   # docs sourced directly from payor's website
     "operational_suggested":    0.65,
     "payer_policy":             0.50,   # published policy docs — citable source
     "fyi_not_citable":          0.20,
