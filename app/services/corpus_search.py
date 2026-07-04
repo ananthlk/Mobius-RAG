@@ -200,6 +200,16 @@ class CorpusSearchResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Authority-level weight map  (matches reranker_v1.yaml authority_level signal)
 # ---------------------------------------------------------------------------
+# FL Medicaid MCO payers — when filtering by one of these, state-authority docs
+# (AHCA model contract, Provider Handbook, PDL) are unioned in automatically
+# because they represent shared obligations every MCO signed.
+_FL_MEDICAID_MCO_PAYERS: frozenset[str] = frozenset({
+    "Sunshine Health", "Simply Healthcare", "United Healthcare",
+    "Aetna", "Molina Healthcare", "Molina Healthcare of Florida",
+    "WellCare", "Humana", "Humana Healthy Horizons",
+})
+_FL_STATE_AUTHORITY_PAYERS: list[str] = ["AHCA", "Ahca.myflorida", "Florida Medicaid"]
+
 _AUTHORITY_WEIGHTS: dict[str, float] = {
     "contract_source_of_truth": 1.0,   # provider/member/billing manuals, UM/auth policies
     "payer_website":            0.75,   # docs sourced directly from payor's website
@@ -480,7 +490,16 @@ def _build_filter_clauses(
 
     if filters:
         if filters.payer:
-            clauses.append("document_payer = :f_payer")
+            if filters.payer in _FL_MEDICAID_MCO_PAYERS:
+                # Union state-authority docs (AHCA model contract, shared policies)
+                # — they apply to every FL Medicaid MCO but are tagged payer=AHCA.
+                clauses.append(
+                    "(document_payer = :f_payer OR "
+                    "(document_payer = ANY(:f_state_auth_payers) AND document_state = 'FL'))"
+                )
+                params["f_state_auth_payers"] = _FL_STATE_AUTHORITY_PAYERS
+            else:
+                clauses.append("document_payer = :f_payer")
             params["f_payer"] = filters.payer
         if filters.state:
             clauses.append("document_state = :f_state")
