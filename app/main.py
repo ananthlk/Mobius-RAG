@@ -5970,38 +5970,54 @@ async def drive_import_folder(
 
         results.append(result_entry)
 
-    # Signal Payor Platform agent via product_feedback
     imported = [r for r in results if r.get("status") == "completed"]
     failed = [r for r in results if r.get("status") == "failed"]
     dupes = [r for r in results if r.get("status") == "duplicate"]
-    try:
-        from app.storage import product_feedback as pf_store
-        if hasattr(pf_store, "insert_open_feedback"):
-            await pf_store.insert_open_feedback(
-                db=db,
-                trigger="agent_signal",
-                category="doc_ingested",
-                area_tags=["drive", body.context_payer or "unknown_payer"],
-                body={
-                    "folder_id": fid,
-                    "folder_name": contents.get("folder_name", ""),
-                    "context_payer": body.context_payer,
-                    "imported": len(imported),
-                    "failed": len(failed),
-                    "duplicates": len(dupes),
-                    "files": [
-                        {
-                            "filename": r["filename"],
-                            "document_id": r.get("document_id"),
-                            "status": r["status"],
-                            "classification": r.get("classification"),
-                        }
-                        for r in results
-                    ],
-                },
+
+    # Create a task via task-manager for Payor Platform to review uncertain classifications
+    uncertain = [
+        r for r in results
+        if r.get("status") == "completed"
+        and (r.get("classification") or {}).get("confidence") in ("low", "none", None)
+    ]
+    if uncertain:
+        import json as _json
+        _tm_url = (os.environ.get("TASK_MANAGER_URL") or "").strip().rstrip("/")
+        if _tm_url:
+            try:
+                import httpx as _httpx
+                uncertain_body = _json.dumps([
+                    {
+                        "filename": r["filename"],
+                        "document_id": r.get("document_id"),
+                        "my_guess": (r.get("classification") or {}).get("asset_type"),
+                        "confidence": (r.get("classification") or {}).get("confidence"),
+                    }
+                    for r in uncertain
+                ], indent=2)
+                async with _httpx.AsyncClient(timeout=8) as _hx:
+                    await _hx.post(
+                        f"{_tm_url}/api/tasks",
+                        json={
+                            "title": f"Payor doc classification — review {len(uncertain)} {body.context_payer or 'unknown'} docs",
+                            "body": uncertain_body,
+                            "area": "payor_platform",
+                            "source_ref": f"drive:{fid}",
+                        },
+                    )
+                logger.info("Created classification-review task for %d uncertain docs", len(uncertain))
+            except Exception as task_err:
+                logger.warning("Classification-review task creation failed: %s", task_err)
+        else:
+            # Log clearly so Payor Platform can find via coverage diff
+            logger.warning(
+                "Drive import uncertain classifications (TASK_MANAGER_URL not set): %s",
+                _json.dumps([
+                    {"filename": r["filename"], "document_id": r.get("document_id"),
+                     "guess": (r.get("classification") or {}).get("asset_type")}
+                    for r in uncertain
+                ])
             )
-    except Exception as sig_err:
-        logger.warning("Drive import signal failed: %s", sig_err)
 
     return {
         "folder_id": fid,

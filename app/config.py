@@ -148,6 +148,8 @@ GOOGLE_DRIVE_CLIENT_ID = os.getenv("GOOGLE_DRIVE_CLIENT_ID")
 GOOGLE_DRIVE_CLIENT_SECRET = os.getenv("GOOGLE_DRIVE_CLIENT_SECRET")
 GOOGLE_DRIVE_REDIRECT_URI = os.getenv("GOOGLE_DRIVE_REDIRECT_URI")
 RAG_FRONTEND_URL = os.getenv("RAG_FRONTEND_URL", "http://localhost:8001")
+# Task manager — used to file classification-review tasks after Drive import
+TASK_MANAGER_URL = os.getenv("TASK_MANAGER_URL", "")
 
 
 # ── Startup validation ───────────────────────────────────────────────
