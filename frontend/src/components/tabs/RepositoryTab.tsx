@@ -1100,7 +1100,7 @@ export function RepositoryTab({
   const [localNavigateTo, setLocalNavigateTo] = useState<NavigateToRead | null>(null)
 
   // ── New layout state ─────────────────────────────────────────────────────
-  const [pageTab, setPageTab] = useState<'library' | 'pipeline'>('library')
+  const [pageTab, setPageTab] = useState<'library' | 'pipeline' | 'drive'>('library')
   const [libMode, setLibMode] = useState<'browse' | 'search'>('browse')
   const [viewingDoc, setViewingDoc] = useState(false)  // reader open (over search results in search mode)
 
@@ -1129,6 +1129,84 @@ export function RepositoryTab({
   const [payerDocs, setPayerDocs] = useState<DocLike[]>([])
   const [payerDocsLoading, setPayerDocsLoading] = useState(false)
   const [activePayer, setActivePayer] = useState<string | null>(null)
+
+  // ── Drive import state ────────────────────────────────────────────────────
+  const [driveConnected, setDriveConnected] = useState<boolean | null>(null) // null = not checked
+  const [driveFolderUrl, setDriveFolderUrl] = useState('')
+  const [driveContextPayer, setDriveContextPayer] = useState('Aetna')
+  const [driveContextState, setDriveContextState] = useState('FL')
+  const [driveContextProgram, setDriveContextProgram] = useState('Medicaid')
+  const [driveScanResult, setDriveScanResult] = useState<any>(null)
+  const [driveScanLoading, setDriveScanLoading] = useState(false)
+  const [driveImportLoading, setDriveImportLoading] = useState(false)
+  const [driveImportResult, setDriveImportResult] = useState<any>(null)
+  const [driveOverrides, setDriveOverrides] = useState<Record<string, Record<string, string>>>({})
+
+  const checkDriveStatus = async () => {
+    try {
+      const r = await fetch(`${API_BASE}/drive/status`)
+      const d = await r.json()
+      setDriveConnected(d.connected === true)
+    } catch { setDriveConnected(false) }
+  }
+
+  const connectDrive = async () => {
+    try {
+      const r = await fetch(`${API_BASE}/drive/auth-url`)
+      const d = await r.json()
+      if (d.url) window.open(d.url, '_blank', 'width=600,height=700')
+    } catch (e) { alert('Failed to get Drive auth URL') }
+  }
+
+  const scanFolder = async () => {
+    if (!driveFolderUrl.trim()) return
+    setDriveScanLoading(true)
+    setDriveScanResult(null)
+    setDriveImportResult(null)
+    try {
+      const r = await fetch(`${API_BASE}/drive/scan-folder`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          folder_id: driveFolderUrl.trim(),
+          context_payer: driveContextPayer || null,
+          context_state: driveContextState || null,
+          context_program: driveContextProgram || null,
+          use_llm_fallback: true,
+        }),
+      })
+      if (!r.ok) throw new Error(await r.text())
+      setDriveScanResult(await r.json())
+    } catch (e: any) { alert('Scan failed: ' + e.message) }
+    finally { setDriveScanLoading(false) }
+  }
+
+  const importFolder = async () => {
+    if (!driveScanResult) return
+    setDriveImportLoading(true)
+    try {
+      const r = await fetch(`${API_BASE}/drive/import-folder`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          folder_id: driveScanResult.folder_id,
+          context_payer: driveContextPayer || null,
+          context_state: driveContextState || null,
+          context_program: driveContextProgram || null,
+          overrides: driveOverrides,
+          use_llm_fallback: true,
+        }),
+      })
+      if (!r.ok) throw new Error(await r.text())
+      setDriveImportResult(await r.json())
+      if (onRefresh) onRefresh()
+    } catch (e: any) { alert('Import failed: ' + e.message) }
+    finally { setDriveImportLoading(false) }
+  }
+
+  useEffect(() => {
+    if (pageTab === 'drive' && driveConnected === null) checkDriveStatus()
+  }, [pageTab])
 
   const selectPayer = (payer: string | null) => {
     setActivePayer(payer)
@@ -1503,7 +1581,7 @@ export function RepositoryTab({
     <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 56px)', overflow: 'hidden', background: 'var(--mobius-bg-primary)' }}>
       {/* ── Top-level tabs: Library | Pipeline ── */}
       <div className="repo-page-tabs" style={{ display: 'flex', gap: 4, alignItems: 'center', flexShrink: 0, borderBottom: '1px solid var(--mobius-border, #e2e8f0)', padding: '0 8px' }}>
-        {(['library', 'pipeline'] as const).map((t) => (
+        {(['library', 'pipeline', 'drive'] as const).map((t) => (
           <button
             key={t}
             onClick={() => setPageTab(t)}
@@ -1511,9 +1589,9 @@ export function RepositoryTab({
               background: 'none', border: 'none', cursor: 'pointer', padding: '10px 16px',
               fontSize: 14, fontWeight: pageTab === t ? 600 : 400,
               color: pageTab === t ? 'var(--mobius-text-primary, #0f172a)' : 'var(--mobius-text-secondary)',
-              borderBottom: pageTab === t ? '2px solid #2563eb' : '2px solid transparent',
+              borderBottom: pageTab === t ? '2px solid var(--mobius-accent)' : '2px solid transparent',
             }}
-          >{t === 'library' ? 'Library' : 'Pipeline'}</button>
+          >{t === 'library' ? 'Library' : t === 'pipeline' ? 'Pipeline' : '↓ Drive'}</button>
         ))}
         <div style={{ flex: 1 }} />
         {onRefresh && pageTab === 'library' && (
@@ -1525,6 +1603,189 @@ export function RepositoryTab({
       {pageTab === 'pipeline' ? (
         <div className="repo-pipeline-body" style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '14px 16px' }}>
           <PipelinePanel documents={documents} onRefresh={onRefresh} />
+        </div>
+      ) : pageTab === 'drive' ? (
+        <div className="repo-drive-panel" style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 20 }}>
+          {/* Header */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 'var(--mobius-text-lg)', color: 'var(--mobius-text-primary)' }}>Google Drive Import</div>
+              <div style={{ fontSize: 'var(--mobius-text-sm)', color: 'var(--mobius-text-muted)', marginTop: 2 }}>
+                Scan a shared Drive folder, auto-classify each document, and import into the corpus.
+              </div>
+            </div>
+            <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+              {driveConnected === null ? (
+                <span style={{ fontSize: 'var(--mobius-text-sm)', color: 'var(--mobius-text-muted)' }}>Checking…</span>
+              ) : driveConnected ? (
+                <span style={{ fontSize: 'var(--mobius-text-sm)', color: 'var(--mobius-success)', fontWeight: 600 }}>● Connected</span>
+              ) : (
+                <button onClick={connectDrive} className="drive-connect-btn">Connect Google Drive</button>
+              )}
+              <button onClick={checkDriveStatus} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--mobius-text-muted)', fontSize: 16 }} title="Refresh connection status">↺</button>
+            </div>
+          </div>
+
+          {/* Folder + context inputs */}
+          <div className="drive-config-card">
+            <div style={{ fontWeight: 600, fontSize: 'var(--mobius-text-sm)', color: 'var(--mobius-text-secondary)', marginBottom: 12 }}>Folder &amp; context</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <label style={{ width: 90, fontSize: 'var(--mobius-text-sm)', color: 'var(--mobius-text-muted)', flexShrink: 0 }}>Folder URL</label>
+                <input
+                  className="drive-input"
+                  placeholder="https://drive.google.com/drive/folders/…"
+                  value={driveFolderUrl}
+                  onChange={e => setDriveFolderUrl(e.target.value)}
+                  style={{ flex: 1 }}
+                />
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flex: 1 }}>
+                  <label style={{ width: 90, fontSize: 'var(--mobius-text-sm)', color: 'var(--mobius-text-muted)', flexShrink: 0 }}>Payer</label>
+                  <input className="drive-input" placeholder="Aetna" value={driveContextPayer} onChange={e => setDriveContextPayer(e.target.value)} style={{ flex: 1 }} />
+                </div>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flex: 1 }}>
+                  <label style={{ width: 50, fontSize: 'var(--mobius-text-sm)', color: 'var(--mobius-text-muted)', flexShrink: 0 }}>State</label>
+                  <input className="drive-input" placeholder="FL" value={driveContextState} onChange={e => setDriveContextState(e.target.value)} style={{ flex: 1 }} />
+                </div>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flex: 1 }}>
+                  <label style={{ width: 60, fontSize: 'var(--mobius-text-sm)', color: 'var(--mobius-text-muted)', flexShrink: 0 }}>Program</label>
+                  <input className="drive-input" placeholder="Medicaid" value={driveContextProgram} onChange={e => setDriveContextProgram(e.target.value)} style={{ flex: 1 }} />
+                </div>
+              </div>
+            </div>
+            <div style={{ marginTop: 14, display: 'flex', gap: 8 }}>
+              <button
+                onClick={scanFolder}
+                disabled={!driveConnected || driveScanLoading || !driveFolderUrl.trim()}
+                className="drive-action-btn"
+              >{driveScanLoading ? 'Scanning…' : 'Scan &amp; classify'}</button>
+              {!driveConnected && <span style={{ fontSize: 'var(--mobius-text-xs)', color: 'var(--mobius-text-muted)', alignSelf: 'center' }}>Connect Drive first</span>}
+            </div>
+          </div>
+
+          {/* Scan results table */}
+          {driveScanResult && !driveImportResult && (
+            <div className="drive-config-card">
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 12 }}>
+                <div style={{ fontWeight: 600, fontSize: 'var(--mobius-text-sm)', color: 'var(--mobius-text-secondary)' }}>
+                  {driveScanResult.folder_name || 'Folder'} — {driveScanResult.file_count} file{driveScanResult.file_count !== 1 ? 's' : ''}
+                </div>
+                <div style={{ fontSize: 'var(--mobius-text-xs)', color: 'var(--mobius-text-muted)' }}>
+                  {Object.entries(driveScanResult.authority_tally || {}).map(([k, v]) => `${k}: ${v}`).join(' · ')}
+                </div>
+              </div>
+
+              <div style={{ overflowX: 'auto' }}>
+                <table className="drive-scan-table">
+                  <thead>
+                    <tr>
+                      <th>Filename</th>
+                      <th>Payer</th>
+                      <th>Authority</th>
+                      <th>State</th>
+                      <th>Program</th>
+                      <th>Conf.</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {driveScanResult.files.map((f: any) => {
+                      const cls = f.classification || {}
+                      const ov = driveOverrides[f.id] || {}
+                      return (
+                        <tr key={f.id} className={cls.confidence === 'low' ? 'drive-row-low' : ''}>
+                          <td className="drive-cell-name" title={f.name}>{f.name}</td>
+                          <td>
+                            <input className="drive-cell-input" value={ov.payer ?? cls.payer ?? ''} placeholder="—"
+                              onChange={e => setDriveOverrides(prev => ({ ...prev, [f.id]: { ...prev[f.id], payer: e.target.value } }))} />
+                          </td>
+                          <td>
+                            <select className="drive-cell-input" value={ov.authority_level ?? cls.authority_level ?? ''}
+                              onChange={e => setDriveOverrides(prev => ({ ...prev, [f.id]: { ...prev[f.id], authority_level: e.target.value } }))}>
+                              <option value="">—</option>
+                              <option value="contract_source_of_truth">contract_source_of_truth</option>
+                              <option value="payer_website">payer_website</option>
+                              <option value="operational_suggested">operational_suggested</option>
+                              <option value="payer_policy">payer_policy</option>
+                              <option value="fyi_not_citable">fyi_not_citable</option>
+                            </select>
+                          </td>
+                          <td>
+                            <input className="drive-cell-input" style={{ width: 40 }} value={ov.state ?? cls.state ?? ''} placeholder="—"
+                              onChange={e => setDriveOverrides(prev => ({ ...prev, [f.id]: { ...prev[f.id], state: e.target.value } }))} />
+                          </td>
+                          <td>
+                            <input className="drive-cell-input" value={ov.program ?? cls.program ?? ''} placeholder="—"
+                              onChange={e => setDriveOverrides(prev => ({ ...prev, [f.id]: { ...prev[f.id], program: e.target.value } }))} />
+                          </td>
+                          <td>
+                            <span className={`drive-conf-badge drive-conf-${cls.confidence}`}>{cls.confidence}</span>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              <div style={{ marginTop: 14, display: 'flex', gap: 8, alignItems: 'center' }}>
+                <button onClick={importFolder} disabled={driveImportLoading} className="drive-action-btn drive-import-btn">
+                  {driveImportLoading ? 'Importing…' : `Import all ${driveScanResult.file_count} files →`}
+                </button>
+                <span style={{ fontSize: 'var(--mobius-text-xs)', color: 'var(--mobius-text-muted)' }}>
+                  Editable cells above let you override classifications before importing.
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* Import result */}
+          {driveImportResult && (
+            <div className="drive-config-card">
+              <div style={{ display: 'flex', gap: 16, marginBottom: 14 }}>
+                <div className="drive-result-stat drive-result-ok">
+                  <div style={{ fontSize: 'var(--mobius-text-xl)', fontWeight: 700 }}>{driveImportResult.imported}</div>
+                  <div style={{ fontSize: 'var(--mobius-text-xs)' }}>imported</div>
+                </div>
+                {driveImportResult.duplicates > 0 && (
+                  <div className="drive-result-stat drive-result-dup">
+                    <div style={{ fontSize: 'var(--mobius-text-xl)', fontWeight: 700 }}>{driveImportResult.duplicates}</div>
+                    <div style={{ fontSize: 'var(--mobius-text-xs)' }}>duplicates</div>
+                  </div>
+                )}
+                {driveImportResult.failed > 0 && (
+                  <div className="drive-result-stat drive-result-fail">
+                    <div style={{ fontSize: 'var(--mobius-text-xl)', fontWeight: 700 }}>{driveImportResult.failed}</div>
+                    <div style={{ fontSize: 'var(--mobius-text-xs)' }}>failed</div>
+                  </div>
+                )}
+                <div style={{ alignSelf: 'center', marginLeft: 'auto' }}>
+                  <button onClick={() => { setDriveImportResult(null); setDriveScanResult(null); setDriveFolderUrl(''); setDriveOverrides({}) }}
+                    style={{ background: 'none', border: '1px solid var(--mobius-border)', borderRadius: 'var(--mobius-radius-sm)', padding: '4px 12px', cursor: 'pointer', fontSize: 'var(--mobius-text-sm)', color: 'var(--mobius-text-secondary)' }}>
+                    Import another folder
+                  </button>
+                </div>
+              </div>
+
+              {/* Per-file result list */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 320, overflowY: 'auto' }}>
+                {driveImportResult.results.map((r: any) => (
+                  <div key={r.file_id} className={`drive-result-row drive-result-row--${r.status}`}>
+                    <span className="drive-result-icon">{r.status === 'completed' ? '✓' : r.status === 'duplicate' ? '=' : '✗'}</span>
+                    <span className="drive-result-name">{r.filename}</span>
+                    {r.classification?.authority_level && (
+                      <span className="drive-result-meta">{r.classification.authority_level}</span>
+                    )}
+                    {r.status === 'failed' && <span className="drive-result-error">{r.error}</span>}
+                  </div>
+                ))}
+              </div>
+              <div style={{ marginTop: 10, fontSize: 'var(--mobius-text-xs)', color: 'var(--mobius-text-muted)' }}>
+                Payor Platform agent has been notified. Chunking + embedding is running in the background.
+              </div>
+            </div>
+          )}
         </div>
       ) : (
         <div className="repo-body" style={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden' }}>

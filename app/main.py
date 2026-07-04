@@ -5702,9 +5702,296 @@ async def import_from_drive(
             "filename": name,
             "document_id": str(doc.id),
             "status": doc.status,
+            "classification": {
+                "payer": doc.payer,
+                "authority_level": doc.authority_level,
+                "state": doc.state,
+                "program": doc.program,
+            },
         })
 
-    return {"results": results}
+    return {"results": results, "folder_id": body.folder_id}
+
+
+# ── Drive: scan folder (classify preview, no import) ─────────────────────────
+
+class DriveClassifyRequest(BaseModel):
+    folder_id: str
+    context_payer: Optional[str] = None
+    context_state: Optional[str] = None
+    context_program: Optional[str] = None
+    use_llm_fallback: bool = True
+
+
+@app.post("/drive/scan-folder")
+async def drive_scan_folder(
+    request: Request,
+    body: DriveClassifyRequest = Body(...),
+    x_rag_session: str | None = Header(default=None, alias="X-RAG-Session"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Scan a Drive folder and return classification preview for all files.
+
+    Does NOT import anything. Returns what each file would be classified as
+    so the user can review/override before importing.
+    """
+    _drive_require_enabled()
+    from app.services.drive_sync import get_credentials, list_folder_contents, parse_folder_id
+    from app.services.drive_classifier import classify_files
+
+    fid = parse_folder_id(body.folder_id)
+    if not fid:
+        raise HTTPException(status_code=400, detail="Invalid folder link or ID")
+
+    session_id = _get_session_id(request, x_rag_session)
+    creds = await get_credentials(session_id, db)
+    if not creds:
+        raise HTTPException(status_code=401, detail="Connect Google Drive first")
+
+    contents = list_folder_contents(creds, fid)
+    files = contents.get("files", [])
+    classified = await classify_files(
+        files,
+        context_payer=body.context_payer,
+        context_state=body.context_state,
+        context_program=body.context_program,
+        use_llm_fallback=body.use_llm_fallback,
+    )
+
+    # Tally by authority level for the summary
+    tally: dict[str, int] = {}
+    for f in classified:
+        lvl = (f.get("classification") or {}).get("authority_level") or "unknown"
+        tally[lvl] = tally.get(lvl, 0) + 1
+
+    return {
+        "folder_id": fid,
+        "folder_name": contents.get("folder_name", ""),
+        "file_count": len(classified),
+        "files": classified,
+        "authority_tally": tally,
+    }
+
+
+# ── Drive: import folder with auto-classification ────────────────────────────
+
+class DriveImportFolderRequest(BaseModel):
+    folder_id: str
+    context_payer: Optional[str] = None
+    context_state: Optional[str] = None
+    context_program: Optional[str] = None
+    # Per-file overrides from the scan-preview UI; keyed by Drive file_id
+    overrides: Optional[dict[str, dict]] = None
+    use_llm_fallback: bool = True
+
+
+@app.post("/drive/import-folder")
+async def drive_import_folder(
+    request: Request,
+    body: DriveImportFolderRequest = Body(...),
+    x_rag_session: str | None = Header(default=None, alias="X-RAG-Session"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Scan a Drive folder, auto-classify each file, import + pipeline all files.
+
+    Returns per-file results and a summary signal suitable for the Payor Platform agent.
+    Any per-file metadata overrides (from the scan preview UI) take priority over
+    the auto-classifier output.
+    """
+    _drive_require_enabled()
+    from app.services.drive_sync import get_credentials, list_folder_contents, download_file, parse_folder_id
+    from app.services.drive_classifier import classify_files
+
+    fid = parse_folder_id(body.folder_id)
+    if not fid:
+        raise HTTPException(status_code=400, detail="Invalid folder link or ID")
+
+    session_id = _get_session_id(request, x_rag_session)
+    creds = await get_credentials(session_id, db)
+    if not creds:
+        raise HTTPException(status_code=401, detail="Connect Google Drive first")
+
+    contents = list_folder_contents(creds, fid)
+    files = contents.get("files", [])
+
+    classified = await classify_files(
+        files,
+        context_payer=body.context_payer,
+        context_state=body.context_state,
+        context_program=body.context_program,
+        use_llm_fallback=body.use_llm_fallback,
+    )
+
+    overrides = body.overrides or {}
+    results = []
+
+    for f in classified:
+        file_id = f["id"]
+        name = f.get("name", "unknown")
+        mime = f.get("mimeType", "")
+        if mime not in ("application/pdf", "application/vnd.google-apps.document"):
+            results.append({"file_id": file_id, "filename": name, "status": "skipped", "reason": "unsupported mime"})
+            continue
+
+        cls = f.get("classification", {})
+        file_overrides = overrides.get(file_id, {})
+        payer = file_overrides.get("payer") or cls.get("payer") or body.context_payer
+        state = file_overrides.get("state") or cls.get("state") or body.context_state
+        program = file_overrides.get("program") or cls.get("program") or body.context_program
+        authority_level = file_overrides.get("authority_level") or cls.get("authority_level")
+
+        # Download
+        try:
+            content = download_file(creds, file_id, mime)
+        except Exception as e:
+            logger.warning("Drive download failed for %s: %s", file_id, e)
+            results.append({"file_id": file_id, "filename": name, "status": "failed", "error": str(e)})
+            continue
+
+        # Dedup by content hash
+        file_hash = hashlib.sha256(content).hexdigest()
+        dup = await db.execute(select(Document).where(Document.file_hash == file_hash))
+        if dup.scalar_one_or_none():
+            results.append({"file_id": file_id, "filename": name, "status": "duplicate"})
+            continue
+
+        if mime == "application/vnd.google-apps.document" and not name.lower().endswith(".pdf"):
+            name = name + ".pdf"
+        blob_path = f"drive/{fid}/{name}"
+        gcs_path = f"gs://{GCS_BUCKET}/{blob_path}"
+
+        try:
+            client = storage.Client()
+            bucket = client.bucket(GCS_BUCKET)
+            blob = bucket.blob(blob_path)
+            blob.upload_from_string(content, content_type="application/pdf")
+        except Exception as e:
+            logger.error("GCS upload failed for %s: %s", name, e)
+            results.append({"file_id": file_id, "filename": name, "status": "failed", "error": str(e)})
+            continue
+
+        doc = Document(
+            filename=name,
+            file_hash=file_hash,
+            file_path=gcs_path,
+            payer=payer,
+            state=state,
+            program=program,
+            authority_level=authority_level,
+            termination_date=default_termination_date(),
+            status="uploaded",
+        )
+        db.add(doc)
+        await db.commit()
+        await db.refresh(doc)
+
+        # Extract → chunk (Path B)
+        try:
+            doc.status = "extracting"
+            await db.commit()
+            from app.services.page_to_markdown import raw_page_to_markdown
+            pages = await extract_text_from_gcs(gcs_path)
+            for page_data in pages:
+                raw_text = sanitize_text_for_db(page_data.get("text") or "") or ""
+                md = raw_page_to_markdown(raw_text) if raw_text else None
+                page = DocumentPage(
+                    document_id=doc.id,
+                    page_number=page_data["page_number"],
+                    text=raw_text,
+                    text_markdown=sanitize_text_for_db(md),
+                    extraction_status=page_data.get("extraction_status", "failed"),
+                    extraction_error=page_data.get("extraction_error"),
+                    text_length=page_data.get("text_length", 0),
+                )
+                db.add(page)
+            doc.status = "completed"
+            await db.commit()
+        except Exception as e:
+            doc.status = "failed"
+            await db.commit()
+            logger.warning("Extraction failed for drive import %s: %s", name, e)
+
+        if doc.status == "completed":
+            try:
+                existing_job = await db.execute(
+                    select(ChunkingJob).where(
+                        ChunkingJob.document_id == doc.id,
+                        ChunkingJob.generator_id == "B",
+                        ChunkingJob.status.in_(["pending", "processing"]),
+                    ).limit(1)
+                )
+                if existing_job.scalar_one_or_none() is None:
+                    job = ChunkingJob(
+                        document_id=doc.id,
+                        generator_id="B",
+                        status="pending",
+                        threshold="0.6",
+                        critique_enabled="false",
+                        max_retries=0,
+                        extraction_enabled="false",
+                    )
+                    db.add(job)
+                    await db.commit()
+            except Exception as chunk_err:
+                logger.warning("Auto-chunk after drive import failed: %s", chunk_err)
+                await db.rollback()
+
+        results.append({
+            "file_id": file_id,
+            "filename": name,
+            "document_id": str(doc.id),
+            "status": doc.status,
+            "classification": {
+                "payer": payer,
+                "authority_level": authority_level,
+                "state": state,
+                "program": program,
+                "confidence": cls.get("confidence", "low"),
+            },
+        })
+
+    # Signal Payor Platform agent via product_feedback
+    imported = [r for r in results if r.get("status") == "completed"]
+    failed = [r for r in results if r.get("status") == "failed"]
+    dupes = [r for r in results if r.get("status") == "duplicate"]
+    try:
+        from app.storage import product_feedback as pf_store
+        if hasattr(pf_store, "insert_open_feedback"):
+            await pf_store.insert_open_feedback(
+                db=db,
+                trigger="agent_signal",
+                category="doc_ingested",
+                area_tags=["drive", body.context_payer or "unknown_payer"],
+                body={
+                    "folder_id": fid,
+                    "folder_name": contents.get("folder_name", ""),
+                    "context_payer": body.context_payer,
+                    "imported": len(imported),
+                    "failed": len(failed),
+                    "duplicates": len(dupes),
+                    "files": [
+                        {
+                            "filename": r["filename"],
+                            "document_id": r.get("document_id"),
+                            "status": r["status"],
+                            "classification": r.get("classification"),
+                        }
+                        for r in results
+                    ],
+                },
+            )
+    except Exception as sig_err:
+        logger.warning("Drive import signal failed: %s", sig_err)
+
+    return {
+        "folder_id": fid,
+        "folder_name": contents.get("folder_name", ""),
+        "total": len(results),
+        "imported": len(imported),
+        "failed": len(failed),
+        "duplicates": len(dupes),
+        "results": results,
+    }
 
 
 def _scraped_url_to_display_name(url: str) -> str:
