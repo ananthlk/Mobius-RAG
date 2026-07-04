@@ -5758,18 +5758,18 @@ async def drive_scan_folder(
         use_llm_fallback=body.use_llm_fallback,
     )
 
-    # Tally by authority level for the summary
+    # Tally by asset_type for the summary
     tally: dict[str, int] = {}
     for f in classified:
-        lvl = (f.get("classification") or {}).get("authority_level") or "unknown"
-        tally[lvl] = tally.get(lvl, 0) + 1
+        at = (f.get("classification") or {}).get("asset_type") or "unknown"
+        tally[at] = tally.get(at, 0) + 1
 
     return {
         "folder_id": fid,
         "folder_name": contents.get("folder_name", ""),
         "file_count": len(classified),
         "files": classified,
-        "authority_tally": tally,
+        "asset_type_tally": tally,
     }
 
 
@@ -5936,19 +5936,39 @@ async def drive_import_folder(
                 logger.warning("Auto-chunk after drive import failed: %s", chunk_err)
                 await db.rollback()
 
-        results.append({
+        result_entry: dict = {
             "file_id": file_id,
             "filename": name,
             "document_id": str(doc.id),
             "status": doc.status,
             "classification": {
                 "payer": payer,
+                "asset_type": cls.get("asset_type"),
                 "authority_level": authority_level,
                 "state": state,
                 "program": program,
                 "confidence": cls.get("confidence", "low"),
             },
-        })
+        }
+
+        # Register in payor registry so corpus_present + coverage update
+        if doc.status == "completed" and payer and cls.get("asset_type"):
+            from app.services.drive_classifier import link_doc_to_registry
+            try:
+                linked = await link_doc_to_registry(
+                    payor=payer,
+                    document_id=str(doc.id),
+                    filename=name,
+                    asset_type=cls["asset_type"],
+                    sub_type=cls.get("sub_type"),
+                    authority_level=authority_level,
+                )
+                result_entry["registry_linked"] = linked
+            except Exception as link_err:
+                logger.warning("link-doc failed for %s: %s", doc.id, link_err)
+                result_entry["registry_linked"] = False
+
+        results.append(result_entry)
 
     # Signal Payor Platform agent via product_feedback
     imported = [r for r in results if r.get("status") == "completed"]
