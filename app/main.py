@@ -5412,7 +5412,6 @@ async def drive_auth_url(
     session_id = _get_session_id(request, x_rag_session)
     state = secrets.token_urlsafe(32)
     import time
-    _drive_oauth_state[state] = (session_id, time.time() + 600)
 
     from google_auth_oauthlib.flow import Flow
     flow = Flow.from_client_config(
@@ -5434,6 +5433,8 @@ async def drive_auth_url(
         state=state,
         login_hint="mobiushealthai@gmail.com",
     )
+    # Store code_verifier alongside state so the stateless callback can use it
+    _drive_oauth_state[state] = (session_id, time.time() + 600, getattr(flow, "code_verifier", None))
 
     response = JSONResponse({"url": url, "session_id": session_id})
     response.set_cookie(key="rag_session", value=session_id, max_age=86400 * 7, samesite="lax", httponly=True)
@@ -5462,7 +5463,7 @@ async def drive_callback(
     if not entry:
         return RedirectResponse(url=f"{RAG_FRONTEND_URL}/#/drive?error=invalid_state")
 
-    session_id, expiry = entry
+    session_id, expiry, code_verifier = entry[0], entry[1], entry[2] if len(entry) > 2 else None
     if time.time() > expiry:
         return RedirectResponse(url=f"{RAG_FRONTEND_URL}/#/drive?error=state_expired")
 
@@ -5480,7 +5481,10 @@ async def drive_callback(
         scopes=["https://www.googleapis.com/auth/drive.readonly"],
         redirect_uri=GOOGLE_DRIVE_REDIRECT_URI,
     )
-    flow.fetch_token(code=code)
+    fetch_kwargs: dict = {"code": code}
+    if code_verifier:
+        fetch_kwargs["code_verifier"] = code_verifier
+    flow.fetch_token(**fetch_kwargs)
 
     creds = flow.credentials
     email = None
