@@ -1374,3 +1374,116 @@ details summary {
   background: #f3f4f6;
   color: #1f2937;
 }
+
+/* ── Observability dashboard (timeline / A-B compare / drift) ──────────────
+   Tokenised via the mobius-design compat aliases (--rag-accent, --accent-*,
+   --border, --text-*). Swap --rag-accent → var(--mobius-indigo) once the
+   design-token sync lands indigo/emerald/violet in this frontend. */
+.obs-dash {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-card, #fff);
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+.obs-title {
+  font-weight: 700;
+  font-size: 13px;
+  margin-bottom: 10px;
+  color: var(--text-primary);
+}
+.obs-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(240px, 1fr);
+  gap: 14px;
+}
+@media (max-width: 900px) {
+  .obs-grid { grid-template-columns: 1fr; }
+}
+.obs-side { display: flex; flex-direction: column; gap: 10px; }
+
+.obs-panel {
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  padding: 10px;
+  background: var(--bg-secondary);
+}
+.obs-panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.obs-muted { color: var(--text-tertiary); font-size: 12px; }
+
+/* timeline chart */
+.obs-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+}
+.obs-swatch { display: inline-block; width: 10px; height: 3px; border-radius: 2px; margin-right: 3px; vertical-align: middle; }
+.obs-swatch.recall { background: var(--rag-accent); }
+.obs-swatch.oracle { background: transparent; height: 0; border-top: 2px dashed var(--text-tertiary); }
+.obs-swatch.tick   { background: var(--accent-amber); width: 2px; height: 10px; }
+.obs-svg { width: 100%; height: auto; display: block; }
+.obs-svg .obs-grid { stroke: var(--border-light); stroke-width: 1; }
+.obs-axis { fill: var(--text-tertiary); font-size: 9px; font-family: var(--mobius-font-mono); }
+.obs-verline { stroke: var(--accent-amber); stroke-width: 1; stroke-dasharray: 2 2; opacity: 0.7; }
+.obs-path { stroke-width: 2; }
+.obs-path.recall { stroke: var(--rag-accent); }
+.obs-path.oracle { stroke: var(--text-tertiary); stroke-dasharray: 4 3; opacity: 0.7; }
+.obs-pt { fill: var(--rag-accent); stroke: #fff; stroke-width: 1; cursor: pointer; }
+.obs-pt:hover { r: 4.5; }
+.obs-pt.chg { fill: var(--accent-amber); }
+.obs-latest { margin-top: 6px; font-size: 12px; color: var(--text-secondary); }
+.obs-latest b { color: var(--text-primary); }
+
+/* A/B compare */
+.obs-cmp-selects { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.obs-select {
+  flex: 1; min-width: 0;
+  font-size: 11px;
+  padding: 3px 6px;
+  border: 1px solid var(--border-medium);
+  border-radius: 4px;
+  background: var(--bg-card, #fff);
+  color: var(--text-primary);
+  font-family: var(--mobius-font-sans);
+}
+.obs-arrow { color: var(--text-tertiary); font-size: 12px; }
+.obs-banner { font-size: 11px; padding: 5px 8px; border-radius: 4px; margin-bottom: 8px; line-height: 1.35; }
+.obs-banner.warn   { background: rgba(245, 158, 11, 0.12); color: #92600a; border: 1px solid rgba(245, 158, 11, 0.35); }
+.obs-banner.ok     { background: var(--bg-hover); color: var(--text-secondary); border: 1px solid var(--border-light); }
+.obs-banner.attrib { background: var(--rag-accent-light); color: var(--rag-accent-hover); border: 1px solid var(--rag-accent-border); }
+.obs-deltas { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 8px; }
+.obs-delta { text-align: center; border: 1px solid var(--border-light); border-radius: 4px; padding: 4px 2px; background: var(--bg-card, #fff); }
+.obs-delta-label { display: block; font-size: 9px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-tertiary); }
+.obs-delta-val { display: block; font-size: 13px; font-weight: 700; font-family: var(--mobius-font-mono); color: var(--text-secondary); }
+.obs-delta-val.up   { color: var(--accent-green); }
+.obs-delta-val.down { color: var(--accent-red); }
+.obs-fpdiff { border-top: 1px solid var(--border-light); padding-top: 6px; margin-bottom: 6px; }
+.obs-fprow { display: flex; justify-content: space-between; gap: 8px; font-size: 10px; padding: 1px 0; }
+.obs-fpk { color: var(--text-tertiary); font-family: var(--mobius-font-mono); }
+.obs-fpv { color: var(--text-secondary); font-family: var(--mobius-font-mono); text-align: right; word-break: break-all; }
+.obs-movers { border-top: 1px solid var(--border-light); padding-top: 6px; }
+.obs-movers-head { font-size: 10px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-tertiary); margin-bottom: 3px; }
+.obs-mover { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: baseline; font-size: 11px; padding: 1px 0; }
+.obs-mq { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); font-family: var(--mobius-font-mono); }
+.obs-md { font-weight: 700; font-family: var(--mobius-font-mono); }
+.obs-md.up { color: var(--accent-green); }
+.obs-md.down { color: var(--accent-red); }
+
+/* drift chip */
+.obs-chip { font-size: 11px; padding: 5px 9px; border-radius: 5px; line-height: 1.35; border: 1px solid var(--border-light); }
+.obs-chip.good    { background: rgba(22, 163, 74, 0.10); color: #15803d; border-color: rgba(22, 163, 74, 0.3); }
+.obs-chip.bad     { background: rgba(220, 38, 38, 0.10); color: #b91c1c; border-color: rgba(220, 38, 38, 0.3); }
+.obs-chip.neutral { background: var(--bg-hover); color: var(--text-tertiary); }

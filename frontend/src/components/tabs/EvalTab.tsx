@@ -142,6 +142,9 @@ export function EvalTab() {
   const [runsCollapsed, setRunsCollapsed] = useState(false)
   const [triggering, setTriggering] = useState(false)
 
+  // Observability dashboard (timeline / A-B compare / drift) — default open.
+  const [dashOpen, setDashOpen] = useState(true)
+
   // Initial: load runs.
   useEffect(() => {
     refreshRuns()
@@ -400,6 +403,13 @@ export function EvalTab() {
         >
           {bankOpen ? '× Close Bank Editor' : '✎ Edit Bank'}
         </button>
+        <button
+          className={`eval-toolbar-btn ${dashOpen ? 'active' : ''}`}
+          onClick={() => setDashOpen((v) => !v)}
+          title="Toggle the eval observability dashboard (timeline / A-B compare / drift)"
+        >
+          {dashOpen ? '× Hide Dashboard' : '📈 Dashboard'}
+        </button>
         {bankOpen && bankDirty && (
           <button
             className="eval-toolbar-btn save"
@@ -471,7 +481,8 @@ export function EvalTab() {
 
       {/* ── Main content (vertical: header → stats → funnel → questions) ── */}
       <div className="eval-main">
-        {!runDetail && !loading && <div className="eval-empty">Pick a run.</div>}
+        {dashOpen && <ObservabilityDashboard onPick={setSelectedRunId} />}
+        {!runDetail && !loading && !dashOpen && <div className="eval-empty">Pick a run.</div>}
         {loading && <div className="eval-empty">Loading…</div>}
         {runDetail && (
           <>
@@ -496,6 +507,264 @@ export function EvalTab() {
           </>
         )}
       </div>
+    </div>
+  )
+}
+
+// ── Observability dashboard (timeline / A-B compare / drift) ─────────────
+// Consumes the invocation-agnostic fingerprint endpoints:
+//   GET /api/eval/timeline   — version-annotated trend
+//   GET /api/eval/compare    — A/B diff + confound guard
+//   GET /api/eval/drift      — mean ± 2σ band (metric moved, fingerprint fixed)
+
+interface FingerprintObj {
+  agent_revision?: string | null
+  agent_git_sha?: string | null
+  priors_version?: string | null
+  retrieval_config_hash?: string | null
+  lexicon_revision?: number | null
+  corpus_snapshot_at?: string | null
+  judge_model?: string | null
+  bank_hash?: string | null
+  stable?: boolean | null
+}
+interface TimelineRun {
+  run_id: string
+  ts: string
+  notes: string | null
+  fingerprint: FingerprintObj | null
+  n_queries: number
+  router_recall: number | null
+  router_composite: number | null
+  oracle_recall: number | null
+  routing_headroom: number | null
+}
+
+// Dims that, if any change between adjacent runs, mark a "version change".
+const FP_SIG_DIMS: (keyof FingerprintObj)[] = [
+  'agent_git_sha', 'priors_version', 'retrieval_config_hash',
+  'lexicon_revision', 'judge_model', 'corpus_snapshot_at',
+]
+function fpSig(fp: FingerprintObj | null): string {
+  if (!fp) return ''
+  return FP_SIG_DIMS.map((d) => String(fp[d] ?? '')).join('|')
+}
+const fmt3 = (v: number | null | undefined) => (v === null || v === undefined ? '—' : Number(v).toFixed(3))
+const shortRun = (r: TimelineRun) => (r.notes || r.run_id.slice(0, 8)) as string
+
+function ObservabilityDashboard({ onPick }: { onPick: (id: string) => void }) {
+  const [runs, setRuns] = useState<TimelineRun[] | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+
+  useEffect(() => {
+    fetch(`${API_BASE}/api/eval/timeline?limit=30`)
+      .then((r) => r.json())
+      .then((d) => setRuns(d.runs || []))
+      .catch((e) => setErr(String(e)))
+  }, [])
+
+  if (err) return <div className="obs-dash"><div className="eval-error">timeline: {err}</div></div>
+  if (!runs) return <div className="obs-dash"><div className="obs-muted">Loading dashboard…</div></div>
+  if (runs.length === 0)
+    return <div className="obs-dash"><div className="obs-muted">No completed runs with fingerprints yet — run a calibration to populate the timeline.</div></div>
+
+  return (
+    <div className="obs-dash">
+      <div className="obs-title">📈 Eval Observability</div>
+      <div className="obs-grid">
+        <TimelinePanel runs={runs} onPick={onPick} />
+        <div className="obs-side">
+          <DriftChip />
+          <ComparePanel runs={runs} onPick={onPick} />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function TimelinePanel({ runs, onPick }: { runs: TimelineRun[]; onPick: (id: string) => void }) {
+  const series = [...runs].reverse() // oldest → newest (left → right)
+  const W = 520, H = 150, PL = 30, PR = 10, PT = 12, PB = 18
+  const n = series.length
+  const xs = (i: number) => (n <= 1 ? PL : PL + (i * (W - PL - PR)) / (n - 1))
+  const vmax = Math.max(0.6, ...series.flatMap((r) => [r.router_recall ?? 0, r.oracle_recall ?? 0]))
+  const ys = (v: number) => PT + (1 - v / vmax) * (H - PT - PB)
+  const linePath = (key: 'router_recall' | 'oracle_recall') =>
+    series
+      .map((r, i) => {
+        const v = r[key]
+        if (v === null || v === undefined) return null
+        return `${i === 0 ? 'M' : 'L'}${xs(i).toFixed(1)},${ys(v).toFixed(1)}`
+      })
+      .filter(Boolean)
+      .join(' ')
+  const changes: number[] = []
+  for (let i = 1; i < n; i++) if (fpSig(series[i].fingerprint) !== fpSig(series[i - 1].fingerprint)) changes.push(i)
+  const gridlines = [0.2, 0.4, 0.6, 0.8].filter((g) => g <= vmax)
+  const latest = series[n - 1]
+
+  return (
+    <div className="obs-panel obs-timeline">
+      <div className="obs-panel-head">
+        <span>Router recall over time</span>
+        <span className="obs-legend">
+          <i className="obs-swatch recall" /> router
+          <i className="obs-swatch oracle" /> oracle ceiling
+          <i className="obs-swatch tick" /> version change
+        </span>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="obs-svg" preserveAspectRatio="xMidYMid meet" role="img"
+           aria-label="Router recall over eval runs">
+        {gridlines.map((g) => (
+          <g key={g}>
+            <line x1={PL} x2={W - PR} y1={ys(g)} y2={ys(g)} className="obs-grid" />
+            <text x={2} y={ys(g) + 3} className="obs-axis">{g.toFixed(1)}</text>
+          </g>
+        ))}
+        {changes.map((i) => (
+          <line key={`chg${i}`} x1={xs(i)} x2={xs(i)} y1={PT} y2={H - PB} className="obs-verline">
+            <title>version change before {shortRun(series[i])}</title>
+          </line>
+        ))}
+        <path d={linePath('oracle_recall')} className="obs-path oracle" fill="none" />
+        <path d={linePath('router_recall')} className="obs-path recall" fill="none" />
+        {series.map((r, i) =>
+          r.router_recall == null ? null : (
+            <circle
+              key={r.run_id}
+              cx={xs(i)}
+              cy={ys(r.router_recall)}
+              r={3.2}
+              className={`obs-pt${changes.includes(i) ? ' chg' : ''}`}
+              onClick={() => onPick(r.run_id)}
+            >
+              <title>
+                {new Date(r.ts).toLocaleString()} · {r.notes || ''}
+                {'\n'}router {fmt3(r.router_recall)} · oracle {fmt3(r.oracle_recall)} · composite {fmt3(r.router_composite)}
+              </title>
+            </circle>
+          ),
+        )}
+      </svg>
+      <div className="obs-latest">
+        latest <b>{fmt3(latest.router_recall)}</b> recall · {fmt3(latest.router_composite)} composite ·
+        headroom {fmt3(latest.routing_headroom)}
+        <span className="obs-muted"> · {shortRun(latest)}</span>
+      </div>
+    </div>
+  )
+}
+
+interface CompareResp {
+  fingerprint_diff: Record<string, { a: unknown; b: unknown }>
+  confounded: boolean
+  confound_reason: string | null
+  deltas: Record<string, number | null>
+  query_movers: { query: string; a: number; b: number; delta: number }[]
+  detail?: string
+}
+
+function ComparePanel({ runs, onPick: _onPick }: { runs: TimelineRun[]; onPick: (id: string) => void }) {
+  const [aId, setAId] = useState<string>(runs[1]?.run_id || runs[0]?.run_id || '')
+  const [bId, setBId] = useState<string>(runs[0]?.run_id || '')
+  const [data, setData] = useState<CompareResp | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    if (!aId || !bId || aId === bId) { setData(null); return }
+    setBusy(true)
+    fetch(`${API_BASE}/api/eval/compare?a=${aId}&b=${bId}`)
+      .then((r) => r.json())
+      .then((d) => setData(d.detail ? null : d))
+      .catch(() => setData(null))
+      .finally(() => setBusy(false))
+  }, [aId, bId])
+
+  const opt = (r: TimelineRun) => (
+    <option key={r.run_id} value={r.run_id}>
+      {new Date(r.ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} · {shortRun(r).slice(0, 22)}
+    </option>
+  )
+  const delta = (k: string, label: string) => {
+    const v = data?.deltas?.[k]
+    const cls = v == null ? '' : v > 0 ? 'up' : v < 0 ? 'down' : ''
+    return (
+      <div className="obs-delta">
+        <span className="obs-delta-label">{label}</span>
+        <span className={`obs-delta-val ${cls}`}>{v == null ? '—' : (v > 0 ? '+' : '') + v.toFixed(3)}</span>
+      </div>
+    )
+  }
+  const fpKeys = data ? Object.keys(data.fingerprint_diff || {}) : []
+
+  return (
+    <div className="obs-panel">
+      <div className="obs-panel-head"><span>A / B compare</span></div>
+      <div className="obs-cmp-selects">
+        <select className="obs-select" value={aId} onChange={(e) => setAId(e.target.value)}>{runs.map(opt)}</select>
+        <span className="obs-arrow">→</span>
+        <select className="obs-select" value={bId} onChange={(e) => setBId(e.target.value)}>{runs.map(opt)}</select>
+      </div>
+      {aId === bId && <div className="obs-muted">Pick two different runs.</div>}
+      {busy && <div className="obs-muted">Comparing…</div>}
+      {data && !busy && (
+        <>
+          {data.confounded ? (
+            <div className="obs-banner warn">⚠ {data.confound_reason}</div>
+          ) : fpKeys.length === 0 ? (
+            <div className="obs-banner ok">✓ same build — delta is noise / measurement only</div>
+          ) : (
+            <div className="obs-banner attrib">✓ attributable — 1 dim changed: {fpKeys.join(', ')}</div>
+          )}
+          <div className="obs-deltas">
+            {delta('router_recall', 'recall')}
+            {delta('router_composite', 'composite')}
+            {delta('oracle_recall', 'oracle')}
+            {delta('routing_headroom', 'headroom')}
+          </div>
+          {fpKeys.length > 0 && (
+            <div className="obs-fpdiff">
+              {Object.entries(data.fingerprint_diff).map(([k, v]) => (
+                <div key={k} className="obs-fprow">
+                  <span className="obs-fpk">{k}</span>
+                  <span className="obs-fpv">{String(v.a)} → {String(v.b)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {data.query_movers?.length > 0 && (
+            <div className="obs-movers">
+              <div className="obs-movers-head">top query movers (router recall)</div>
+              {data.query_movers.slice(0, 6).map((m) => (
+                <div key={m.query} className="obs-mover">
+                  <span className="obs-mq" title={m.query}>{m.query}</span>
+                  <span className={`obs-md ${m.delta > 0 ? 'up' : 'down'}`}>{m.delta > 0 ? '+' : ''}{m.delta.toFixed(3)}</span>
+                  <span className="obs-muted">{m.a.toFixed(2)}→{m.b.toFixed(2)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
+function DriftChip() {
+  const [d, setD] = useState<any>(null)
+  useEffect(() => {
+    fetch(`${API_BASE}/api/eval/drift?metric=router_recall`)
+      .then((r) => r.json())
+      .then(setD)
+      .catch(() => setD(null))
+  }, [])
+  if (!d) return null
+  if (d.status === 'insufficient_data')
+    return <div className="obs-chip neutral" title={d.detail}>drift: not enough same-config runs for a band</div>
+  const cls = d.status === 'DRIFT' ? 'bad' : 'good'
+  return (
+    <div className={`obs-chip ${cls}`} title={`fingerprint group: ${JSON.stringify(d.fingerprint_group)}`}>
+      drift ({d.metric}): {d.status === 'DRIFT' ? '⚠ DRIFT' : '✓ in band'} · μ {d.mean} ±2σ [{d.band_2sigma?.[0]}, {d.band_2sigma?.[1]}] · latest {d.latest?.value} · n={d.n_runs}
     </div>
   )
 }
