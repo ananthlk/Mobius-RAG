@@ -1157,7 +1157,20 @@ export function RepositoryTab({
       const r = await fetch(`${API_BASE}/drive/auth-url`)
       const d = await r.json()
       if (!r.ok) { alert(d.detail || 'Failed to get Drive auth URL'); return }
-      if (d.url) window.open(d.url, '_blank', 'width=600,height=700')
+      if (!d.url) return
+      const popup = window.open(d.url, '_blank', 'width=600,height=700')
+      // Listen for the popup-success postMessage; fall back to polling if blocked
+      const onMessage = (e: MessageEvent) => {
+        if (e.data?.type === 'drive_connected') {
+          window.removeEventListener('message', onMessage)
+          clearInterval(poll)
+          checkDriveStatus()
+        }
+      }
+      window.addEventListener('message', onMessage)
+      const poll = setInterval(() => {
+        if (popup?.closed) { clearInterval(poll); window.removeEventListener('message', onMessage); checkDriveStatus() }
+      }, 1500)
     } catch (e) { alert('Failed to get Drive auth URL') }
   }
 

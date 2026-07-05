@@ -5,7 +5,7 @@ from typing import Optional, List, Any
 from fastapi import FastAPI, UploadFile, HTTPException, Depends, Body, Query, Request, Header
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, RedirectResponse, JSONResponse
+from fastapi.responses import StreamingResponse, RedirectResponse, JSONResponse, HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete, update, func, text, bindparam, and_, or_, cast, Text as SAText
 from sqlalchemy.orm import defer
@@ -5507,7 +5507,25 @@ async def drive_callback(
     db.add(conn)
     await db.commit()
 
-    return RedirectResponse(url=f"{RAG_FRONTEND_URL}/#/drive?connected=1")
+    return RedirectResponse(url=f"{RAG_FRONTEND_URL}/drive/popup-success")
+
+
+@app.get("/drive/popup-success", response_class=HTMLResponse)
+async def drive_popup_success():
+    """Tiny page shown in the OAuth popup after successful connect. Posts a message to the opener and closes."""
+    return HTMLResponse(content="""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Drive connected</title>
+<style>body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f8f9fa;}
+.card{text-align:center;padding:32px;border-radius:12px;background:#fff;box-shadow:0 2px 16px rgba(0,0,0,.1);}
+.check{font-size:48px;margin-bottom:12px;} .msg{color:#374151;font-size:16px;font-weight:600;margin-bottom:6px;}
+.sub{color:#6b7280;font-size:13px;}</style></head>
+<body><div class="card"><div class="check">✓</div>
+<div class="msg">Google Drive connected</div>
+<div class="sub">You can close this window.</div></div>
+<script>
+try { window.opener && window.opener.postMessage({type:'drive_connected'}, '*'); } catch(e){}
+setTimeout(function(){ try{window.close();}catch(e){} }, 1200);
+</script></body></html>""")
 
 
 @app.get("/drive/status")
