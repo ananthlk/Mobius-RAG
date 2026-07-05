@@ -5428,7 +5428,12 @@ async def drive_auth_url(
         scopes=["https://www.googleapis.com/auth/drive.readonly"],
         redirect_uri=GOOGLE_DRIVE_REDIRECT_URI,
     )
-    url, _ = flow.authorization_url(access_type="offline", prompt="consent", state=state)
+    url, _ = flow.authorization_url(
+        access_type="offline",
+        prompt="consent",
+        state=state,
+        login_hint="mobiushealthai@gmail.com",
+    )
 
     response = JSONResponse({"url": url, "session_id": session_id})
     response.set_cookie(key="rag_session", value=session_id, max_age=86400 * 7, samesite="lax", httponly=True)
