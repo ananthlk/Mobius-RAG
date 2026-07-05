@@ -5427,14 +5427,18 @@ async def drive_auth_url(
         scopes=["https://www.googleapis.com/auth/drive.readonly"],
         redirect_uri=GOOGLE_DRIVE_REDIRECT_URI,
     )
+    # Disable PKCE: Cloud Run is stateless (callback hits a fresh process that
+    # can't access the code_verifier stored in the auth-url process's memory).
+    # Web server flows don't require PKCE; newer google-auth-oauthlib may add it
+    # automatically — explicitly clear it here.
+    flow.oauth2session.pkce = None
     url, _ = flow.authorization_url(
         access_type="offline",
         prompt="consent",
         state=state,
         login_hint="mobiushealthai@gmail.com",
     )
-    # Store code_verifier alongside state so the stateless callback can use it
-    _drive_oauth_state[state] = (session_id, time.time() + 600, getattr(flow, "code_verifier", None))
+    _drive_oauth_state[state] = (session_id, time.time() + 600)
 
     response = JSONResponse({"url": url, "session_id": session_id})
     response.set_cookie(key="rag_session", value=session_id, max_age=86400 * 7, samesite="lax", httponly=True)
@@ -5463,7 +5467,7 @@ async def drive_callback(
     if not entry:
         return RedirectResponse(url=f"{RAG_FRONTEND_URL}/#/drive?error=invalid_state")
 
-    session_id, expiry, code_verifier = entry[0], entry[1], entry[2] if len(entry) > 2 else None
+    session_id, expiry = entry[0], entry[1]
     if time.time() > expiry:
         return RedirectResponse(url=f"{RAG_FRONTEND_URL}/#/drive?error=state_expired")
 
@@ -5481,10 +5485,8 @@ async def drive_callback(
         scopes=["https://www.googleapis.com/auth/drive.readonly"],
         redirect_uri=GOOGLE_DRIVE_REDIRECT_URI,
     )
-    fetch_kwargs: dict = {"code": code}
-    if code_verifier:
-        fetch_kwargs["code_verifier"] = code_verifier
-    flow.fetch_token(**fetch_kwargs)
+    flow.oauth2session.pkce = None
+    flow.fetch_token(code=code)
 
     creds = flow.credentials
     email = None
