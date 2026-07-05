@@ -292,6 +292,13 @@ _JPD_PATTERNS: dict[str, list[str]] = {
         "contact member", "member outreach", "member communication",
         "member notification",
     ],
+    # ── C — Contact / exact-value lookup ───────────────────────────────
+    "contact_info": [
+        "phone", "fax", "telephone", "call", "hotline", "toll-free", "toll free",
+        "contact number", "provider services phone", "member services phone",
+        "provider phone", "member phone", "edi", "payer id", "payer number",
+        "1-800", "1-866", "1-877", "1-888",
+    ],
     "other_important": [],
 }
 
@@ -307,6 +314,7 @@ _JPD_FAMILY: dict[str, str] = {
     "claim_submission_important":       "D",
     "claim_disputes":                   "D",
     "contacting_marketing_members":     "O",
+    "contact_info":                     "C",
     "other_important":                  "O",
 }
 
@@ -613,6 +621,34 @@ _BM25_COLS = """
 # ('mani', 'day') that kill the intersection even when the content terms
 # match perfectly.  We strip common question lead-phrases and quantifying
 # adverbs before handing the query to Postgres.
+
+# ---------------------------------------------------------------------------
+# Contact-class query and chunk detection
+# ---------------------------------------------------------------------------
+# Queries asking for phone/fax/EDI numbers are "contact-class". The correct
+# answer is an exact-value chunk (a line containing a phone number) which
+# typically doesn't repeat the word "phone" in its body — so the reranker's
+# tag-coverage floor would drop it.  Detecting these two things separately
+# lets us (a) add a JPD signal and (b) exempt the chunk from the hard floor.
+
+_CONTACT_QUERY_RE = re.compile(
+    r"\b(phone|fax|telephone|hotline|toll[\s.\-]?free|"
+    r"edi\s+payer[\s\-]?id|payer[\s\-]?id|edi[\s\-]?id|"
+    r"contact\s+number|provider\s+(services|phone|contact)|"
+    r"member\s+(services|phone|contact))\b",
+    re.IGNORECASE,
+)
+
+# US phone number formats: 1-800-441-5501 / (800) 441-5501 / 800.441.5501 / 800-441-5501
+# Use (?<!\d) / (?!\d) instead of \b so the pattern fires before '(' too.
+_CONTACT_VALUE_RE = re.compile(
+    r"(?<!\d)"
+    r"(?:1-\d{3}-\d{3}-\d{4}"
+    r"|\(\d{3}\)\s*\d{3}[-.\s]\d{4}"
+    r"|\d{3}-\d{3}-\d{4}"
+    r"|\d{3}\.\d{3}\.\d{4})"
+    r"(?!\d)",
+)
 
 _QUESTION_LEAD = re.compile(
     r'\b('
@@ -1672,6 +1708,11 @@ def _rerank(
     query_cats = _classify_jpd(query) if query else {}
     has_jpd = bool(query_cats)
 
+    # Contact-class queries (phone/fax/EDI lookups) need exact-value chunks
+    # (lines containing a phone number) to survive the coverage floor even when
+    # they don't repeat the literal word "phone" in their body.
+    is_contact_query = bool(_CONTACT_QUERY_RE.search(query)) if query else False
+
     has_tag_cov = bool(required_phrases)
     required_lower = [p.lower() for p in (required_phrases or []) if p]
     has_meta = has_tag_cov   # meta_boost only meaningful when phrases set
@@ -1903,7 +1944,16 @@ def _rerank(
                 c.get("_promoted_from_seed") is not None
                 or "bm25_inherited" in (c.get("retrieval_arms") or [])
             )
-            if cov < _TAG_COVERAGE_FLOOR and not is_promoted_neighbor:
+            # Contact-class exemption: a chunk that IS a phone/fax number
+            # (exact-value chunk) shouldn't be dropped just because it
+            # doesn't contain the word "phone" — the value itself IS the
+            # answer. The JPD "contact_info" signal still scores it; we
+            # just don't let the coverage floor silence it entirely.
+            is_contact_exact = (
+                is_contact_query
+                and bool(_CONTACT_VALUE_RE.search(c.get("text") or ""))
+            )
+            if cov < _TAG_COVERAGE_FLOOR and not is_promoted_neighbor and not is_contact_exact:
                 dropped_coverage_ids.append(c["id"])
                 if search_id:
                     _log_stage(
@@ -2221,6 +2271,11 @@ def _assemble(
 # subsections.
 _NEIGHBOR_TOTAL_CAP   = 50    # absolute ceiling on chunks after expansion
 _NEIGHBOR_PER_DOC_CAP = 20    # max chunks kept from any one document
+# Floor rerank_score assigned to neighbor chunks whose document has no surviving
+# assembled seed (e.g. a contact-sheet document whose primary chunks were all
+# dropped by the coverage floor). Non-zero so they can be ranked above true
+# zero-score chunks and surface in the output.
+_NEIGHBOR_SCORE_FLOOR = 0.15
 
 # Big sentinel so chunks without a page_number get effectively no page
 # constraint (still bounded by paragraph_index window).
@@ -2781,6 +2836,10 @@ async def _expand_with_neighbors(
     # Inherit a fractional score from the closest seed in the SAME document.
     # We use 0.5 × seed.rerank_score to keep neighbors below their seeds at
     # rerank-sort time — they're context, not primary citations.
+    # Floor: _NEIGHBOR_SCORE_FLOOR (0.15) for chunks whose document has no
+    # surviving seed (e.g. a contact-sheet doc where every primary chunk was
+    # dropped by the rerank coverage floor). Without the floor these chunks
+    # inherit 0.0 and rank at the very bottom, defeating the expansion.
     seed_score_by_doc: dict[str, float] = {}
     for s in seeds:
         doc = str(s.get("document_id") or "")
@@ -2789,7 +2848,10 @@ async def _expand_with_neighbors(
             seed_score_by_doc[doc] = max(seed_score_by_doc.get(doc, 0.0), sc)
     for n in fresh:
         doc = str(n.get("document_id") or "")
-        n["rerank_score"] = 0.5 * seed_score_by_doc.get(doc, 0.0)
+        parent_score = seed_score_by_doc.get(doc, 0.0)
+        n["rerank_score"] = (
+            0.5 * parent_score if parent_score > 0.0 else _NEIGHBOR_SCORE_FLOOR
+        )
         n["confidence_label"] = "low"
 
     combined = _apply_neighbor_caps(seeds, fresh)

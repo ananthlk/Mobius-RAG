@@ -462,7 +462,13 @@ def _run_nightly(opts: dict) -> None:
         elif not passed:
             _step("push", "skipped", "gate failed — not pushing partial corpus")
         else:
-            res = _lex_call("/policy/lexicon/push-to-chat", {"dry_run": False})
+            # lexicon_only: sync just the lexicon meta+entries (what chat's
+            # query-tagger needs). The full sync also fetchall()s the
+            # multi-million-row document_tags + policy_line_tags tables and OOMs
+            # the lexicon-maintenance service (503). Chat retrieves via the RAG
+            # service (current tags), so lexicon_only is sufficient here.
+            # Streaming those tag tables so the FULL push works is the follow-up.
+            res = _lex_call("/policy/lexicon/push-to-chat", {"dry_run": False, "lexicon_only": True})
             if res is None:
                 _step("push", "skipped", "lexicon svc not configured")
             elif res.get("_error"):

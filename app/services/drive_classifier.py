@@ -5,11 +5,16 @@ Fallback: regex patterns when the payor service is unavailable or returns confid
 
 After ingest, call link_doc_to_registry() to register the document_id in the
 payor registry so corpus_present/coverage updates automatically.
+
+Authority levels are REGISTRY-OWNED. Always call get_authority_policy() rather
+than using a local _ASSET_AUTHORITY constant — the registry is the source of truth
+and may update asset tiers without a RAG deploy.
 """
 from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Any
 
 import httpx
@@ -25,22 +30,58 @@ logger = logging.getLogger(__name__)
 
 PAYOR_SERVICE_URL = "https://mobius-payor-ortabkknqa-uc.a.run.app"
 
-# ── asset_type → authority_level mapping ─────────────────────────────────────
+# ── Authority policy — fetched from registry, cached 5 minutes ───────────────
 
-_ASSET_AUTHORITY: dict[str, str] = {
+_authority_policy_cache: dict[str, str] | None = None
+_authority_policy_loaded_at: float = 0.0
+_AUTHORITY_POLICY_TTL = 300  # 5 min
+
+# Local fallback used only when registry is unreachable. Values must match registry.
+# Do NOT treat this as the canonical map — always call get_authority_policy() in code.
+_AUTHORITY_POLICY_FALLBACK: dict[str, str] = {
     "state_contract":   "contract_source_of_truth",
     "provider_manual":  "contract_source_of_truth",
     "member_handbook":  "contract_source_of_truth",
     "billing_manual":   "contract_source_of_truth",
     "um_policies":      "contract_source_of_truth",
     "medical_policies": "contract_source_of_truth",
-    "formulary":        "contract_source_of_truth",
+    "formulary":        "payer_policy",          # ratified: not contract_source_of_truth
     "fee_schedule":     "payer_policy",
     "provider_directory": "payer_policy",
+    "benefits_summary": "payer_policy",
     "quick_reference":  "operational_suggested",
-    "useful_forms":     "operational_suggested",
+    "useful_forms":     "fyi_not_citable",       # ratified: templates must not outrank manuals
     "newsletter":       "fyi_not_citable",
 }
+
+
+async def get_authority_policy() -> dict[str, str]:
+    """Return the registry-owned asset_type → authority_level map.
+
+    Cached 5 minutes. Falls back to local constants if registry unreachable.
+    """
+    global _authority_policy_cache, _authority_policy_loaded_at
+    now = time.monotonic()
+    if _authority_policy_cache is not None and (now - _authority_policy_loaded_at) < _AUTHORITY_POLICY_TTL:
+        return _authority_policy_cache
+
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(f"{PAYOR_SERVICE_URL}/api/registry/authority-policy")
+        if resp.status_code == 200:
+            data = resp.json()
+            # Registry returns {asset_type: tier_name, ...} or {policy: {asset_type: ...}}
+            policy = data.get("policy", data) if isinstance(data, dict) else {}
+            if policy:
+                _authority_policy_cache = {k: v for k, v in policy.items() if isinstance(k, str) and isinstance(v, str)}
+                _authority_policy_loaded_at = now
+                return _authority_policy_cache
+    except Exception as e:
+        logger.warning("get_authority_policy: registry unreachable, using fallback: %s", e)
+
+    _authority_policy_cache = dict(_AUTHORITY_POLICY_FALLBACK)
+    _authority_policy_loaded_at = now
+    return _authority_policy_cache
 
 
 async def classify_via_registry(
@@ -68,12 +109,13 @@ async def classify_via_registry(
         if resp.status_code == 200:
             data = resp.json()
             asset_type = data.get("asset_type")
-            authority_level = _ASSET_AUTHORITY.get(asset_type or "", "payer_policy")
+            policy = await get_authority_policy()
+            authority_level = policy.get(asset_type or "", "payer_policy") if asset_type else None
             return {
                 "asset_type":      asset_type,
                 "sub_type":        data.get("sub_type"),
                 "confidence":      data.get("confidence", "low"),
-                "authority_level": canonical_authority_level(authority_level),
+                "authority_level": canonical_authority_level(authority_level) if authority_level else None,
                 "registry_raw":    data,
             }
         else:
@@ -81,7 +123,7 @@ async def classify_via_registry(
     except Exception as e:
         logger.warning("Payor classify failed for %s: %s", filename, e)
 
-    # Fallback to local regex
+    # Fallback to local regex — only when registry is unreachable (not when it returns null)
     return _classify_regex_fallback(filename)
 
 
@@ -215,12 +257,12 @@ def _classify_regex_fallback(
             program = prog
             break
 
-    confidence = "high" if asset_type else "low"
+    confidence = "high" if asset_type else "none"
     return {
-        "asset_type":      asset_type or "useful_forms",
+        "asset_type":      asset_type,   # None = unclassified; callers must route to review
         "sub_type":        None,
         "confidence":      confidence,
-        "authority_level": canonical_authority_level(authority_level or "payer_policy"),
+        "authority_level": canonical_authority_level(authority_level) if authority_level else None,
         "payer":           canonical_payer(payer),
         "state":           canonical_state(state),
         "program":         canonical_program(program),
