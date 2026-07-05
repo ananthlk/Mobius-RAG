@@ -3385,6 +3385,47 @@ def _self_post(path: str, timeout: int = 300) -> bool:
         return False
 
 
+@app.post("/admin/normalize-payer")
+async def normalize_payer(
+    body: dict = Body(...),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Bulk-normalize documents.payer to canonical form.
+
+    Body: {from_values: ["Ahca.myflorida", "ahca"], to_value: "AHCA"}
+    Runs a direct SQL UPDATE so 4000+ rows complete in one round-trip.
+    Also updates the corresponding rag_published_embeddings rows so the
+    corpus filter stays coherent.
+    """
+    from sqlalchemy import text as _text
+    from_values = body.get("from_values", [])
+    to_value = body.get("to_value", "")
+    if not from_values or not to_value:
+        return {"error": "from_values and to_value required"}
+
+    placeholders = ",".join([f":v{i}" for i in range(len(from_values))])
+    params = {"to_value": to_value}
+    params.update({f"v{i}": v for i, v in enumerate(from_values)})
+
+    r1 = await db.execute(
+        _text(f"UPDATE documents SET payer=:to_value WHERE payer IN ({placeholders})"),
+        params,
+    )
+    r2 = await db.execute(
+        _text(f"UPDATE rag_published_embeddings SET document_payer=:to_value WHERE document_payer IN ({placeholders})"),
+        params,
+    )
+    await db.commit()
+
+    return {
+        "status": "ok",
+        "to_value": to_value,
+        "from_values": from_values,
+        "documents_updated": r1.rowcount,
+        "embeddings_updated": r2.rowcount,
+    }
+
+
 @app.get("/admin/integrity/report")
 def integrity_report() -> dict:
     """One-call corpus-integrity snapshot for the ops UI. Every gap plus the
@@ -6077,13 +6118,20 @@ async def drive_relink_docs(
     filename against the payor registry, PATCHes authority_level, calls link-doc.
     Returns per-doc results.
     """
-    from app.services.drive_classifier import classify_via_registry, link_doc_to_registry, _classify_regex_fallback, _ASSET_AUTHORITY
+    from app.services.drive_classifier import (
+        classify_via_registry, link_doc_to_registry,
+        _classify_regex_fallback, get_authority_policy,
+    )
     from app.services.metadata_canonical import canonical_authority_level
 
     payer = body.get("payer", "")
     folder_id = body.get("folder_id", "")
     context_state = body.get("context_state")
     context_program = body.get("context_program")
+    # By default, skip link-doc for single-instance types to avoid clobbering.
+    # Pass force_single_instance=true to override (e.g. after registry reconciliation).
+    force_single_instance = body.get("force_single_instance", False)
+    _SINGLE_INSTANCE_TYPES: frozenset[str] = frozenset({"provider_manual", "member_handbook"})
 
     if folder_id:
         prefix = f"gs://{GCS_BUCKET}/drive/{folder_id}/"
@@ -6094,6 +6142,9 @@ async def drive_relink_docs(
     result = await db.execute(q)
     docs = result.scalars().all()
 
+    # Fetch registry-owned authority policy once for this batch
+    authority_policy = await get_authority_policy()
+
     results = []
     for doc in docs:
         name = doc.filename or ""
@@ -6102,25 +6153,49 @@ async def drive_relink_docs(
             cls = _classify_regex_fallback(name, payer, context_state, context_program)
 
         asset_type = cls.get("asset_type")
+
+        # null asset_type = unclassifiable — route to task review, skip link-doc
+        if not asset_type:
+            results.append({
+                "document_id": str(doc.id),
+                "filename": name,
+                "asset_type": None,
+                "authority_level": None,
+                "confidence": cls.get("confidence", "none"),
+                "registry_linked": False,
+                "needs_review": True,
+            })
+            continue
+
+        # Authority level comes from the registry-owned policy map
         authority_level = canonical_authority_level(
-            _ASSET_AUTHORITY.get(asset_type or "", "payer_policy") if asset_type else cls.get("authority_level") or "payer_policy"
+            authority_policy.get(asset_type, "payer_policy")
         )
 
         # Patch authority_level on the document row
         doc.authority_level = authority_level
         await db.commit()
 
-        # Call link-doc if we have a valid asset_type
+        # Slot-guard: single-instance types (provider_manual, member_handbook)
+        # are one-per-payer in the registry. Skip link-doc unless forced so
+        # we don't clobber a comprehensive manual with a variant doc.
+        is_single_instance = asset_type in _SINGLE_INSTANCE_TYPES
+        skip_link = is_single_instance and not force_single_instance
+
         linked = False
-        if asset_type and payer:
-            linked = await link_doc_to_registry(
-                payor=payer,
-                document_id=str(doc.id),
-                filename=name,
-                asset_type=asset_type,
-                sub_type=cls.get("sub_type"),
-                authority_level=authority_level,
-            )
+        skipped_slot_guard = False
+        if payer:
+            if skip_link:
+                skipped_slot_guard = True
+            else:
+                linked = await link_doc_to_registry(
+                    payor=payer,
+                    document_id=str(doc.id),
+                    filename=name,
+                    asset_type=asset_type,
+                    sub_type=cls.get("sub_type"),
+                    authority_level=authority_level,
+                )
 
         results.append({
             "document_id": str(doc.id),
@@ -6129,15 +6204,126 @@ async def drive_relink_docs(
             "authority_level": authority_level,
             "confidence": cls.get("confidence"),
             "registry_linked": linked,
+            "skipped_slot_guard": skipped_slot_guard,
+            "needs_review": False,
         })
 
     linked_count = sum(1 for r in results if r["registry_linked"])
+    skipped_count = sum(1 for r in results if r.get("skipped_slot_guard"))
+    review_count = sum(1 for r in results if r.get("needs_review"))
     return {
         "total": len(results),
-        "authority_level_patched": len(results),
+        "authority_level_patched": len(results) - review_count,
         "registry_linked": linked_count,
+        "skipped_slot_guard": skipped_count,
+        "needs_review": review_count,
         "results": results,
     }
+
+
+_DRIVE_REPUBLISH: dict = {
+    "running": False, "total": 0, "done": 0, "ok": 0, "failed": 0,
+    "started_at": None, "finished_at": None, "results": [], "error": None,
+}
+
+
+def _run_drive_republish(doc_ids: list[str], authority_levels: dict[str, str]) -> None:
+    """Background thread: publish each doc sequentially to avoid OOM."""
+    import psycopg2 as _pg
+    from datetime import datetime as _dt
+    from app.services.publish import publish_document as _pub
+
+    st = _DRIVE_REPUBLISH
+    st["started_at"] = _dt.utcnow().isoformat()
+    st["total"] = len(doc_ids)
+    st["done"] = st["ok"] = st["failed"] = 0
+    st["results"] = []
+    st["error"] = None
+
+    import asyncio
+    from uuid import UUID
+
+    async def _publish_one(doc_id_str: str) -> dict:
+        from app.database import AsyncSessionLocal
+        try:
+            async with AsyncSessionLocal() as doc_db:
+                res = await _pub(UUID(doc_id_str), doc_db)
+                await doc_db.commit()
+            return {
+                "document_id": doc_id_str,
+                "authority_level": authority_levels.get(doc_id_str),
+                "published": res.verification_passed if res else False,
+                "rows_written": res.rows_written if res else 0,
+            }
+        except Exception as exc:
+            return {
+                "document_id": doc_id_str,
+                "authority_level": authority_levels.get(doc_id_str),
+                "published": False,
+                "rows_written": 0,
+                "error": str(exc),
+            }
+
+    loop = asyncio.new_event_loop()
+    try:
+        for doc_id_str in doc_ids:
+            r = loop.run_until_complete(_publish_one(doc_id_str))
+            st["results"].append(r)
+            st["done"] += 1
+            if r.get("published"):
+                st["ok"] += 1
+            else:
+                st["failed"] += 1
+    except Exception as exc:
+        st["error"] = str(exc)
+    finally:
+        loop.close()
+        st["running"] = False
+        from datetime import datetime as _dt2
+        st["finished_at"] = _dt2.utcnow().isoformat()
+
+
+@app.post("/admin/drive/republish")
+async def drive_republish_docs(
+    body: dict = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Re-publish docs by payer (or folder_id) so chunks inherit the current authority_level.
+
+    Runs in a background thread (one doc at a time) to avoid OOM from loading
+    many embedding vectors at once. Poll /admin/drive/republish/status.
+    Body: {payer: str, folder_id?: str}
+    """
+    if _DRIVE_REPUBLISH.get("running"):
+        return {"status": "already_running", **_DRIVE_REPUBLISH}
+
+    payer = body.get("payer", "")
+    folder_id = body.get("folder_id", "")
+
+    if folder_id:
+        prefix = f"gs://{GCS_BUCKET}/drive/{folder_id}/"
+        q = select(Document).where(Document.file_path.like(f"{prefix}%"))
+    elif payer:
+        q = select(Document).where(Document.payer == payer)
+    else:
+        return {"error": "payer or folder_id required"}
+
+    result = await db.execute(q)
+    docs = result.scalars().all()
+    doc_ids = [str(d.id) for d in docs]
+    auth_map = {str(d.id): d.authority_level for d in docs}
+
+    _DRIVE_REPUBLISH["running"] = True
+    import threading
+    threading.Thread(target=_run_drive_republish, args=(doc_ids, auth_map), daemon=True).start()
+
+    return {"status": "started", "total": len(doc_ids)}
+
+
+@app.get("/admin/drive/republish/status")
+async def drive_republish_status():
+    """Poll status of the background republish job."""
+    return dict(_DRIVE_REPUBLISH)
 
 
 def _scraped_url_to_display_name(url: str) -> str:

@@ -67,6 +67,7 @@ _PAYER_CANONICAL: dict[str, str] = {
     "ahca":              "AHCA",  # FL Medicaid agency itself
     "ahca.myflorida":    "AHCA",  # URL-derived form (ahca.myflorida.com → stripped TLD)
     "ahca myflorida":    "AHCA",
+    "ahca.myflorida.com": "AHCA",
     "florida medicaid":  "Florida Medicaid",
     "fl medicaid":       "Florida Medicaid",
 }

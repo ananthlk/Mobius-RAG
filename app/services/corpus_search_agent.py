@@ -1403,6 +1403,7 @@ class CandidatePool:
     cascade_level: str
     cascade_steps: list[tuple[str, Any]]
     intersect_codes: list[str]
+    inherited_document_ids: list[str] = field(default_factory=list)
 
     # Back-compat with code that reads the old shape — these are derived
     # from the cascade trace.
@@ -1822,6 +1823,104 @@ async def build_candidate_pool(
         cascade_level="L5_empty",
         cascade_steps=cascade_steps,
         intersect_codes=[],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Inherited-authority union
+# ---------------------------------------------------------------------------
+#
+# For FL Medicaid MCO queries (j:payor.aetna, j:payor.sunshine_health, …)
+# the cascade returns only that plan's own documents. AHCA 59G rules and
+# coverage policies are the BINDING regulatory authority those plans
+# operate under — but they live under payer=AHCA and therefore never
+# surface in a plan-scoped pool.
+#
+# After a plan-scoped L1/L2 pool is built, we UNION in the document IDs
+# from ``payor_inherited_authority WHERE payor=<plan>`` — the deterministic
+# set of AHCA docs that are legally authoritative for that plan.  They
+# then compete on relevance+authority in the normal reranker alongside the
+# plan's own docs.  This is ADDITIVE (not a replacement): L3/L4 are
+# unchanged as the fallback path when the plan has no corpus at all.
+
+# J-tag leaf → canonical payer name as stored in payor_inherited_authority.
+# Extend as new MCOs are onboarded and given inheritance mappings.
+_JTAG_LEAF_TO_INHERITED_PAYOR: dict[str, str] = {
+    "aetna":           "Aetna",
+    "aetna_better_health": "Aetna",
+    "sunshine_health": "Sunshine Health",
+}
+
+
+async def _inherited_authority_doc_ids(
+    db: AsyncSession,
+    j_payor_tags: list[str],
+) -> list[str]:
+    """Return document IDs that the given FL Medicaid MCO(s) inherit from AHCA.
+
+    Queries ``payor_inherited_authority`` — a materialized view produced by
+    payor-platform migration 004.  Returns [] when the view has no rows for
+    the plan (safe to call for any payer; no-ops for non-FL-Medicaid plans).
+    """
+    from sqlalchemy import text as _text
+    canonical_payors: list[str] = []
+    for tag in j_payor_tags:
+        # tag looks like "j:payor.aetna" or "j:payor.sunshine_health"
+        leaf = tag.split(".", 1)[-1] if "." in tag else ""
+        canon = _JTAG_LEAF_TO_INHERITED_PAYOR.get(leaf)
+        if canon and canon not in canonical_payors:
+            canonical_payors.append(canon)
+
+    if not canonical_payors:
+        return []
+
+    placeholders = ",".join(f":p{i}" for i in range(len(canonical_payors)))
+    params = {f"p{i}": v for i, v in enumerate(canonical_payors)}
+    try:
+        result = await db.execute(
+            _text(
+                f"SELECT DISTINCT document_id FROM payor_inherited_authority "
+                f"WHERE payor IN ({placeholders})"
+            ),
+            params,
+        )
+        return [str(row[0]) for row in result.fetchall()]
+    except Exception as exc:
+        logger.warning("[inheritance_union] view query failed: %s", exc)
+        return []
+
+
+def _augment_pool_with_inheritance(
+    pool: "CandidatePool",
+    inherited_ids: list[str],
+) -> "CandidatePool":
+    """Return a new CandidatePool that includes the inherited doc IDs.
+
+    Only applied to plan-scoped (L1/L2) pools — L3/L4 already use AHCA
+    as primary source, and L5 (empty) would rather bootstrap via vector.
+    Returns the original pool unchanged if inherited_ids is empty or the
+    pool is not a plan-scoped level.
+
+    The inherited IDs are tracked separately in ``inherited_document_ids``
+    so the caller can run them through a separate reranker pass that does
+    NOT apply the payer coverage floor (AHCA docs legitimately don't
+    contain the plan's name but are still authoritative).
+    """
+    if not inherited_ids or pool.cascade_level not in ("L1_JDP", "L2_JD"):
+        return pool
+    existing = set(pool.document_ids or [])
+    added = [d for d in inherited_ids if d not in existing]
+    if not added:
+        return pool
+    merged = list(existing) + added
+    return CandidatePool(
+        document_ids=merged[:5000],
+        cascade_level=pool.cascade_level,
+        cascade_steps=list(pool.cascade_steps or []) + [
+            ("inherited_authority_union", len(added))
+        ],
+        intersect_codes=pool.intersect_codes,
+        inherited_document_ids=added,
     )
 
 
@@ -2913,6 +3012,11 @@ async def _corpus_search_agent_impl(
         try:
             partition_pre = await partition_terms(db, profile)
             pool_pre = await build_candidate_pool(db, partition_pre)
+            # Augment plan-scoped pools with inherited AHCA authority docs.
+            _pre_j_payor = [t for t in profile.tag_matches if t.startswith("j:payor.")]
+            if _pre_j_payor:
+                _inh_pre = await _inherited_authority_doc_ids(db, _pre_j_payor)
+                pool_pre = _augment_pool_with_inheritance(pool_pre, _inh_pre)
             pool_size_pre = len(pool_pre.document_ids) if pool_pre.document_ids else 0
             queries_pre = rewrite_for_strategies(profile, partition_pre)
             logger.info(
@@ -3428,9 +3532,18 @@ async def _corpus_search_agent_impl(
 
     # ── 1c. Build candidate pool via cascading levels ───────────────────
     # New cascade (2026-05-01): J∩D∩P → J∩D → AHCA∩D → AHCA → empty.
-    # Replaces the old "supplement payer pool with AHCA" union — clean
-    # progressive-relaxation rule means each pool is one tight scope.
+    # For plan-scoped (L1/L2) pools: additionally UNION in the inherited
+    # AHCA authority docs (59G rules, coverage policies, model contract)
+    # from payor_inherited_authority so they compete on relevance+authority.
     pool = await build_candidate_pool(db, partition)
+    _j_payor_tags = [t for t in profile.tag_matches if t.startswith("j:payor.")]
+    # Full set of inherited doc IDs — used by the supplemental pass to force-
+    # retrieve AHCA docs that BM25/vector skips (they lack the plan name in text).
+    _all_inherited_doc_ids: list[str] = []
+    if _j_payor_tags:
+        _inh_ids = await _inherited_authority_doc_ids(db, _j_payor_tags)
+        _all_inherited_doc_ids = _inh_ids
+        pool = _augment_pool_with_inheritance(pool, _inh_ids)
     logger.info(
         "[%s] [trace:pool] cascade_level=%s pool_size=%d intersect=%s "
         "cascade_steps=%s",
@@ -3439,6 +3552,11 @@ async def _corpus_search_agent_impl(
     )
 
     pool_doc_ids: list[str] | None = pool.document_ids or None
+    # Inherited doc IDs tracked for the supplemental pass (safety-net only —
+    # primary path is binary j-tag credit in the reranker: inherited AHCA docs
+    # carry payor.aetna / payor.sunshine_health in document_tags.j_tags so
+    # the reranker treats them as same-payer without needing payer text in body).
+    _inherited_pool: list[str] = pool.inherited_document_ids or []
 
     # If the user explicitly passed include_document_ids, that takes
     # precedence over our cascade (e.g., instant-rag uploads).
@@ -3446,6 +3564,10 @@ async def _corpus_search_agent_impl(
         request.include_document_ids if request.include_document_ids
         else pool_doc_ids
     )
+    # Inherited docs compete in the main strategy — their document_tags.j_tags
+    # now carry payor.aetna / payor.sunshine_health so the reranker's binary
+    # j-tag credit gives them coverage=1.0 without the plan name appearing in
+    # body text. No need to exclude them from the main effective_pool.
 
     # Compatibility shims for the rest of the code that still reads the
     # old "domain_fallback" telemetry shape.
@@ -3818,6 +3940,50 @@ async def _corpus_search_agent_impl(
     # ── 3. Aggregate confidence + improvement hint ─────────────────────
     confidence = _aggregate_confidence(outcomes, profile)
     hint = _generate_hint(outcomes, profile, confidence)
+
+    # ── Inherited-authority supplemental pass ──────────────────────────
+    # BM25/vector retrieval skips AHCA inherited docs (they don't contain
+    # "aetna" in text). Force-retrieve them via include_document_ids so the
+    # reranker can score them. Pass required_phrases + tag_codes so the
+    # reranker's binary j-tag credit activates: these docs now carry
+    # payor.aetna in document_tags.j_tags → coverage=1.0 without text match.
+    if _all_inherited_doc_ids and not request.include_document_ids:
+        try:
+            inh_req = CorpusSearchRequest(
+                query=queries.hybrid,
+                k=request.k,
+                mode="precision",
+                tag_mode="none",
+                filters=request.filters,
+                include_document_ids=_all_inherited_doc_ids,
+                min_similarity=None,
+                required_phrases=_derive_required_phrases(profile, partition),
+                required_phrase_weights=_derive_required_phrase_weights(profile, partition),
+                required_phrase_tag_codes=_derive_required_phrase_tag_codes(profile, partition),
+            )
+            inh_resp = await corpus_search(
+                db, inh_req,
+                caller=f"{caller}:agent:inherited_authority",
+            )
+            if inh_resp.chunks:
+                seen_ids = {c.id for c in best_chunks}
+                new_chunks = [c for c in inh_resp.chunks if c.id not in seen_ids]
+                if new_chunks:
+                    merged = sorted(
+                        best_chunks + new_chunks,
+                        key=lambda c: c.rerank_score or 0,
+                        reverse=True,
+                    )
+                    best_chunks = merged
+                    logger.info(
+                        "[%s] [inherited_authority] merged %d AHCA chunks into results",
+                        agent_id, len(new_chunks),
+                    )
+        except Exception as _inh_exc:
+            logger.warning(
+                "[%s] [inherited_authority] supplemental pass failed: %s",
+                agent_id, _inh_exc,
+            )
 
     # Synthesize an LLM answer from the best chunks so strategy (a) is
     # evaluated on the same footing as (c) and (d). Without this, (a)
