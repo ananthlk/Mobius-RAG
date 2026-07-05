@@ -439,9 +439,13 @@ def fail_fast_gate(
 
     # D-tag presence — the scope contract. Literal anchors (HCPCS codes,
     # policy IDs) bypass this check: "what does H0019 say" is a valid
-    # retrieval target even without a domain term.
+    # retrieval target even without a domain term. Payer tags (j:) also
+    # bypass: "how do I get credentialed with Sunshine Health?" has a clear
+    # retrieval target even though no domain term (credentialing, enrollment)
+    # matched — the j: tag routes us to payer-scoped docs.
     d_tags = [t for t in profile.tag_matches if t.startswith("d:")]
-    if not d_tags and not profile.literal_anchors:
+    j_tags = [t for t in profile.tag_matches if t.startswith("j:")]
+    if not d_tags and not profile.literal_anchors and not j_tags:
         # Collapse 180+ leaf codes (``claims.timely_filing``, ``claims.denial``…)
         # to their top-level groups (``claims``, ``credentialing``, …) so the
         # chat planner can render a usable menu instead of a wall of options.
