@@ -1131,6 +1131,7 @@ export function RepositoryTab({
   const [activePayer, setActivePayer] = useState<string | null>(null)
 
   // ── Drive import state ────────────────────────────────────────────────────
+  const [driveEnabled, setDriveEnabled] = useState<boolean | null>(null)    // null = not checked
   const [driveConnected, setDriveConnected] = useState<boolean | null>(null) // null = not checked
   const [driveFolderUrl, setDriveFolderUrl] = useState('')
   const [driveContextPayer, setDriveContextPayer] = useState('Aetna')
@@ -1146,14 +1147,16 @@ export function RepositoryTab({
     try {
       const r = await fetch(`${API_BASE}/drive/status`)
       const d = await r.json()
+      setDriveEnabled(d.enabled !== false)
       setDriveConnected(d.connected === true)
-    } catch { setDriveConnected(false) }
+    } catch { setDriveEnabled(false); setDriveConnected(false) }
   }
 
   const connectDrive = async () => {
     try {
       const r = await fetch(`${API_BASE}/drive/auth-url`)
       const d = await r.json()
+      if (!r.ok) { alert(d.detail || 'Failed to get Drive auth URL'); return }
       if (d.url) window.open(d.url, '_blank', 'width=600,height=700')
     } catch (e) { alert('Failed to get Drive auth URL') }
   }
@@ -1615,8 +1618,10 @@ export function RepositoryTab({
               </div>
             </div>
             <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
-              {driveConnected === null ? (
+              {driveEnabled === null ? (
                 <span style={{ fontSize: 'var(--mobius-text-sm)', color: 'var(--mobius-text-muted)' }}>Checking…</span>
+              ) : !driveEnabled ? (
+                <span style={{ fontSize: 'var(--mobius-text-sm)', color: 'var(--mobius-warning)', fontWeight: 500 }}>Not configured</span>
               ) : driveConnected ? (
                 <span style={{ fontSize: 'var(--mobius-text-sm)', color: 'var(--mobius-success)', fontWeight: 600 }}>● Connected</span>
               ) : (
@@ -1625,6 +1630,20 @@ export function RepositoryTab({
               <button onClick={checkDriveStatus} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--mobius-text-muted)', fontSize: 16 }} title="Refresh connection status">↺</button>
             </div>
           </div>
+
+          {/* Setup callout when Drive is not configured */}
+          {driveEnabled === false && (
+            <div style={{ background: 'color-mix(in srgb, var(--mobius-warning) 8%, transparent)', border: '1px solid color-mix(in srgb, var(--mobius-warning) 30%, transparent)', borderRadius: 8, padding: '14px 18px', fontSize: 'var(--mobius-text-sm)' }}>
+              <div style={{ fontWeight: 600, color: 'var(--mobius-warning)', marginBottom: 8 }}>Drive integration not configured</div>
+              <div style={{ color: 'var(--mobius-text-secondary)', lineHeight: 1.6 }}>
+                Set these env vars in Cloud Run (or <code>.env</code> for local dev), then redeploy:
+              </div>
+              <pre style={{ margin: '10px 0 0', fontSize: 'var(--mobius-text-xs)', color: 'var(--mobius-text-primary)', background: 'color-mix(in srgb, var(--mobius-surface) 60%, transparent)', borderRadius: 6, padding: '10px 14px', overflowX: 'auto' }}>{`DRIVE_API_ENABLED=true
+GOOGLE_DRIVE_CLIENT_ID=<your-client-id>
+GOOGLE_DRIVE_CLIENT_SECRET=<your-client-secret>
+GOOGLE_DRIVE_REDIRECT_URI=https://mobius-rag-ortabkknqa-uc.a.run.app/drive/callback`}</pre>
+            </div>
+          )}
 
           {/* Folder + context inputs */}
           <div className="drive-config-card">
