@@ -5427,17 +5427,23 @@ async def drive_auth_url(
         scopes=["https://www.googleapis.com/auth/drive.readonly"],
         redirect_uri=GOOGLE_DRIVE_REDIRECT_URI,
     )
-    # Disable PKCE: Cloud Run is stateless (callback hits a fresh process that
-    # can't access the code_verifier stored in the auth-url process's memory).
-    # Web server flows don't require PKCE; newer google-auth-oauthlib may add it
-    # automatically — explicitly clear it here.
-    flow.oauth2session.pkce = None
     url, _ = flow.authorization_url(
         access_type="offline",
         prompt="consent",
         state=state,
         login_hint="mobiushealthai@gmail.com",
     )
+    # Strip PKCE params that google_auth_oauthlib adds automatically.
+    # Cloud Run is stateless — the code_verifier lives only in the flow object
+    # on the auth-url instance; the callback hits a fresh instance with no
+    # verifier. Web server flows don't require PKCE, so just remove the
+    # challenge from the URL so Google never demands a verifier in return.
+    from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+    _parsed = urlparse(url)
+    _params = parse_qs(_parsed.query, keep_blank_values=True)
+    _params.pop("code_challenge", None)
+    _params.pop("code_challenge_method", None)
+    url = urlunparse(_parsed._replace(query=urlencode({k: v[0] for k, v in _params.items()})))
     _drive_oauth_state[state] = (session_id, time.time() + 600)
 
     response = JSONResponse({"url": url, "session_id": session_id})
@@ -5485,7 +5491,6 @@ async def drive_callback(
         scopes=["https://www.googleapis.com/auth/drive.readonly"],
         redirect_uri=GOOGLE_DRIVE_REDIRECT_URI,
     )
-    flow.oauth2session.pkce = None
     flow.fetch_token(code=code)
 
     creds = flow.credentials
