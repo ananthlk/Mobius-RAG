@@ -47,6 +47,26 @@ _CACHE_TTL_SECONDS = 5 * 60
 # explode the tsquery.
 _MAX_ENTRIES_PER_QUERY = 12
 
+# Single-word phrases longer than 4 chars are rejected if and only if they are
+# in this stoplist.  The old heuristic (reject ALL len>4 single words) wrongly
+# dropped domain terms like "aetna", "florida", "telehealth", "pharmacy",
+# "credentialing" — causing strategy e / no_domain_match even when the corpus
+# had the answer.  These are genuinely generic words that add no retrieval
+# signal when they appear alone; multi-word phrases containing them still match.
+_SINGLE_WORD_STOPLIST: frozenset[str] = frozenset({
+    "provider", "providers", "policy", "policies",
+    "rule", "rules", "requirement", "requirements",
+    "information", "info", "details", "general", "specific",
+    "covered", "coverage", "applies", "apply",
+    "process", "guideline", "guidelines",
+    "service", "services", "plan", "plans",
+    "member", "members", "patient", "patients",
+    "client", "clients", "notice", "section",
+    "program", "programs", "benefit", "benefits",
+    "criteria", "procedure", "procedures",
+    "standard", "standards", "update", "updates",
+})
+
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -326,9 +346,13 @@ def _match_entry(query_lower: str, phrases: list[str]) -> str | None:
         # ARE meaningful single tokens.
         word_count = len(p_norm.split())
         if word_count == 1:
-            # Allow short acronyms / codes (≤4 chars); reject longer
-            # single words that are too generic.
-            if len(p_norm) > 4:
+            # Short acronyms/codes (≤4 chars: NPI, DME, HCPCS) always pass.
+            # Longer single words pass UNLESS they are provably generic —
+            # the old len>4 heuristic wrongly rejected "aetna", "florida",
+            # "telehealth", "pharmacy" etc. causing strategy e / no_domain_match
+            # even when the corpus had the answer. Use an explicit stoplist
+            # instead so domain terms (payors, states, services) get through.
+            if len(p_norm) > 4 and p_norm in _SINGLE_WORD_STOPLIST:
                 continue
         if f" {p_norm} " in padded_q:
             return p
