@@ -1429,6 +1429,17 @@ details summary {
   font-size: 10px;
   font-weight: 500;
   color: var(--text-tertiary);
+  flex-wrap: wrap;
+}
+.obs-legend-item { display: inline-flex; align-items: center; white-space: nowrap; }
+.obs-view-select {
+  font-size: 10px;
+  padding: 2px 4px;
+  border: 1px solid var(--border-medium);
+  border-radius: 4px;
+  background: var(--bg-card, #fff);
+  color: var(--text-secondary);
+  font-family: var(--mobius-font-sans);
 }
 .obs-swatch { display: inline-block; width: 10px; height: 3px; border-radius: 2px; margin-right: 3px; vertical-align: middle; }
 .obs-swatch.recall { background: var(--rag-accent); }

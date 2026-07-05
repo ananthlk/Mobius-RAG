@@ -538,6 +538,23 @@ interface TimelineRun {
   router_composite: number | null
   oracle_recall: number | null
   routing_headroom: number | null
+  // Per-strategy recall — only populated for calibration runs (forced
+  // a/b/c/d/natural passes); a plain eval run only has "natural".
+  strategy_recall?: Record<string, number | null>
+}
+
+// Strategy line palette — natural (router) gets the darkest/most prominent
+// color since it's the actual system behavior; a/b/c/d are distinguishable
+// accents. Reuses mobius-design compat aliases, no new hex.
+const TL_STRATEGY_COLOR: Record<string, string> = {
+  natural: 'var(--text-primary)',
+  a: 'var(--rag-accent)',
+  b: 'var(--accent-green)',
+  c: 'var(--accent-red)',
+  d: 'var(--accent-amber)',
+}
+const TL_STRATEGY_LABEL: Record<string, string> = {
+  natural: 'router', a: 'a', b: 'b', c: 'c', d: 'd',
 }
 
 // Dims that, if any change between adjacent runs, mark a "version change".
@@ -582,17 +599,31 @@ function ObservabilityDashboard({ onPick }: { onPick: (id: string) => void }) {
   )
 }
 
+type TimelineView = 'router_oracle' | 'strategies'
+type SeriesKey = 'router_recall' | 'oracle_recall' | 'a' | 'b' | 'c' | 'd' | 'natural'
+
+function seriesVal(r: TimelineRun, key: SeriesKey): number | null | undefined {
+  if (key === 'router_recall' || key === 'oracle_recall') return r[key]
+  return r.strategy_recall?.[key]
+}
+
 function TimelinePanel({ runs, onPick }: { runs: TimelineRun[]; onPick: (id: string) => void }) {
+  const [view, setView] = useState<TimelineView>('router_oracle')
   const series = [...runs].reverse() // oldest → newest (left → right)
   const W = 520, H = 150, PL = 30, PR = 10, PT = 12, PB = 18
   const n = series.length
   const xs = (i: number) => (n <= 1 ? PL : PL + (i * (W - PL - PR)) / (n - 1))
-  const vmax = Math.max(0.6, ...series.flatMap((r) => [r.router_recall ?? 0, r.oracle_recall ?? 0]))
+
+  const keys: SeriesKey[] = view === 'strategies' ? ['a', 'b', 'c', 'd', 'natural'] : ['router_recall', 'oracle_recall']
+  // Only offer strategy lines that actually have at least one data point —
+  // calibration runs populate all 5; plain eval runs only ever have 'natural'.
+  const activeKeys = keys.filter((k) => series.some((r) => seriesVal(r, k) != null))
+  const vmax = Math.max(0.6, ...series.flatMap((r) => activeKeys.map((k) => seriesVal(r, k) ?? 0)))
   const ys = (v: number) => PT + (1 - v / vmax) * (H - PT - PB)
-  const linePath = (key: 'router_recall' | 'oracle_recall') =>
+  const linePath = (key: SeriesKey) =>
     series
       .map((r, i) => {
-        const v = r[key]
+        const v = seriesVal(r, key)
         if (v === null || v === undefined) return null
         return `${i === 0 ? 'M' : 'L'}${xs(i).toFixed(1)},${ys(v).toFixed(1)}`
       })
@@ -606,15 +637,34 @@ function TimelinePanel({ runs, onPick }: { runs: TimelineRun[]; onPick: (id: str
   return (
     <div className="obs-panel obs-timeline">
       <div className="obs-panel-head">
-        <span>Router recall over time</span>
+        <span>{view === 'strategies' ? 'Strategy recall over time' : 'Router recall over time'}</span>
+        <select
+          className="obs-select obs-view-select"
+          value={view}
+          onChange={(e) => setView(e.target.value as TimelineView)}
+          title="Choose what to trend"
+        >
+          <option value="router_oracle">Router vs oracle</option>
+          <option value="strategies">All strategies (a/b/c/d/router)</option>
+        </select>
         <span className="obs-legend">
-          <i className="obs-swatch recall" /> router
-          <i className="obs-swatch oracle" /> oracle ceiling
+          {view === 'strategies' ? (
+            activeKeys.map((k) => (
+              <span key={k} className="obs-legend-item">
+                <i className="obs-swatch" style={{ background: TL_STRATEGY_COLOR[k] }} /> {TL_STRATEGY_LABEL[k]}
+              </span>
+            ))
+          ) : (
+            <>
+              <i className="obs-swatch recall" /> router
+              <i className="obs-swatch oracle" /> oracle ceiling
+            </>
+          )}
           <i className="obs-swatch tick" /> version change
         </span>
       </div>
       <svg viewBox={`0 0 ${W} ${H}`} className="obs-svg" preserveAspectRatio="xMidYMid meet" role="img"
-           aria-label="Router recall over eval runs">
+           aria-label={view === 'strategies' ? 'Per-strategy recall over eval runs' : 'Router recall over eval runs'}>
         {gridlines.map((g) => (
           <g key={g}>
             <line x1={PL} x2={W - PR} y1={ys(g)} y2={ys(g)} className="obs-grid" />
@@ -626,25 +676,53 @@ function TimelinePanel({ runs, onPick }: { runs: TimelineRun[]; onPick: (id: str
             <title>version change before {shortRun(series[i])}</title>
           </line>
         ))}
-        <path d={linePath('oracle_recall')} className="obs-path oracle" fill="none" />
-        <path d={linePath('router_recall')} className="obs-path recall" fill="none" />
-        {series.map((r, i) =>
-          r.router_recall == null ? null : (
-            <circle
-              key={r.run_id}
-              cx={xs(i)}
-              cy={ys(r.router_recall)}
-              r={3.2}
-              className={`obs-pt${changes.includes(i) ? ' chg' : ''}`}
-              onClick={() => onPick(r.run_id)}
-            >
-              <title>
-                {new Date(r.ts).toLocaleString()} · {r.notes || ''}
-                {'\n'}router {fmt3(r.router_recall)} · oracle {fmt3(r.oracle_recall)} · composite {fmt3(r.router_composite)}
-              </title>
-            </circle>
-          ),
+        {view === 'strategies' ? (
+          activeKeys.map((k) => (
+            <path key={k} d={linePath(k)} fill="none" style={{ stroke: TL_STRATEGY_COLOR[k], strokeWidth: k === 'natural' ? 2.4 : 1.6 }} />
+          ))
+        ) : (
+          <>
+            <path d={linePath('oracle_recall')} className="obs-path oracle" fill="none" />
+            <path d={linePath('router_recall')} className="obs-path recall" fill="none" />
+          </>
         )}
+        {view === 'strategies'
+          ? activeKeys.flatMap((k) =>
+              series.map((r, i) => {
+                const v = seriesVal(r, k)
+                if (v == null) return null
+                return (
+                  <circle
+                    key={`${k}-${r.run_id}`}
+                    cx={xs(i)} cy={ys(v)} r={2.6}
+                    style={{ fill: TL_STRATEGY_COLOR[k], stroke: '#fff', strokeWidth: 1, cursor: 'pointer' }}
+                    onClick={() => onPick(r.run_id)}
+                  >
+                    <title>
+                      {new Date(r.ts).toLocaleString()} · {r.notes || ''}
+                      {'\n'}{TL_STRATEGY_LABEL[k]} recall {fmt3(v)}
+                    </title>
+                  </circle>
+                )
+              }),
+            )
+          : series.map((r, i) =>
+              r.router_recall == null ? null : (
+                <circle
+                  key={r.run_id}
+                  cx={xs(i)}
+                  cy={ys(r.router_recall)}
+                  r={3.2}
+                  className={`obs-pt${changes.includes(i) ? ' chg' : ''}`}
+                  onClick={() => onPick(r.run_id)}
+                >
+                  <title>
+                    {new Date(r.ts).toLocaleString()} · {r.notes || ''}
+                    {'\n'}router {fmt3(r.router_recall)} · oracle {fmt3(r.oracle_recall)} · composite {fmt3(r.router_composite)}
+                  </title>
+                </circle>
+              ),
+            )}
       </svg>
       <div className="obs-latest">
         latest <b>{fmt3(latest.router_recall)}</b> recall · {fmt3(latest.router_composite)} composite ·

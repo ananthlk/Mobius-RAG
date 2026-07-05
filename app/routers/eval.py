@@ -267,6 +267,9 @@ async def eval_timeline(limit: int = Query(30, ge=1, le=100)):
             "router_composite": s["router_composite"],
             "oracle_recall": s["oracle_recall"],
             "routing_headroom": s["routing_headroom"],
+            # Per-strategy recall (only populated for calibration runs — forced
+            # a/b/c/d/natural passes; a plain eval run only has "natural" cells).
+            "strategy_recall": {k: v["recall"] for k, v in s["strategies"].items()},
         })
     return {"runs": out}
 
