@@ -6064,6 +6064,82 @@ async def drive_import_folder(
     }
 
 
+@app.post("/admin/drive/relink")
+async def drive_relink_docs(
+    body: dict = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Re-classify + re-link already-ingested docs by payer/folder prefix.
+
+    Body: {payer: str, folder_id?: str, context_state?: str, context_program?: str}
+    Finds documents whose file_path starts with gs://{bucket}/drive/{folder_id}/
+    (or all docs with the given payer if folder_id omitted), re-classifies each
+    filename against the payor registry, PATCHes authority_level, calls link-doc.
+    Returns per-doc results.
+    """
+    from app.services.drive_classifier import classify_via_registry, link_doc_to_registry, _classify_regex_fallback, _ASSET_AUTHORITY
+    from app.services.metadata_canonical import canonical_authority_level
+
+    payer = body.get("payer", "")
+    folder_id = body.get("folder_id", "")
+    context_state = body.get("context_state")
+    context_program = body.get("context_program")
+
+    if folder_id:
+        prefix = f"gs://{GCS_BUCKET}/drive/{folder_id}/"
+        q = select(Document).where(Document.file_path.like(f"{prefix}%"))
+    else:
+        q = select(Document).where(Document.payer == payer)
+
+    result = await db.execute(q)
+    docs = result.scalars().all()
+
+    results = []
+    for doc in docs:
+        name = doc.filename or ""
+        cls = await classify_via_registry(name)
+        if cls.get("confidence") == "none":
+            cls = _classify_regex_fallback(name, payer, context_state, context_program)
+
+        asset_type = cls.get("asset_type")
+        authority_level = canonical_authority_level(
+            _ASSET_AUTHORITY.get(asset_type or "", "payer_policy") if asset_type else cls.get("authority_level") or "payer_policy"
+        )
+
+        # Patch authority_level on the document row
+        doc.authority_level = authority_level
+        await db.commit()
+
+        # Call link-doc if we have a valid asset_type
+        linked = False
+        if asset_type and payer:
+            linked = await link_doc_to_registry(
+                payor=payer,
+                document_id=str(doc.id),
+                filename=name,
+                asset_type=asset_type,
+                sub_type=cls.get("sub_type"),
+                authority_level=authority_level,
+            )
+
+        results.append({
+            "document_id": str(doc.id),
+            "filename": name,
+            "asset_type": asset_type,
+            "authority_level": authority_level,
+            "confidence": cls.get("confidence"),
+            "registry_linked": linked,
+        })
+
+    linked_count = sum(1 for r in results if r["registry_linked"])
+    return {
+        "total": len(results),
+        "authority_level_patched": len(results),
+        "registry_linked": linked_count,
+        "results": results,
+    }
+
+
 def _scraped_url_to_display_name(url: str) -> str:
     """Derive a short display name from a scraped page URL: drop scheme and trailing .html / index.html."""
     if not url or not url.strip():
