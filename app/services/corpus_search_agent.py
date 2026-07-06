@@ -3553,6 +3553,36 @@ async def _corpus_search_agent_impl(
                 "jpd_tags": [],
             })
 
+        # Apply FL Medicaid MCO attribution to strategy-d answers before returning.
+        # Strategy d bypasses _synthesize_internal_answer() so the postfix in that
+        # function never runs.  Derive payor_name from j:payor.* tags (already in
+        # profile) and append 59G attribution when it is absent from the answer.
+        _d_llm = d_result.llm_answer or ""
+        _d_j_payor = [t for t in (profile.tag_matches or []) if t.startswith("j:payor.")]
+        _d_payor: str | None = None
+        for _jt in _d_j_payor:
+            _code = _jt.removeprefix("j:")
+            if _code in _JTAG_TO_PAYOR_DISPLAY:
+                _d_payor = _JTAG_TO_PAYOR_DISPLAY[_code]
+                break
+        if not _d_payor:
+            _q_low = raw_query.lower()
+            for _dname in _JTAG_TO_PAYOR_DISPLAY.values():
+                if _dname.lower().split()[0] in _q_low:
+                    _d_payor = _dname
+                    break
+        if _d_llm and _d_payor and not re.search(r"\b59G\b", _d_llm):
+            if _d_payor in _d_llm:
+                _d_llm += (
+                    f" {_d_payor}'s Medicaid coverage is governed by"
+                    f" Florida Medicaid's 59G administrative rules."
+                )
+            else:
+                _d_llm += (
+                    f" These Florida Medicaid requirements apply to {_d_payor},"
+                    f" following the state's 59G administrative rules."
+                )
+
         return CorpusSearchAgentResponse(
             chunks=[CorpusChunk(**d) for d in d_chunk_dicts][: request.k],
             confidence=d_confidence,
@@ -3567,7 +3597,7 @@ async def _corpus_search_agent_impl(
                 "untagged_meaningful_tokens": profile.untagged_meaningful_tokens,
                 "raw_query": profile.raw_query,
             },
-            llm_answer=d_result.llm_answer,
+            llm_answer=_d_llm or None,
             # Reuse validated_citations field for external "passages"
             # so chat planner has a single contract to render.
             validated_citations=[
