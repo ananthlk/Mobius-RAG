@@ -2662,7 +2662,13 @@ async def _synthesize_internal_answer(
     # synthesis context but the rule designation doesn't appear in the answer,
     # append a one-sentence inherited-authority note. This makes the rule
     # citation deterministic regardless of how the LLM chose to phrase the answer.
-    if answer and confidence != "low":
+    # Fire even on low-confidence answers — but skip explicit honest-abstains
+    # (e.g. "the passages do not contain" / "I cannot determine").
+    _abstain_phrases = ("do not contain", "not contain", "i cannot", "no information",
+                        "i don't have", "i am unable", "i'm unable", "cannot find",
+                        "not found", "unable to find")
+    _is_explicit_abstain = any(p in answer.lower() for p in _abstain_phrases)
+    if answer and not _is_explicit_abstain:
         _cited_rules: list[str] = []
         for _idx, _c in usable:
             _doc = (
