@@ -2604,9 +2604,6 @@ async def _synthesize_internal_answer(
         return "", "low", {"llm_ms": 0, "no_chunks": True}
 
     parts = [f"Question: {query}", ""]
-    if payor_name:
-        parts.append(f"[Context: This query is about {payor_name}. Name this plan explicitly in your answer.]")
-        parts.append("")
     for i, c in usable:
         doc = getattr(c, "document_name", None) or (c.get("document_name") if isinstance(c, dict) else "?")
         page = getattr(c, "page_number", None) if not isinstance(c, dict) else c.get("page_number")
