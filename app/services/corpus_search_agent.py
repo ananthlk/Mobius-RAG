@@ -2622,11 +2622,12 @@ async def _synthesize_internal_answer(
             system=_INTERNAL_SYNTHESIS_SYSTEM,
             user=user_prompt,
             stage=stage,
-            # 1024 not 512 — the JSON envelope plus a 5-sentence answer
-            # plus the "used_passages" array runs ~600 tokens; 512 was
-            # truncating the JSON mid-string and making the parser fall
-            # back to the raw output which was just `{"answer": "...`
-            max_tokens=1024,
+            # Gemini 2.5 Flash counts thinking tokens within max_output_tokens.
+            # With 1024, ~800-900 tokens are consumed by internal reasoning
+            # before the model emits a single character — truncating the answer
+            # mid-sentence. 4096 gives enough headroom for thinking + a full
+            # 5-sentence JSON response (~200 actual output tokens).
+            max_tokens=4096,
             correlation_id=correlation_id,
         )
     except Exception as exc:
