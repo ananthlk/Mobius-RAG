@@ -2696,22 +2696,31 @@ async def _synthesize_internal_answer(
                 if _rule not in answer:
                     _cited_rules.append(_rule)
 
-        # Append regulatory note if AHCA-inherited doc was in context and
-        # the answer doesn't already mention the payor name.
-        if _inherited_in_ctx and payor_name not in answer:
-            if _cited_rules:
-                _unique_rules = list(dict.fromkeys(_cited_rules))
-                _rules_str = " and ".join(_unique_rules)
+        # Two independent postfix conditions — each fires separately:
+        # 1. Payor name missing → attribute the answer to the MCO (citing rules if known).
+        # 2. 59G rules in context but missing from answer → append a rule note even if
+        #    the payor name was already placed by the LLM (the user-prompt injection makes
+        #    the LLM mention the payor but doesn't guarantee it cites the rule number).
+        _unique_rules = list(dict.fromkeys(_cited_rules))
+        _rules_missing = [r for r in _unique_rules if r not in answer]
+        if _inherited_in_ctx:
+            _payor_in_answer = payor_name in answer
+            if not _payor_in_answer and _rules_missing:
+                _rules_str = " and ".join(_rules_missing)
                 answer = (
                     answer
                     + f" {payor_name} follows Florida Medicaid "
                     f"{_rules_str} for these requirements."
                 )
-            else:
+            elif not _payor_in_answer:
                 answer = (
                     answer
                     + f" These Florida Medicaid requirements apply to {payor_name}."
                 )
+            elif _rules_missing:
+                # Payor already in answer but rule designation absent.
+                _rules_str = " and ".join(_rules_missing)
+                answer = answer + f" The applicable Florida Medicaid rule is {_rules_str}."
 
     return answer, confidence, {
         "llm_ms": elapsed,
@@ -3616,6 +3625,14 @@ async def _corpus_search_agent_impl(
         if _code in _JTAG_TO_PAYOR_DISPLAY:
             _derived_payor_name = _JTAG_TO_PAYOR_DISPLAY[_code]
             break
+    # Fallback: scan raw query text for known MCO names when the lexicon tagger
+    # didn't emit a j:payor tag (e.g. weak coverage for "definitions" queries).
+    if not _derived_payor_name:
+        _q_lower = raw_query.lower()
+        for _display_name in _JTAG_TO_PAYOR_DISPLAY.values():
+            if _display_name.lower().split()[0] in _q_lower:  # match on first word ("aetna", "sunshine")
+                _derived_payor_name = _display_name
+                break
     # Full set of inherited doc IDs — used by the supplemental pass to force-
     # retrieve AHCA docs that BM25/vector skips (they lack the plan name in text).
     _all_inherited_doc_ids: list[str] = []
@@ -3623,6 +3640,18 @@ async def _corpus_search_agent_impl(
         _inh_ids = await _inherited_authority_doc_ids(db, _j_payor_tags)
         _all_inherited_doc_ids = _inh_ids
         pool = _augment_pool_with_inheritance(pool, _inh_ids)
+    elif _derived_payor_name:
+        # Payor inferred from query text but lexicon tagger didn't emit j-tag.
+        # Synthesize a j-tag to fetch inherited AHCA docs so the supplemental
+        # pass can force-include them (e.g. "definitions" queries with weak coverage).
+        _display_to_jtag = {v: k for k, v in _JTAG_TO_PAYOR_DISPLAY.items()}
+        _synthetic_jtag = _display_to_jtag.get(_derived_payor_name)
+        if _synthetic_jtag:
+            _syn_jtags = [f"j:{_synthetic_jtag}"]
+            _inh_ids = await _inherited_authority_doc_ids(db, _syn_jtags)
+            if _inh_ids:
+                _all_inherited_doc_ids = _inh_ids
+                pool = _augment_pool_with_inheritance(pool, _inh_ids)
     logger.info(
         "[%s] [trace:pool] cascade_level=%s pool_size=%d intersect=%s "
         "cascade_steps=%s",
