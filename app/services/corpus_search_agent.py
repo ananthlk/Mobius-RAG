@@ -4003,6 +4003,33 @@ async def _corpus_search_agent_impl(
     # Chat callers set skip_synthesis=True to skip this — they have their
     # own LLM and paying for two synthesis calls doubles latency.
     final_chunks = best_chunks[: request.k]
+
+    # Guarantee at least one AHCA inherited chunk reaches synthesis even when
+    # plan-specific docs outscore it. The 59G doc body prefix injection in
+    # _synthesize_internal_answer only fires when a 59G chunk is in final_chunks.
+    if _all_inherited_doc_ids and not request.skip_synthesis:
+        _ahca_set = set(_all_inherited_doc_ids)
+        _ahca_in_final = any(
+            str(getattr(c, "document_id", None) or "") in _ahca_set
+            for c in final_chunks
+        )
+        if not _ahca_in_final:
+            _ahca_overflow = next(
+                (c for c in best_chunks[request.k:]
+                 if str(getattr(c, "document_id", None) or "") in _ahca_set),
+                None,
+            )
+            if _ahca_overflow:
+                # Replace lowest-ranked slot so k stays constant.
+                final_chunks = list(final_chunks[: request.k - 1]) + [_ahca_overflow]
+                logger.info(
+                    "[%s] [inherited_authority] force-included AHCA chunk "
+                    "doc=%s page=%s rerank=%.4f",
+                    agent_id,
+                    _ahca_overflow.document_id,
+                    _ahca_overflow.page_number,
+                    _ahca_overflow.rerank_score or 0,
+                )
     if request.skip_synthesis:
         final_llm_answer = None
         synth_tel: dict[str, Any] = {}
