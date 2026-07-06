@@ -2585,6 +2585,8 @@ async def _synthesize_internal_answer(
     stage: str,
     correlation_id: str | None = None,
     max_chunks: int = 12,
+    payor_name: str | None = None,
+    inherited_doc_ids: set[str] | None = None,
 ) -> tuple[str, str, dict[str, Any]]:
     """Compose a brief answer from corpus chunks via the LLM Manager.
 
@@ -2602,6 +2604,9 @@ async def _synthesize_internal_answer(
         return "", "low", {"llm_ms": 0, "no_chunks": True}
 
     parts = [f"Question: {query}", ""]
+    if payor_name:
+        parts.append(f"[Context: This query is about {payor_name}. Name this plan explicitly in your answer.]")
+        parts.append("")
     for i, c in usable:
         doc = getattr(c, "document_name", None) or (c.get("document_name") if isinstance(c, dict) else "?")
         page = getattr(c, "page_number", None) if not isinstance(c, dict) else c.get("page_number")
@@ -2671,27 +2676,42 @@ async def _synthesize_internal_answer(
                         "i don't have", "i am unable", "i'm unable", "cannot find",
                         "not found", "unable to find")
     _is_explicit_abstain = any(p in answer.lower() for p in _abstain_phrases)
-    if answer and not _is_explicit_abstain:
+    if answer and not _is_explicit_abstain and payor_name:
         _cited_rules: list[str] = []
+        _inherited_in_ctx = False
         for _idx, _c in usable:
             _doc = (
                 getattr(_c, "document_name", None)
                 or (_c.get("document_name") if isinstance(_c, dict) else None)
                 or ""
             )
+            _cid = str(getattr(_c, "document_id", None) or (_c.get("document_id") if isinstance(_c, dict) else "") or "")
+            # Check if any inherited AHCA doc is in context (by doc_id OR 59G name).
+            if inherited_doc_ids and _cid in inherited_doc_ids:
+                _inherited_in_ctx = True
             _m2 = re.match(r"(59G[-\d.]+)", _doc)
             if _m2:
+                _inherited_in_ctx = True
                 _rule = _m2.group(1)
                 if _rule not in answer:
                     _cited_rules.append(_rule)
-        if _cited_rules:
-            _unique_rules = list(dict.fromkeys(_cited_rules))
-            _rules_str = " and ".join(_unique_rules)
-            answer = (
-                answer
-                + f" Aetna Better Health of Florida Medicaid follows Florida Medicaid "
-                f"{_rules_str} for these requirements."
-            )
+
+        # Append regulatory note if AHCA-inherited doc was in context and
+        # the answer doesn't already mention the payor name.
+        if _inherited_in_ctx and payor_name not in answer:
+            if _cited_rules:
+                _unique_rules = list(dict.fromkeys(_cited_rules))
+                _rules_str = " and ".join(_unique_rules)
+                answer = (
+                    answer
+                    + f" {payor_name} follows Florida Medicaid "
+                    f"{_rules_str} for these requirements."
+                )
+            else:
+                answer = (
+                    answer
+                    + f" These Florida Medicaid requirements apply to {payor_name}."
+                )
 
     return answer, confidence, {
         "llm_ms": elapsed,
@@ -3585,6 +3605,17 @@ async def _corpus_search_agent_impl(
     # from payor_inherited_authority so they compete on relevance+authority.
     pool = await build_candidate_pool(db, partition)
     _j_payor_tags = [t for t in profile.tag_matches if t.startswith("j:payor.")]
+    # Maps j-tag codes to display names used in synthesis context injection.
+    _JTAG_TO_PAYOR_DISPLAY: dict[str, str] = {
+        "payor.aetna": "Aetna Better Health of Florida",
+        "payor.sunshine_health": "Sunshine Health",
+    }
+    _derived_payor_name: str | None = None
+    for _jt in _j_payor_tags:
+        _code = _jt.removeprefix("j:")
+        if _code in _JTAG_TO_PAYOR_DISPLAY:
+            _derived_payor_name = _JTAG_TO_PAYOR_DISPLAY[_code]
+            break
     # Full set of inherited doc IDs — used by the supplemental pass to force-
     # retrieve AHCA docs that BM25/vector skips (they lack the plan name in text).
     _all_inherited_doc_ids: list[str] = []
@@ -4075,6 +4106,8 @@ async def _corpus_search_agent_impl(
             raw_query, final_chunks,
             stage="rag_strategy_a_synth",
             correlation_id=caller_id,
+            payor_name=_derived_payor_name,
+            inherited_doc_ids=set(_all_inherited_doc_ids) if _all_inherited_doc_ids else None,
         )
         # Cap confidence at the more conservative of the two readings.
         confidence_rank = {"high": 3, "medium": 2, "low": 1}
