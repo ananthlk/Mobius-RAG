@@ -2567,6 +2567,10 @@ _INTERNAL_SYNTHESIS_SYSTEM = (
     'emit confidence "low".\n'
     "- For yes/no questions, lead with Yes or No.\n"
     "- Quote specific numbers, codes, deadlines verbatim from passages.\n"
+    "- When a passage comes from a regulatory or policy document whose name includes "
+    "a rule designation (e.g. '59G-1.053 Authorization Requirements Policy', "
+    "'59G-4.140 Hospice Coverage Policy'), identify that rule in your answer "
+    "when it governs the topic — e.g. 'Under Florida Medicaid Rule 59G-1.053...'.\n"
     "- Keep the answer compact — under 5 sentences."
 )
 
