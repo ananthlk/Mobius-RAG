@@ -2657,6 +2657,33 @@ async def _synthesize_internal_answer(
     used = parsed.get("used_passages") or []
     if not isinstance(used, list):
         used = []
+
+    # Post-process: if any 59G Florida Medicaid regulatory document was in the
+    # synthesis context but the rule designation doesn't appear in the answer,
+    # append a one-sentence inherited-authority note. This makes the rule
+    # citation deterministic regardless of how the LLM chose to phrase the answer.
+    if answer and confidence != "low":
+        _cited_rules: list[str] = []
+        for _idx, _c in usable:
+            _doc = (
+                getattr(_c, "document_name", None)
+                or (_c.get("document_name") if isinstance(_c, dict) else None)
+                or ""
+            )
+            _m2 = re.match(r"(59G[-\d.]+)", _doc)
+            if _m2:
+                _rule = _m2.group(1)
+                if _rule not in answer:
+                    _cited_rules.append(_rule)
+        if _cited_rules:
+            _unique_rules = list(dict.fromkeys(_cited_rules))
+            _rules_str = " and ".join(_unique_rules)
+            answer = (
+                answer
+                + f" These requirements are also governed by Florida Medicaid "
+                f"{_rules_str}."
+            )
+
     return answer, confidence, {
         "llm_ms": elapsed,
         "model": (llm_meta or {}).get("model"),
