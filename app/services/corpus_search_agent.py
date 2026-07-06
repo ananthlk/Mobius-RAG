@@ -2605,7 +2605,14 @@ async def _synthesize_internal_answer(
         text = (getattr(c, "text", None) if not isinstance(c, dict) else c.get("text")) or ""
         is_neighbor = bool(getattr(c, "is_neighbor", False) if not isinstance(c, dict) else c.get("is_neighbor"))
         tag = " (neighbor)" if is_neighbor else ""
-        parts.append(f"[{i}]{tag} {doc} p.{page}\n{text[:1500]}")
+        # For Florida Medicaid 59G regulatory docs: prepend the rule designation
+        # directly into the passage body so the synthesis LLM quotes it verbatim.
+        rule_prefix = ""
+        if doc:
+            _m = re.match(r"(59G[-\d.]+)", doc)
+            if _m:
+                rule_prefix = f"[Florida Medicaid Rule {_m.group(1)}] "
+        parts.append(f"[{i}]{tag} {doc} p.{page}\n{rule_prefix}{text[:1500]}")
         parts.append("")
     user_prompt = "\n".join(parts)
 
