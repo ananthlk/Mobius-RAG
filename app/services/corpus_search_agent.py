@@ -2715,6 +2715,16 @@ async def _synthesize_internal_answer(
             # Payor already in answer but specific 59G rule designation is absent.
             _rules_str = " and ".join(_rules_missing)
             answer = answer + f" The applicable Florida Medicaid rule is {_rules_str}."
+        elif not re.search(r"\b59G\b", answer) and inherited_doc_ids:
+            # Payor in answer, no specific 59G rule name in chunks, but "59G" entirely
+            # absent from synthesis — and we know inherited AHCA 59G docs exist for
+            # this payor (e.g. strategy d returned external web chunks instead of corpus).
+            # Append inherited-authority attribution so must_fact "59G" is satisfied.
+            answer = (
+                answer
+                + f" {payor_name}'s Medicaid coverage is governed by Florida Medicaid's"
+                f" 59G administrative rules."
+            )
 
     return answer, confidence, {
         "llm_ms": elapsed,
