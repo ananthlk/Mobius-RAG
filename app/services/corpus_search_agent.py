@@ -3557,17 +3557,25 @@ async def _corpus_search_agent_impl(
         # Strategy d bypasses _synthesize_internal_answer() so the postfix in that
         # function never runs.  Derive payor_name from j:payor.* tags (already in
         # profile) and append 59G attribution when it is absent from the answer.
+        # NOTE: Use a local dict literal here (_D_MCO) rather than the later-defined
+        # _JTAG_TO_PAYOR_DISPLAY — that assignment at line ~3652 would make Python's
+        # compiler treat _JTAG_TO_PAYOR_DISPLAY as a local var throughout, causing an
+        # UnboundLocalError when read here (before the assignment).
         _d_llm = d_result.llm_answer or ""
+        _D_MCO: dict[str, str] = {
+            "payor.aetna": "Aetna Better Health of Florida",
+            "payor.sunshine_health": "Sunshine Health",
+        }
         _d_j_payor = [t for t in (profile.tag_matches or []) if t.startswith("j:payor.")]
         _d_payor: str | None = None
         for _jt in _d_j_payor:
             _code = _jt.removeprefix("j:")
-            if _code in _JTAG_TO_PAYOR_DISPLAY:
-                _d_payor = _JTAG_TO_PAYOR_DISPLAY[_code]
+            if _code in _D_MCO:
+                _d_payor = _D_MCO[_code]
                 break
         if not _d_payor:
             _q_low = raw_query.lower()
-            for _dname in _JTAG_TO_PAYOR_DISPLAY.values():
+            for _dname in _D_MCO.values():
                 if _dname.lower().split()[0] in _q_low:
                     _d_payor = _dname
                     break
