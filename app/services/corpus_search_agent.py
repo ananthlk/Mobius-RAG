@@ -2571,6 +2571,9 @@ _INTERNAL_SYNTHESIS_SYSTEM = (
     "a rule designation (e.g. '59G-1.053 Authorization Requirements Policy', "
     "'59G-4.140 Hospice Coverage Policy'), identify that rule in your answer "
     "when it governs the topic — e.g. 'Under Florida Medicaid Rule 59G-1.053...'.\n"
+    "- When the question asks about a specific health plan (e.g., 'Aetna Better Health "
+    "of Florida', 'Sunshine Health'), name that plan explicitly in your answer even "
+    "when the passages are general Florida Medicaid rules that apply to it.\n"
     "- Keep the answer compact — under 5 sentences."
 )
 
