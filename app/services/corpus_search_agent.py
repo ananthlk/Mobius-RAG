@@ -2686,8 +2686,8 @@ async def _synthesize_internal_answer(
             _rules_str = " and ".join(_unique_rules)
             answer = (
                 answer
-                + f" These requirements are also governed by Florida Medicaid "
-                f"{_rules_str}."
+                + f" Aetna Better Health of Florida Medicaid follows Florida Medicaid "
+                f"{_rules_str} for these requirements."
             )
 
     return answer, confidence, {
