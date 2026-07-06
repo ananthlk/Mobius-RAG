@@ -6061,26 +6061,41 @@ async def drive_import_folder(
         if _tm_url:
             try:
                 import httpx as _httpx
-                uncertain_body = _json.dumps([
-                    {
-                        "filename": r["filename"],
-                        "document_id": r.get("document_id"),
-                        "my_guess": (r.get("classification") or {}).get("asset_type"),
-                        "confidence": (r.get("classification") or {}).get("confidence"),
-                    }
-                    for r in uncertain
-                ], indent=2)
                 async with _httpx.AsyncClient(timeout=8) as _hx:
-                    await _hx.post(
-                        f"{_tm_url}/api/tasks",
-                        json={
-                            "title": f"Payor doc classification — review {len(uncertain)} {body.context_payer or 'unknown'} docs",
-                            "body": uncertain_body,
-                            "area": "payor_platform",
-                            "source_ref": f"drive:{fid}",
-                        },
-                    )
-                logger.info("Created classification-review task for %d uncertain docs", len(uncertain))
+                    for r in uncertain:
+                        cls_r = r.get("classification") or {}
+                        conf = cls_r.get("confidence") or "none"
+                        guess = cls_r.get("asset_type") or "unknown"
+                        payor = cls_r.get("payer") or body.context_payer or "unknown"
+                        fname = r["filename"]
+                        drive_fid = r.get("file_id") or fid
+                        doc_id = r.get("document_id") or ""
+                        await _hx.post(
+                            f"{_tm_url}/tasks",
+                            json={
+                                "type": "drive_doc_review",
+                                "source_module": "drive_import",
+                                "org_name": "_payor_registry_",
+                                "source_ref": f"drive:{drive_fid}",
+                                "severity": "warning",
+                                "workflow": "corpus_curation",
+                                "roles": ["corpus_curator"],
+                                "title": f"Review: {fname}",
+                                "text": (
+                                    f"Classifier assigned '{guess}' with {conf} confidence "
+                                    f"for {payor} — corpus curator review needed."
+                                ),
+                                "detail_payload": {
+                                    "document_id": doc_id,
+                                    "filename": fname,
+                                    "classifier_guess": guess,
+                                    "confidence": conf,
+                                    "payor": payor,
+                                    "drive_file_id": drive_fid,
+                                },
+                            },
+                        )
+                logger.info("Created %d drive_doc_review tasks for uncertain docs", len(uncertain))
             except Exception as task_err:
                 logger.warning("Classification-review task creation failed: %s", task_err)
         else:
