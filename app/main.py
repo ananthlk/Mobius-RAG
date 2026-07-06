@@ -3385,6 +3385,43 @@ def _self_post(path: str, timeout: int = 300) -> bool:
         return False
 
 
+@app.post("/admin/patch-doc-display-name")
+async def patch_doc_display_name(
+    body: dict = Body(...),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Update document_display_name in rag_published_embeddings for specific doc IDs.
+
+    Body: {document_ids: ["<uuid>", ...], display_name: "New Name"}
+    Used to fix denormalized display names without a full republish.
+    """
+    from sqlalchemy import text as _text
+    doc_ids = body.get("document_ids", [])
+    display_name = body.get("display_name", "")
+    if not doc_ids or not display_name:
+        return {"error": "document_ids and display_name required"}
+
+    placeholders = ",".join([f":id{i}" for i in range(len(doc_ids))])
+    params = {"display_name": display_name}
+    params.update({f"id{i}": v for i, v in enumerate(doc_ids)})
+
+    r = await db.execute(
+        _text(
+            f"UPDATE rag_published_embeddings SET document_display_name=:display_name "
+            f"WHERE document_id::text IN ({placeholders})"
+        ),
+        params,
+    )
+    await db.commit()
+
+    return {
+        "status": "ok",
+        "display_name": display_name,
+        "document_ids": doc_ids,
+        "rows_updated": r.rowcount,
+    }
+
+
 @app.post("/admin/normalize-payer")
 async def normalize_payer(
     body: dict = Body(...),
