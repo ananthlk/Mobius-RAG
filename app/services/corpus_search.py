@@ -2496,6 +2496,34 @@ async def _attach_inherited_doc_tags(
             "j_tags": _coerce_jsonb_to_list(r.get("j_tags")),
             "p_tags": _coerce_jsonb_to_list(r.get("p_tags")),
         }
+
+    # Durable inheritance credit: inject payor j-tags from payor_inherited_authority
+    # so that AHCA regulatory docs (59G rules, model contract) get binary j-tag credit
+    # for the FL Medicaid MCOs that inherit from them — even after a retag wipes
+    # document_tags.j_tags.  The VIEW is migration-managed; manual DB updates are not.
+    _INHERITED_PAYOR_TO_JTAG: dict[str, str] = {
+        "Aetna": "payor.aetna",
+        "Sunshine Health": "payor.sunshine_health",
+    }
+    try:
+        inh_rows = await db.execute(
+            text(
+                "SELECT document_id::text AS doc_id, payor AS payor_name "
+                "FROM payor_inherited_authority "
+                "WHERE document_id::text = ANY(CAST(:ids AS text[]))"
+            ),
+            {"ids": doc_ids},
+        )
+        for inh_row in inh_rows.mappings().all():
+            doc_id = inh_row["doc_id"]
+            jtag_code = _INHERITED_PAYOR_TO_JTAG.get(inh_row["payor_name"] or "")
+            if jtag_code and doc_id in by_doc:
+                existing_j = by_doc[doc_id]["j_tags"]
+                if jtag_code not in existing_j:
+                    by_doc[doc_id]["j_tags"] = existing_j + [jtag_code]
+    except Exception as exc:
+        logger.debug("payor_inherited_authority j-tag injection failed: %s", exc)
+
     for c in candidates:
         info = by_doc.get(str(c.get("document_id") or ""))
         if info:
