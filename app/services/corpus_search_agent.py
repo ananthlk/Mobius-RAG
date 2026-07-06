@@ -2674,50 +2674,49 @@ async def _synthesize_internal_answer(
                         "not found", "unable to find")
     _is_explicit_abstain = any(p in answer.lower() for p in _abstain_phrases)
     if answer and not _is_explicit_abstain and payor_name:
+        # Collect 59G rule designations from chunk document names that are absent from answer.
         _cited_rules: list[str] = []
-        _inherited_in_ctx = False
         for _idx, _c in usable:
             _doc = (
                 getattr(_c, "document_name", None)
                 or (_c.get("document_name") if isinstance(_c, dict) else None)
                 or ""
             )
-            _cid = str(getattr(_c, "document_id", None) or (_c.get("document_id") if isinstance(_c, dict) else "") or "")
-            # Check if any inherited AHCA doc is in context (by doc_id OR 59G name).
-            if inherited_doc_ids and _cid in inherited_doc_ids:
-                _inherited_in_ctx = True
             _m2 = re.match(r"(59G[-\d.]+)", _doc)
             if _m2:
-                _inherited_in_ctx = True
                 _rule = _m2.group(1)
                 if _rule not in answer:
                     _cited_rules.append(_rule)
 
-        # Two independent postfix conditions — each fires separately:
-        # 1. Payor name missing → attribute the answer to the MCO (citing rules if known).
-        # 2. 59G rules in context but missing from answer → append a rule note even if
-        #    the payor name was already placed by the LLM (the user-prompt injection makes
-        #    the LLM mention the payor but doesn't guarantee it cites the rule number).
         _unique_rules = list(dict.fromkeys(_cited_rules))
         _rules_missing = [r for r in _unique_rules if r not in answer]
-        if _inherited_in_ctx:
-            _payor_in_answer = payor_name in answer
-            if not _payor_in_answer and _rules_missing:
+        _payor_in_answer = payor_name in answer
+        # Also detect generic "59G" in the answer text (e.g. "Division 59G, Florida Administrative
+        # Code") — catches cases where no chunk carries a 59G-prefixed document name but the
+        # synthesis quoted the regulation family by number (e.g. AHCA "Policy Library" docs).
+        _has_generic_59g = bool(re.search(r"\b59G\b", answer)) and not _rules_missing
+
+        if not _payor_in_answer:
+            if _rules_missing:
                 _rules_str = " and ".join(_rules_missing)
                 answer = (
                     answer
                     + f" {payor_name} follows Florida Medicaid "
                     f"{_rules_str} for these requirements."
                 )
-            elif not _payor_in_answer:
+            elif _has_generic_59g:
+                # Synthesis cited "59G" generically (e.g. AHCA Library docs with empty doc_id).
+                # The match can't be done via doc_id, so fire on the answer text instead.
+                answer = answer + f" These Florida Medicaid 59G rules apply to {payor_name}."
+            else:
                 answer = (
                     answer
                     + f" These Florida Medicaid requirements apply to {payor_name}."
                 )
-            elif _rules_missing:
-                # Payor already in answer but rule designation absent.
-                _rules_str = " and ".join(_rules_missing)
-                answer = answer + f" The applicable Florida Medicaid rule is {_rules_str}."
+        elif _rules_missing:
+            # Payor already in answer but specific 59G rule designation is absent.
+            _rules_str = " and ".join(_rules_missing)
+            answer = answer + f" The applicable Florida Medicaid rule is {_rules_str}."
 
     return answer, confidence, {
         "llm_ms": elapsed,
