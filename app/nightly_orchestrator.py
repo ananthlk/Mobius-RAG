@@ -35,6 +35,7 @@ _STEP_DEFS = [
     ("baseline_eval", "Baseline eval"),
     ("publish",       "Publish lexicon QA→RAG"),
     ("retag",         "Retag in place"),
+    ("reconcile",     "Inheritance reconcile"),
     ("chunk",         "Chunk new docs"),
     ("embed",         "Embed → publish"),
     ("gate",          "Integrity gate"),
@@ -363,6 +364,42 @@ def _run_nightly(opts: dict) -> None:
             _rag_post("/admin/retag-in-place", {"only_stale": True}, timeout=30)
             st = _poll_job("/admin/retag-in-place/status", 90)
             _step("retag", "done", f"{st.get('done')}/{st.get('total')} · {st.get('errors',0)} err")
+        if _stopping():
+            raise RuntimeError("stopped")
+
+        # 2b — inheritance reconcile: re-stamp MCO payor j-tags on all docs in
+        # payor_inherited_authority.  Runs after every retag so lexicon clobbers
+        # are healed before the gate eval.  Idempotent (jsonb merge, no-op if
+        # tags already present).  Keyed on the view, so new payors onboarded
+        # via mobius-payor are picked up automatically next nightly run.
+        _step("reconcile", "running")
+        _RECONCILE_SQL = (
+            "UPDATE document_tags dt "
+            "SET j_tags = COALESCE(dt.j_tags, '{}'::jsonb) || pia_tags.tags "
+            "FROM ("
+            "  SELECT pia.document_id, "
+            "    jsonb_object_agg("
+            "      CASE pia.payor "
+            "        WHEN 'Aetna' THEN 'payor.aetna' "
+            "        WHEN 'Sunshine Health' THEN 'payor.sunshine_health' "
+            "      END, "
+            "      1.0"
+            "    ) AS tags "
+            "  FROM payor_inherited_authority pia "
+            "  WHERE pia.payor IN ('Aetna', 'Sunshine Health') "
+            "  GROUP BY pia.document_id"
+            ") pia_tags "
+            "WHERE dt.document_id = pia_tags.document_id"
+        )
+        if dry_run:
+            _step("reconcile", "skipped", "dry run")
+        else:
+            try:
+                rec = _rag_post("/admin/db/execute", {"sql": _RECONCILE_SQL}, timeout=60)
+                rows = rec.get("affected_rows", "?")
+                _step("reconcile", "done", f"{rows} docs stamped")
+            except Exception as _exc:
+                _step("reconcile", "failed", str(_exc)[:80])
         if _stopping():
             raise RuntimeError("stopped")
 

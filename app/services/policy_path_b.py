@@ -784,6 +784,31 @@ async def aggregate_paragraph_tags_to_document(
 
     doc_tags.p_tags = agg_p or None
     doc_tags.d_tags = agg_d or None
+
+    # Post-tagger overlay: additively merge inherited payor j-tags from
+    # payor_inherited_authority before writing, so lexicon retags can't
+    # clobber MCO inheritance stamps. Keyed on canonical payor names from
+    # the registry view. Non-fatal: nightly reconcile is the backstop.
+    _INHERIT_PAYOR_JTAG: dict[str, str] = {
+        "Aetna": "payor.aetna",
+        "Sunshine Health": "payor.sunshine_health",
+    }
+    try:
+        from sqlalchemy import text as _sa_text
+        inh_rows = await db.execute(
+            _sa_text(
+                "SELECT DISTINCT payor FROM payor_inherited_authority "
+                "WHERE document_id = CAST(:doc_id AS uuid)"
+            ),
+            {"doc_id": str(document_id)},
+        )
+        for inh_row in inh_rows.mappings().all():
+            jtag_code = _INHERIT_PAYOR_JTAG.get(inh_row["payor"] or "")
+            if jtag_code:
+                agg_j[jtag_code] = 1.0  # binary credit, immune to lexicon score noise
+    except Exception:
+        pass  # non-fatal
+
     doc_tags.j_tags = agg_j or None
 
 
