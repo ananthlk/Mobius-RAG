@@ -3088,6 +3088,7 @@ async def _corpus_search_agent_impl(
     queries_pre: StrategyQueries | None = None
     self_assessments: dict[str, tuple[float, str]] = {}
     _missing_token: str | None = None  # populated by _estimate_internal_recall
+    _inherited_doc_ids_pre: list[str] = []  # inherited AHCA doc IDs found during routing
 
     if not (verdict and verdict.fail):
         try:
@@ -3097,6 +3098,7 @@ async def _corpus_search_agent_impl(
             _pre_j_payor = [t for t in profile.tag_matches if t.startswith("j:payor.")]
             if _pre_j_payor:
                 _inh_pre = await _inherited_authority_doc_ids(db, _pre_j_payor)
+                _inherited_doc_ids_pre = _inh_pre  # expose for routing features below
                 pool_pre = _augment_pool_with_inheritance(pool_pre, _inh_pre)
             pool_size_pre = len(pool_pre.document_ids) if pool_pre.document_ids else 0
             queries_pre = rewrite_for_strategies(profile, partition_pre)
@@ -3155,6 +3157,14 @@ async def _corpus_search_agent_impl(
             and pool_pre.cascade_level in ("L3_AHCA_D", "L4_AHCA")
         ),
         "pool_cascade_level": pool_pre.cascade_level if pool_pre is not None else "L5_empty",
+        # has_inherited_docs — True when payor_inherited_authority returned at
+        # least one AHCA doc for the MCO payor tags in this query.  Strategy (a)
+        # runs an explicit supplemental pass for these docs regardless of their
+        # BM25/vector score, so its effective recall is higher than est_recall
+        # suggests (the co-occurrence check misses AHCA docs because their text
+        # uses generic "Medicaid managed care plan" language, not MCO names).
+        "has_inherited_docs": bool(_inherited_doc_ids_pre),
+        "inherited_doc_count": len(_inherited_doc_ids_pre),
     }
 
     # Override path — explicit mode set by caller bypasses the router's

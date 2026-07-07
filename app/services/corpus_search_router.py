@@ -197,7 +197,7 @@ QueryClass = Literal[
     "vague",              # VAGUE classification (no tags, no literals)
 ]
 
-PRIORS_VERSION = "v2.1.2026-07-01-canonical-blend"  # +canonical/factual prior blend for b/d niche (run 41b5c5e7)
+PRIORS_VERSION = "v2.2.2026-07-06-inherited-auth-boost"  # +inherited-authority routing adj for a on MCO+payor queries (v1.2.7)
 
 # v1.2 update — derived from N=5 strategy×query verdict matrix
 # (eval/calibration/strategy_matrix_n5_20260503-183648.json) with
@@ -642,6 +642,25 @@ def decide(
             elif sid == "b":
                 adj -= 0.20
                 adj_reason = (adj_reason or "") + "-ahca_b_redundant_with_domain_pool"
+
+        # Inherited authority docs boost (v1.2.7 — 2026-07-06):
+        # When a query names a specific MCO payer (has_j_payor_tag) AND
+        # payor_inherited_authority returned inherited AHCA docs for that payer,
+        # strategy (a)'s supplemental pass WILL surface those docs regardless of
+        # BM25/vector score.  The co-occurrence check underestimates (a)'s recall
+        # here because AHCA doc text uses "Medicaid managed care plan" not MCO
+        # names — so est_recall is spuriously low.  Apply a routing bonus to (a)
+        # to reflect its actual advantage over (b) on MCO+inherited-authority queries.
+        if (
+            profile_features.get("has_j_payor_tag")
+            and profile_features.get("has_inherited_docs")
+        ):
+            if sid == "a":
+                adj += +0.12
+                adj_reason = (adj_reason or "") + "+inherited_authority_a_boost"
+            elif sid == "b":
+                adj -= 0.05
+                adj_reason = (adj_reason or "") + "-b_redundant_with_inherited_precision"
 
         # Zero-cooc routing (v1.2.5 — 2026-05-05):
         # When _estimate_internal_recall found a content token with ZERO
