@@ -197,7 +197,7 @@ QueryClass = Literal[
     "vague",              # VAGUE classification (no tags, no literals)
 ]
 
-PRIORS_VERSION = "v2.2.2026-07-06-inherited-auth-boost"  # +inherited-authority routing adj for a on MCO+payor queries (v1.2.7)
+PRIORS_VERSION = "v2.4.2026-07-07-zero-cooc-service-specific-override"  # +inherited-authority a boost (v1.2.7) + service-specificity d penalty (v1.2.8) + zero-cooc/service-specific override (v1.2.9)
 
 # v1.2 update — derived from N=5 strategy×query verdict matrix
 # (eval/calibration/strategy_matrix_n5_20260503-183648.json) with
@@ -662,7 +662,27 @@ def decide(
                 adj -= 0.05
                 adj_reason = (adj_reason or "") + "-b_redundant_with_inherited_precision"
 
-        # Zero-cooc routing (v1.2.5 — 2026-05-05):
+        # Service-specificity penalty on (d) (v1.2.8 — 2026-07-07):
+        # 2026-07-07 calibration review, question-by-question, all 22 cmhc
+        # queries: when the query asks whether/how a SPECIFIC clinical
+        # service or procedure is covered/authorized/billed (a service-type
+        # d-tag co-occurring with a coverage-determination or billing-
+        # specific d-tag), (d) external search NEVER won — n=8, zero
+        # exceptions. That detail lives in the payer's internal coverage/
+        # billing policy, not anything indexed publicly. Corpus strategies
+        # (a/b) should get a LOWER bar to be trusted here — even a weak
+        # corpus signal beats (d)'s near-zero value on this bucket — so we
+        # penalize (d) rather than boost a/b (their existing priors already
+        # win when (d) is fairly scored). Standardized administrative facts
+        # (deadlines, turnaround times, vendor names) are NOT covered by
+        # this rule — that bucket is genuinely payer-corpus-completeness
+        # dependent (see CANONICAL_STRATEGY_BASELINE.md), not fixable by a
+        # static adjustment.
+        if profile_features.get("has_service_specificity") and sid == "d":
+            adj -= 0.25
+            adj_reason = (adj_reason or "") + "-service_specificity_d_penalty"
+
+        # Zero-cooc routing (v1.2.5 — 2026-05-05; refined v1.2.9 — 2026-07-07):
         # When _estimate_internal_recall found a content token with ZERO
         # corpus presence (e.g. "molina" when Molina docs aren't indexed),
         # no amount of BM25 or vector recall can help — the corpus simply
@@ -670,17 +690,38 @@ def decide(
         # Condition: has_zero_cooc_term AND has_d_tag (domain is valid) AND
         # NOT has_literal (literal-anchor miss is a different failure mode —
         # let the literal-anchor hard-withdraw handle it via est_recall=0).
+        #
+        # EXCEPTION (v1.2.9 — 2026-07-07 calibration, cmhc005/cmhc012 both
+        # scored 0.0 in production): when the query is ALSO service-specific
+        # (v1.2.8), zero-cooc is NOT a reason to trust (d) more — it's the
+        # WORST case for (d), not the best. A narrow billing/coverage code
+        # missing from the corpus is very likely ALSO missing from public
+        # web content, since that detail lives in the payer's internal
+        # policy (the same reasoning behind v1.2.8's penalty). The old
+        # linear combine let this rule's +0.60 swamp v1.2.8's -0.25, so
+        # (d) kept winning on exactly the queries it structurally cannot
+        # answer. Route the other way instead: corpus is the only real
+        # shot here, even a weak one — verified against live cmhc005/012
+        # data before shipping this change.
         if (
             profile_features.get("has_zero_cooc_term")
             and profile_features.get("has_d_tag")
             and not profile_features.get("has_literal")
         ):
-            if sid == "d":
-                adj += +0.60
-                adj_reason = (adj_reason or "") + "+zero_cooc_entity_not_in_corpus"
-            elif sid in ("a", "b"):
-                adj += -0.40
-                adj_reason = (adj_reason or "") + "-zero_cooc_internal_strategy_penalised"
+            if profile_features.get("has_service_specificity"):
+                if sid == "d":
+                    adj -= 0.40
+                    adj_reason = (adj_reason or "") + "-zero_cooc_service_specific_d_double_penalty"
+                elif sid in ("a", "b"):
+                    adj += 0.40
+                    adj_reason = (adj_reason or "") + "+zero_cooc_service_specific_corpus_last_resort"
+            else:
+                if sid == "d":
+                    adj += +0.60
+                    adj_reason = (adj_reason or "") + "+zero_cooc_entity_not_in_corpus"
+                elif sid in ("a", "b"):
+                    adj += -0.40
+                    adj_reason = (adj_reason or "") + "-zero_cooc_internal_strategy_penalised"
         total += adj
 
         scores[sid] = round(total, 4)

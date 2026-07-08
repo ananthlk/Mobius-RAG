@@ -491,6 +491,25 @@ def _is_exploratory(query: str) -> bool:
     return any(p.search(q) for p in _EXPLORATORY_PATTERNS)
 
 
+def _has_service_specificity(tag_matches: list[str]) -> bool:
+    """True when a service-type d-tag co-occurs with a coverage-
+    determination or billing-specific d-tag — i.e. the query asks
+    whether/how a SPECIFIC clinical service or procedure is covered,
+    authorized, or billed. See router v1.2.8 for how this is used."""
+    d_tags = [t for t in (tag_matches or []) if t.startswith("d:")]
+    has_service = any(
+        t.startswith(("d:health_care_services.", "d:billing_codes."))
+        for t in d_tags
+    )
+    has_determination = any(
+        t.startswith("d:utilization_management.")
+        or t.startswith("d:billing_codes.")
+        or t == "d:claims.general"
+        for t in d_tags
+    )
+    return has_service and has_determination
+
+
 # ---------------------------------------------------------------------------
 # Strategy (b) — Wide → Themes → Narrow (discovery executor)
 # ---------------------------------------------------------------------------
@@ -3146,6 +3165,14 @@ async def _corpus_search_agent_impl(
         # — router_decide uses it to route to strategy (d) external.
         "has_zero_cooc_term": bool(_missing_token),
         "zero_cooc_token": _missing_token,
+        # has_service_specificity — True when the query asks whether/how a
+        # SPECIFIC clinical service or procedure is covered/authorized/
+        # billed (a service-type d-tag co-occurring with a coverage-
+        # determination or billing-specific d-tag). 2026-07-07 calibration
+        # review: (d) external search never won a single query in this
+        # bucket (n=8, zero exceptions) — this detail lives in the payer's
+        # internal policy, not anything a web search can surface.
+        "has_service_specificity": _has_service_specificity(profile.tag_matches),
         # has_ahca_pool — True when the pre-route candidate pool cascade
         # landed at AHCA scope (L3_AHCA_D or L4_AHCA). AHCA is the FL
         # Medicaid umbrella domain; when a query has a domain tag but no
@@ -3529,6 +3556,8 @@ async def _corpus_search_agent_impl(
             db, raw_query,
             agent_id=agent_id,
             correlation_id=caller_id,
+            tag_matches=profile.tag_matches,
+            partition=partition_pre,
         )
         # Confidence comes from the LLM's self-reported synthesis
         # confidence (it knew which passages it cited and whether they

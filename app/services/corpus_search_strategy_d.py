@@ -40,6 +40,7 @@ import re
 import time
 import urllib.parse
 import urllib.request
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -97,11 +98,448 @@ class StrategyDResult:
 
 
 # ---------------------------------------------------------------------------
-# Step 1: Search via mobius-skills google-search
+# Query enrichment — bias the search toward authoritative payer sources
+# and the right document type, instead of sending the raw user question
+# verbatim. Evidence: 2026-07-07 calibration review found (d) never wins
+# a single narrow/code-specific query (n=8, zero exceptions) but does
+# win cleanly on standardized administrative facts IF the search actually
+# surfaces the payer's own provider-facing page instead of generic SEO
+# content. Only payers with a VERIFIED domain (seen in the payor registry
+# seeds) get a site: restriction — guessing a domain would silently zero
+# out results, which is worse than not restricting at all.
 # ---------------------------------------------------------------------------
 
-async def _search_web(query: str, *, n: int = 5) -> list[_SearchHit]:
-    """Call the shared google-search skill. Returns up to n hits."""
+# Payer domain + display-name resolution is fully data-driven (see
+# _resolve_payer_context below) — deliberately NOT a hand-maintained
+# allowlist. A static dict needs a manual edit for every new payer, and
+# (found 2026-07-07) can silently assert something the data doesn't
+# support: an earlier hardcoded entry for "aetna" claimed
+# aetnabetterhealth.com as verified, but discovered_sources has ZERO
+# fetchable rows for Aetna — that's exactly the "guessed domain" risk
+# this file otherwise refuses to take, just asserted instead of guessed.
+# Resolving against the live crawl means any payer the curator actually
+# covers becomes usable automatically, and a payer with real coverage
+# gaps (like Aetna) correctly gets no restriction until the crawl catches
+# up — no code change needed either way.
+
+# d-tag prefix -> URL-path keyword. discovered_sources.topic_tags is NULL
+# across the board (checked 2026-07-07), so we match on URL path instead.
+_D_TAG_URL_KEYWORDS: list[tuple[str, list[str]]] = [
+    ("claims.timely_filing", ["timely", "filing"]),
+    ("utilization_management.prior_authorization", ["preauth", "prior-auth", "authorization"]),
+    ("utilization_management", ["preauth", "prior-auth", "authorization"]),
+    ("pharmacy", ["pharmacy"]),
+    ("eligibility", ["eligib"]),
+    ("disputes", ["appeal", "grievance"]),
+    ("claims", ["claims"]),
+]
+
+
+def _extract_payer_slug(tag_matches: list[str] | None) -> str | None:
+    for t in (tag_matches or []):
+        if t.startswith("j:payor."):
+            return t.split("j:payor.", 1)[1]
+    return None
+
+
+_GENERIC_D_TAG_LEAVES = {"general", "info", "information", "misc", "other"}
+
+
+def _most_specific_d_tag(tag_matches: list[str] | None) -> str | None:
+    """Return the MOST SPECIFIC matched d-tag, full code (e.g.
+    ``d:utilization_management.prior_authorization``) — kept as the full
+    code, not just the leaf phrase, so the caller can look up its corpus
+    selectivity via ``selectivity_for_tag`` before deciding whether it's
+    discriminating enough to force as a must-have. Filler leaves
+    ("general", "info") are excluded first — a tag like ``claims.general``
+    and ``claims.timely_filing`` tie on dot-count, and "general" alone is
+    useless as a must-have phrase regardless of its corpus frequency.
+    Ties among the remaining candidates break on longest code (more
+    specific overall).
+    """
+    d_tags = [t for t in (tag_matches or []) if t.startswith("d:")]
+    if not d_tags:
+        return None
+    candidates = [t for t in d_tags if t.split(".")[-1] not in _GENERIC_D_TAG_LEAVES]
+    if not candidates:
+        # BUG FIX (2026-07-07, cmhc005 live regression): the old fallback
+        # was re-admitting the generic leaves this filter just excluded —
+        # exactly when it matters most (a query whose only d-tag is e.g.
+        # ``claims.general``). No candidates surviving the filter means
+        # there IS no good must-have candidate here — return None.
+        return None
+    return max(candidates, key=lambda t: (t.count("."), len(t)))
+
+
+def _tag_to_phrase(full_code: str) -> str:
+    """``d:utilization_management.prior_authorization`` -> "prior authorization"."""
+    leaf = full_code.split(".")[-1]
+    return leaf.replace("_", " ").strip().lower()
+
+
+_MIN_PAYER_ROWS = 3  # a single stray crawl row can't manufacture a "verified" domain
+
+_PAYOR_PLATFORM_BASE = os.environ.get(
+    "MOBIUS_PAYOR_URL", "https://mobius-payor-ortabkknqa-uc.a.run.app",
+).rstrip("/")
+_PAYOR_PLATFORM_TIMEOUT_S = 3.0
+
+
+async def _resolve_payer_context(
+    db: AsyncSession, slug: str | None,
+) -> tuple[str | None, str | None]:
+    """Resolve (site_domain, payer display name) for a ``j:payor.<slug>``
+    tag. Two layers, in order:
+
+    1. **Payor Platform registry** (2026-07-07 collaboration) — the
+       authoritative source. It combines a live robots.txt check with our
+       own crawl evidence into a tri-state ``crawlable`` verdict:
+       ``true`` -> safe to ``site:``-restrict, ``false`` -> explicitly
+       DON'T (robots disallows machines even where our own crawler found
+       some pages — confirmed for Aetna: 0 fetchable rows AND a robots
+       Disallow, so this is a real, not just under-crawled, gap), ``null``
+       (no metafact yet) -> fall through to layer 2.
+    2. **Our own curator crawl** (discovered_sources) — degrade
+       gracefully when the registry is unreachable or has no opinion yet.
+       Guesses a display name from the slug (title-case —
+       "simply_healthcare" -> "Simply Healthcare"), matches
+       case-insensitively against discovered_sources.payer, then takes
+       the dominant host among that payer's fetchable rows. Requires
+       >= _MIN_PAYER_ROWS matching rows AND >= _MIN_PAYER_ROWS of those
+       on the single dominant host, so a handful of stray/mixed rows
+       can't produce a false-confidence domain.
+
+    Either layer returning nothing usable is the same "we don't know"
+    outcome — (None, None), same as an unlisted payer always had. Never
+    invents a domain either way. Pushing our own crawl evidence back to
+    the registry (the POST half of the collaboration) belongs to the
+    nightly curator pipeline, not this per-request read path — a live
+    query shouldn't pay for or depend on a write.
+    """
+    if not slug:
+        return None, None
+    display_name = slug.replace("_", " ").title()
+
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=_PAYOR_PLATFORM_TIMEOUT_S) as client:
+            resp = await client.get(
+                f"{_PAYOR_PLATFORM_BASE}/api/registry/payors/"
+                f"{urllib.parse.quote(display_name)}/web-domain"
+            )
+        if resp.status_code == 200:
+            data = resp.json()
+            crawlable = data.get("crawlable")
+            host = data.get("host")
+            if crawlable is True and host:
+                return host, display_name
+            if crawlable is False:
+                return None, None
+            # crawlable is null (no metafact yet) -> fall through below.
+    except Exception as exc:
+        logger.warning("(d) payor platform web-domain lookup failed: %s", exc)
+
+    try:
+        from sqlalchemy import text as sql_text
+        rows = (await db.execute(sql_text(
+            """
+            SELECT payer, url FROM discovered_sources
+            WHERE lower(payer) = lower(:name) AND last_fetch_status = 200
+            """
+        ), {"name": display_name})).mappings().all()
+    except Exception as exc:
+        logger.warning("(d) payer context resolution failed: %s", exc)
+        return None, None
+    if len(rows) < _MIN_PAYER_ROWS:
+        return None, None
+    hosts = Counter(
+        (urllib.parse.urlparse(r["url"]).netloc or "").removeprefix("www.")
+        for r in rows
+    )
+    if not hosts:
+        return None, None
+    dominant_host, count = hosts.most_common(1)[0]
+    if not dominant_host or count < _MIN_PAYER_ROWS:
+        return None, None
+    return dominant_host, rows[0]["payer"]
+
+
+# 2026-07-07: NOT the same bar as corpus_search_agent's
+# _SELECTIVITY_REQUIRED (0.65) — that threshold answers "is this tag
+# selective enough to be a safe REQUIRED filter for OUR OWN corpus
+# retrieval," a different, lower-stakes question. This one answers "is
+# this phrase rare enough that quoting it on the PUBLIC WEB, unanchored
+# to any domain, won't drift onto generic/competitor content" — checked
+# against the full distribution of 1,612 distinct d-tags across 9,130
+# docs: median selectivity is 0.997 (the vast majority of tags are
+# ordinary/specific), with a sharp knee around the 10th percentile
+# (~0.94) before a long common/generic tail. The two known-bad unanchored
+# cases (utilization_management.prior_authorization=0.819,
+# health_care_services.therapy_services=0.760) sit well below the 5th
+# percentile (0.892); the one known-good case
+# (claims.timely_filing=0.994) sits at the median — an ordinary tag, not
+# an outlier. 0.95 draws the line just above that knee: only the
+# rarest ~8-10% of tags in the whole corpus clear it.
+_WEB_QUOTE_SELECTIVITY_MIN = 0.95
+
+
+async def build_authoritative_query(
+    db: AsyncSession, raw_query: str, tag_matches: list[str] | None, domain: str | None,
+    partition: Any = None,
+) -> tuple[str, str | None, list[str]]:
+    """Return (query, site_domain_or_None, exact_terms — a list, possibly
+    empty). The raw query text is passed through UNCHANGED here —
+    site/exactTerms are resolved separately and applied as real
+    search-engine syntax by ``_embed_search_operators``, not string
+    concatenation. ``domain`` comes from ``_resolve_payer_context``
+    (data-driven), never invented here.
+
+    ``partition`` is the ``TermPartition`` the router already computes
+    once per query via ``partition_terms`` (corpus_search_agent.py) —
+    reusing it instead of re-deriving "what's important in this query"
+    from scratch. It already separates:
+      - literal anchors (regex-extracted codes like "H0015") — always
+        REQUIRED, selectivity=1.0 by construction. These are precise
+        identifiers, the single best kind of must-have term, and used
+        unconditionally regardless of domain.
+      - REQUIRED lexicon tags — cleared partition_terms's own bar
+        (0.65), which answers "safe to require for OUR corpus
+        retrieval." That's a different, lower-stakes question than "safe
+        to quote unanchored on the public web" (see
+        _WEB_QUOTE_SELECTIVITY_MIN's comment) — so a REQUIRED tag only
+        becomes a must-have here without a domain if it ALSO clears the
+        stricter web bar. With a domain, use it regardless — the site
+        restriction already anchors it.
+    Multiple terms can combine (e.g. a literal anchor AND a REQUIRED tag
+    phrase, each independently quoted) — real search engines AND multiple
+    quoted segments together.
+
+    Falls back to the single-most-specific-tag path (2026-07-07 original
+    design) when no partition was computed upstream (e.g. pre-route pool
+    build failed) — same selectivity bar, just scoped to one candidate
+    instead of the full per-query partition.
+    """
+    exact_terms: list[str] = []
+    if partition is not None:
+        exact_terms.extend(
+            t.term for t in partition.required if t.kind == "literal"
+        )
+        for t in partition.required:
+            if t.kind != "tag" or not t.full_code:
+                continue
+            if domain or t.selectivity >= _WEB_QUOTE_SELECTIVITY_MIN:
+                exact_terms.append(_tag_to_phrase(t.full_code))
+    else:
+        candidate_tag = _most_specific_d_tag(tag_matches)
+        if candidate_tag:
+            if domain:
+                exact_terms.append(_tag_to_phrase(candidate_tag))
+            else:
+                from app.services.corpus_search_agent import selectivity_for_tag
+                sel = await selectivity_for_tag(db, candidate_tag)
+                if sel >= _WEB_QUOTE_SELECTIVITY_MIN:
+                    exact_terms.append(_tag_to_phrase(candidate_tag))
+    seen: set[str] = set()
+    exact_terms = [t for t in exact_terms if not (t in seen or seen.add(t))]
+    return raw_query, domain, exact_terms
+
+
+def _rerank_hits(
+    hits: list[_SearchHit], site_domain: str | None, exact_terms: list[str],
+) -> list[_SearchHit]:
+    """Second layer of defense on top of search-engine operators. ``site:``
+    and quoted phrases steer the engine's own ranking, but generic
+    aggregator/SEO-farm results (verified 2026-07-07: medicalbillingrcm.com,
+    studyquiz.blog, payerlookup.com) can still slip in below the real
+    payer pages, especially when no verified domain exists yet to
+    ``site:``-restrict to. Score independently of what the engine
+    returned first: +2 for matching the known payer domain, +1 for EACH
+    exact_terms phrase actually appearing in title/snippet (0-N terms can
+    apply now that must-haves are a list, not a single phrase). Stable
+    sort — ties keep the engine's original order, this only promotes
+    verified matches, never invents relevance for a hit that has neither
+    signal.
+    """
+    if not site_domain and not exact_terms:
+        return hits
+
+    def _score(h: _SearchHit) -> int:
+        s = 0
+        if site_domain and site_domain.lower() in h.url.lower():
+            s += 2
+        text = f"{h.title} {h.snippet}".lower()
+        s += sum(1 for term in exact_terms if term.lower() in text)
+        return s
+
+    return sorted(hits, key=_score, reverse=True)
+
+
+def _embed_search_operators(
+    raw_query: str, site_domain: str | None, exact_terms: list[str],
+) -> str:
+    """Append real search-engine operators to the query text. Verified
+    2026-07-07 against live DuckDuckGo results: unquoted "timely filing"
+    drifted onto other payers' identical generic content (genmeditech,
+    happybilling, muni.health), quoted '"timely filing"' pulled Sunshine
+    Health's own pages back to the top. ``site:`` restricted results to
+    the payer's domain with zero off-domain hits. Both engines parse
+    these as operators, not literal keywords — this is what makes it
+    safe where the earlier qualifier-concatenation regression wasn't:
+    no new words are being added for the engine to match against, just
+    a scope restriction on the words already there. Multiple exact_terms
+    (e.g. a literal anchor code AND a REQUIRED tag phrase) each get their
+    own quoted segment — real search engines AND them together.
+    """
+    q = raw_query
+    for term in exact_terms:
+        q = f'{q} "{term}"'
+    if site_domain:
+        q = f"{q} site:{site_domain}"
+    return q
+
+
+# ---------------------------------------------------------------------------
+# Sitemap check — before blind Google search, check discovered_sources
+# (the curator's own sitemap/BFS crawl, 11k+ rows) for a URL we already
+# know exists for this payer + topic. Preference goes to rows that are
+# NOT yet ingested but ARE fetchable (last_fetch_status=200) — that's
+# the genuine gap-fill case: a real page our own crawl found, that the
+# corpus hasn't absorbed yet. Also includes already-ingested URLs,
+# since (d) reads the WHOLE page text rather than chunk-level retrieval,
+# so it can succeed even where corpus chunking/rerank missed the
+# relevant section.
+# ---------------------------------------------------------------------------
+
+async def _lookup_sitemap_candidates(
+    db: AsyncSession, tag_matches: list[str] | None, display_name: str | None, *, limit: int = 3,
+) -> list[str]:
+    """``display_name`` comes from ``_resolve_payer_context`` — the caller
+    resolves it once and shares it with the search-operator path, rather
+    than each doing its own separate (and potentially inconsistent)
+    payer-name lookup."""
+    if not display_name:
+        return []
+    d_tags = [t for t in (tag_matches or []) if t.startswith("d:")]
+    keywords: list[str] = []
+    for prefix, kws in _D_TAG_URL_KEYWORDS:
+        if any(dt == f"d:{prefix}" or dt.startswith(f"d:{prefix}.") for dt in d_tags):
+            keywords = kws
+            break
+    if not keywords:
+        return []
+    try:
+        from sqlalchemy import text as sql_text
+        like_clauses = " OR ".join(f"url ILIKE :kw{i}" for i in range(len(keywords)))
+        params = {f"kw{i}": f"%{kw}%" for i, kw in enumerate(keywords)}
+        params["payer"] = display_name
+        params["limit"] = limit
+        rows = (await db.execute(sql_text(
+            f"""
+            SELECT url FROM discovered_sources
+            WHERE payer = :payer
+              AND last_fetch_status = 200
+              AND curation_status NOT IN ('noise', 'stale')
+              AND ({like_clauses})
+            ORDER BY ingested DESC, last_seen_at DESC
+            LIMIT :limit
+            """
+        ), params)).mappings().all()
+        return [r["url"] for r in rows]
+    except Exception as exc:
+        logger.warning("(d) sitemap lookup failed: %s", exc)
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Step 1: Search — Vertex AI Grounding with Google Search (primary),
+# mobius-skills google-search / DuckDuckGo (fallback)
+# ---------------------------------------------------------------------------
+
+_VERTEX_GROUNDING_MODEL = "gemini-2.5-flash"
+
+
+async def _search_web_vertex(
+    query: str, *, n: int = 5,
+    site: str | None = None, exact: list[str] | None = None,
+) -> list[_SearchHit]:
+    """Primary search backend for (d), 2026-07-07 — Vertex AI's "Grounding
+    with Google Search" Gemini feature, not the old Custom Search JSON API
+    (closed to new customers — see project_google_cse_closed_new_customers
+    memory; this is a different Vertex AI product path and hit no such
+    restriction). Uses infrastructure already wired for LLM synthesis: no
+    new GCP API to enable (aiplatform.googleapis.com already on), no new
+    package (google-genai is already a transitive dep of
+    google-cloud-aiplatform). Native async client (``client.aio``) — no
+    thread involved, unlike the urllib-based DDG path below.
+
+    ``site``/``exact`` are embedded as real search operators in the prompt
+    text (the same site:/quoted-phrase syntax as _embed_search_operators),
+    not a structured API field — grounding has none. Verified live
+    (2026-07-07): unlike a hard site: filter, a wrong/guessed domain
+    degrades gracefully — the model still finds and grounds on the REAL
+    correct source rather than returning nothing, which is a materially
+    safer failure mode than DuckDuckGo's site: given our domain
+    resolution is itself a best-effort guess.
+
+    grounding_chunks only exposes {domain, title=domain, uri} — no
+    per-source snippet — so hits come back with snippet="" (same as
+    sitemap-derived hits below); real page text is filled in by
+    _fetch_and_extract same as any other hit. Returned URIs are Google's
+    own redirect-proxy links; verified they resolve to the real page
+    server-side, so no changes needed downstream.
+    """
+    prompt = query
+    for term in (exact or []):
+        prompt = f'{prompt} "{term}"'
+    if site:
+        prompt = f"{prompt} site:{site}"
+
+    try:
+        from google import genai
+        from google.genai.types import GenerateContentConfig, GoogleSearch, Tool
+
+        project = os.environ.get("VERTEX_PROJECT_ID", "").strip()
+        location = os.environ.get("VERTEX_LOCATION", "us-central1").strip()
+        if not project:
+            logger.warning("(d) VERTEX_PROJECT_ID not set; skipping vertex grounding search")
+            return []
+
+        client = genai.Client(vertexai=True, project=project, location=location)
+        tool = Tool(google_search=GoogleSearch())
+        response = await client.aio.models.generate_content(
+            model=_VERTEX_GROUNDING_MODEL,
+            contents=prompt,
+            config=GenerateContentConfig(tools=[tool]),
+        )
+        cand = response.candidates[0] if response.candidates else None
+        gm = getattr(cand, "grounding_metadata", None) if cand else None
+        chunks = (gm.grounding_chunks or []) if gm else []
+
+        out: list[_SearchHit] = []
+        seen: set[str] = set()
+        for c in chunks:
+            web = getattr(c, "web", None)
+            if not web or not web.uri or web.uri in seen:
+                continue
+            seen.add(web.uri)
+            out.append(_SearchHit(title=web.title or "", snippet="", url=web.uri))
+            if len(out) >= n:
+                break
+        return out
+    except Exception as exc:
+        logger.warning("(d) vertex grounding search failed: %s", exc)
+        return []
+
+
+async def _search_web(
+    query: str, *, n: int = 5,
+    site: str | None = None, exact: str | None = None,
+) -> list[_SearchHit]:
+    """Call the shared google-search skill. Returns up to n hits.
+
+    ``site``/``exact`` are real Google CSE fields (siteSearch/exactTerms),
+    forwarded as separate query params — NOT concatenated into ``query``.
+    """
     base = os.environ.get("CHAT_SKILLS_GOOGLE_SEARCH_URL", "").strip()
     if not base:
         logger.warning(
@@ -115,6 +553,10 @@ async def _search_web(query: str, *, n: int = 5) -> list[_SearchHit]:
         + "q=" + urllib.parse.quote(query)
         + f"&num={min(10, max(1, n))}"
     )
+    if site:
+        url += "&site=" + urllib.parse.quote(site)
+    if exact:
+        url += "&exact=" + urllib.parse.quote(exact)
 
     def _do_request() -> list[_SearchHit]:
         try:
@@ -394,17 +836,91 @@ async def strategy_d_external(
     correlation_id: str | None = None,
     n_search: int = 5,
     n_fetch: int = _MAX_FETCH,
+    tag_matches: list[str] | None = None,
+    partition: Any = None,
 ) -> StrategyDResult:
-    """Run Strategy (d). Returns answer + scraped passages."""
+    """Run Strategy (d). Returns answer + scraped passages.
+
+    ``partition`` is the ``TermPartition`` the caller already computed via
+    ``partition_terms`` for routing purposes (corpus_search_agent.py) —
+    passed through so must-have terms reuse the router's own per-query
+    importance ranking (literal anchors + REQUIRED tags) instead of a
+    separate, narrower derivation. Optional — falls back gracefully to a
+    single-tag heuristic when not provided (see build_authoritative_query).
+    """
     t_start = time.monotonic()
 
-    # Step 1: Search.
+    # Step 1: Search. Enrich the raw query with a document-type qualifier
+    # (provider manual / PA requirements / etc, derived from d-tags) and,
+    # if we have a VERIFIED official domain for the named payer, try a
+    # site-restricted + exactTerms-constrained search first (real CSE API
+    # fields, not string concatenation — see build_authoritative_query).
+    # Fall back to the plain, unrestricted query if that comes back empty
+    # — never let a guessed/wrong domain or an over-strict exactTerms
+    # silently zero out results.
+    payer_slug = _extract_payer_slug(tag_matches)
+    site_domain, payer_display_name = await _resolve_payer_context(db, payer_slug)
+    query_text, site_domain, exact_terms = await build_authoritative_query(
+        db, raw_query, tag_matches, site_domain, partition,
+    )
     t_search = time.monotonic()
-    hits = await _search_web(raw_query, n=n_search)
+
+    # Check our own sitemap crawl first — a URL we already know exists
+    # for this payer+topic beats hoping Google resurfaces it. Shares the
+    # same resolved payer_display_name as the search-operator path above
+    # (one resolution, not two potentially-inconsistent lookups).
+    sitemap_urls = await _lookup_sitemap_candidates(db, tag_matches, payer_display_name)
+    hits: list[_SearchHit] = [
+        _SearchHit(title="", snippet="", url=u) for u in sitemap_urls
+    ]
+    if sitemap_urls:
+        logger.info(
+            "[%s] [trace:d:sitemap] n_candidates=%d urls=%s",
+            agent_id, len(sitemap_urls), sitemap_urls,
+        )
+
+    # Primary: Vertex AI grounding (2026-07-07 — see _search_web_vertex).
+    # Fall back to the mobius-skills google-search / DuckDuckGo path only
+    # if Vertex errors or returns nothing — never let one backend being
+    # briefly unavailable stall (d) entirely.
+    web_hits: list[_SearchHit] = await _search_web_vertex(
+        query_text, n=n_search, site=site_domain, exact=exact_terms,
+    )
+    if web_hits:
+        logger.info(
+            "[%s] [trace:d:search] vertex grounding hit query=%r site=%s exact=%s n_hits=%d",
+            agent_id, query_text, site_domain, exact_terms, len(web_hits),
+        )
+    else:
+        logger.info("[%s] [trace:d:search] vertex grounding empty/failed, falling back to DDG", agent_id)
+        if site_domain or exact_terms:
+            operator_query = _embed_search_operators(query_text, site_domain, exact_terms)
+            # Structured site=/exact= params are also passed for the Google
+            # CSE path (currently unusable on this project — see
+            # project_google_cse_closed_new_customers memory), but the
+            # operators embedded in operator_query are what actually take
+            # effect on the live DuckDuckGo fallback.
+            web_hits = await _search_web(
+                operator_query, n=n_search, site=site_domain,
+                exact=" ".join(exact_terms) if exact_terms else None,
+            )
+            if web_hits:
+                logger.info(
+                    "[%s] [trace:d:search] constrained hit query=%r site=%s exact=%s n_hits=%d",
+                    agent_id, operator_query, site_domain, exact_terms, len(web_hits),
+                )
+        if not web_hits:
+            web_hits = await _search_web(query_text, n=n_search)
+
+    web_hits = _rerank_hits(web_hits, site_domain, exact_terms)
+
+    # Sitemap candidates first (highest trust), then web hits, deduped by URL.
+    seen_urls = {h.url for h in hits}
+    hits.extend(h for h in web_hits if h.url not in seen_urls)
     search_ms = int((time.monotonic() - t_search) * 1000)
     logger.info(
-        "[%s] [trace:d:search] n_hits=%d elapsed=%dms",
-        agent_id, len(hits), search_ms,
+        "[%s] [trace:d:search] query=%r site=%s exact=%s n_sitemap=%d n_web=%d total=%d elapsed=%dms",
+        agent_id, query_text, site_domain, exact_terms, len(sitemap_urls), len(web_hits), len(hits), search_ms,
     )
 
     if not hits:
