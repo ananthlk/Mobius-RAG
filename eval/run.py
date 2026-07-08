@@ -27,7 +27,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import os
 import statistics
 import sys
 import time
@@ -41,9 +40,9 @@ _repo_root = Path(__file__).resolve().parent.parent
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-import asyncpg
 import yaml
 
+from eval.db import close_pool, execute as db_execute, fetchrow as db_fetchrow
 from eval.judge import adjudicate
 
 
@@ -179,22 +178,13 @@ async def call_agent(
 # Persistence
 # ---------------------------------------------------------------------------
 
-async def _conn() -> asyncpg.Connection:
-    # DB URL selection must survive three environments (payor-agent diagnosis,
-    # 2026-07-03). The raw ``DATABASE_URL`` env commonly points at the DIRECT
-    # Cloud SQL IP (34.135.72.145:5432), FIREWALLED from local dev → asyncpg
-    # connect times out (Errno 60) and the background insert_run dies silently
-    # (the /eval/trigger "no row ever appears" bug). But we can't just switch to
-    # ``app.config.DATABASE_URL`` either — in some checkouts (incl. this one) it
-    # ALSO resolves to the direct IP (env lacks CHAT_RAG_DATABASE_URL). So:
-    # honour an explicit local/proxy override first (the persistent driver sets
-    # 127.0.0.1:5433), else the app's resolved URL (correct in-cloud where the
-    # direct IP is reachable). Local dev needs the cloud-sql-proxy on 5433.
-    from app.config import DATABASE_URL as _APP_DB_URL
-    env = os.environ.get("DATABASE_URL", "")
-    url = env if ("127.0.0.1" in env or "localhost" in env) else _APP_DB_URL
-    url = url.replace("postgresql+asyncpg://", "postgresql://").replace("+asyncpg", "")
-    return await asyncpg.connect(url)
+# All writes go through the shared pool in eval/db.py (one pool per
+# process, acquire per statement). 2026-07-07: the previous open-a-fresh-
+# asyncpg-connection-per-call pattern (~111 connects per calibration run)
+# both lost runs to single transient blips (two sigma-baseline runs got
+# 0/110 and 32/110 rows) and fed the local cloud-sql-proxy's degraded
+# hang-on-handshake state. The pool replaces the interim per-call retry
+# patch that lived here.
 
 
 async def insert_run(
@@ -206,22 +196,21 @@ async def insert_run(
     config_dump: dict[str, Any],
     n_queries: int,
 ) -> str:
-    conn = await _conn()
-    try:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO rag_eval_runs (
-                bank_path, bank_version, priors_version, caller_mode_filter,
-                notes, config_dump, n_queries
-            ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
-            RETURNING id::text
-            """,
-            bank_path, bank_version, priors_version, "all",
-            notes, json.dumps(config_dump), n_queries,
-        )
-        return row["id"]
-    finally:
-        await conn.close()
+    # Client-generated id + ON CONFLICT DO NOTHING makes the INSERT safe to
+    # retry (a lost ack on a committed row is a no-op, not a duplicate run).
+    run_id = str(uuid4())
+    await db_execute(
+        """
+        INSERT INTO rag_eval_runs (
+            id, bank_path, bank_version, priors_version, caller_mode_filter,
+            notes, config_dump, n_queries
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+        ON CONFLICT (id) DO NOTHING
+        """,
+        run_id, bank_path, bank_version, priors_version, "all",
+        notes, json.dumps(config_dump), n_queries,
+    )
+    return run_id
 
 
 def _strip_nulls(obj):
@@ -243,42 +232,40 @@ async def insert_result(row: dict[str, Any]) -> None:
         full_response_json = None
     else:
         full_response_json = json.dumps(full_response)
-    conn = await _conn()
-    try:
-        await conn.execute(
-            """
-            INSERT INTO rag_eval_results (
-                run_id, query_id, query, expected,
-                strategy_chosen, strategy_executed, confidence,
-                total_ms, n_chunks, top_rerank, mean_top3_rerank,
-                llm_answer, chunks_summary,
-                routing_correct, citation_hit, fail_fast_correct,
-                judge_verdict, judge_score, judge_reasoning,
-                judge_model, judge_ms, full_response
-            ) VALUES (
-                $1, $2, $3, $4::jsonb,
-                $5, $6, $7,
-                $8, $9, $10, $11,
-                $12, $13::jsonb,
-                $14, $15, $16,
-                $17, $18, $19,
-                $20, $21, $22::jsonb
-            )
-            """,
-            row["run_id"], row["query_id"], row["query"], json.dumps(row["expected"]),
-            row.get("strategy_chosen"), row.get("strategy_executed"),
-            row.get("confidence"),
-            row.get("total_ms"), row.get("n_chunks"), row.get("top_rerank"),
-            row.get("mean_top3_rerank"),
-            row.get("llm_answer"), json.dumps(row.get("chunks_summary") or []),
-            row.get("routing_correct"), row.get("citation_hit"),
-            row.get("fail_fast_correct"),
-            row.get("judge_verdict"), row.get("judge_score"), row.get("judge_reasoning"),
-            row.get("judge_model"), row.get("judge_ms"),
-            full_response_json,
+    await db_execute(
+        """
+        INSERT INTO rag_eval_results (
+            id, run_id, query_id, query, expected,
+            strategy_chosen, strategy_executed, confidence,
+            total_ms, n_chunks, top_rerank, mean_top3_rerank,
+            llm_answer, chunks_summary,
+            routing_correct, citation_hit, fail_fast_correct,
+            judge_verdict, judge_score, judge_reasoning,
+            judge_model, judge_ms, full_response
+        ) VALUES (
+            $1, $2, $3, $4, $5::jsonb,
+            $6, $7, $8,
+            $9, $10, $11, $12,
+            $13, $14::jsonb,
+            $15, $16, $17,
+            $18, $19, $20,
+            $21, $22, $23::jsonb
         )
-    finally:
-        await conn.close()
+        ON CONFLICT (id) DO NOTHING
+        """,
+        str(uuid4()),
+        row["run_id"], row["query_id"], row["query"], json.dumps(row["expected"]),
+        row.get("strategy_chosen"), row.get("strategy_executed"),
+        row.get("confidence"),
+        row.get("total_ms"), row.get("n_chunks"), row.get("top_rerank"),
+        row.get("mean_top3_rerank"),
+        row.get("llm_answer"), json.dumps(row.get("chunks_summary") or []),
+        row.get("routing_correct"), row.get("citation_hit"),
+        row.get("fail_fast_correct"),
+        row.get("judge_verdict"), row.get("judge_score"), row.get("judge_reasoning"),
+        row.get("judge_model"), row.get("judge_ms"),
+        full_response_json,
+    )
 
 
 async def finalize_run(run_id: str, results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -316,23 +303,19 @@ async def finalize_run(run_id: str, results: list[dict[str, Any]]) -> dict[str, 
         "p95_latency_ms": p95,
     }
 
-    conn = await _conn()
-    try:
-        await conn.execute(
-            """
-            UPDATE rag_eval_runs SET
-              n_correct = $2, n_partial = $3, n_wrong = $4, n_unable = $5,
-              routing_accuracy = $6, citation_hit_rate = $7,
-              median_latency_ms = $8, p95_latency_ms = $9,
-              completed_at = now()
-            WHERE id = $1
-            """,
-            run_id,
-            n_correct, n_partial, n_wrong, n_unable,
-            routing_acc, citation_rate, median_ms, p95,
-        )
-    finally:
-        await conn.close()
+    await db_execute(
+        """
+        UPDATE rag_eval_runs SET
+          n_correct = $2, n_partial = $3, n_wrong = $4, n_unable = $5,
+          routing_accuracy = $6, citation_hit_rate = $7,
+          median_latency_ms = $8, p95_latency_ms = $9,
+          completed_at = now()
+        WHERE id = $1
+        """,
+        run_id,
+        n_correct, n_partial, n_wrong, n_unable,
+        routing_acc, citation_rate, median_ms, p95,
+    )
     return summary
 
 
@@ -472,10 +455,16 @@ def main():
     if not bank.exists():
         logger.error("Bank file not found: %s", bank)
         sys.exit(1)
-    asyncio.run(run_eval(
-        bank, args.endpoint, args.notes,
-        skip_judge=args.skip_judge,
-    ))
+    async def _cli() -> None:
+        # Close the pool before asyncio.run() tears down the loop — the
+        # in-process eval router never calls this (its loop is long-lived).
+        try:
+            await run_eval(bank, args.endpoint, args.notes,
+                           skip_judge=args.skip_judge)
+        finally:
+            await close_pool()
+
+    asyncio.run(_cli())
 
 
 if __name__ == "__main__":

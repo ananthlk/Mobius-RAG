@@ -56,7 +56,8 @@ if str(_repo_root) not in sys.path:
 import yaml  # noqa: E402
 
 from eval.judge import adjudicate  # noqa: E402
-from eval.run import insert_run, insert_result, finalize_run, _strip_nulls, _conn  # noqa: E402
+from eval.db import close_pool, execute as db_execute, fetchrow as db_fetchrow  # noqa: E402
+from eval.run import insert_run, insert_result, finalize_run, _strip_nulls  # noqa: E402
 from app.services.fact_checker import check_facts  # noqa: E402  — retrieval critic (chunk-only recall)
 
 
@@ -87,15 +88,60 @@ def load_bank(path: Path) -> list[dict[str, Any]]:
 # Agent call (forced strategy)
 # ---------------------------------------------------------------------------
 
+# Transient, connection-level errors worth a retry — NOT application-level
+# failures (a real 4xx/5xx with a JSON error body is left alone, since
+# retrying would mask an actual bug). 2026-07-07: calibration runs share
+# the single pinned mobius-rag instance (min=max=1, deliberately — see
+# feedback_rag_api_max1_inprocess_state) with concurrent EvalTab dashboard
+# polling, and that contention can drop or stall an in-flight connection.
+# That isn't a signal about the strategy being tested — retrying recovers
+# the real data point instead of silently losing it as an error.
+_TRANSIENT_ERROR_NAMES = (
+    "RemoteDisconnected", "ConnectionResetError", "ConnectionAbortedError",
+    "ConnectionRefusedError", "IncompleteRead",
+    # httpx's own exception names (see call_agent's docstring for why
+    # httpx, not urllib, is what actually raises these now):
+    "RemoteProtocolError", "ConnectError", "ReadError", "WriteError",
+    "ReadTimeout", "ConnectTimeout", "PoolTimeout",
+)
+_AGENT_CALL_RETRIES = 2
+_AGENT_CALL_RETRY_BACKOFF_S = 2.0
+_AGENT_CALL_PER_ATTEMPT_TIMEOUT_S = 40.0
+
+
 async def call_agent(
     endpoint: str,
     query: str,
     forced_strategy: str,
     *,
     caller_mode: str | None = None,
-    timeout: int = 120,
+    timeout: float = _AGENT_CALL_PER_ATTEMPT_TIMEOUT_S,
 ) -> dict[str, Any]:
-    """POST with mode=<strategy> override. Returns the response dict."""
+    """POST with mode=<strategy> override. Returns the response dict.
+
+    Uses httpx.AsyncClient — natively async, unlike the urllib-in-a-thread
+    version this replaced (2026-07-07). That distinction matters a lot
+    here: run_calibration wraps this call in
+    ``asyncio.wait_for(..., timeout=agent_timeout_s)``, and when THAT
+    outer timeout fires on a urllib+asyncio.to_thread call, the blocked OS
+    thread underneath keeps running regardless — asyncio has no way to
+    kill it. Over a long run those orphaned threads accumulate, and
+    eventually the process's own DB connection pool destabilizes (this
+    was caught live: a "did not finish joining its threads within 300
+    seconds" warning immediately preceded a DB connection failure that
+    killed two sigma-baseline runs at 70-95% complete). httpx's async
+    requests are genuinely cancellable, so an outer timeout actually
+    tears down the in-flight request — no orphans possible.
+
+    Retries a small, fixed number of times on transient connection-level
+    errors (see _TRANSIENT_ERROR_NAMES) with a short linear backoff —
+    everything else (a real timeout, an application error response) is
+    returned as-is on the first attempt. The per-attempt timeout is kept
+    well under run_calibration's usual 90s outer budget so at least one
+    retry fits inside it.
+    """
+    import httpx
+
     body: dict[str, Any] = {
         "query": query,
         "k": 5,
@@ -106,19 +152,26 @@ async def call_agent(
     if caller_mode:
         body["caller_mode"] = caller_mode
 
-    def _do() -> dict[str, Any]:
-        req = urllib.request.Request(
-            endpoint,
-            data=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json"},
-        )
+    result: dict[str, Any] = {"error": "unreachable"}
+    for attempt in range(_AGENT_CALL_RETRIES + 1):
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read())
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(endpoint, json=body)
+                resp.raise_for_status()
+                result = resp.json()
         except Exception as e:
-            return {"error": f"{type(e).__name__}: {e}"}
+            result = {"error": f"{type(e).__name__}: {e}"}
 
-    return await asyncio.to_thread(_do)
+        err = result.get("error", "")
+        is_transient = any(name in err for name in _TRANSIENT_ERROR_NAMES)
+        if not is_transient or attempt == _AGENT_CALL_RETRIES:
+            return result
+        logger.warning(
+            "transient agent-call error (attempt %d/%d), retrying in %.0fs: %s",
+            attempt + 1, _AGENT_CALL_RETRIES, _AGENT_CALL_RETRY_BACKOFF_S, err,
+        )
+        await asyncio.sleep(_AGENT_CALL_RETRY_BACKOFF_S)
+    return result
 
 
 def _answered(response: dict[str, Any]) -> bool:
@@ -234,15 +287,11 @@ async def _capture_fingerprint(endpoint: str, bank_version: str) -> dict[str, An
     except Exception as exc:                       # /version unreachable → record the miss
         fp["agent_version_error"] = f"{type(exc).__name__}: {exc}"
     try:
-        conn = await _conn()
-        try:
-            row = await conn.fetchrow(
-                "SELECT max(lexicon_revision) lex, max(tagged_at) snap FROM document_tags"
-            )
-            fp["lexicon_revision"] = row["lex"]
-            fp["corpus_snapshot_at"] = row["snap"].isoformat() if row["snap"] else None
-        finally:
-            await conn.close()
+        row = await db_fetchrow(
+            "SELECT max(lexicon_revision) lex, max(tagged_at) snap FROM document_tags"
+        )
+        fp["lexicon_revision"] = row["lex"]
+        fp["corpus_snapshot_at"] = row["snap"].isoformat() if row["snap"] else None
     except Exception as exc:
         fp["corpus_state_error"] = f"{type(exc).__name__}: {exc}"
     return fp
@@ -254,26 +303,22 @@ async def _finalize_fingerprint_stable(run_id: str) -> None:
     (mixed-build confound) ⇒ flag it so the dashboard excludes it from
     attribution. Turns the trap that cost us hours into a data flag."""
     try:
-        conn = await _conn()
-        try:
-            row = await conn.fetchrow(
-                """
-                SELECT count(DISTINCT full_response->'routing'->>'priors_version') n,
-                       array_agg(DISTINCT full_response->'routing'->>'priors_version')
-                         FILTER (WHERE full_response->'routing'->>'priors_version' IS NOT NULL) vs
-                FROM rag_eval_results WHERE run_id::text = $1
-                """, run_id)
-            stable = (row["n"] or 0) <= 1
-            await conn.execute(
-                """
-                UPDATE rag_eval_runs SET config_dump = jsonb_set(
-                    jsonb_set(coalesce(config_dump, '{}'::jsonb),
-                              '{fingerprint,stable}', $2::jsonb),
-                    '{fingerprint,observed_priors_versions}', $3::jsonb)
-                WHERE id::text = $1
-                """, run_id, json.dumps(stable), json.dumps(row["vs"] or []))
-        finally:
-            await conn.close()
+        row = await db_fetchrow(
+            """
+            SELECT count(DISTINCT full_response->'routing'->>'priors_version') n,
+                   array_agg(DISTINCT full_response->'routing'->>'priors_version')
+                     FILTER (WHERE full_response->'routing'->>'priors_version' IS NOT NULL) vs
+            FROM rag_eval_results WHERE run_id::text = $1
+            """, run_id)
+        stable = (row["n"] or 0) <= 1
+        await db_execute(
+            """
+            UPDATE rag_eval_runs SET config_dump = jsonb_set(
+                jsonb_set(coalesce(config_dump, '{}'::jsonb),
+                          '{fingerprint,stable}', $2::jsonb),
+                '{fingerprint,observed_priors_versions}', $3::jsonb)
+            WHERE id::text = $1
+            """, run_id, json.dumps(stable), json.dumps(row["vs"] or []))
     except Exception as exc:
         logger.warning("fingerprint_stable finalize failed for %s: %s", run_id, exc)
 
@@ -589,7 +634,7 @@ def render_priors_diff(cells: dict[tuple[str, str], dict[str, Any]]) -> str:
     all_means = [c["mean_ms"] for c in cells.values() if c.get("mean_ms")]
 
     for sid in STRATEGIES:
-        for qclass in ("literal_anchor", "tight_pool", "wide_pool", "exploratory", "vague"):
+        for qclass in ("literal_anchor", "tight_pool", "wide_pool", "exploratory", "vague", "conceptual"):
             cell = cells.get((sid, qclass))
             if cell is None or cell["n_total"] == 0:
                 continue
@@ -643,15 +688,20 @@ async def main_async(args):
     bank_raw = Path(args.bank).read_text(encoding="utf-8")
     bank_sha = hashlib.sha256(bank_raw.encode()).hexdigest()[:12]
 
-    run_id, raw_rows, cells = await run_calibration(
-        bank, args.endpoint,
-        skip_judge=args.skip_judge,
-        judge_timeout_s=args.judge_timeout,
-        agent_timeout_s=args.agent_timeout,
-        notes=args.notes,
-        bank_path=args.bank,
-        bank_version=bank_sha,
-    )
+    try:
+        run_id, raw_rows, cells = await run_calibration(
+            bank, args.endpoint,
+            skip_judge=args.skip_judge,
+            judge_timeout_s=args.judge_timeout,
+            agent_timeout_s=args.agent_timeout,
+            notes=args.notes,
+            bank_path=args.bank,
+            bank_version=bank_sha,
+        )
+    finally:
+        # CLI-only: close before asyncio.run() tears the loop down. The
+        # in-process eval router keeps its (long-lived loop's) pool open.
+        await close_pool()
 
     print(render_priors_diff(cells))
     print(f"\nrun_id: {run_id}")
