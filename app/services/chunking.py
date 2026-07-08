@@ -19,6 +19,81 @@ import re
 from typing import List, Dict, Any
 
 
+# --- Code-list / changelog row gluing -------------------------------------
+# PDF→markdown conversion of code tables and revision logs frequently inserts a
+# blank line *inside* one logical entry, so the blank-line paragraph split below
+# severs a single "code + descriptor + date" row into an orphaned <40-char
+# fragment — e.g. "and G0659.", "(Genemarkers): 81418",
+# "Added HCPCS code [Q5129].  04.17.23", "Removed HCPCS code [J9259].  11.06.24".
+# Such a fragment carries an answer-bearing HCPCS/CPT code but no queryable
+# context, which hurts retrieval and forces a keep-list exception in the
+# publish-time short-fragment filter. We glue each such fragment back onto the
+# preceding paragraph of the same section so the code stays with its row.
+#
+# The gate is deliberately tight (short AND carries a code token AND reads like a
+# continuation or a changelog row) so ordinary short paragraphs — headings, page
+# numbers, bare figures — are left untouched.
+
+# HCPCS (e.g. G0659, J9259, Q5129) or a bare 5-digit CPT (e.g. 81418).
+_CODE_TOKEN_RE = re.compile(r'\b(?:[A-Z]\d{4}|\d{5})\b')
+# Revision-log verb paired with a code reference ("Added HCPCS code ...").
+_CHANGELOG_RE = re.compile(
+    r'(?i)\b(?:add(?:ed)?|remov(?:ed)?|updat(?:ed)?|revis(?:ed)?|'
+    r'delet(?:ed)?|replac(?:ed)?|correct(?:ed)?)\b[^.\n]*\b(?:hcpcs|cpt|code)\b'
+)
+# Continuation-style opening: a mid-sentence *lowercase* start, an opening
+# bracket/paren, or a lowercase connector word — i.e. text that plainly began on
+# the previous line (a wrapped "...and G0659.", "(Genemarkers): 81418",
+# "care  99503"). The bare-letter branch is intentionally case-SENSITIVE:
+# uppercase-initial short lines are self-contained entries (addresses, ZIP codes,
+# "Deny CON #10715.", bare "S5100" codes), not severed continuations.
+_CONTINUATION_START_RE = re.compile(r'^(?:[a-z(\[]|(?:and|or|to|through|thru)\b)')
+
+# A stripped paragraph shorter than this (chars) is a candidate for gluing.
+_GLUE_MAX_FRAGMENT_LEN = 40
+
+
+def _is_code_list_fragment(text: str) -> bool:
+    """True if ``text`` is a short, code-bearing continuation/changelog fragment
+    that the blank-line paragraph split severed from its row."""
+    t = (text or "").strip()
+    if not t or len(t) >= _GLUE_MAX_FRAGMENT_LEN:
+        return False
+    if not _CODE_TOKEN_RE.search(t):
+        return False
+    return bool(_CHANGELOG_RE.search(t)) or bool(_CONTINUATION_START_RE.match(t))
+
+
+def _glue_code_list_fragments(
+    paragraphs: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Merge short code/changelog fragments back onto the preceding paragraph of
+    the same section, keeping the code glued to its row.
+
+    Offsets are preserved: the merged paragraph keeps the first paragraph's
+    ``start_offset`` and takes the fragment's ``end_offset`` (a superset span in
+    the original markdown). ``paragraph_index`` is re-numbered after merging.
+
+    Only merges *backward* into an existing same-section predecessor; a fragment
+    with no such predecessor (rare) is left as its own paragraph.
+    """
+    merged: List[Dict[str, Any]] = []
+    for para in paragraphs:
+        if (
+            merged
+            and _is_code_list_fragment(para["text"])
+            and merged[-1]["section_path"] == para["section_path"]
+        ):
+            prev = merged[-1]
+            prev["text"] = f"{prev['text']}\n{para['text']}"
+            prev["end_offset"] = para["end_offset"]
+        else:
+            merged.append(para)
+    for idx, para in enumerate(merged):
+        para["paragraph_index"] = idx
+    return merged
+
+
 def split_paragraphs_from_markdown(md: str) -> List[Dict[str, Any]]:
     """
     Split markdown string into paragraphs with section context.
@@ -68,7 +143,7 @@ def split_paragraphs_from_markdown(md: str) -> List[Dict[str, Any]]:
                 "end_offset": end_offset,
             })
         current_pos += len(part)
-    return cleaned_paragraphs
+    return _glue_code_list_fragments(cleaned_paragraphs)
 
 
 def page_to_markdown_blocks(text: str) -> List[Dict[str, str]]:
