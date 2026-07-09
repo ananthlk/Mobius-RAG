@@ -272,6 +272,12 @@ class RagPublishedEmbedding(Base):
     content_sha = Column(String(64), default="", nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     source_verification_status = Column(String(20), default="", nullable=False)
+    # Chunk-level topic tags from policy_paragraphs (Path-B lexicon tagger).
+    # Populated at publish time via join on (document_id, page_number, paragraph_index).
+    # NULL for chunks with no Path-B paragraph match (scraped/fact chunks).
+    chunk_d_tags = Column(JSONB, nullable=True)
+    chunk_p_tags = Column(JSONB, nullable=True)
+    chunk_j_tags = Column(JSONB, nullable=True)
 
 
 class EmbeddableUnit(Base):

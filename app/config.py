@@ -114,6 +114,11 @@ VERTEX_MODEL = os.getenv("VERTEX_MODEL", "gemini-2.5-flash")
 # User can override via ?threshold=.
 CRITIQUE_RETRY_THRESHOLD = float(os.getenv("CRITIQUE_RETRY_THRESHOLD", "0.6"))
 
+# Chunk-tag boost: multiplicative score multiplier applied during reranking when
+# a query profile d-tag matches the chunk's chunk_d_tags column. Sweep via env
+# var for eval calibration (try 1.25 / 1.5 / 2.0). Default 1.5.
+CHUNK_TAG_BOOST = float(os.getenv("CHUNK_TAG_BOOST", "1.5"))
+
 # ── Uploads ──────────────────────────────────────────────────────────
 # Hard cap on single-file upload size. Enforced in /upload before we
 # allocate a full in-memory read. Default 100 MB — large enough for a

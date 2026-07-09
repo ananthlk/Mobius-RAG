@@ -385,6 +385,16 @@ async def _run_startup_migrations_background():
                 await migrate_chunking_priority()
             except Exception as migrate_err:
                 logger.warning(f"Startup migration (chunking_job priority) skipped: {migrate_err}")
+            try:
+                from app.migrations.add_chunk_tags_to_published import migrate as migrate_chunk_tags
+                await migrate_chunk_tags()
+            except Exception as migrate_err:
+                logger.warning(f"Startup migration (chunk_tags_to_published) skipped: {migrate_err}")
+            try:
+                from app.migrations.fix_document_payer_canonical import migrate as migrate_payer_fix
+                await migrate_payer_fix()
+            except Exception as migrate_err:
+                logger.warning(f"Startup migration (fix_document_payer_canonical) skipped: {migrate_err}")
 
             logger.info("✓ Startup migrations completed successfully")
         except Exception as e:

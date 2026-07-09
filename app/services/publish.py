@@ -129,6 +129,34 @@ async def publish_document(document_id: UUID, db: AsyncSession, generator_id: st
     for _f in _fact_res.scalars().all():
         fact_by_id[_f.id] = _f
 
+    # Batch-load chunk-level topic tags from policy_paragraphs.
+    # DISTINCT ON (page_number, order_index) deduplicates repeated ingest runs
+    # that append rows instead of upsert (e.g. Sunshine Provider Manual p121
+    # has 14 duplicate rows). Take the latest by created_at for freshest tags.
+    # Keyed by (page_number, order_index) for O(1) lookup in the row loop.
+    _chunk_tags_by_pos: dict[tuple[int, int], dict] = {}
+    try:
+        _pp_rows = await db.execute(
+            sa_text(
+                """
+                SELECT DISTINCT ON (page_number, order_index)
+                    page_number, order_index, d_tags, p_tags, j_tags
+                FROM policy_paragraphs
+                WHERE document_id = :doc_id
+                ORDER BY page_number, order_index, created_at DESC
+                """
+            ),
+            {"doc_id": str(document_id)},
+        )
+        for _pp in _pp_rows.mappings().all():
+            _chunk_tags_by_pos[(_pp["page_number"], _pp["order_index"])] = {
+                "d": _pp["d_tags"],
+                "p": _pp["p_tags"],
+                "j": _pp["j_tags"],
+            }
+    except Exception:
+        pass  # non-fatal; chunk_d/p/j_tags stay NULL for this doc
+
     # Document metadata (contract: empty string when null)
     doc_filename = _str_or_empty(doc.filename)
     doc_display_name = _str_or_empty(doc.display_name)
@@ -212,6 +240,11 @@ async def publish_document(document_id: UUID, db: AsyncSession, generator_id: st
             content_sha=content_sha,
             updated_at=now,
             source_verification_status=source_verification_status,
+            **({
+                "chunk_d_tags": _ct["d"],
+                "chunk_p_tags": _ct["p"],
+                "chunk_j_tags": _ct["j"],
+            } if (_ct := _chunk_tags_by_pos.get((page_number, paragraph_index))) else {}),
         )
         rows.append(row)
 

@@ -604,7 +604,10 @@ _BM25_COLS = """
     rag_published_embeddings.document_filename,
     rag_published_embeddings.document_authority_level,
     rag_published_embeddings.document_payer,
-    rag_published_embeddings.document_state
+    rag_published_embeddings.document_state,
+    rag_published_embeddings.chunk_d_tags,
+    rag_published_embeddings.chunk_p_tags,
+    rag_published_embeddings.chunk_j_tags
 """
 # Columns explicitly table-qualified because the vector arm and the
 # relaxed-tag BM25 candidate stage both LEFT JOIN document_tags when
@@ -1871,6 +1874,26 @@ def _rerank(
                  + W_JPD * jpd
                  + W_COV * cov)
         score = raw / MAX_WEIGHT if MAX_WEIGHT > 0 else raw
+
+        # Chunk-level d-tag boost (v1.3.1 — 2026-07-08):
+        # When the query profile carries d-tag phrase codes and the chunk's
+        # chunk_d_tags column contains a matching tag, multiply the final score
+        # by CHUNK_TAG_BOOST. This is the chunk-level analogue of the existing
+        # doc-level jpd_tag_match signal (0.20 weight above).
+        chunk_dtag_boost_applied = False
+        chunk_dtag_matched: list[str] = []
+        if phrase_tag_codes:
+            _chunk_d = c.get("chunk_d_tags") or {}
+            for _ptc in phrase_tag_codes:
+                if _ptc and _ptc.startswith("d:"):
+                    _dtag_body = _ptc[2:]
+                    if _dtag_body in _chunk_d:
+                        chunk_dtag_matched.append(_dtag_body)
+            if chunk_dtag_matched:
+                from app.config import CHUNK_TAG_BOOST
+                score = score * CHUNK_TAG_BOOST
+                chunk_dtag_boost_applied = True
+
         c["rerank_score"] = score
         c["_jpd_tags"] = jpd_tags
         # Stash per-signal breakdown for trace / telemetry
@@ -1895,6 +1918,8 @@ def _rerank(
             "total_raw":            round(raw, 4),
             "rerank_score":         round(score, 4),
             "max_weight":           round(MAX_WEIGHT, 4),
+            "chunk_dtag_boost":     chunk_dtag_boost_applied,
+            "chunk_dtag_matched":   chunk_dtag_matched,
         }
         if search_id:
             _log_stage(
