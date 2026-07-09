@@ -1672,7 +1672,7 @@ async def backfill_chunk_tags(
         try:
             r = await db.execute(_text("""
                 UPDATE rag_published_embeddings rpe
-                SET chunk_d_tags = pp_dedup.d_tags,
+                SET chunk_d_tags = COALESCE(pp_dedup.d_tags, '{}'),
                     chunk_p_tags = pp_dedup.p_tags,
                     chunk_j_tags = pp_dedup.j_tags
                 FROM (
