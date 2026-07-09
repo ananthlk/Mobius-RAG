@@ -62,6 +62,7 @@ async def migrate() -> None:
                 SELECT DISTINCT ON (document_id, page_number, order_index)
                     document_id, page_number, order_index, d_tags, p_tags, j_tags
                 FROM policy_paragraphs
+                WHERE d_tags IS NOT NULL OR p_tags IS NOT NULL OR j_tags IS NOT NULL
                 ORDER BY document_id, page_number, order_index, created_at DESC
             ) pp_dedup
             WHERE rpe.document_id     = pp_dedup.document_id
