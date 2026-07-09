@@ -4786,10 +4786,17 @@ async def check_file(filename: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _estimate_processing_seconds(ext: str, size_bytes: int, page_count: int) -> int:
+def _estimate_processing_seconds(ext: str, size_bytes: int, page_count: int, is_chat: bool = False) -> int:
     """4s/page for PDFs (chunking + embedding dominates), with overhead.
     Caps at 30 min. Reasonable for the v1 chat-side ETA — refine when
-    we have telemetry from chunking_jobs.completed_at - started_at."""
+    we have telemetry from chunking_jobs.completed_at - started_at.
+
+    Chat uploads use Path A (LLM per-page extraction): ~9s/page keeps
+    1-page files under chat's 12s foreground-strip cutoff."""
+    if is_chat:
+        # Path A: LLM chunking (~7s/page) + embedding (~2s) = 9s/page.
+        # 1-page → 9s (foreground); 2+ pages → background (fine).
+        return min(max(9, page_count * 9), 20 * 60)
     if ext == "pdf":
         return min(max(60, page_count * 4 + 30), 30 * 60)
     elif ext in ("docx", "html", "htm"):
@@ -4951,14 +4958,28 @@ async def upload_file(
 
         # Start text extraction (async in background)
         # For now, do it synchronously but could be moved to background task
+        _upload_ext = (file.filename.lower().rsplit(".", 1)[-1] if "." in file.filename else "")
         page_count = 0
         try:
             # Update status to extracting
             document.status = "extracting"
             await db.commit()
-            
-            # Extract text from PDF
-            pages = await extract_text_from_gcs(gcs_path)
+
+            # Plain-text formats (CSV, TXT, MD) don't go through the PDF
+            # extractor — decode in-process and wrap as a single page so
+            # the downstream chunking pipeline sees a uniform pages list.
+            if _upload_ext in ("txt", "csv", "md"):
+                raw_text = contents.decode("utf-8", errors="replace")
+                pages = [{
+                    "page_number": 1,
+                    "text": raw_text,
+                    "extraction_status": "success" if raw_text.strip() else "empty",
+                    "extraction_error": None if raw_text.strip() else "File appears to be empty",
+                    "text_length": len(raw_text.strip()),
+                }]
+            else:
+                # Extract text from PDF (or HTML/DOCX via GCS path)
+                pages = await extract_text_from_gcs(gcs_path)
             page_count = len(pages) if pages else 0
 
             # Save pages to database with error tracking (raw + markdown for reader)
@@ -5065,8 +5086,11 @@ async def upload_file(
             else:
                 _pc = 1
 
-        ext_lower = (file.filename.lower().rsplit(".", 1)[-1] if "." in file.filename else "")
-        eta_seconds = _estimate_processing_seconds(ext_lower, len(contents), _pc)
+        ext_lower = _upload_ext
+        eta_seconds = _estimate_processing_seconds(
+            ext_lower, len(contents), _pc,
+            is_chat=((agent_scope or "").lower() == "chat"),
+        )
         # ``stage`` distinguishes extraction-complete from full-pipeline-complete
         # (which only chunk+embed+publish reaches). The legacy ``status`` field
         # historically reports "completed" the moment extraction finishes, which
@@ -5096,6 +5120,143 @@ async def upload_file(
         await db.rollback()
         logger.error(f"Upload error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+
+@app.post("/documents/{document_id}/retry")
+async def retry_document(
+    document_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Re-trigger the full extraction → chunk → embed → publish pipeline for a
+    document that failed (e.g. because the original upload hit the PDF-only
+    extractor for a CSV/TXT file).  GCS bytes must already exist.
+
+    Returns the same shape as POST /upload so chat can reconnect to the
+    progress_channel and render the foreground strip."""
+    import uuid as _uuid_mod
+    from datetime import datetime as _dt
+
+    try:
+        doc_uuid = _uuid_mod.UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document_id")
+
+    result = await db.execute(select(Document).where(Document.id == doc_uuid))
+    document = result.scalar_one_or_none()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Determine file extension from stored filename or GCS path
+    _fname = document.filename or document.file_path or ""
+    _ext = (_fname.lower().rsplit(".", 1)[-1] if "." in _fname else "")
+
+    # Reset to extracting
+    document.status = "extracting"
+    await db.commit()
+
+    page_count = 0
+    try:
+        if _ext in ("txt", "csv", "md"):
+            # Re-download from GCS and decode as plain text
+            from google.cloud import storage as _gcs
+            from app.config import GCS_BUCKET as _GCS_BUCKET
+            _client = _gcs.Client()
+            _bucket = _client.bucket(_GCS_BUCKET)
+            _prefix = f"gs://{_GCS_BUCKET}/"
+            _blob_path = (
+                document.file_path[len(_prefix):].lstrip("/")
+                if document.file_path and document.file_path.startswith(_prefix)
+                else (_fname or "").lstrip("/")
+            )
+            _raw = _client.bucket(_GCS_BUCKET).blob(_blob_path).download_as_bytes()
+            raw_text = _raw.decode("utf-8", errors="replace")
+            pages = [{
+                "page_number": 1,
+                "text": raw_text,
+                "extraction_status": "success" if raw_text.strip() else "empty",
+                "extraction_error": None if raw_text.strip() else "File appears to be empty",
+                "text_length": len(raw_text.strip()),
+            }]
+        else:
+            pages = await extract_text_from_gcs(document.file_path)
+
+        page_count = len(pages) if pages else 0
+
+        # Delete stale pages from previous attempt, then re-insert
+        await db.execute(
+            text("DELETE FROM document_pages WHERE document_id = CAST(:d AS uuid)"),
+            {"d": document_id},
+        )
+
+        from app.services.page_to_markdown import raw_page_to_markdown
+        for page_data in pages:
+            raw_text = sanitize_text_for_db(page_data.get("text") or "") or ""
+            md = raw_page_to_markdown(raw_text) if raw_text else None
+            page = DocumentPage(
+                document_id=document.id,
+                page_number=page_data["page_number"],
+                text=raw_text,
+                text_markdown=sanitize_text_for_db(md),
+                extraction_status=page_data.get("extraction_status", "failed"),
+                extraction_error=page_data.get("extraction_error"),
+                text_length=page_data.get("text_length", 0),
+            )
+            db.add(page)
+
+        document.status = "completed"
+        await db.commit()
+    except Exception as _ex:
+        document.status = "failed"
+        await db.commit()
+        raise HTTPException(status_code=500, detail=f"Extraction failed: {_ex}")
+
+    # Infer agent_scope from source_metadata (set at original upload time)
+    _agent_scope = ""
+    if document.source_metadata and isinstance(document.source_metadata, dict):
+        _agent_scope = document.source_metadata.get("agent_scope", "") or ""
+    _is_chat = _agent_scope.lower() == "chat"
+
+    # Re-queue chunking job
+    try:
+        auto_job = ChunkingJob(
+            document_id=document.id,
+            generator_id="A" if _is_chat else "B",
+            status="pending",
+            threshold="0.6",
+            critique_enabled="true",
+            max_retries=2,
+            extraction_enabled="true",
+            created_at=_dt.utcnow(),
+            updated_at=_dt.utcnow(),
+        )
+        db.add(auto_job)
+        await db.commit()
+        if _is_chat:
+            try:
+                await db.execute(
+                    text("UPDATE chunking_jobs SET priority = 0 WHERE id = CAST(:jid AS uuid)"),
+                    {"jid": str(auto_job.id)},
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+    except Exception as _cj_err:
+        logger.warning("[retry] chunking job queue failed (non-fatal): %s", _cj_err)
+        await db.rollback()
+
+    _pc = max(page_count, 1)
+    eta_seconds = _estimate_processing_seconds(_ext, 0, _pc, is_chat=_is_chat)
+    _doc_id_str = str(document.id)
+    return {
+        "document_id": _doc_id_str,
+        "upload_id": _doc_id_str,
+        "status": document.status,
+        "stage": "extracted",
+        "page_count": _pc,
+        "estimated_processing_seconds": int(eta_seconds),
+        "estimated_seconds": int(eta_seconds),
+        "progress_channel": f"/chat/uploads/{_doc_id_str}/events",
+    }
 
 
 class ImportFromGcsRequest(BaseModel):
