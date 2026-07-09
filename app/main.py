@@ -1671,24 +1671,28 @@ async def backfill_chunk_tags(
         doc_id = row.d
         try:
             r = await db.execute(_text("""
-                UPDATE rag_published_embeddings rpe
-                SET chunk_d_tags = COALESCE(pp_dedup.d_tags, '{}'),
-                    chunk_p_tags = pp_dedup.p_tags,
-                    chunk_j_tags = pp_dedup.j_tags
-                FROM (
-                    SELECT DISTINCT ON (page_number, order_index)
-                        page_number, order_index, d_tags, p_tags, j_tags
-                    FROM policy_paragraphs
-                    WHERE document_id = CAST(:d AS uuid)
-                      AND (d_tags IS NOT NULL OR p_tags IS NOT NULL OR j_tags IS NOT NULL)
-                    ORDER BY page_number, order_index, created_at DESC
-                ) pp_dedup
-                WHERE rpe.document_id = CAST(:d AS uuid)
-                  AND rpe.page_number = pp_dedup.page_number
-                  AND rpe.paragraph_index = pp_dedup.order_index
-                  AND rpe.chunk_d_tags IS NULL
+                WITH updated AS (
+                    UPDATE rag_published_embeddings rpe
+                    SET chunk_d_tags = COALESCE(pp_dedup.d_tags, '{}'),
+                        chunk_p_tags = pp_dedup.p_tags,
+                        chunk_j_tags = pp_dedup.j_tags
+                    FROM (
+                        SELECT DISTINCT ON (page_number, order_index)
+                            page_number, order_index, d_tags, p_tags, j_tags
+                        FROM policy_paragraphs
+                        WHERE document_id = CAST(:d AS uuid)
+                          AND (d_tags IS NOT NULL OR p_tags IS NOT NULL OR j_tags IS NOT NULL)
+                        ORDER BY page_number, order_index, created_at DESC
+                    ) pp_dedup
+                    WHERE rpe.document_id = CAST(:d AS uuid)
+                      AND rpe.page_number = pp_dedup.page_number
+                      AND rpe.paragraph_index = pp_dedup.order_index
+                      AND rpe.chunk_d_tags IS NULL
+                    RETURNING 1
+                )
+                SELECT COUNT(*) AS n FROM updated
             """), {"d": doc_id})
-            n = r.rowcount or 0
+            n = r.scalar() or 0
             await db.commit()
             total_rows += n
             updated.append({"document_id": doc_id, "rows_tagged": n})
