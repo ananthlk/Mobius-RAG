@@ -11693,8 +11693,9 @@ async def upload_progress_stream(document_id: str):
     Late-subscribe: if the doc is already terminal, emits the terminal event and closes.
     Poll interval: 2 s.  Auto-closes on terminal event or after 10 min.
     """
+    import uuid as _uuid_mod
     try:
-        doc_uuid = uuid.UUID(document_id)
+        doc_uuid = _uuid_mod.UUID(document_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid document_id")
 
