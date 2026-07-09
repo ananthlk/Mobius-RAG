@@ -2,16 +2,10 @@
 Migration: add chunk_d_tags / chunk_p_tags / chunk_j_tags (JSONB) to
 rag_published_embeddings.
 
-These carry per-chunk topic tags from policy_paragraphs so retrieval can
-boost at chunk level (not just document level) without a query-time join.
-
-Backfill: JOIN rag_published_embeddings → policy_paragraphs on
-  (document_id, page_number, rpe.paragraph_index = pp.order_index)
-with DISTINCT ON dedup — policy_paragraphs has duplicate rows from
-repeated ingest runs that append instead of upsert (see Sunshine Provider
-Manual: 14 rows for page 121, order_index=3). We take the row with the
-latest created_at to get the freshest tags. Rows with no matching
-policy_paragraph row stay NULL (scraped/fact chunks with no Path-B tags).
+DDL only — columns are added here. Backfill is done via the admin endpoint
+POST /admin/backfill_chunk_tags, which runs per-document batches so large
+table MVCC cost is spread across many small transactions instead of one
+hours-long single UPDATE.
 """
 import asyncio
 import sys
@@ -28,7 +22,6 @@ async def migrate() -> None:
     url = DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
     conn = await asyncpg.connect(url)
     try:
-        # 1 — add columns (idempotent)
         for col_name, col_def in [
             ("chunk_d_tags", "JSONB"),
             ("chunk_p_tags", "JSONB"),
@@ -46,32 +39,6 @@ async def migrate() -> None:
                 print(f"  Added column rag_published_embeddings.{col_name}")
             else:
                 print(f"  Column rag_published_embeddings.{col_name} already exists")
-
-        # 2 — backfill from policy_paragraphs (idempotent — only NULL rows)
-        # DISTINCT ON dedup: policy_paragraphs has duplicate (document_id,
-        # page_number, order_index) rows from repeated ingest runs. Take the
-        # latest by created_at so the JOIN is 1:1 and never fans out.
-        result = await conn.execute(
-            """
-            UPDATE rag_published_embeddings rpe
-            SET
-                chunk_d_tags = pp_dedup.d_tags,
-                chunk_p_tags = pp_dedup.p_tags,
-                chunk_j_tags = pp_dedup.j_tags
-            FROM (
-                SELECT DISTINCT ON (document_id, page_number, order_index)
-                    document_id, page_number, order_index, d_tags, p_tags, j_tags
-                FROM policy_paragraphs
-                WHERE d_tags IS NOT NULL OR p_tags IS NOT NULL OR j_tags IS NOT NULL
-                ORDER BY document_id, page_number, order_index, created_at DESC
-            ) pp_dedup
-            WHERE rpe.document_id     = pp_dedup.document_id
-              AND rpe.page_number     = pp_dedup.page_number
-              AND rpe.paragraph_index = pp_dedup.order_index
-              AND rpe.chunk_d_tags IS NULL
-            """
-        )
-        print(f"  Backfill complete: {result}")
     finally:
         await conn.close()
 

@@ -390,11 +390,10 @@ async def _run_startup_migrations_background():
                 await migrate_chunk_tags()
             except Exception as migrate_err:
                 logger.warning(f"Startup migration (chunk_tags_to_published) skipped: {migrate_err}")
-            try:
-                from app.migrations.fix_document_payer_canonical import migrate as migrate_payer_fix
-                await migrate_payer_fix()
-            except Exception as migrate_err:
-                logger.warning(f"Startup migration (fix_document_payer_canonical) skipped: {migrate_err}")
+            # payer canonical fix + chunk_tag backfill are done via admin endpoints
+            # (POST /admin/fix_payer_canonical, POST /admin/backfill_chunk_tags)
+            # because single-transaction UPDATEs on rag_published_embeddings (wide
+            # table, 1.9M rows) take 2+ hours under MVCC.
 
             logger.info("✓ Startup migrations completed successfully")
         except Exception as e:
@@ -1635,6 +1634,134 @@ async def dedupe_policy_paragraphs(
         "paragraphs_freed": total_paras_freed,
         "lines_freed": total_lines_freed,
         "remaining_dupe_docs": "rerun until 0 to fully drain",
+        "failed_sample": failed[:5],
+    }
+
+
+@app.post("/admin/backfill_chunk_tags")
+async def backfill_chunk_tags(
+    max_docs: int = Query(200, ge=1, le=2000),
+    db: AsyncSession = Depends(get_db),
+):
+    """Backfill chunk_d/p/j_tags on rag_published_embeddings from policy_paragraphs.
+
+    Runs per-document so each transaction is small — avoids the hours-long single
+    UPDATE that MVCC makes expensive on this wide table. Run repeatedly until
+    docs_updated=0 to fully backfill the corpus.
+    """
+    from sqlalchemy import text as _text
+
+    doc_rows = (await db.execute(_text("""
+        SELECT DISTINCT rpe.document_id::text AS d
+        FROM rag_published_embeddings rpe
+        JOIN policy_paragraphs pp
+          ON pp.document_id = rpe.document_id
+         AND pp.page_number = rpe.page_number
+         AND pp.order_index = rpe.paragraph_index
+        WHERE rpe.chunk_d_tags IS NULL
+          AND (pp.d_tags IS NOT NULL OR pp.p_tags IS NOT NULL OR pp.j_tags IS NOT NULL)
+        LIMIT :lim
+    """), {"lim": max_docs})).fetchall()
+
+    updated = []
+    failed = []
+    total_rows = 0
+
+    for row in doc_rows:
+        doc_id = row.d
+        try:
+            r = await db.execute(_text("""
+                UPDATE rag_published_embeddings rpe
+                SET chunk_d_tags = pp_dedup.d_tags,
+                    chunk_p_tags = pp_dedup.p_tags,
+                    chunk_j_tags = pp_dedup.j_tags
+                FROM (
+                    SELECT DISTINCT ON (page_number, order_index)
+                        page_number, order_index, d_tags, p_tags, j_tags
+                    FROM policy_paragraphs
+                    WHERE document_id = CAST(:d AS uuid)
+                      AND (d_tags IS NOT NULL OR p_tags IS NOT NULL OR j_tags IS NOT NULL)
+                    ORDER BY page_number, order_index, created_at DESC
+                ) pp_dedup
+                WHERE rpe.document_id = CAST(:d AS uuid)
+                  AND rpe.page_number = pp_dedup.page_number
+                  AND rpe.paragraph_index = pp_dedup.order_index
+                  AND rpe.chunk_d_tags IS NULL
+            """), {"d": doc_id})
+            n = r.rowcount or 0
+            await db.commit()
+            total_rows += n
+            updated.append({"document_id": doc_id, "rows_tagged": n})
+        except Exception as exc:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            failed.append({"document_id": doc_id, "error": str(exc)[:200]})
+
+    return {
+        "docs_updated": len(updated),
+        "docs_failed": len(failed),
+        "rows_tagged": total_rows,
+        "remaining": "rerun until docs_updated=0",
+        "failed_sample": failed[:5],
+    }
+
+
+@app.post("/admin/fix_payer_canonical")
+async def fix_payer_canonical(
+    max_docs: int = Query(500, ge=1, le=5000),
+    db: AsyncSession = Depends(get_db),
+):
+    """Fix document_payer on rag_published_embeddings rows that don't match
+    the canonical payer from the documents table. Per-document transactions.
+    Run repeatedly until docs_fixed=0.
+    """
+    from sqlalchemy import text as _text
+
+    doc_rows = (await db.execute(_text("""
+        SELECT DISTINCT rpe.document_id::text AS d
+        FROM rag_published_embeddings rpe
+        JOIN documents doc ON doc.id = rpe.document_id
+        WHERE rpe.document_payer != COALESCE(doc.payer, '')
+          AND doc.payer IS NOT NULL
+          AND doc.payer != ''
+        LIMIT :lim
+    """), {"lim": max_docs})).fetchall()
+
+    fixed = []
+    failed = []
+    total_rows = 0
+
+    for row in doc_rows:
+        doc_id = row.d
+        try:
+            r = await db.execute(_text("""
+                UPDATE rag_published_embeddings rpe
+                SET document_payer = doc.payer
+                FROM documents doc
+                WHERE rpe.document_id = CAST(:d AS uuid)
+                  AND doc.id = rpe.document_id
+                  AND rpe.document_payer != COALESCE(doc.payer, '')
+                  AND doc.payer IS NOT NULL
+                  AND doc.payer != ''
+            """), {"d": doc_id})
+            n = r.rowcount or 0
+            await db.commit()
+            total_rows += n
+            fixed.append({"document_id": doc_id, "rows_fixed": n})
+        except Exception as exc:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            failed.append({"document_id": doc_id, "error": str(exc)[:200]})
+
+    return {
+        "docs_fixed": len(fixed),
+        "docs_failed": len(failed),
+        "rows_fixed": total_rows,
+        "remaining": "rerun until docs_fixed=0",
         "failed_sample": failed[:5],
     }
 
