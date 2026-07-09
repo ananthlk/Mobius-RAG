@@ -3337,14 +3337,23 @@ def _run_retag_inplace(document_ids, limit: int, only_stale: bool, max_lines: in
             return p_t, d_t, j_t
 
         # 2) Target document set.
+        # Ephemeral (instant-rag, expires_at set) docs are EXCLUDED from the
+        # auto-selected retag scope: a 7d-TTL doc expires before a lexicon
+        # revision bump matters, so retagging it is pure churn. Promotion
+        # clears expires_at (→ NULL), which re-includes the doc here with no
+        # further bookkeeping. Explicit document_ids callers bypass the filter.
         if document_ids:
             target = list(document_ids)
         elif only_stale:
-            cur.execute("SELECT document_id::text FROM document_tags "
-                        "WHERE lexicon_revision IS DISTINCT FROM %s", (revision,))
+            cur.execute("SELECT dt.document_id::text FROM document_tags dt "
+                        "JOIN documents d ON d.id = dt.document_id "
+                        "WHERE dt.lexicon_revision IS DISTINCT FROM %s "
+                        "AND d.expires_at IS NULL", (revision,))
             target = [r[0] for r in cur.fetchall()]
         else:
-            cur.execute("SELECT DISTINCT document_id::text FROM policy_lines")
+            cur.execute("SELECT DISTINCT pl.document_id::text FROM policy_lines pl "
+                        "JOIN documents d ON d.id = pl.document_id "
+                        "WHERE d.expires_at IS NULL")
             target = [r[0] for r in cur.fetchall()]
         # Order SMALL docs first (one grouped count, indexed by document_id) so
         # the bulk of the corpus lands in minutes and the handful of giant docs
