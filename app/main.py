@@ -5070,17 +5070,21 @@ async def upload_file(
         stage = "extracted" if document.status == "completed" else (
             "failed" if document.status == "failed" else document.status
         )
+        _doc_id_str = str(document.id)
         return {
             "filename": file.filename,
             "content_type": file.content_type,
             "size": len(contents),
             "hash": file_hash,
             "gcs_path": gcs_path,
-            "document_id": str(document.id),
+            "document_id": _doc_id_str,
+            "upload_id": _doc_id_str,  # P0: same as document_id
             "status": document.status,
             "page_count": _pc,
             "estimated_processing_seconds": int(eta_seconds),
+            "estimated_seconds": int(eta_seconds),  # §1 alias
             "stage": stage,
+            "progress_channel": f"/chat/uploads/{_doc_id_str}/events",  # §1 — chat bridges this
         }
     except HTTPException:
         raise
@@ -11673,6 +11677,175 @@ async def stream_chunking_events_sse(document_id: str):
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",  # Disable nginx buffering
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# P0 instant-RAG progress stream (§2 of instant-rag-progress-contract.md)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/uploads/{document_id}/progress")
+async def upload_progress_stream(document_id: str):
+    """SSE progress stream per document_id — emits §2-shape events.
+
+    Stages: queued → extracting → chunking → embedding → publishing → ready | failed
+    Late-subscribe: if the doc is already terminal, emits the terminal event and closes.
+    Poll interval: 2 s.  Auto-closes on terminal event or after 10 min.
+    """
+    try:
+        doc_uuid = uuid.UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document_id")
+
+    async def _derive_progress() -> dict | None:
+        """Query DB → synthesize one §2 progress dict.  Returns None if doc missing."""
+        from app.database import AsyncSessionLocal
+        async with AsyncSessionLocal() as _db:
+            doc_r = await _db.execute(select(Document.id).where(Document.id == doc_uuid))
+            if not doc_r.first():
+                return None
+
+            cj_r = await _db.execute(
+                select(ChunkingJob)
+                .where(ChunkingJob.document_id == doc_uuid)
+                .order_by(ChunkingJob.created_at.desc())
+                .limit(1)
+            )
+            cj = cj_r.scalar_one_or_none()
+
+            ce_r = await _db.execute(
+                select(ChunkingEvent.event_type)
+                .where(ChunkingEvent.document_id == doc_uuid)
+                .order_by(ChunkingEvent.created_at.desc(), ChunkingEvent.id.desc())
+                .limit(1)
+            )
+            ce_row = ce_r.first()
+            latest_ev = ce_row[0] if ce_row else None
+
+            ej_r = await _db.execute(
+                select(EmbeddingJob)
+                .where(EmbeddingJob.document_id == doc_uuid)
+                .order_by(EmbeddingJob.created_at.desc())
+                .limit(1)
+            )
+            ej = ej_r.scalar_one_or_none()
+
+            pub_r = await _db.execute(
+                select(func.count()).select_from(RagPublishedEmbedding)
+                .where(RagPublishedEmbedding.document_id == str(doc_uuid))
+            )
+            pub_count: int = pub_r.scalar() or 0
+
+            page_r = await _db.execute(
+                select(func.count()).select_from(DocumentPage)
+                .where(DocumentPage.document_id == doc_uuid)
+            )
+            page_count: int = page_r.scalar() or 0
+
+            pp_r = await _db.execute(
+                select(func.count()).select_from(PolicyParagraph)
+                .where(PolicyParagraph.document_id == doc_uuid)
+            )
+            para_count: int = pp_r.scalar() or 0
+
+        base = {"document_id": document_id, "upload_id": document_id}
+
+        # Ready — published embeddings are the ground truth
+        if pub_count > 0:
+            return {**base, "stage": "ready", "pct": 100, "message": "ready",
+                    "terminal": True, "chunks_count": pub_count, "tier": "private"}
+
+        if cj is None:
+            return {**base, "stage": "queued", "pct": 2, "message": "queued", "terminal": False}
+
+        status = cj.status
+
+        if status == "pending":
+            return {**base, "stage": "queued", "pct": 5, "message": "queued", "terminal": False}
+
+        if status in ("failed", "blocked"):
+            err = cj.error_message or ("blocked after repeated failures" if status == "blocked" else "processing failed")
+            return {**base, "stage": "failed", "pct": 0, "message": err,
+                    "terminal": True, "error": err, "retryable": status != "blocked"}
+
+        if status == "cancelled":
+            return {**base, "stage": "failed", "pct": 0, "message": "cancelled",
+                    "terminal": True, "error": "cancelled", "retryable": False}
+
+        # EmbeddingJob presence signals chunking is done
+        if ej is not None:
+            if ej.status in ("pending", "processing"):
+                return {**base, "stage": "embedding", "pct": 72, "message": "embedding", "terminal": False}
+            if ej.status == "completed":
+                # pub_count is 0 here; publish is in-flight
+                return {**base, "stage": "publishing", "pct": 90, "message": "publishing", "terminal": False}
+            if ej.status == "failed":
+                err = ej.error_message or "embedding failed"
+                return {**base, "stage": "failed", "pct": 0, "message": err,
+                        "terminal": True, "error": err, "retryable": True}
+
+        if status == "completed":
+            # Chunking done; embedding worker hasn't claimed the job yet
+            return {**base, "stage": "embedding", "pct": 65, "message": "embedding queued", "terminal": False}
+
+        # status == "processing" — use latest event_type for granularity
+        CHUNK_EVENTS = {
+            "paragraph_complete", "paragraph_persisted", "paragraph_error",
+            "progress_update", "status_message", "critique_start", "critique_complete",
+            "retry_start", "retry_extraction_complete",
+        }
+        if latest_ev in CHUNK_EVENTS:
+            total = max(page_count, para_count, 1)
+            done = para_count
+            pct = min(25 + int(35 * done / total), 60)
+            msg = f"chunking ({done}/{total})"
+            return {**base, "stage": "chunking", "pct": pct, "message": msg,
+                    "terminal": False, "chunks_done": done, "chunks_total": total}
+
+        return {**base, "stage": "extracting", "pct": 15, "message": "extracting", "terminal": False}
+
+    async def _sse_gen():
+        from app.database import AsyncSessionLocal
+        try:
+            # Verify doc exists before opening the stream
+            async with AsyncSessionLocal() as _db:
+                doc_r = await _db.execute(select(Document.id).where(Document.id == doc_uuid))
+                if not doc_r.first():
+                    yield f"data: {json.dumps({'document_id': document_id, 'error': 'not found', 'terminal': True})}\n\n"
+                    return
+
+            last_key: tuple | None = None
+            for _ in range(300):  # max 10 min (300 × 2 s)
+                progress = await _derive_progress()
+                if progress is None:
+                    yield f"data: {json.dumps({'document_id': document_id, 'error': 'not found', 'terminal': True})}\n\n"
+                    return
+
+                state_key = (progress["stage"], progress.get("pct", 0) // 5)
+                if state_key != last_key:
+                    last_key = state_key
+                    yield f"data: {json.dumps(progress)}\n\n"
+
+                if progress.get("terminal"):
+                    return
+
+                await asyncio.sleep(2)
+
+            # Timed out
+            yield f"data: {json.dumps({**{'document_id': document_id, 'upload_id': document_id}, 'stage': 'failed', 'pct': 0, 'message': 'progress stream timed out', 'terminal': True, 'error': 'timed out', 'retryable': False})}\n\n"
+        except asyncio.CancelledError:
+            pass
+        except Exception as _exc:
+            logger.warning("[progress-sse] error for doc %s: %s", document_id, _exc)
+
+    return StreamingResponse(
+        _sse_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
         },
     )
 
