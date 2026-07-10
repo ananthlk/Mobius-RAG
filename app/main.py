@@ -4786,6 +4786,110 @@ async def check_file(filename: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── Instant inline pipeline ─────────────────────────────────────────────────
+# Small chat uploads (≤10 pages, ≤500 KB) bypass the worker queue entirely.
+# The ChunkingJob worker is serial (maxScale=1) and may be busy with a 12-min
+# batch job — queuing a 734-byte TXT behind it produced 143s latency.
+# Inline runs Path B deterministically in-request: ~3-8s total, doc searchable
+# when the HTTP response returns. Larger docs fall through to async queue.
+_INSTANT_MAX_PAGES = 10
+_INSTANT_MAX_BYTES = 500_000  # 500 KB
+
+
+async def _run_instant_pipeline(
+    doc_id_str: str,
+    job_id_str: str,
+    pages: list,
+    doc_uuid: "UUID",
+) -> None:
+    """Path B chunk → embed → publish, fully inline. No ChunkingJob worker involved.
+
+    ChunkingJob already set to status=processing/worker_id=inline before this
+    task fires. On error: resets job to pending so the async worker claims it.
+    """
+    import uuid as _uuid_mod
+    from datetime import datetime as _dt
+    from app.database import AsyncSessionLocal
+    from app.worker.coordinator import run_chunking_loop
+    from app.embedding_worker import process_embedding_job
+    from app.services.policy_lexicon_repo import load_lexicon_snapshot_db
+
+    _job_uuid = _uuid_mod.UUID(job_id_str)
+
+    try:
+        async with AsyncSessionLocal() as _db:
+            # Load lexicon for Path B tag scoring
+            try:
+                _lex = await load_lexicon_snapshot_db(_db)
+            except Exception as _lex_err:
+                logger.warning("[instant] lexicon load failed (continuing without): %s", _lex_err)
+                _lex = None
+
+            # Fetch ChunkingJob row so we can update it
+            _jres = await _db.execute(select(ChunkingJob).where(ChunkingJob.id == _job_uuid))
+            _job = _jres.scalar_one_or_none()
+
+            # Run Path B coordinator (chunk → policy_paragraphs → policy_lines → lexicon tags)
+            _ok = await run_chunking_loop(
+                doc_id_str, doc_uuid, job_id_str, pages, _db,
+                extraction_enabled=False,
+                critique_enabled=False,
+                max_retries=0,
+                lexicon_snapshot=_lex,
+            )
+            if not _ok:
+                raise RuntimeError("run_chunking_loop returned False")
+
+            if _job:
+                _job.status = "completed"
+                _job.completed_at = _dt.utcnow()
+                _job.updated_at = _dt.utcnow()
+                await _db.commit()
+
+            # Create EmbeddingJob and run embed + auto-publish inline
+            _emb_job = EmbeddingJob(
+                document_id=doc_uuid,
+                status="processing",
+                worker_id="inline",
+                generator_id="B",
+                started_at=_dt.utcnow(),
+                created_at=_dt.utcnow(),
+                updated_at=_dt.utcnow(),
+            )
+            _db.add(_emb_job)
+            await _db.commit()
+            await _db.refresh(_emb_job)
+
+            await process_embedding_job(_emb_job, _db)
+
+            _emb_job.status = "completed"
+            _emb_job.completed_at = _dt.utcnow()
+            _emb_job.updated_at = _dt.utcnow()
+            await _db.commit()
+
+            logger.info("[instant] doc %s chunk+embed+publish DONE", doc_id_str)
+
+    except Exception as _exc:
+        logger.error(
+            "[instant] pipeline failed for doc %s — falling back to async worker: %s",
+            doc_id_str, _exc, exc_info=True,
+        )
+        try:
+            from app.database import AsyncSessionLocal as _ASL
+            from datetime import datetime as _dt2
+            async with _ASL() as _fb_db:
+                _fbr = await _fb_db.execute(select(ChunkingJob).where(ChunkingJob.id == _job_uuid))
+                _fb_job = _fbr.scalar_one_or_none()
+                if _fb_job and _fb_job.status in ("processing", "pending"):
+                    _fb_job.status = "pending"
+                    _fb_job.worker_id = None
+                    _fb_job.updated_at = _dt2.utcnow()
+                    await _fb_db.commit()
+                    logger.info("[instant] fallback: reset job %s to pending", job_id_str)
+        except Exception as _fb_err:
+            logger.error("[instant] fallback re-queue also failed: %s", _fb_err)
+
+
 def _estimate_processing_seconds(ext: str, size_bytes: int, page_count: int, is_chat: bool = False) -> int:
     """4s/page for PDFs (chunking + embedding dominates), with overhead.
     Caps at 30 min. Reasonable for the v1 chat-side ETA — refine when
@@ -5016,53 +5120,75 @@ async def upload_file(
 
         # Auto-chain to chunking + embedding for ANY successful extraction.
         # Path B (chunk → embed → publish) runs uniformly for rag UI uploads,
-        # chat uploads, and agent uploads. ``agent_scope`` is metadata-only
-        # attribution — NOT a pipeline gate (was previously gated on
-        # agent_scope being set, which left rag-UI uploads stuck at
-        # extracted-but-unchunked).
+        # chat uploads, and agent uploads.
         # AUTO_PUBLISH_ON_EMBED on the embedding worker handles publish.
+        #
+        # TWO paths for small chat uploads vs. everything else:
+        #
+        #   INLINE (chat + ≤_INSTANT_MAX_PAGES + ≤_INSTANT_MAX_BYTES):
+        #     Skip the worker queue — run Path B synchronously via asyncio.create_task().
+        #     ChunkingJob is created with status=processing/worker_id=inline so the
+        #     serial worker never claims it. ~3–8s total; doc searchable before the
+        #     response returns to the caller. Fallback: reset to pending on error.
+        #
+        #   ASYNC (everything else):
+        #     Enqueue ChunkingJob(status=pending) as before; worker claims it.
         if document.status == "completed":
             try:
                 from datetime import datetime as _dt
                 from sqlalchemy import text as _text
                 _is_chat_upload = (agent_scope or "").lower() == "chat"
+                _use_inline = (
+                    _is_chat_upload
+                    and int(page_count or 0) <= _INSTANT_MAX_PAGES
+                    and len(contents) <= _INSTANT_MAX_BYTES
+                )
+                _job_status = "processing" if _use_inline else "pending"
+                _job_worker = "inline" if _use_inline else None
                 auto_job = ChunkingJob(
                     document_id=document.id,
-                    # Instant/chat uploads use Path B (generator="B"): deterministic
-                    # paragraph split → PolicyParagraph+PolicyLines → lexicon tag →
-                    # embed → publish. No LLM in the hot path → 2–5s for small docs.
-                    # build_paragraph_and_lines() CREATES policy_lines from raw text;
-                    # it does NOT require pre-existing rows (earlier comment was wrong).
-                    # LLM extraction (Path A) runs deferred or at corpus-promotion time.
                     generator_id="B",
-                    status="pending",
+                    status=_job_status,
                     threshold="0.6",
                     critique_enabled="false",
                     max_retries=0,
                     extraction_enabled="false",
+                    worker_id=_job_worker,
                     created_at=_dt.utcnow(),
                     updated_at=_dt.utcnow(),
-                    # priority is NOT set here — omit from INSERT so the query
-                    # succeeds even if the migration hasn't run yet (race window
-                    # at startup). server_default=10 handles normal jobs at the DB
-                    # level. Chat uploads get priority=0 via a separate UPDATE below.
                 )
                 db.add(auto_job)
                 await db.commit()
-                logger.info(
-                    "[upload] auto-queued Path B chunking for doc %s (agent_scope=%s, unified-flow)",
-                    document.id, agent_scope,
-                )
-                if _is_chat_upload:
-                    try:
-                        await db.execute(
-                            _text("UPDATE chunking_jobs SET priority = 0 WHERE id = CAST(:jid AS uuid)"),
-                            {"jid": str(auto_job.id)},
+
+                if _use_inline:
+                    # Fire-and-forget inline pipeline; upload returns immediately.
+                    asyncio.create_task(
+                        _run_instant_pipeline(
+                            str(document.id),
+                            str(auto_job.id),
+                            pages,
+                            document.id,
                         )
-                        await db.commit()
-                    except Exception as _prio_err:
-                        await db.rollback()
-                        logger.debug("[upload] priority update skipped (migration pending?): %s", _prio_err)
+                    )
+                    logger.info(
+                        "[upload] INLINE instant pipeline started for doc %s (%d pages, %d bytes)",
+                        document.id, int(page_count or 0), len(contents),
+                    )
+                else:
+                    logger.info(
+                        "[upload] async-queued Path B chunking for doc %s (agent_scope=%s)",
+                        document.id, agent_scope,
+                    )
+                    if _is_chat_upload:
+                        try:
+                            await db.execute(
+                                _text("UPDATE chunking_jobs SET priority = 0 WHERE id = CAST(:jid AS uuid)"),
+                                {"jid": str(auto_job.id)},
+                            )
+                            await db.commit()
+                        except Exception as _prio_err:
+                            await db.rollback()
+                            logger.debug("[upload] priority update skipped (migration pending?): %s", _prio_err)
             except Exception as auto_err:
                 logger.warning(
                     "[upload] auto-chunk queue failed (non-fatal): %s",
