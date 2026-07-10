@@ -279,34 +279,42 @@ async def write_event(
     event_type: str,
     event_data: dict,
 ) -> None:
-    """Persist a single ChunkingEvent, commit, and pg_notify for SSE push."""
-    try:
-        event = ChunkingEvent(
-            document_id=doc_uuid,
-            event_type=event_type,
-            event_data=event_data,
-        )
-        db.add(event)
-        await db.commit()
+    """Persist a single ChunkingEvent, commit, and pg_notify for SSE push.
 
-        # Push real-time notification via pg_notify (payload < 8 KB)
-        try:
-            payload = _json.dumps({
-                "id": str(event.id),
-                "document_id": str(doc_uuid),
-                "event_type": event_type,
-                "event_data": event_data,
-            }, default=str)
-            await db.execute(
-                text("SELECT pg_notify('chunking_events', :p)"), {"p": payload}
+    Uses a FRESH session (not the shared ``db``) so that an aborted outer
+    transaction (InFailedSQLTransactionError from a prior failed statement)
+    cannot poison this write.  The shared session's state is untouched.
+    See: _finalize_job_atomic for the same pattern.
+    """
+    from app.database import AsyncSessionLocal
+    try:
+        async with AsyncSessionLocal() as event_db:
+            event = ChunkingEvent(
+                document_id=doc_uuid,
+                event_type=event_type,
+                event_data=event_data,
             )
-            await db.commit()
-        except Exception as notify_exc:
-            # Non-fatal: SSE will still pick up on next poll/reconnect
-            logger.debug("[db] pg_notify failed (non-fatal): %s", notify_exc)
+            event_db.add(event)
+            await event_db.commit()
+            await event_db.refresh(event)
+
+            # Push real-time notification via pg_notify (payload < 8 KB)
+            try:
+                payload = _json.dumps({
+                    "id": str(event.id),
+                    "document_id": str(doc_uuid),
+                    "event_type": event_type,
+                    "event_data": event_data,
+                }, default=str)
+                await event_db.execute(
+                    text("SELECT pg_notify('chunking_events', :p)"), {"p": payload}
+                )
+                await event_db.commit()
+            except Exception as notify_exc:
+                # Non-fatal: SSE will still pick up on next poll/reconnect
+                logger.debug("[db] pg_notify failed (non-fatal): %s", notify_exc)
     except Exception as exc:
         logger.error("[db] write_event(%s) failed: %s", event_type, exc, exc_info=True)
-        await db.rollback()
 
 
 # ---------------------------------------------------------------------------

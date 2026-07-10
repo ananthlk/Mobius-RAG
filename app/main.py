@@ -5028,18 +5028,18 @@ async def upload_file(
                 _is_chat_upload = (agent_scope or "").lower() == "chat"
                 auto_job = ChunkingJob(
                     document_id=document.id,
-                    # Chat uploads: Path A (generator="A") runs LLM extraction directly
-                    # on the raw page text — required for documents with no prior
-                    # policy_lines (first-time processing). Path B (generator="B")
-                    # only processes pre-existing policy_lines, so it produces
-                    # 0 paragraphs for fresh chat uploads.
-                    # Non-chat uploads: Path B is the standard corpus ingestion path.
-                    generator_id="A" if _is_chat_upload else "B",
+                    # Instant/chat uploads use Path B (generator="B"): deterministic
+                    # paragraph split → PolicyParagraph+PolicyLines → lexicon tag →
+                    # embed → publish. No LLM in the hot path → 2–5s for small docs.
+                    # build_paragraph_and_lines() CREATES policy_lines from raw text;
+                    # it does NOT require pre-existing rows (earlier comment was wrong).
+                    # LLM extraction (Path A) runs deferred or at corpus-promotion time.
+                    generator_id="B",
                     status="pending",
                     threshold="0.6",
-                    critique_enabled="true",
-                    max_retries=2,
-                    extraction_enabled="true",
+                    critique_enabled="false",
+                    max_retries=0,
+                    extraction_enabled="false",
                     created_at=_dt.utcnow(),
                     updated_at=_dt.utcnow(),
                     # priority is NOT set here — omit from INSERT so the query
@@ -5216,16 +5216,16 @@ async def retry_document(
         _agent_scope = document.source_metadata.get("agent_scope", "") or ""
     _is_chat = _agent_scope.lower() == "chat"
 
-    # Re-queue chunking job
+    # Re-queue chunking job — always Path B (deterministic, no LLM in hot path)
     try:
         auto_job = ChunkingJob(
             document_id=document.id,
-            generator_id="A" if _is_chat else "B",
+            generator_id="B",
             status="pending",
             threshold="0.6",
-            critique_enabled="true",
-            max_retries=2,
-            extraction_enabled="true",
+            critique_enabled="false",
+            max_retries=0,
+            extraction_enabled="false",
             created_at=_dt.utcnow(),
             updated_at=_dt.utcnow(),
         )
