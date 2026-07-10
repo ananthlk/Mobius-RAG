@@ -405,6 +405,10 @@ async def finalise(ctx: ChunkingRunContext, resources: PathBResources | None) ->
             # Fire-and-forget inline cleanup: deterministic rules + catalog +
             # bounded LLM triage on this document's candidates. Best-effort —
             # never blocks or fails ingestion.
-            await _trigger_lexicon_cleanup(ctx, str(doc_uuid), doc_id)
+            # Skipped on the inline instant pipeline (ctx.skip_lexicon_cleanup=True)
+            # where the ~6s HTTP round-trip is unacceptable. Candidate mining
+            # still runs at corpus-promotion / batch re-process time.
+            if not getattr(ctx, "skip_lexicon_cleanup", False):
+                await _trigger_lexicon_cleanup(ctx, str(doc_uuid), doc_id)
         except Exception as cand_err:
             logger.warning("[%s] Path B candidate extraction (non-fatal): %s", doc_id, cand_err, exc_info=True)

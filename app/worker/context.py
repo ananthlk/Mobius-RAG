@@ -34,6 +34,12 @@ class ChunkingRunContext:
     total_pages: int = 0
     results_paragraphs: dict[str, Any] = field(default_factory=dict)
 
+    # When True, path_b.finalise skips _trigger_lexicon_cleanup (the HTTP call
+    # to LEXICON_MAINTENANCE_URL). Set for inline instant uploads where that
+    # ~6s round-trip is unacceptable in the hot path. Candidate mining still
+    # happens at corpus-promotion / batch re-process time.
+    skip_lexicon_cleanup: bool = False
+
     # ------------------------------------------------------------------ emit
     async def emit(
         self,

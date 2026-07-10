@@ -362,15 +362,21 @@ async def process_job(job: ChunkingJob, db: AsyncSession, *, worker_cfg: WorkerC
 # worker_loop
 # ---------------------------------------------------------------------------
 
-async def worker_loop():
+async def worker_loop(*, instant_only: bool = False):
     """Main worker loop — polls for pending jobs and processes them.
+
+    ``instant_only=True``: only claim jobs with priority=0 (chat instant
+    uploads), never touching the batch queue. The companion batch worker
+    runs ``instant_only=False`` and filters priority > 0. Together they
+    implement the dedicated instant lane so instant jobs never wait behind
+    12-min batch corpus jobs.
+
+    ``instant_only=False`` (default): batch mode — claims priority > 0 jobs
+    (coalesce(priority, 10) > 0 — server_default=10 for non-chat uploads).
 
     Graceful shutdown: installs SIGTERM/SIGINT handlers on start;
     the loop polls ``is_shutting_down()`` between iterations so
-    in-flight jobs complete naturally before exit. DB rows locked
-    by a half-finished session release automatically on rollback —
-    the stale-recovery sweep (already running as the first step of
-    each iteration) picks them up on restart.
+    in-flight jobs complete naturally before exit.
     """
     from app.logging_setup import configure_logging
     configure_logging("mobius-rag-chunker")
@@ -378,10 +384,11 @@ async def worker_loop():
     from app.worker.shutdown import (
         install_handlers, is_shutting_down, sleep_or_shutdown,
     )
-    install_handlers(worker_name="chunking-worker")
+    _lane = "instant" if instant_only else "batch"
+    install_handlers(worker_name=f"chunking-worker-{_lane}")
 
     cfg = load_worker_config()
-    logger.info("Worker %s starting...", WORKER_ID)
+    logger.info("Worker %s starting (lane=%s)...", WORKER_ID, _lane)
 
     # Startup migrations
     _run_startup_migrations_sync = [
@@ -435,11 +442,18 @@ async def worker_loop():
                     logger.warning("Stale job recovery failed (non-fatal): %s", recovery_err)
 
             # ── Claim next pending job (atomic with FOR UPDATE SKIP LOCKED) ──
+            # instant_only=True  → only priority=0 jobs (chat instant fallback lane)
+            # instant_only=False → only priority>0 jobs (batch corpus queue)
             async with AsyncSessionLocal() as db:
+                _prio_col = func.coalesce(ChunkingJob.priority, 10)
+                _prio_filter = (
+                    _prio_col == 0 if instant_only
+                    else _prio_col > 0
+                )
                 result = await db.execute(
                     select(ChunkingJob)
-                    .where(ChunkingJob.status == "pending")
-                    .order_by(func.coalesce(ChunkingJob.priority, 10), ChunkingJob.created_at)
+                    .where(ChunkingJob.status == "pending", _prio_filter)
+                    .order_by(_prio_col, ChunkingJob.created_at)
                     .limit(1)
                     .with_for_update(skip_locked=True)
                 )
@@ -469,13 +483,28 @@ async def worker_loop():
 # ---------------------------------------------------------------------------
 
 def main():
-    """Entry point for worker process."""
+    """Entry point for batch chunking worker (priority > 0 jobs)."""
     try:
-        asyncio.run(worker_loop())
+        asyncio.run(worker_loop(instant_only=False))
     except KeyboardInterrupt:
         logger.info("Worker shutting down...")
     except Exception as e:
         logger.error("Fatal error in worker: %s", e, exc_info=True)
+        sys.exit(1)
+
+
+def instant_main():
+    """Entry point for instant chunking worker (priority = 0 jobs only).
+
+    Runs alongside main() as a second thread so instant jobs never wait
+    behind 12-min batch corpus jobs. Started by worker_server_chunking.py.
+    """
+    try:
+        asyncio.run(worker_loop(instant_only=True))
+    except KeyboardInterrupt:
+        logger.info("Instant worker shutting down...")
+    except Exception as e:
+        logger.error("Fatal error in instant worker: %s", e, exc_info=True)
         sys.exit(1)
 
 

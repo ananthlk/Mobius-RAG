@@ -46,10 +46,13 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Mobius RAG Chunking Worker", version="0.1.0")
 
-# Supervisor state.
+# Supervisor state — batch worker.
 _worker_thread: threading.Thread | None = None
 _worker_last_tick: float = 0.0  # monotonic timestamp of last supervisor heartbeat
 _worker_restart_count: int = 0
+
+# Supervisor state — instant worker (priority=0 lane, separate thread).
+_instant_worker_thread: threading.Thread | None = None
 
 # Liveness threshold — if the supervisor hasn't ticked in this many
 # seconds, ``/health`` reports unhealthy. Default 120s covers the
@@ -117,9 +120,37 @@ def _worker_loop_supervisor() -> None:
     )
 
 
+def _instant_worker_supervisor() -> None:
+    """Supervisor for the instant lane worker (priority=0 jobs only).
+
+    Mirrors _worker_loop_supervisor but calls instant_main() instead of main().
+    Crash-restarts with exponential backoff. Runs until shutdown.
+    """
+    from app.worker.shutdown import is_shutting_down
+
+    backoff = 1.0
+    while not is_shutting_down():
+        try:
+            from app.worker.main import instant_main
+            logger.info("[instant-supervisor] starting instant_main()")
+            instant_main()
+            logger.warning("[instant-supervisor] instant_main() returned — restarting after %.1fs.", backoff)
+        except SystemExit as se:
+            logger.warning("[instant-supervisor] instant_main() raised SystemExit(%s) — restarting after %.1fs.", se.code, backoff)
+        except Exception as exc:
+            logger.exception("[instant-supervisor] instant_main() crashed: %s — restarting after %.1fs.", exc, backoff)
+
+        if is_shutting_down():
+            break
+        time.sleep(backoff)
+        backoff = min(backoff * 2, 60.0)
+
+    logger.info("[instant-supervisor] shutdown signalled, exiting")
+
+
 @app.on_event("startup")
 def start_worker():
-    global _worker_thread, _worker_last_tick
+    global _worker_thread, _worker_last_tick, _instant_worker_thread
     _worker_last_tick = time.monotonic()
     _worker_thread = threading.Thread(
         target=_worker_loop_supervisor,
@@ -127,7 +158,15 @@ def start_worker():
         daemon=True,
     )
     _worker_thread.start()
-    logger.info("RAG chunking worker supervisor started in background thread")
+    logger.info("RAG chunking batch-worker supervisor started in background thread")
+
+    _instant_worker_thread = threading.Thread(
+        target=_instant_worker_supervisor,
+        name="rag-instant-chunker-supervisor",
+        daemon=True,
+    )
+    _instant_worker_thread.start()
+    logger.info("RAG chunking instant-worker supervisor started in background thread")
 
 
 @app.on_event("shutdown")

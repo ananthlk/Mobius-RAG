@@ -48,6 +48,7 @@ async def run_chunking_loop(
     llm: Any = None,
     lexicon_snapshot: Any | None = None,
     worker_cfg: WorkerConfig | None = None,
+    skip_lexicon_cleanup: bool = False,
 ) -> bool:
     """Top-level chunking coordinator.
 
@@ -89,6 +90,7 @@ async def run_chunking_loop(
         job_id=str(job_id),
         total_paragraphs=total_paragraphs,
         total_pages=total_pages,
+        skip_lexicon_cleanup=skip_lexicon_cleanup,
     )
 
     # --- Idempotent cleanup ---

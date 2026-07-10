@@ -84,6 +84,23 @@ async def run_startup_migrations():
     assert_hosted_config()
 
     asyncio.create_task(_run_startup_migrations_background())
+    asyncio.create_task(_warm_embed_provider())
+
+
+async def _warm_embed_provider() -> None:
+    """Pre-initialize the Vertex AI embedding provider to eliminate cold-start latency.
+
+    The first embed_async call after a new Cloud Run instance starts takes ~17s
+    (gRPC/HTTP connection setup). Firing a throwaway call at startup drops
+    subsequent inline-pipeline embed calls to ~2-3s warm latency.
+    """
+    try:
+        from app.services.embedding_provider import get_embedding_provider, embed_async
+        _prov = get_embedding_provider()
+        await embed_async(["startup warmup"], _prov)
+        logger.info("[startup] embed provider warmed up successfully")
+    except Exception as _exc:
+        logger.warning("[startup] embed provider warmup failed (non-fatal): %s", _exc)
 
 
 async def _run_startup_migrations_background():
@@ -4840,13 +4857,18 @@ async def _run_instant_pipeline(
             _jres = await _db.execute(select(ChunkingJob).where(ChunkingJob.id == _job_uuid))
             _job = _jres.scalar_one_or_none()
 
-            # Run Path B coordinator (chunk → policy_paragraphs → policy_lines → lexicon tags)
+            # Run Path B coordinator (chunk → policy_paragraphs → policy_lines → lexicon tags).
+            # skip_lexicon_cleanup=True: skip the HTTP call to LEXICON_MAINTENANCE_URL
+            # (~6s round-trip for candidate mining). Tagging (apply_lexicon/Aho-Corasick)
+            # still runs — it's part of path_b's paragraph processing, not finalise cleanup.
+            # Candidate mining happens at corpus-promotion / batch re-process time.
             _ok = await run_chunking_loop(
                 doc_id_str, doc_uuid, job_id_str, _db_pages, _db,
                 extraction_enabled=False,
                 critique_enabled=False,
                 max_retries=0,
                 lexicon_snapshot=_lex,
+                skip_lexicon_cleanup=True,
             )
             if not _ok:
                 raise RuntimeError("run_chunking_loop returned False")
