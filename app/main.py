@@ -4799,13 +4799,14 @@ _INSTANT_MAX_BYTES = 500_000  # 500 KB
 async def _run_instant_pipeline(
     doc_id_str: str,
     job_id_str: str,
-    pages: list,
     doc_uuid: "UUID",
 ) -> None:
     """Path B chunk → embed → publish, fully inline. No ChunkingJob worker involved.
 
     ChunkingJob already set to status=processing/worker_id=inline before this
-    task fires. On error: resets job to pending so the async worker claims it.
+    task fires. Loads DocumentPage objects from DB (coordinator expects model
+    objects with .text/.page_number attributes, not plain dicts).
+    On error: resets job to pending so the async worker claims it.
     """
     import uuid as _uuid_mod
     from datetime import datetime as _dt
@@ -4818,6 +4819,16 @@ async def _run_instant_pipeline(
 
     try:
         async with AsyncSessionLocal() as _db:
+            # Load DocumentPage model objects — coordinator accesses .text, .page_number
+            _pages_res = await _db.execute(
+                select(DocumentPage)
+                .where(DocumentPage.document_id == doc_uuid)
+                .order_by(DocumentPage.page_number)
+            )
+            _db_pages = _pages_res.scalars().all()
+            if not _db_pages:
+                raise RuntimeError(f"no DocumentPage rows for doc {doc_id_str}")
+
             # Load lexicon for Path B tag scoring
             try:
                 _lex = await load_lexicon_snapshot_db(_db)
@@ -4831,7 +4842,7 @@ async def _run_instant_pipeline(
 
             # Run Path B coordinator (chunk → policy_paragraphs → policy_lines → lexicon tags)
             _ok = await run_chunking_loop(
-                doc_id_str, doc_uuid, job_id_str, pages, _db,
+                doc_id_str, doc_uuid, job_id_str, _db_pages, _db,
                 extraction_enabled=False,
                 critique_enabled=False,
                 max_retries=0,
@@ -5166,7 +5177,6 @@ async def upload_file(
                         _run_instant_pipeline(
                             str(document.id),
                             str(auto_job.id),
-                            pages,
                             document.id,
                         )
                     )
