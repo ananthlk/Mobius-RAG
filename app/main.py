@@ -1669,14 +1669,18 @@ async def backfill_chunk_tags(
     """
     from sqlalchemy import text as _text
 
+    # Correct join: rpe.source_id → hierarchical_chunks.id → policy_paragraphs
+    # (rpe.paragraph_index is within-page, not policy_paragraphs.order_index directly)
     doc_rows = (await db.execute(_text("""
         SELECT DISTINCT rpe.document_id::text AS d
         FROM rag_published_embeddings rpe
+        JOIN hierarchical_chunks hc ON hc.id = rpe.source_id
         JOIN policy_paragraphs pp
-          ON pp.document_id = rpe.document_id
-         AND pp.page_number = rpe.page_number
-         AND pp.order_index = rpe.paragraph_index
-        WHERE rpe.chunk_d_tags IS NULL
+          ON pp.document_id = hc.document_id
+         AND pp.page_number = hc.page_number
+         AND pp.order_index = hc.paragraph_index
+        WHERE rpe.source_type = 'hierarchical'
+          AND rpe.chunk_d_tags IS NULL
           AND (pp.d_tags IS NOT NULL OR pp.p_tags IS NOT NULL OR pp.j_tags IS NOT NULL)
         LIMIT :lim
     """), {"lim": max_docs})).fetchall()
@@ -1691,21 +1695,19 @@ async def backfill_chunk_tags(
             r = await db.execute(_text("""
                 WITH updated AS (
                     UPDATE rag_published_embeddings rpe
-                    SET chunk_d_tags = COALESCE(pp_dedup.d_tags, '{}'),
-                        chunk_p_tags = pp_dedup.p_tags,
-                        chunk_j_tags = pp_dedup.j_tags
-                    FROM (
-                        SELECT DISTINCT ON (page_number, order_index)
-                            page_number, order_index, d_tags, p_tags, j_tags
-                        FROM policy_paragraphs
-                        WHERE document_id = CAST(:d AS uuid)
-                          AND (d_tags IS NOT NULL OR p_tags IS NOT NULL OR j_tags IS NOT NULL)
-                        ORDER BY page_number, order_index, created_at DESC
-                    ) pp_dedup
-                    WHERE rpe.document_id = CAST(:d AS uuid)
-                      AND rpe.page_number = pp_dedup.page_number
-                      AND rpe.paragraph_index = pp_dedup.order_index
+                    SET chunk_d_tags = COALESCE(pp.d_tags, '{}'),
+                        chunk_p_tags = pp.p_tags,
+                        chunk_j_tags = pp.j_tags
+                    FROM hierarchical_chunks hc
+                    JOIN policy_paragraphs pp
+                      ON pp.document_id = hc.document_id
+                     AND pp.page_number = hc.page_number
+                     AND pp.order_index = hc.paragraph_index
+                    WHERE rpe.source_id = hc.id
+                      AND rpe.source_type = 'hierarchical'
+                      AND rpe.document_id = CAST(:d AS uuid)
                       AND rpe.chunk_d_tags IS NULL
+                      AND (pp.d_tags IS NOT NULL OR pp.p_tags IS NOT NULL OR pp.j_tags IS NOT NULL)
                     RETURNING 1
                 )
                 SELECT COUNT(*) AS n FROM updated
