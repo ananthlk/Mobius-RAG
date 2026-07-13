@@ -1500,7 +1500,11 @@ async def _dtag_arm(
         WHERE chunk_d_tags IS NOT NULL
           {filter_sql}
           {dtag_filter}
-        ORDER BY updated_at DESC
+        ORDER BY CASE document_authority_level
+            WHEN 'contract_source_of_truth' THEN 0
+            WHEN 'operational' THEN 1
+            ELSE 2
+        END, rag_published_embeddings.id
         LIMIT :k
     """)
     try:
