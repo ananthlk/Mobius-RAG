@@ -1,5 +1,6 @@
 import hashlib
 import logging
+import re
 from pathlib import Path
 from typing import Optional, List, Any
 from fastapi import FastAPI, UploadFile, HTTPException, Depends, Body, Query, Request, Header
@@ -2454,6 +2455,112 @@ def _chunking_status_from_latest_event(event_type: str, event_data: dict) -> tup
             stage = "persisting"
         return ("in_progress", stage)
     return ("in_progress", "idle")
+
+
+_SEARCH_STOPWORDS = frozenset({
+    "the", "a", "an", "of", "for", "to", "and", "or", "in", "on",
+    "document", "doc", "file", "pdf", "version", "latest",
+})
+
+
+def _search_tokenize(s: str) -> list[str]:
+    """Lowercase alphanumeric+dot tokens, whole + dot-parts, de-duped.
+
+    Mirrors mobius-chat's fetch_document tokenizer so both ends of the
+    document name-search rank the same way: dotted policy IDs
+    ("FL.UM.87") match whole, while "Provider_Manual.pdf" still yields
+    the bare "manual" token."""
+    out: dict[str, None] = {}
+    for tok in re.findall(r"[A-Za-z0-9.]+", (s or "").lower()):
+        tok = tok.strip(".")
+        candidates = [tok]
+        if "." in tok:
+            candidates.extend(tok.split("."))
+        for c in candidates:
+            if c and c not in _SEARCH_STOPWORDS and len(c) > 1:
+                out[c] = None
+    return list(out)
+
+
+@app.get("/documents/search")
+async def search_documents(
+    q: str,
+    payer: str | None = None,
+    limit: int = 20,
+    db: AsyncSession = Depends(get_db),
+):
+    """Server-side document name-search: rank documents by query-token
+    overlap over display_name / filename / payer.
+
+    One implementation for every surface that resolves "which document
+    did the user mean" — mobius-chat's ``fetch_document`` skill and the
+    Repository tab's browse box (which previously could only
+    client-side-filter the rows it happened to have loaded). The coarse
+    ILIKE filter runs in SQL so the corpus size never silently caps
+    recall; the overlap ranking matches chat's skill exactly.
+    """
+    limit = max(1, min(50, limit))
+    tokens = _search_tokenize(q)
+    if not tokens:
+        return {"query": q, "count": 0, "documents": []}
+
+    def _token_cond(t: str):
+        pat = f"%{t}%"
+        return or_(
+            Document.display_name.ilike(pat),
+            Document.filename.ilike(pat),
+            Document.payer.ilike(pat),
+        )
+
+    tok_conds = [_token_cond(t) for t in tokens[:8]]
+
+    # Two passes. The all-tokens AND pass first: broad single tokens
+    # ("provider") match thousands of rows, and any recency-capped OR
+    # scan silently drops the best match (this exact failure shipped in
+    # chat's fetch_document once). The AND pass is small and precise;
+    # the OR pass only fills remaining slots.
+    def _scoped(query):
+        if payer:
+            query = query.where(Document.payer == payer)
+        return query.order_by(Document.created_at.desc())
+
+    rows = list((await db.execute(
+        _scoped(select(Document).where(and_(*tok_conds))).limit(200)
+    )).scalars().all())
+    if len(rows) < limit:
+        seen_ids = {d.id for d in rows}
+        or_rows = (await db.execute(
+            _scoped(select(Document).where(or_(*tok_conds))).limit(500)
+        )).scalars().all()
+        rows.extend(d for d in or_rows if d.id not in seen_ids)
+
+    def _overlap(doc: Document) -> int:
+        target = set(_search_tokenize(doc.display_name or ""))
+        target |= set(_search_tokenize(doc.filename or ""))
+        target |= set(_search_tokenize(doc.payer or ""))
+        return sum(1 for t in tokens if t in target)
+
+    scored = sorted(
+        ((_overlap(d), d) for d in rows),
+        key=lambda x: (-x[0], len((x[1].display_name or "") + (x[1].filename or ""))),
+    )
+    out = []
+    for overlap, d in scored[:limit]:
+        if overlap <= 0:
+            continue
+        out.append({
+            "id": str(d.id),
+            "display_name": d.display_name,
+            "filename": d.filename,
+            "payer": d.payer,
+            "state": d.state,
+            "program": d.program,
+            "authority_level": d.authority_level,
+            "status": d.status,
+            "match_overlap": overlap,
+            "has_original_file": bool((d.file_path or "").startswith("gs://")),
+        })
+    return {"query": q, "count": len(out), "documents": out}
 
 
 @app.get("/documents")
