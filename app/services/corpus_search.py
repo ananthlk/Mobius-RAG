@@ -3228,6 +3228,20 @@ async def corpus_search(
             tag_mode=request.tag_mode,
         )
         bm25_ms = (time.monotonic() - tb) * 1000
+        # Precision mode (strategy a) is BM25-only by design, but tag-matched
+        # chunks with sparse body text (e.g. table rows) miss BM25 entirely.
+        # Pull them via the d-tag arm so the reranker and boost can act on them.
+        dtag_keys_precision = [
+            t[len("d:"):]
+            for t in (bm25_expansion.get("domain_tags") or [])
+            if t.startswith("d:")
+        ]
+        if dtag_keys_precision:
+            dtag_chunks_corpus = await _dtag_arm(
+                db, dtag_keys_precision, k,
+                request.filters, request.include_document_ids,
+                search_id=search_id,
+            )
 
     else:  # recall
         query_embedding, embed_ms, _cache_hit = await _embed_with_cache(
@@ -3278,11 +3292,17 @@ async def corpus_search(
             _rrf_arms["dtag"] = dtag_chunks_corpus
         candidates = _rrf_merge(_rrf_arms, search_id=search_id)
     elif mode == "precision":
-        for c in bm25_chunks:
-            c.setdefault("retrieval_arms", ["bm25"])
-        candidates = bm25_chunks
-        _log_stage("fusion_bypass", search_id, reason="precision→bm25_only",
-                   candidates=len(candidates))
+        if dtag_chunks_corpus:
+            candidates = _rrf_merge(
+                {"bm25": bm25_chunks, "dtag": dtag_chunks_corpus},
+                search_id=search_id,
+            )
+        else:
+            for c in bm25_chunks:
+                c.setdefault("retrieval_arms", ["bm25"])
+            candidates = bm25_chunks
+            _log_stage("fusion_bypass", search_id, reason="precision→bm25_only",
+                       candidates=len(candidates))
     else:  # recall
         for c in vec_chunks:
             c.setdefault("retrieval_arms", ["vector"])
