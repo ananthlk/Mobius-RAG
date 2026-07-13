@@ -246,31 +246,42 @@ async def sync_document_to_retrieval_stores(
         logger.warning("[publish_sync] %s: no syncable rows after embedding validation", document_id)
         return result
 
-    # ── Run the two stores in a thread (sync libs) ──────────────────
-    # chromadb + psycopg2 are sync; offload so we don't block the
-    # FastAPI event loop.
+    # ── Run the two stores concurrently (sync libs via to_thread) ───
+    # Chroma and chat_pg are independent; run in parallel so a slow/dead
+    # Chroma host (15s timeout) doesn't delay the chat_pg write.
 
-    if chroma_host:
+    async def _run_chroma() -> None:
+        if not chroma_host:
+            return
         try:
-            await asyncio.to_thread(
-                _chroma_upsert_batch,
-                host=chroma_host,
-                port=chroma_port,
-                ssl=chroma_ssl,
-                token=chroma_token,
-                collection=chroma_collection,
-                ids=chroma_ids,
-                embeddings=chroma_embeddings,
-                documents=chroma_documents,
-                metadatas=chroma_metadatas,
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    _chroma_upsert_batch,
+                    host=chroma_host,
+                    port=chroma_port,
+                    ssl=chroma_ssl,
+                    token=chroma_token,
+                    collection=chroma_collection,
+                    ids=chroma_ids,
+                    embeddings=chroma_embeddings,
+                    documents=chroma_documents,
+                    metadatas=chroma_metadatas,
+                ),
+                timeout=15.0,
             )
             result.chroma_status = "ok"
+        except asyncio.TimeoutError:
+            logger.warning("[publish_sync] %s: Chroma upsert timed out (15s) — host unreachable?", document_id)
+            result.chroma_status = "error"
+            result.chroma_message = "timeout after 15s (Chroma host unreachable or slow)"
         except Exception as exc:
             logger.exception("[publish_sync] %s: Chroma upsert failed", document_id)
             result.chroma_status = "error"
             result.chroma_message = f"{type(exc).__name__}: {exc}"[:500]
 
-    if chat_db_url:
+    async def _run_chat_pg() -> None:
+        if not chat_db_url:
+            return
         try:
             await asyncio.to_thread(
                 _chat_pg_upsert_batch,
@@ -282,6 +293,9 @@ async def sync_document_to_retrieval_stores(
             logger.exception("[publish_sync] %s: chat Postgres upsert failed", document_id)
             result.chat_pg_status = "error"
             result.chat_pg_message = f"{type(exc).__name__}: {exc}"[:500]
+
+    await asyncio.gather(_run_chroma(), _run_chat_pg())
+
 
     result.chunks_synced = len(chroma_ids)
     result.duration_s = round(time.monotonic() - started, 2)
