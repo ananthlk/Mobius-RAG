@@ -555,6 +555,9 @@ def _row_to_base_dict(row: Any) -> dict[str, Any]:
         "chapter_path": _none_if_empty(_safe_get(row, "chapter_path")),
         "summary": _none_if_empty(_safe_get(row, "summary")),
         "content_sha": _none_if_empty(_safe_get(row, "content_sha")),
+        "chunk_d_tags": _safe_get(row, "chunk_d_tags") or {},
+        "chunk_p_tags": _safe_get(row, "chunk_p_tags") or {},
+        "chunk_j_tags": _safe_get(row, "chunk_j_tags") or {},
     }
 
 
