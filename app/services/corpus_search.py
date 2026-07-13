@@ -1466,6 +1466,63 @@ async def _vector_arm(
     return out
 
 
+async def _dtag_arm(
+    db: AsyncSession,
+    dtag_keys: list[str],
+    k: int,
+    filters: "CorpusFilters | None",
+    include_document_ids: list[str] | None,
+    search_id: str = "",
+) -> list[dict[str, Any]]:
+    """Retrieve chunks by chunk_d_tags membership.
+
+    Fetches rows WHERE chunk_d_tags ? key for any of the query's d-tag
+    codes.  The result joins the BM25+vector pool via RRF so tag-matched
+    chunks (e.g. sparse table rows with no phrase overlap) become
+    candidates even when ANN and BM25 miss them.
+    """
+    if not dtag_keys:
+        return []
+    params: dict[str, Any] = {"k": k}
+    filter_sql = _build_filter_clauses(filters, include_document_ids, params)
+
+    or_clauses: list[str] = []
+    for i, key in enumerate(dtag_keys):
+        pname = f"_dt_key_{i}"
+        params[pname] = key
+        or_clauses.append(f"chunk_d_tags ? :{pname}")
+    dtag_filter = " AND (" + " OR ".join(or_clauses) + ")"
+
+    sql = text(f"""
+        SELECT {_BM25_COLS},
+               0.5 AS similarity
+        FROM rag_published_embeddings
+        WHERE chunk_d_tags IS NOT NULL
+          {filter_sql}
+          {dtag_filter}
+        ORDER BY updated_at DESC
+        LIMIT :k
+    """)
+    try:
+        result = await db.execute(sql, params)
+        rows = result.mappings().all()
+    except Exception as exc:
+        logger.warning("corpus_search dtag arm failed: %s", exc)
+        return []
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        c = _row_to_base_dict(row)
+        c["similarity"] = 0.5
+        c["match_score"] = 0.5
+        c["_arm"] = "dtag"
+        out.append(c)
+
+    if search_id:
+        _log_stage("dtag_arm", search_id, returned=len(out), keys=dtag_keys)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # RRF fusion  (ported from mobius-chat/app/services/retriever_hybrid.py)
 # ---------------------------------------------------------------------------
@@ -3082,8 +3139,9 @@ async def corpus_search(
     # recall mode:    embed → vector only — no BM25.
     #
     query_embedding: list[float] | None = None
-    bm25_chunks: list[dict[str, Any]] = []
-    vec_chunks:  list[dict[str, Any]] = []
+    bm25_chunks:        list[dict[str, Any]] = []
+    vec_chunks:         list[dict[str, Any]] = []
+    dtag_chunks_corpus: list[dict[str, Any]] = []
     embed_ms = bm25_ms = vec_ms = 0.0
     bm25_normalized_query: str | None = None   # set when normalizer changed the query
     bm25_expansion: dict[str, Any] = {
@@ -3119,6 +3177,13 @@ async def corpus_search(
         bm25_chunks, bm25_normalized_query, bm25_expansion = await bm25_task
         bm25_ms = (time.monotonic() - tb) * 1000 - embed_ms  # net DB time
 
+        # D-tag keys from lexicon expansion — used for the tag-membership arm.
+        dtag_keys_corpus = [
+            t[len("d:"):]
+            for t in (bm25_expansion.get("domain_tags") or [])
+            if t.startswith("d:")
+        ]
+
         if query_embedding:
             # Reuse the lexicon expansion from BM25 so vector arm applies
             # the same metadata-J filter (no second lexicon call).
@@ -3132,14 +3197,27 @@ async def corpus_search(
                 log=[],
             )
             tv = time.monotonic()
-            vec_chunks = await _vector_arm(
-                db, query_embedding, k * 2,
-                request.filters, request.include_document_ids,
-                search_id=search_id,
-                expansion=_exp_for_vec,
-                tag_mode=request.tag_mode,
+            # Fire vector arm and d-tag arm concurrently.
+            vec_task = asyncio.create_task(
+                _vector_arm(
+                    db, query_embedding, k * 2,
+                    request.filters, request.include_document_ids,
+                    search_id=search_id,
+                    expansion=_exp_for_vec,
+                    tag_mode=request.tag_mode,
+                )
             )
+            dtag_task = asyncio.create_task(
+                _dtag_arm(
+                    db, dtag_keys_corpus, k,
+                    request.filters, request.include_document_ids,
+                    search_id=search_id,
+                )
+            )
+            vec_chunks, dtag_chunks_corpus = await asyncio.gather(vec_task, dtag_task)
             vec_ms = (time.monotonic() - tv) * 1000
+        else:
+            dtag_chunks_corpus = []
 
     elif mode == "precision":
         tb = time.monotonic()
@@ -3192,10 +3270,13 @@ async def corpus_search(
     # ── 3. Fuse ───────────────────────────────────────────────────────────
     tr = time.monotonic()
     if mode == "corpus":
-        candidates = _rrf_merge(
-            {"bm25": bm25_chunks, "vector": vec_chunks},
-            search_id=search_id,
-        )
+        _rrf_arms: dict[str, list[dict[str, Any]]] = {
+            "bm25": bm25_chunks,
+            "vector": vec_chunks,
+        }
+        if dtag_chunks_corpus:
+            _rrf_arms["dtag"] = dtag_chunks_corpus
+        candidates = _rrf_merge(_rrf_arms, search_id=search_id)
     elif mode == "precision":
         for c in bm25_chunks:
             c.setdefault("retrieval_arms", ["bm25"])
