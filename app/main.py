@@ -5151,18 +5151,31 @@ async def upload_file(
                     {"did": str(existing_doc.id)},
                 )
                 _chunks_count = int(_count_res.scalar() or 0)
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error": "duplicate_file",
-                    "message": "This file has already been uploaded.",
-                    "document_id": str(existing_doc.id),
-                    "chunks_count": _chunks_count,
-                    "published_at": _published_at_iso,
-                    "original_filename": existing_doc.filename,
-                    "help": "If you need to upload a different version, please rename the file first.",
-                }
-            )
+            # A doc with 0 published embeddings is a zombie (publish failed mid-flight).
+            # Treat it as new so the upload re-triggers ingest rather than returning
+            # an empty shell that will never be searchable.
+            if _chunks_count == 0:
+                logger.warning(
+                    "[upload] dedup hit zombie doc %s (0 embeddings) — re-ingesting",
+                    existing_doc.id,
+                )
+                # Delete the zombie so the new upload creates a fresh document row.
+                await db.delete(existing_doc)
+                await db.commit()
+                # Fall through to normal upload + ingest path below.
+            else:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "duplicate_file",
+                        "message": "This file has already been uploaded.",
+                        "document_id": str(existing_doc.id),
+                        "chunks_count": _chunks_count,
+                        "published_at": _published_at_iso,
+                        "original_filename": existing_doc.filename,
+                        "help": "If you need to upload a different version, please rename the file first.",
+                    }
+                )
         
         # Upload file to GCS
         logger.info(f"Uploading to GCS bucket: {GCS_BUCKET}")
