@@ -1981,7 +1981,15 @@ def _rerank(
                 is_contact_query
                 and bool(_CONTACT_VALUE_RE.search(c.get("text") or ""))
             )
-            if cov < _TAG_COVERAGE_FLOOR and not is_promoted_neighbor and not is_contact_exact:
+            # D-tag exemption: a chunk whose chunk_d_tags matched the query's
+            # d-tag codes IS on-topic by corpus taxonomy, even if its body text
+            # is sparse (e.g. a table row "180 days / 365 days" with no phrase
+            # "timely filing"). The boost already fired; don't let the floor
+            # undo it by dropping the chunk before it can surface.
+            is_dtag_matched = bool(
+                (c.get("_rerank_signals") or {}).get("chunk_dtag_boost")
+            )
+            if cov < _TAG_COVERAGE_FLOOR and not is_promoted_neighbor and not is_contact_exact and not is_dtag_matched:
                 dropped_coverage_ids.append(c["id"])
                 if search_id:
                     _log_stage(
