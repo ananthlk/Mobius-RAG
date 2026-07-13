@@ -60,7 +60,13 @@ def _content_sha(document_id: UUID, source_id: UUID, text: str) -> str:
     return hashlib.sha256(f"{document_id}{source_id}{text}".encode()).hexdigest()
 
 
-async def publish_document(document_id: UUID, db: AsyncSession, generator_id: str | None = None) -> PublishResult:
+async def publish_document(
+    document_id: UUID,
+    db: AsyncSession,
+    generator_id: str | None = None,
+    *,
+    background_sync: bool = False,
+) -> PublishResult:
     """
     Write all embeddings for the given document to rag_published_embeddings (dbt contract).
     Deletes existing published rows for this document first, then inserts new set.
@@ -349,12 +355,42 @@ async def publish_document(document_id: UUID, db: AsyncSession, generator_id: st
     # Errors are logged and surfaced in the result message but do NOT
     # fail the publish — the rag-side mart row is already committed,
     # downstream sync is recoverable via backfill_published_to_chat.py.
+    #
+    # background_sync=True (used by the inline instant pipeline): fires
+    # the sync as asyncio.create_task so publish returns in ~0s and the
+    # caller can commit the PublishEvent immediately. The 132s chat_pg
+    # sync runs concurrently without blocking the upload response path.
     sync_summary: str | None = None
+    _is_instant = doc.expires_at is not None
+    if background_sync:
+        import asyncio as _asyncio
+        import logging as _bg_log
+
+        async def _bg_sync() -> None:
+            try:
+                from app.database import AsyncSessionLocal as _ASL
+                from app.services.publish_sync import sync_document_to_retrieval_stores as _sync
+                async with _ASL() as _bgs:
+                    _res = await _sync(document_id, _bgs, is_instant_rag=_is_instant)
+                    _bg_log.getLogger(__name__).info(
+                        "[publish] bg-sync done: chunks=%d chroma=%s chat_pg=%s (%.2fs)",
+                        _res.chunks_synced, _res.chroma_status, _res.chat_pg_status, _res.duration_s,
+                    )
+            except Exception as _be:
+                _bg_log.getLogger(__name__).warning("[publish] bg-sync failed (non-fatal): %s", _be)
+
+        _asyncio.create_task(_bg_sync())
+        return PublishResult(
+            rows_written=expected_count,
+            verification_passed=True,
+            verification_message="published OK; downstream sync running in background",
+        )
+
     try:
         from app.services.publish_sync import sync_document_to_retrieval_stores
         sync_res = await sync_document_to_retrieval_stores(
             document_id, db,
-            is_instant_rag=doc.expires_at is not None,
+            is_instant_rag=_is_instant,
         )
         sync_summary = (
             f"sync: chunks={sync_res.chunks_synced} "

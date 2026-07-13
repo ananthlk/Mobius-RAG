@@ -4893,7 +4893,11 @@ async def _run_instant_pipeline(
             await _db.commit()
             await _db.refresh(_emb_job)
 
-            await process_embedding_job(_emb_job, _db)
+            # background_sync=True: fire chat_pg/Chroma sync as asyncio.create_task
+            # so the inline path returns "published" in ~8-10s, not 140s.
+            # The sync runs concurrently; backfill_published_to_chat.py recovers
+            # on Cloud Run instance shutdown before sync completes.
+            await process_embedding_job(_emb_job, _db, background_sync=True)
 
             _emb_job.status = "completed"
             _emb_job.completed_at = _dt.utcnow()

@@ -116,7 +116,9 @@ def _build_text_for_fact(fact: ExtractedFact) -> str:
     return "\n".join(parts).strip() or ""
 
 
-async def process_embedding_job(job: EmbeddingJob, db: AsyncSession) -> None:
+async def process_embedding_job(
+    job: EmbeddingJob, db: AsyncSession, *, background_sync: bool = False
+) -> None:
     """Process one embedding job: load chunks/facts, embed, write chunk_embeddings + vector DB."""
     job_start = _utc_now_naive()
     try:
@@ -317,7 +319,7 @@ async def process_embedding_job(job: EmbeddingJob, db: AsyncSession) -> None:
             try:
                 from app.services.publish import publish_document
                 from app.models import PublishEvent as _PE
-                pres = await publish_document(UUID(str(job.document_id)), db)
+                pres = await publish_document(UUID(str(job.document_id)), db, background_sync=background_sync)
                 # CRITICAL: publish_document only flushes; the caller
                 # owns the commit. Without this commit, the writes to
                 # ``rag_published_embeddings`` get rolled back when
