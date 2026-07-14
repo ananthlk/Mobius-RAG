@@ -4,21 +4,31 @@
 **bandit** (what to learn), and by the **data pipeline** (what to log). Author: Eval agent,
 2026-07-14. Corrections/extensions: RAG agent, 2026-07-14. Status: canonical reference for
 the router re-architecture (RAG commit 5b45257 + escalation-integrated inheritance boost,
-rev 00330).*
+rev 00332).*
 
 > **Implementation status notes (RAG agent, 2026-07-14):**
-> - `strategy_chain`, `escalated`, `fast_exit` are on the response object (677ab53) but
->   **not yet in the decision row** — persistence is currently per-attempt, not per-query.
->   Fix: move `_persist_routing_decision_async` after the outer loop; enrich with final
->   response telemetry. Pre-production work; doesn't block cert.
-> - `corpus_fingerprint` is not yet computed or stamped. Plan: hash of
+> - `strategy_chain`, `escalated`, `fast_exit`, `inherited_boost` fully on response object
+>   (4d3b3d0 / rev 00331). **Not yet in the decision row** — persistence is per-attempt, not
+>   per-query. Fix: move `_persist_routing_decision_async` after outer loop; enrich with
+>   final telemetry. Pre-production; doesn't block cert.
+> - `corpus_fingerprint` not yet computed or stamped. Plan: hash of
 >   `rag_published_embeddings` version counter; stamp on decision row.
 > - `grounding_source` not yet computed in response. Plan: post-retrieval, classify each
 >   chunk via `document_id ∈ payor_inherited_authority(payer)` (set already fetched during
 >   strategy_a supplemental pass).
-> - `inherited_boost: bool` fires correctly in runtime but not yet persisted.
+> - **Inherited boost per-doc cap** (b155ecb / rev 00332): over-fetch `k = n_inherited_docs × 2`
+>   + top-2 per doc cap before boosting, so large inherited docs (936-chunk SMMC, 26-chunk
+>   1.010) can't crowd pinpoint docs (1-chunk 59G_1020). `inherited_boost.boosted_doc_ids`
+>   surfaced so EVAL can confirm 88e28899 appears. **Pending cert.**
 > - **Gap-based multi-invoke** (§3 "small gap → co-plausible strategies") = **Stage 3, not
 >   yet built**. Argmax-only today. Don't read §3 gap paragraph as shipped.
+> - **Tool-collapse** (§3 Ananth directive, 2026-07-14): internalize payor-lookup as an
+>   internal registry strategy. `CorpusSearchAgentRequest` already accepts `mode`
+>   (fast/chat/thinking) — the collapse is a Chat-side change (expose only `rag(query, mode)`)
+>   + a RAG-side routing addition (structured payer facts strategy). **Not yet built.**
+> - **Exploratory/overview intent** (§2, 2026-07-14): `exploratory_intent` feature + strong
+>   +b weight + `multi_domain → +b`. Fixes Sunshine overview → a pinpoints instead of b
+>   assembling. **Not yet built.** (See §2 below for design.)
 
 ---
 
@@ -107,19 +117,41 @@ The features are the vocabulary all three consumers speak. Each is a property of
 | `multi_domain` | bool | spans ≥2 major d-categories | d-tags |
 | `p_tag_request_type` | enum | what the user wants (submit / verify / compliance / lookup) | p-tags |
 | `factual_vs_procedural` | float | pinpoint fact vs how-to | query parse |
+| `exploratory_intent` | bool | open-ended overview/catalog question ("tell me about X", "what services does X offer", "overview of") → answer is an *assembly*, not a pinpoint | query parse (trigger phrases + absence of specific code/ID) |
 
 **Bootstrap weights** (hand-reasoned, shipped; the bandit refines them):
 `a`: +exclusivity +literal +corpus_depth −thematic −wide_pool ·
-`b`: +thematic +corpus_depth −literal ·
+`b`: +thematic +corpus_depth −literal **+exploratory_intent +multi_domain** ·
 `d`: +crawlability +wide_pool −inheritance −thematic −corpus_depth ·
 `c`: low bias.
+
+> **Exploratory-intent diagnosis (EVAL, 2026-07-14):** "What services does Sunshine offer?" →
+> scores a=0.504, b=0.401, d=0.37 → routes a → one-facet answer (expanded benefits only, not
+> the catalog). b loses by 0.10. Root cause: `thematic_policy` only fires for PA/appeals/
+> credentialing d-tags; overview/catalog questions never trigger it. Fix: `exploratory_intent`
+> feature gives b the signal it needs; `multi_domain → +b` catches the case where the answer
+> spans multiple d-categories (services catalog always does). **Not yet built; queued after
+> inheritance GA cert.**
 
 ---
 
 ## 3. Contract A — for the ReAct runtime
 
+**PRINCIPLE (Ananth, 2026-07-14) — ONE retrieval tool, not a menu.** ReAct must NOT be handed a
+menu of search tools (`corpus_search`, `payor_lookup`, `lookup_authoritative_sources`,
+`google_search`, …) to choose among. Exposing them makes ReAct do strategy selection — badly — and
+it routes *around* the router (observed live: "tell me more about Sunshine Health" → ReAct picked
+`payor_lookup` [errored] → `lookup_authoritative_sources` [empty] → `google_search`, and NEVER
+touched the corpus that holds 573 Sunshine docs). **Collapse every retrieval/search tool into a
+single `rag(query, mode)` call.** The former tools become RAG-internal *strategies*: `google_search`
+→ strategy **d**; `payor_lookup` / `lookup_authoritative_sources` → an internal registry/corpus
+capability the router invokes; corpus a/b → internal. ReAct picks the **mode** (effort/latency
+budget), never the strategy. Action tools (task creation, etc.) stay on ReAct — this collapse is
+retrieval-only. This is what makes the router load-bearing: it can only "figure out the strategy" if
+the caller actually delegates the choice to it.
+
 **What ReAct passes in:** the query, the caller `mode` (fast/chat/thinking), and — if this is a
-*re-ask* — the prior decision trace.
+*re-ask* — the prior decision trace. **Not** a tool choice.
 
 **What ReAct reads back (the decision trace):**
 - `strategy_chain: [a, b, …]` — the ordered strategies actually invoked.
