@@ -16,10 +16,12 @@ rev 00332).*
 > - `grounding_source` not yet computed in response. Plan: post-retrieval, classify each
 >   chunk via `document_id ∈ payor_inherited_authority(payer)` (set already fetched during
 >   strategy_a supplemental pass).
-> - **Inherited boost per-doc cap** (b155ecb / rev 00332): over-fetch `k = n_inherited_docs × 2`
->   + top-2 per doc cap before boosting, so large inherited docs (936-chunk SMMC, 26-chunk
->   1.010) can't crowd pinpoint docs (1-chunk 59G_1020). `inherited_boost.boosted_doc_ids`
->   surfaced so EVAL can confirm 88e28899 appears. **Pending cert.**
+> - **Inherited boost full-coverage retrieval** (aef943a + d322b6f / rev 00336):
+>   `k = n_inherited_docs × 200 = 1400` (Aetna set = 1039 total chunks; SMMC alone = 936).
+>   With `include_document_ids` filtering to the 7 inherited docs, k=1400 guarantees ALL
+>   inherited chunks enter the pool before the per-doc cap (top-2/doc) applies. BM25/vector
+>   cutoff no longer determines inclusion. `inherited_boost.boosted_doc_ids` surfaced;
+>   EVAL cert pending (gap_fill ≥4/5, restatement 2/2, displacement guard must hold).
 > - **Gap-based multi-invoke** (§3 "small gap → co-plausible strategies") = **Stage 3, not
 >   yet built**. Argmax-only today. Don't read §3 gap paragraph as shipped.
 > - **Tool-collapse** (§3 Ananth directive, 2026-07-14): Chat collapses retrieval tools to
@@ -295,6 +297,27 @@ instead of collapsed to a scalar score. It also feeds chat's Citations/Correctio
 > (different entities/scope/terms) and call again, or (b) stop and surface the best-so-far. It must
 > **never** re-issue a not-materially-different query. This is what makes the loop terminate and
 > keeps latency bounded.
+
+**Learned-informed rewrites + the `improvement_hint` channel (Ananth, 2026-07-14).** Observed live
+failure: escalating *"process for submitting an appeal to Sunshine Health"* (mode a) →
+*"Sunshine Health appeal submission process, required documents, methods"* (mode d) — a **cosmetic
+paraphrase**, not a material change. Both weak; the *strategy* flipped a→d but the *retrieval
+signal* didn't move, and RAG's own trace flagged it (`strategies_tried[].note = "only 1 new docs
+vs prior strategies"`). Three refinements, all buildable from signal RAG **already returns**:
+- **Materiality is measured by RETRIEVAL SIGNAL, not surface words.** A rewrite is "material" only
+  if it changes the parse (matched tags / `term_partition`) or the retrieved doc set. RAG already
+  computes "N new docs vs prior" — formalize it: a rewrite retrieving < threshold *new* docs is
+  **not** a material escalation → fast-exit (don't burn the pass).
+- **Rewrites must be LEARNED-INFORMED**, derived from the prior attempt's returned signal:
+  `term_partition` (drop the low-selectivity/`dropped` terms, keep the high-selectivity `required`
+  tags), `untagged_meaningful_tokens` (map to a tag or make it the pivot — e.g. drop noise token
+  "submitting", lean on `d:disputes.appeal`), and the thematic/procedural cue (a *"process"*
+  question on a `disputes.appeal` section is **b's** job — assemble the procedure — not **d/web**).
+  A blind paraphrase is never a valid rewrite.
+- **`improvement_hint` is the inner→outer channel** (today: `null`). RAG populates it with the
+  learned-informed suggested reframing. Chat's outer loop consumes it: use it for a
+  *materially-different* re-ask, or surface it to the user ("Try: …"). This is how the inner loop
+  tells the outer loop *how* to reformulate, instead of the outer loop guessing with a paraphrase.
 
 The escalation loop *is* the ReAct layer, pulled inside RAG so chat's outer ReAct doesn't have to
 burn a second network round-trip to get cross-strategy behavior. Chat's ReAct sits *on top* for
