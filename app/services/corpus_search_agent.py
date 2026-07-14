@@ -4447,7 +4447,16 @@ async def _corpus_search_agent_impl(
             inh_req = CorpusSearchRequest(
                 query=queries.hybrid,
                 k=_inh_k,
-                mode="precision",
+                # "recall" (vector-only) so the WHERE clause is
+                # `embedding_vec IS NOT NULL AND doc_id IN (...)` only.
+                # "precision" (BM25) requires keyword matches: 1-chunk
+                # pinpoint docs like 59G_1020 (county-of-residence)
+                # contain "county" but not "Aetna"/"Florida", so they
+                # fail the BM25 k-of-n token filter and never enter the
+                # supplemental pool despite being the canonical answer.
+                # Vector search has no such keyword gate — all 1039
+                # inherited chunks return (LIMIT 1400 > 1039 rows).
+                mode="recall",
                 tag_mode="none",
                 filters=request.filters,
                 include_document_ids=_all_inherited_doc_ids,
