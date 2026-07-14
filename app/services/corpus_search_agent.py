@@ -2828,6 +2828,12 @@ class CorpusSearchAgentResponse(BaseModel):
     escalated: bool = False          # True when cross-strategy escalation fired
     strategy_chain: list[str] = []  # ordered strategy IDs actually invoked
     fast_exit: dict[str, Any] | None = None  # {"fired": bool, "reason": str | None}
+    # Inherited-authority escalation telemetry: populated when the plan-scoped
+    # boost pass fires (inherited_authority_escalation=True inner call). Tells
+    # EVAL exactly whether the boost ran, how many inherited chunks it returned,
+    # what confidence the synthesis gave, and the top rerank score — the
+    # discriminator for routing the 2 remaining gap_fill misses.
+    inherited_boost: dict[str, Any] | None = None  # {fired, n_chunks, result_confidence, top_rerank}
 
 
 class CorpusSearchAgentRequest(BaseModel):
@@ -2940,6 +2946,16 @@ async def corpus_search_agent(
     # Confidence rank for keep-best semantics on escalation.
     _conf_rank = {"high": 2, "medium": 1, "low": 0}
 
+    # Inherited-boost telemetry: populated when the inherited-authority
+    # escalation fires in the outer loop. Carried into every _with_chain()
+    # return so EVAL can see exactly what the boost pass did.
+    _inh_boost_record: dict | None = None
+
+    # Full ordered chain of invocations including sub-passes: e.g. ['a',
+    # 'a+inh', 'b']. Distinct from _tried (which tracks unique strategy IDs
+    # for router-exclusion) — _chain is the narrative EVAL reads for pathing.
+    _chain: list[str] = []
+
     for _attempt in range(_MAX_TRIES):
         # Attempt 0 honours the caller's explicit mode (if any).
         # Attempt 1+ clears it so the router takes over — the planner already
@@ -2963,14 +2979,16 @@ async def corpus_search_agent(
             _fe_resp = _best_resp if _best_resp is not None else response
             return _fe_resp.model_copy(update={
                 "escalated": _escalations_done > 0,
-                "strategy_chain": list(_tried),
+                "strategy_chain": list(_chain),
                 "fast_exit": {"fired": True, "reason": "query_sig_seen"},
+                "inherited_boost": _inh_boost_record,
             })
         _query_signatures_seen.add(_qsig)
 
         strategy_used = response.strategy_used or "a"
         if strategy_used not in _tried:
             _tried.append(strategy_used)
+        _chain.append(strategy_used)  # narrative chain — always append, even if _tried already had it
 
         # Accumulate per-attempt strategies_tried for full escalation-chain visibility.
         _all_strategies_tried.extend(response.strategies_tried or [])
@@ -2980,8 +2998,9 @@ async def corpus_search_agent(
             return resp.model_copy(update={
                 "strategies_tried": list(_all_strategies_tried),
                 "escalated": _escalations_done > 0,
-                "strategy_chain": list(_tried),
+                "strategy_chain": list(_chain),   # full ordered path, not deduped _tried
                 "fast_exit": {"fired": False, "reason": None},
+                "inherited_boost": _inh_boost_record,  # None when boost never fired
             })
 
         # Explicit mode override (A/B-test / calibration knob): honour the
@@ -3026,10 +3045,27 @@ async def corpus_search_agent(
         # told us the chunks didn't contain the answer. Escalate to the next
         # strategy if budget allows; returning an honest abstain when a better
         # strategy exists is a silent failure from the user's perspective.
+        # Text-based abstain detection: LLM sometimes returns confidence="medium"
+        # on boundary cases even when it explicitly says it can't find the answer
+        # in the passages — making escalation nondeterministic. Detect the
+        # language the synthesis LLM uses when it abstains, regardless of label.
+        _llm_text = (response.llm_answer or "").lower()
+        _is_explicit_abstain = any(p in _llm_text for p in (
+            "passages do not contain",
+            "cannot find",
+            "do not contain information",
+            "not found in the",
+            "unable to find",
+            "not mentioned in",
+            "not available in these",
+            "cannot answer from these",
+            "doesn't contain",
+            "does not contain",
+        ))
         _is_synthesis_abstain = (
             n_chunks > 0
-            and response.confidence == "low"
             and top_rerank >= _HYBRID_RERANK_HIGH
+            and (response.confidence == "low" or _is_explicit_abstain)
         )
 
         if _is_synthesis_abstain and _escalations_done < _escalation_budget:
@@ -3073,6 +3109,15 @@ async def corpus_search_agent(
                          for c in (_inh_esc_resp.chunks or [])),
                         default=0.0,
                     )
+                    # Record boost telemetry and mark the chain so EVAL can see
+                    # the full invocation path (a → a+inh → ...).
+                    _chain.append("a+inh")
+                    _inh_boost_record = {
+                        "fired": True,
+                        "n_chunks": _inh_n,
+                        "result_confidence": _inh_conf,
+                        "top_rerank": round(_inh_top, 4),
+                    }
                     logger.info(
                         "[corpus_search_agent] inherited_authority_escalation: "
                         "conf=%s top_rerank=%.3f chunks=%d",
