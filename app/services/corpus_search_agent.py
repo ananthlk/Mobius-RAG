@@ -2698,17 +2698,23 @@ async def _synthesize_internal_answer(
         used = []
 
     # Post-process: if any 59G Florida Medicaid regulatory document was in the
-    # synthesis context but the rule designation doesn't appear in the answer,
-    # append a one-sentence inherited-authority note. This makes the rule
-    # citation deterministic regardless of how the LLM chose to phrase the answer.
-    # Fire even when the synthesis explicitly abstains — for a known MCO query the
-    # regulatory attribution is factually correct regardless of whether the specific
-    # answer was found. (county_residence shows this pattern: honest_abstain +
-    # all must_facts present = judge marks "correct".)
+    # synthesis context AND the LLM actually cited it, append a one-sentence
+    # inherited-authority note when the rule designation doesn't appear in the answer.
+    #
+    # IMPORTANT: only scan chunks the LLM cited (used_passages).  Scanning all
+    # offered chunks causes two known failure modes:
+    #   (1) Abstain + uncited 59G chunk → trailer leaks a must-fact → false-GREEN
+    #       (county_residence: answer abstains, but 59G-1.010 leaks in → judge scores correct)
+    #   (2) Correct answer cites the right rule (59G-4.140) but a different 59G doc
+    #       was in context → trailer appends the WRONG rule → self-contradiction → false-RED
+    #       (hospice: correct 59G-4.140 answer, but trailer adds 59G-1.010 → judge flags hallucination)
     if answer and payor_name:
-        # Collect 59G rule designations from chunk document names that are absent from answer.
+        _used_set: set = set(used) if isinstance(used, list) else set()
+        # Collect 59G rule designations from chunks the LLM actually cited.
         _cited_rules: list[str] = []
         for _idx, _c in usable:
+            if _idx not in _used_set:
+                continue
             _doc = (
                 getattr(_c, "document_name", None)
                 or (_c.get("document_name") if isinstance(_c, dict) else None)
@@ -2723,6 +2729,9 @@ async def _synthesize_internal_answer(
         _unique_rules = list(dict.fromkeys(_cited_rules))
         _rules_missing = [r for r in _unique_rules if r not in answer]
         _payor_in_answer = payor_name in answer
+        # If synthesis already cited a specific 59G-X.Y designation, don't append
+        # a different (possibly wrong) one — the LLM was more specific than us.
+        _already_has_specific_59g = bool(re.search(r"\b59G-[\d.]+\b", answer))
         # Also detect generic "59G" in the answer text (e.g. "Division 59G, Florida Administrative
         # Code") — catches cases where no chunk carries a 59G-prefixed document name but the
         # synthesis quoted the regulation family by number (e.g. AHCA "Policy Library" docs).
@@ -2745,8 +2754,9 @@ async def _synthesize_internal_answer(
                     answer
                     + f" These Florida Medicaid requirements apply to {payor_name}."
                 )
-        elif _rules_missing:
-            # Payor already in answer but specific 59G rule designation is absent.
+        elif _rules_missing and not _already_has_specific_59g:
+            # Payor in answer, specific 59G rule cited by used chunks is absent from answer,
+            # and synthesis didn't already cite a different specific 59G rule.
             _rules_str = " and ".join(_rules_missing)
             answer = answer + f" The applicable Florida Medicaid rule is {_rules_str}."
         elif not re.search(r"\b59G\b", answer) and inherited_doc_ids:
@@ -4296,15 +4306,29 @@ async def _corpus_search_agent_impl(
                 seen_ids = {c.id for c in best_chunks}
                 new_chunks = [c for c in inh_resp.chunks if c.id not in seen_ids]
                 if new_chunks:
+                    # Boost inherited-authority (AHCA 59G) chunks before the merge sort.
+                    # AHCA docs lack the plan name in body text so BM25 scores them lower
+                    # than plan-manual chunks even when they're the authoritative answer.
+                    # 0.08 ≈ one standard deviation above typical plan-manual rerank scores;
+                    # parallels the authority-tier fix that lifted Aetna/Sunshine on gap_fill.
+                    _INH_BOOST = 0.08
+                    boosted_new = []
+                    for _ic in new_chunks:
+                        _raw = _ic.rerank_score or 0.0
+                        if _raw > 0.0:
+                            _ic = _ic.model_copy(update={
+                                "rerank_score": min(1.0, _raw + _INH_BOOST),
+                            })
+                        boosted_new.append(_ic)
                     merged = sorted(
-                        best_chunks + new_chunks,
+                        best_chunks + boosted_new,
                         key=lambda c: c.rerank_score or 0,
                         reverse=True,
                     )
                     best_chunks = merged
                     logger.info(
-                        "[%s] [inherited_authority] merged %d AHCA chunks into results",
-                        agent_id, len(new_chunks),
+                        "[%s] [inherited_authority] merged %d AHCA chunks (+%.2f boost) into results",
+                        agent_id, len(new_chunks), _INH_BOOST,
                     )
         except Exception as _inh_exc:
             logger.warning(
