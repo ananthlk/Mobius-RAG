@@ -30,8 +30,10 @@ rev 00332).*
 > - **Strategy `s` router wiring**: Payor registry API DELIVERED (GET /structured-fields,
 >   GET /populated-matrix). RAG router dispatch for `s` **not yet built** (after cert).
 > - **Strategy `m` (cache)**: architecture specced (§2). Store **not yet built**.
-> - **Strategy `c` honest floor**: architecture specced (§2). Explicit tier **not yet built**
->   (today's full-miss path is a bare abstain).
+> - **Strategy `f` honest floor** (renamed from `c` to avoid collision with live `c = llm_validate`):
+>   architecture specced (§2). Explicit tier **not yet built** (today's full-miss path is a bare
+>   abstain). Live `c` = LLM-validate / reverse-RAG pipeline (`corpus_search_strategy_c.py`) — see
+>   §2 note below.
 > - **Validation ledger** (§3 Contract A): specced in detail. Engine exists
 >   (`app/services/fact_checker.py` per-claim support). Per-claim surface in response
 >   **not yet built** (after cert).
@@ -135,7 +137,7 @@ The features are the vocabulary all three consumers speak. Each is a property of
 `a`: +exclusivity +literal +corpus_depth −thematic −wide_pool ·
 `b`: +thematic +corpus_depth −literal **+exploratory_intent +multi_domain** ·
 `d`: +crawlability +wide_pool −inheritance −thematic −corpus_depth ·
-`c` (honest floor): fires ONLY on a full miss (all other tiers failed to ground); always answers, always labeled ungrounded.
+`f` (honest floor): fires ONLY on a full miss (all other tiers failed to ground); always answers, always labeled ungrounded. *(Note: live router `c` = llm_validate / reverse-RAG, a separate existing strategy — `f` is the planned new tier.)*
 
 > **Strategy `s` — structured-fact lookup (Ananth directive, 2026-07-14).** The payor_lookup
 > registry holds *raw authoritative facts* per payer — timely-filing windows, appeal deadlines,
@@ -176,7 +178,7 @@ The features are the vocabulary all three consumers speak. Each is a property of
 > router.
 >
 > **The determinism thesis (why this is the core, not a nicety).** Resolution runs
-> deterministic-first: **`m` (replay) → `s` (field read) → `a`/`b` (retrieve) → `d` (web) → `c`
+> deterministic-first: **`m` (replay) → `s` (field read) → `a`/`b` (retrieve) → `d` (web) → `f`
 > (honest floor)**. `m` and
 > `s` are *reads* (deterministic, ~1.0, instant); `a`/`b`/`d` are *retrieval* (probabilistic). Every
 > approved answer becomes a cache entry and every filled field becomes a structured hit, so **the
@@ -192,7 +194,7 @@ The features are the vocabulary all three consumers speak. Each is a property of
 > strategy memory. Same reward feeds both. **Cache + rating store + fingerprint invalidation: not
 > yet built.**
 
-> **Strategy `c` — honest full-miss floor (Ananth directive, 2026-07-14).** When every grounded
+> **Strategy `f` — honest full-miss floor (Ananth directive, 2026-07-14; renamed from `c` to avoid collision with live `c = llm_validate`).** When every grounded
 > tier misses (`m`/`s`/`a`/`b`/`d` all fail to find the answer), the response is NOT a bare "I
 > couldn't find it." `c` surfaces a *helpful, best-effort answer* — general/directional guidance —
 > that is ALWAYS and EXPLICITLY labeled **"not found in our materials."** Not cited, not
@@ -205,13 +207,17 @@ The features are the vocabulary all three consumers speak. Each is a property of
 >    figure"). General framing is allowed; invented specifics are not.
 > 3. **Always carries the ungrounded label** — a reader can never mistake a `c` answer for a sourced
 >    fact.
-> `c` is the honest floor: the user always gets *something useful*, and it is always transparent
+> `f` is the honest floor: the user always gets *something useful*, and it is always transparent
 > about what it is. This also cleanly resolves the composer over-abstain problem (§ the Sunshine
-> case): grounded answers (`m`/`s`/`a`/`b`/`d`) get **cited**; a true full-miss goes to `c`,
+> case): grounded answers (`m`/`s`/`a`/`b`/`d`) get **cited**; a true full-miss goes to `f`,
 > **labeled** — so a grounded-but-partial assembly (strategy `b`) is never demoted to "no verified
 > answer," and a real miss is never dressed up as grounded. The line is: *cite it, or label it —
 > never blank, never bluff.* **Not yet built as an explicit tier (today's full-miss path is a bare
 > abstain).**
+>
+> *Note on live `c` = llm_validate: the router's existing `strategy_id="c"` is the reverse-RAG /
+> LLM-validate pipeline (`corpus_search_strategy_c.py`) — generate from prior, then verify each
+> citation against corpus/sitemap. It is a separate live strategy and is NOT what `f` refers to.*
 
 > **Exploratory-intent diagnosis (EVAL, 2026-07-14):** "What services does Sunshine offer?" →
 > scores a=0.504, b=0.401, d=0.37 → routes a → one-facet answer (expanded benefits only, not
@@ -435,7 +441,7 @@ run happens in a clean corpus-fingerprint window (Payor holds mutations). Owners
   down-rated never replayed.
 
 **Phase 3 — Honesty layer**
-- 3a `c` (honest floor): Build (RAG/Chat) explicit full-miss tier + cite-or-label composer.
+- 3a `f` (honest floor): Build (RAG/Chat) explicit full-miss tier + cite-or-label composer.
   Test: full-miss → labeled help (not bare abstain, no fabricated specifics); grounded-partial
   keeps citations (over-abstain fixed).
 - 3b validation ledger: Build (RAG) surface `fact_checker` per-claim in the response. Test: ledger
