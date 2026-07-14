@@ -3138,7 +3138,11 @@ async def corpus_search_agent(
                         )
                         return _with_chain(winner)
                     # Inherited pass also abstained — update best, fall to normal escalation.
-                    if _inh_n > (len(_best_resp.chunks or []) if _best_resp else -1):
+                    # Use >= (not >) so the inherited response wins over the outer's original
+                    # when chunk counts are equal (k=5 eval: outer=5, inner=5 → > fails,
+                    # outer's non-59G synthesis stays; >= ensures the inherited pass's
+                    # 88e28899-containing synthesis answer is used instead).
+                    if _inh_n >= (len(_best_resp.chunks or []) if _best_resp else -1):
                         _best_resp = _inh_esc_resp
                 except Exception as _inh_exc:
                     logger.warning(
