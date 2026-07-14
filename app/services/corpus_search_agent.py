@@ -4447,16 +4447,7 @@ async def _corpus_search_agent_impl(
             inh_req = CorpusSearchRequest(
                 query=queries.hybrid,
                 k=_inh_k,
-                # "recall" (vector-only) so the WHERE clause is
-                # `embedding_vec IS NOT NULL AND doc_id IN (...)` only.
-                # "precision" (BM25) requires keyword matches: 1-chunk
-                # pinpoint docs like 59G_1020 (county-of-residence)
-                # contain "county" but not "Aetna"/"Florida", so they
-                # fail the BM25 k-of-n token filter and never enter the
-                # supplemental pool despite being the canonical answer.
-                # Vector search has no such keyword gate — all 1039
-                # inherited chunks return (LIMIT 1400 > 1039 rows).
-                mode="recall",
+                mode="precision",
                 tag_mode="none",
                 filters=request.filters,
                 include_document_ids=_all_inherited_doc_ids,
@@ -4469,6 +4460,87 @@ async def _corpus_search_agent_impl(
                 db, inh_req,
                 caller=f"{caller}:agent:inherited_authority",
             )
+            # Direct-fetch fallback for pinpoint inherited docs that BM25 and
+            # HNSW both miss. BM25 (precision mode) applies a k-of-n token
+            # filter: 59G_1020 (county-of-residence) has "county" but not
+            # "Aetna"/"Florida", so it gets 0 BM25 hits. HNSW (recall mode)
+            # has the same problem: it scans the WHOLE index and post-filters by
+            # doc_id; if the chunk isn't in the top-N ANN candidates it's
+            # dropped. Both arms are unreliable for doc-id-pinned retrieval when
+            # the inherited doc lacks plan/state keywords.
+            # Fix: after the corpus_search pass, detect which inherited doc IDs
+            # have 0 chunks in inh_resp, and directly SELECT their rows from the
+            # DB (no keyword gate, no ANN). This guarantees every inherited doc
+            # enters the pool so the per-doc cap + boost can act on it.
+            if request.inherited_authority_escalation and _all_inherited_doc_ids:
+                _inh_found_doc_ids = {
+                    str(getattr(c, "document_id", "") or "")
+                    for c in (inh_resp.chunks or [])
+                }
+                _inh_missing_ids = [
+                    d for d in _all_inherited_doc_ids
+                    if d not in _inh_found_doc_ids
+                ]
+                if _inh_missing_ids:
+                    from sqlalchemy import text as _sa_text
+                    from app.services.corpus_search import CorpusChunk as _CC
+                    try:
+                        _fb_result = await db.execute(
+                            _sa_text("""
+                                SELECT id, document_id, text, page_number, paragraph_index,
+                                       document_filename, document_display_name,
+                                       document_payer, document_state, document_program,
+                                       document_authority_level, source_type,
+                                       section_path, chapter_path
+                                FROM rag_published_embeddings
+                                WHERE document_id::text = ANY(:miss_ids)
+                                ORDER BY document_id,
+                                         page_number NULLS LAST,
+                                         paragraph_index NULLS LAST
+                            """),
+                            {"miss_ids": _inh_missing_ids},
+                        )
+                        _fb_rows = _fb_result.mappings().all()
+                        if _fb_rows:
+                            _fb_chunks = [
+                                _CC(
+                                    id=str(r["id"]),
+                                    text=r["text"] or "",
+                                    document_id=str(r["document_id"]),
+                                    document_name=(
+                                        (r.get("document_display_name") or "").strip()
+                                        or r.get("document_filename") or ""
+                                    ),
+                                    page_number=r.get("page_number"),
+                                    paragraph_index=r.get("paragraph_index"),
+                                    source_type=r.get("source_type") or "hierarchical",
+                                    authority_level=(r.get("document_authority_level") or "").strip() or None,
+                                    payer=(r.get("document_payer") or "").strip() or None,
+                                    state=(r.get("document_state") or "").strip() or None,
+                                    section_path=r.get("section_path") or None,
+                                    chapter_path=r.get("chapter_path") or None,
+                                    rerank_score=0.0,
+                                    similarity=0.0,
+                                    confidence_label="low",
+                                    retrieval_arms=["direct_fetch"],
+                                    jpd_tags=[],
+                                )
+                                for r in _fb_rows
+                            ]
+                            inh_resp = inh_resp.model_copy(update={
+                                "chunks": list(inh_resp.chunks or []) + _fb_chunks,
+                            })
+                            logger.info(
+                                "[%s] [inherited_authority] direct-fetch fallback: "
+                                "%d chunks from %d missing inherited docs %s",
+                                agent_id, len(_fb_chunks), len(_inh_missing_ids),
+                                _inh_missing_ids,
+                            )
+                    except Exception as _fb_exc:
+                        logger.warning(
+                            "[%s] [inherited_authority] direct-fetch fallback failed: %s",
+                            agent_id, _fb_exc,
+                        )
             if inh_resp.chunks:
                 # In inherited-authority escalation mode, strip inherited-doc chunks
                 # from best_chunks BEFORE computing seen_ids. Inherited docs that landed
