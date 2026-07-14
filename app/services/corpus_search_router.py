@@ -463,6 +463,71 @@ def _score_strategy(prior: StrategyPrior, prefs: RoutePreferences) -> float:
 # to offer for this query.
 _WITHDRAW_RECALL_THRESHOLD = 0.05
 
+# ---------------------------------------------------------------------------
+# Stage-1 linear scoring model (replaces query_class prior lookup)
+# EVAL spec 2026-07-15: per-strategy weights over retrieval-property features.
+# Hand-reasoned bootstrap — production bandit will learn these from reward.
+# ---------------------------------------------------------------------------
+
+_LINEAR_BASE: dict[str, float] = {
+    "a": 0.40,   # default preferred: cheap, fast, usually right
+    "b": 0.20,
+    "c": 0.05,   # rarely wins on this corpus
+    "d": 0.20,
+}
+
+_LINEAR_WEIGHTS: dict[str, dict[str, float]] = {
+    "a": {
+        "exclusivity":     0.30,   # narrow tag pool → pinpointable in corpus
+        "literal":         0.25,   # exact code (H0019) → BM25 dominates
+        "corpus_depth":    0.20,   # payer has docs in corpus
+        "thematic_policy": -0.10,  # broad policy section → b assembles better
+        "wide_pool":       -0.15,  # diffuse corpus → BM25/vector drown
+        "inheritance":      0.05,  # AHCA content → keep in corpus
+    },
+    "b": {
+        "thematic_policy":  0.40,  # answer spans policy section → b assembles
+        "corpus_depth":     0.20,  # needs docs in corpus
+        "literal":         -0.20,  # exact code → a/c faster
+        "exclusivity":      0.05,
+    },
+    "c": {},   # low bias; may add weights when b-bank is built
+    "d": {
+        "crawlability":    0.40,   # payer site web-fetchable
+        "wide_pool":       0.25,   # diffuse → external has better coverage
+        "inheritance":    -0.25,   # AHCA content NOT on web → hurts
+        "thematic_policy": -0.20,  # policy section → b from corpus is better
+        "corpus_depth":   -0.15,   # deep payer corpus → stay internal
+        "literal":        -0.05,
+    },
+}
+
+
+def _compute_linear_features(profile_features: dict[str, Any]) -> dict[str, float]:
+    """Extract normalized [0..1] feature values for linear scoring."""
+    pool_size = max(1, int(profile_features.get("pool_size") or 500))
+    return {
+        # Small pool = highly specific tag = pinpointable
+        "exclusivity":     min(1.0, 50.0 / pool_size),
+        "literal":         float(bool(profile_features.get("has_literal", False))),
+        # Payer identified AND has ≥20 docs in corpus (or AHCA-inherited)
+        "corpus_depth":    float(
+            bool(profile_features.get("has_j_payor_tag", False))
+            and (pool_size >= 20 or bool(profile_features.get("has_inherited_docs", False)))
+        ),
+        "thematic_policy": float(bool(profile_features.get("thematic_policy", False))),
+        "wide_pool":       float(pool_size > 500),
+        "inheritance":     float(bool(profile_features.get("has_inherited_docs", False))),
+        "crawlability":    float(profile_features.get("crawlability", 0.3)),
+    }
+
+
+def _linear_score_strategy(sid: str, feats: dict[str, float]) -> float:
+    """Compute the linear score for one strategy."""
+    base = _LINEAR_BASE.get(sid, 0.0)
+    weights = _LINEAR_WEIGHTS.get(sid, {})
+    return base + sum(w * feats.get(feat, 0.0) for feat, w in weights.items())
+
 
 def decide(
     profile_features: dict[str, Any],
@@ -531,6 +596,8 @@ def decide(
     accuracy_need = resolved.accuracy_need or 0.5
     recall_demand = resolved.recall_demand or 0.5
 
+    _lin_feats = _compute_linear_features(profile_features)
+
     for sid in ("a", "b", "c", "d"):
         prior = _blend_prior(_BASE_PRIORS[sid][qclass], _CANONICAL_PRIORS[sid], w_canon)
 
@@ -578,180 +645,18 @@ def decide(
             }
             continue
 
-        # Score using estimated_recall in place of the static recall_capacity.
-        # Each term is exposed so the trace UI can show "this strategy
-        # got 0.81 from accuracy * 0.85 + 0.78 from recall * 0.95 + …".
-        accuracy_term = prior.accuracy * accuracy_need
-        recall_term = est_recall * recall_demand
-        speed_term = prior.speed * speed_w
-        shape_match = _shape_match(prior, resolved.answer_shape)
-        shape_term = shape_match * _SHAPE_MATCH_WEIGHT
-        total = accuracy_term + recall_term + speed_term + shape_term
-
-        # Payer-specificity-aware adjustment (v1.2.4 — 2026-05-03):
-        # When the query has NO PAYER-specific j-tag (j:state.* and
-        # j:program.* don't count — they're jurisdiction, not payer),
-        # the answer is "general knowledge" shape — standardised codes,
-        # universal procedures, training-data territory. (a)/(b) lose
-        # because the cascade pool widens (no payer narrowing) and
-        # corpus retrieval becomes diffuse; (c) wins because its LLM
-        # prior IS "the world's policy" when no specific payer applies.
-        # Boosts only when:
-        #   • not has_j_payor_tag (no specific payer named)
-        #   • AND has_d_tag (some topical anchor — not fail-fast vague)
-        # Empirical anchor: cmhc012 (ABA HCPCS — query mentions
-        # "FL Medicaid" which matches j:state.florida but no payer).
-        # (c) was the only strategy returning the right CPT codes via
-        # LLM prior + clinical-policy citation; (a)/(b)/(d) abstained
-        # or returned generic content.
-        adj = 0.0
-        adj_reason = None
-        # No-payer routing: when the query has a domain tag but no specific
-        # payer, the answer is general/public-knowledge shape. (c) wins
-        # because its LLM prior IS global policy when no payer narrows it.
-        # Exception: when pool already landed at AHCA scope (L3_AHCA_D /
-        # L4_AHCA), the domain pool IS meaningful narrowing — AHCA
-        # substitutes for the absent payer (v1.2.6). Skip the haircut and
-        # let the AHCA-substitution block below do the routing instead.
-        if (
-            profile_features.get("has_d_tag")
-            and not profile_features.get("has_j_payor_tag")
-            and not profile_features.get("has_ahca_pool")
-        ):
-            if sid == "c":
-                adj = +0.40
-                adj_reason = "no_payer_general_knowledge_boost"
-            elif sid == "a":
-                adj = -0.30
-                adj_reason = "no_payer_a_recall_haircut"
-
-        # AHCA domain substitutes absent payer (v1.2.6 — 2026-05-05):
-        # When the pool cascade landed at AHCA scope and the query has a
-        # domain tag but no payer tag, AHCA is the effective payer scope.
-        # (a) BM25 precision WITHIN AHCA∩D is the right first attempt —
-        # it finds whatever payer-adjacent content the corpus has.
-        # (b) wide-themes is redundant: the pool is already domain-narrowed.
-        if (
-            profile_features.get("has_ahca_pool")
-            and not profile_features.get("has_j_payor_tag")
-            and profile_features.get("has_d_tag")
-        ):
-            if sid == "a":
-                adj += +0.20
-                adj_reason = (adj_reason or "") + "+ahca_domain_substitutes_payer"
-            elif sid == "b":
-                adj -= 0.20
-                adj_reason = (adj_reason or "") + "-ahca_b_redundant_with_domain_pool"
-
-        # Inherited authority docs boost (v1.2.7 — 2026-07-06):
-        # When a query names a specific MCO payer (has_j_payor_tag) AND
-        # payor_inherited_authority returned inherited AHCA docs for that payer,
-        # strategy (a)'s supplemental pass WILL surface those docs regardless of
-        # BM25/vector score.  The co-occurrence check underestimates (a)'s recall
-        # here because AHCA doc text uses "Medicaid managed care plan" not MCO
-        # names — so est_recall is spuriously low.  Apply a routing bonus to (a)
-        # to reflect its actual advantage over (b) on MCO+inherited-authority queries.
-        if (
-            profile_features.get("has_j_payor_tag")
-            and profile_features.get("has_inherited_docs")
-        ):
-            if sid == "a":
-                adj += +0.12
-                adj_reason = (adj_reason or "") + "+inherited_authority_a_boost"
-            elif sid == "b":
-                adj -= 0.05
-                adj_reason = (adj_reason or "") + "-b_redundant_with_inherited_precision"
-
-        # Service-specificity penalty on (d) (v1.2.8 — 2026-07-07):
-        # 2026-07-07 calibration review, question-by-question, all 22 cmhc
-        # queries: when the query asks whether/how a SPECIFIC clinical
-        # service or procedure is covered/authorized/billed (a service-type
-        # d-tag co-occurring with a coverage-determination or billing-
-        # specific d-tag), (d) external search NEVER won — n=8, zero
-        # exceptions. That detail lives in the payer's internal coverage/
-        # billing policy, not anything indexed publicly. Corpus strategies
-        # (a/b) should get a LOWER bar to be trusted here — even a weak
-        # corpus signal beats (d)'s near-zero value on this bucket — so we
-        # penalize (d) rather than boost a/b (their existing priors already
-        # win when (d) is fairly scored). Standardized administrative facts
-        # (deadlines, turnaround times, vendor names) are NOT covered by
-        # this rule — that bucket is genuinely payer-corpus-completeness
-        # dependent (see CANONICAL_STRATEGY_BASELINE.md), not fixable by a
-        # static adjustment.
-        if profile_features.get("has_service_specificity") and sid == "d":
-            adj -= 0.25
-            adj_reason = (adj_reason or "") + "-service_specificity_d_penalty"
-
-        # Zero-cooc routing (v1.2.5 — 2026-05-05; refined v1.2.9 — 2026-07-07):
-        # When _estimate_internal_recall found a content token with ZERO
-        # corpus presence (e.g. "molina" when Molina docs aren't indexed),
-        # no amount of BM25 or vector recall can help — the corpus simply
-        # doesn't have this entity. Route hard to (d) external.
-        # Condition: has_zero_cooc_term AND has_d_tag (domain is valid) AND
-        # NOT has_literal (literal-anchor miss is a different failure mode —
-        # let the literal-anchor hard-withdraw handle it via est_recall=0).
-        #
-        # EXCEPTION (v1.2.9 — 2026-07-07 calibration, cmhc005/cmhc012 both
-        # scored 0.0 in production): when the query is ALSO service-specific
-        # (v1.2.8), zero-cooc is NOT a reason to trust (d) more — it's the
-        # WORST case for (d), not the best. A narrow billing/coverage code
-        # missing from the corpus is very likely ALSO missing from public
-        # web content, since that detail lives in the payer's internal
-        # policy (the same reasoning behind v1.2.8's penalty). The old
-        # linear combine let this rule's +0.60 swamp v1.2.8's -0.25, so
-        # (d) kept winning on exactly the queries it structurally cannot
-        # answer. Route the other way instead: corpus is the only real
-        # shot here, even a weak one — verified against live cmhc005/012
-        # data before shipping this change.
-        if (
-            profile_features.get("has_zero_cooc_term")
-            and profile_features.get("has_d_tag")
-            and not profile_features.get("has_literal")
-        ):
-            if profile_features.get("has_service_specificity"):
-                if sid == "d":
-                    adj -= 0.40
-                    adj_reason = (adj_reason or "") + "-zero_cooc_service_specific_d_double_penalty"
-                elif sid in ("a", "b"):
-                    adj += 0.40
-                    adj_reason = (adj_reason or "") + "+zero_cooc_service_specific_corpus_last_resort"
-            else:
-                if sid == "d":
-                    adj += +0.60
-                    adj_reason = (adj_reason or "") + "+zero_cooc_entity_not_in_corpus"
-                elif sid in ("a", "b"):
-                    adj += -0.40
-                    adj_reason = (adj_reason or "") + "-zero_cooc_internal_strategy_penalised"
-        total += adj
+        # Score using the linear feature model (EVAL spec 2026-07-15).
+        # Replaces the prior-lookup + additive-adj system with a direct
+        # dot-product over retrieval-property features. Hand-reasoned weights
+        # in _LINEAR_WEIGHTS; production bandit will update from reward.
+        total = _linear_score_strategy(sid, _lin_feats)
 
         scores[sid] = round(total, 4)
         score_breakdown[sid] = {
             "withdrawn": False,
-            "accuracy": {
-                "prior": prior.accuracy,
-                "weight": round(accuracy_need, 3),
-                "contrib": round(accuracy_term, 4),
-            },
-            "recall": {
-                "est": round(est_recall, 3),
-                "static": prior.recall_capacity,
-                "weight": round(recall_demand, 3),
-                "contrib": round(recall_term, 4),
-            },
-            "speed": {
-                "prior": prior.speed,
-                "weight": round(speed_w, 3),
-                "contrib": round(speed_term, 4),
-            },
-            "shape": {
-                "match": round(shape_match, 3),
-                "weight": _SHAPE_MATCH_WEIGHT,
-                "contrib": round(shape_term, 4),
-            },
-            "cost_per_call": prior.cost_per_call,
+            "linear_score": round(total, 4),
+            "features": _lin_feats,
             "total": round(total, 4),
-            "adj": round(adj, 4),
-            "adj_reason": adj_reason,
         }
 
     # Pick highest-scoring non-withdrawn strategy.

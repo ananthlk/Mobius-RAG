@@ -2894,6 +2894,17 @@ async def corpus_search_agent(
     _best_resp: CorpusSearchAgentResponse | None = None
     response: CorpusSearchAgentResponse | None = None
 
+    # Fast-exit termination guard (EVAL spec Stage 2): a retry only helps if
+    # the input changes materially — a genuinely different strategy OR a
+    # significantly rewritten query. Track a query-form signature to detect
+    # same-query re-attempts that would return identical chunks.
+    import hashlib as _hashlib
+    def _query_signature(q: str) -> str:
+        # Normalised first-100-chars hash — different if query was meaningfully rewritten
+        return _hashlib.md5(" ".join(q.lower().split())[:100].encode()).hexdigest()[:8]
+
+    _query_signatures_seen: set[str] = set()
+
     # Cross-strategy escalation on synthesis abstain: how many times we're
     # allowed to escalate beyond the first strategy when synthesis says "low"
     # even though retrieval found chunks. 0 for fast/copilot, 1 for chat, 2+ for research.
@@ -2917,6 +2928,18 @@ async def corpus_search_agent(
         })
         response = await _corpus_search_agent_impl(db, attempt_request, caller, caller_id)
         _persist_routing_decision_async(attempt_request, response)
+
+        # Fast-exit: if this attempt used the same query form we've already seen
+        # with a different strategy, the corpus returned identical chunks.
+        # Return best-so-far immediately — another pass adds no value.
+        _qsig = _query_signature(attempt_request.query)
+        if _qsig in _query_signatures_seen and _attempt > 0:
+            logger.info(
+                "[corpus_search_agent] attempt=%d strategy=%s query_sig=%s already_seen → fast_exit",
+                _attempt, response.strategy_used or "?", _qsig,
+            )
+            return _best_resp if _best_resp is not None else response
+        _query_signatures_seen.add(_qsig)
 
         strategy_used = response.strategy_used or "a"
         if strategy_used not in _tried:
@@ -3275,6 +3298,39 @@ async def _corpus_search_agent_impl(
         "has_inherited_docs": bool(_inherited_doc_ids_pre),
         "inherited_doc_count": len(_inherited_doc_ids_pre),
     }
+
+    # thematic_policy: d-tag spans a policy section b assembles better than a
+    _THEMATIC_PREFIXES = (
+        "d:utilization_management.prior_authorization",
+        "d:utilization_management.concurrent_review",
+        "d:appeals_and_disputes",
+        "d:credentialing",
+    )
+    profile_features["thematic_policy"] = any(
+        t.startswith(pfx)
+        for t in profile.tag_matches
+        for pfx in _THEMATIC_PREFIXES
+    )
+
+    # crawlability: payer web-fetchable by strategy d
+    _PAYOR_CRAWLABILITY = {
+        "sunshine": 0.80,
+        "aetna":    0.00,
+        "simply":   0.00,
+        "humana":   0.40,
+        "staywell": 0.30,
+        "wellcare": 0.40,
+    }
+    _crawl_score = 0.30  # default: unknown payer
+    for _t in profile.tag_matches:
+        if _t.startswith("j:payor."):
+            _pname = _t[len("j:payor."):].lower().replace("_", "").replace("-", "")
+            for _k, _v in _PAYOR_CRAWLABILITY.items():
+                if _k in _pname:
+                    _crawl_score = _v
+                    break
+            break
+    profile_features["crawlability"] = _crawl_score
 
     # Override path — explicit mode set by caller bypasses the router's
     # scoring and forces a specific strategy.
