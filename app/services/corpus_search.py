@@ -3181,8 +3181,18 @@ async def corpus_search(
         bm25_chunks, bm25_normalized_query, bm25_expansion = await bm25_task
         bm25_ms = (time.monotonic() - tb) * 1000 - embed_ms  # net DB time
 
-        # D-tag keys from lexicon expansion — used for the tag-membership arm.
-        dtag_keys_corpus = [
+        # D-tag keys for the tag-membership arm.
+        # Prefer the high-selectivity leaf codes from required_phrase_tag_codes
+        # (partition_terms filters to selectivity ≥ 0.65, so these are specific
+        # tags like claims.timely_filing). Broad expansion tags like claims.general
+        # match thousands of chunks and flood the arm with irrelevant candidates.
+        # Fall back to expansion domain_tags only if no required d-tag codes exist.
+        _req_dtag_keys = [
+            t[len("d:"):]
+            for t in (request.required_phrase_tag_codes or [])
+            if t.startswith("d:")
+        ]
+        dtag_keys_corpus = _req_dtag_keys or [
             t[len("d:"):]
             for t in (bm25_expansion.get("domain_tags") or [])
             if t.startswith("d:")
@@ -3235,7 +3245,14 @@ async def corpus_search(
         # Precision mode (strategy a) is BM25-only by design, but tag-matched
         # chunks with sparse body text (e.g. table rows) miss BM25 entirely.
         # Pull them via the d-tag arm so the reranker and boost can act on them.
-        dtag_keys_precision = [
+        # Use required leaf tags (high-selectivity) not broad expansion tags —
+        # claims.timely_filing hits ~19 chunks; claims.general hits thousands.
+        _req_dtag_keys_p = [
+            t[len("d:"):]
+            for t in (request.required_phrase_tag_codes or [])
+            if t.startswith("d:")
+        ]
+        dtag_keys_precision = _req_dtag_keys_p or [
             t[len("d:"):]
             for t in (bm25_expansion.get("domain_tags") or [])
             if t.startswith("d:")
