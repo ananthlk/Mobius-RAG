@@ -3137,13 +3137,17 @@ async def corpus_search_agent(
                             _best_resp or response
                         )
                         return _with_chain(winner)
-                    # Inherited pass also abstained — update best, fall to normal escalation.
-                    # Use >= (not >) so the inherited response wins over the outer's original
-                    # when chunk counts are equal (k=5 eval: outer=5, inner=5 → > fails,
-                    # outer's non-59G synthesis stays; >= ensures the inherited pass's
-                    # 88e28899-containing synthesis answer is used instead).
-                    if _inh_n >= (len(_best_resp.chunks or []) if _best_resp else -1):
-                        _best_resp = _inh_esc_resp
+                    # Inherited pass also abstained — update best only if not degrading
+                    # confidence. An escalation abstain (conf=low) must NOT replace a
+                    # pre-escalation answer that was medium/correct (definitions_rule:
+                    # plain-a conf=medium → escalation floods all 7 inherited docs →
+                    # abstain conf=low; keep-best must preserve the better answer).
+                    _best_conf_rank = _conf_rank.get(
+                        (_best_resp.confidence or "low") if _best_resp else "low", 0
+                    )
+                    if _conf_rank.get(_inh_conf, 0) >= _best_conf_rank:
+                        if _inh_n >= (len(_best_resp.chunks or []) if _best_resp else -1):
+                            _best_resp = _inh_esc_resp
                 except Exception as _inh_exc:
                     logger.warning(
                         "[corpus_search_agent] inherited_authority_escalation failed: %s",
@@ -4616,9 +4620,26 @@ async def _corpus_search_agent_impl(
                             boosted_new.append(_ic)
                         new_chunks = boosted_new
 
+                    # Sort by (score, title_overlap) so that within the boosted
+                    # inherited set — where all docs reach score=1.0 — the chunk
+                    # whose document name shares the most query terms ranks first.
+                    # This ensures the query-relevant inherited doc (e.g. 59G_1053
+                    # for an authorization query, 59G_1020 for a county query)
+                    # surfaces before irrelevant siblings with equal boosted scores.
+                    import re as _re_inh
+                    _inh_q_words = set(
+                        _re_inh.findall(r"\b\w{4,}\b", (request.query or "").lower())
+                    ) - {"that", "this", "with", "from", "have", "what", "does",
+                         "which", "under", "when", "their", "they", "been", "were",
+                         "will", "more", "most", "each", "also", "both", "than"}
+
+                    def _inh_title_overlap(c: object) -> int:
+                        name = (getattr(c, "document_name", "") or "").lower()
+                        return len(_inh_q_words & set(_re_inh.findall(r"\b\w+\b", name)))
+
                     merged = sorted(
                         best_chunks + new_chunks,
-                        key=lambda c: c.rerank_score or 0,
+                        key=lambda c: (c.rerank_score or 0, _inh_title_overlap(c)),
                         reverse=True,
                     )
                     best_chunks = merged
