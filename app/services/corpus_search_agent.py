@@ -2822,6 +2822,12 @@ class CorpusSearchAgentResponse(BaseModel):
     # "③ Query Rewrite" section so the analyst can see exactly what
     # text each strategy ran with vs. the user's raw query.
     queries_per_strategy: dict[str, str] | None = None
+    # Escalation telemetry — clean per-query signals for eval and
+    # Payor's displacement matrix ({escalated?}×{grounded?} per query).
+    # Emitted by the outer corpus_search_agent() loop; absent on inner impl calls.
+    escalated: bool = False          # True when cross-strategy escalation fired
+    strategy_chain: list[str] = []  # ordered strategy IDs actually invoked
+    fast_exit: dict[str, Any] | None = None  # {"fired": bool, "reason": str | None}
 
 
 class CorpusSearchAgentRequest(BaseModel):
@@ -2954,7 +2960,12 @@ async def corpus_search_agent(
                 "[corpus_search_agent] attempt=%d strategy=%s query_sig=%s already_seen → fast_exit",
                 _attempt, response.strategy_used or "?", _qsig,
             )
-            return _best_resp if _best_resp is not None else response
+            _fe_resp = _best_resp if _best_resp is not None else response
+            return _fe_resp.model_copy(update={
+                "escalated": _escalations_done > 0,
+                "strategy_chain": list(_tried),
+                "fast_exit": {"fired": True, "reason": "query_sig_seen"},
+            })
         _query_signatures_seen.add(_qsig)
 
         strategy_used = response.strategy_used or "a"
@@ -2965,8 +2976,13 @@ async def corpus_search_agent(
         _all_strategies_tried.extend(response.strategies_tried or [])
 
         def _with_chain(resp: CorpusSearchAgentResponse) -> CorpusSearchAgentResponse:
-            """Patch the response with the full cross-attempt strategies_tried list."""
-            return resp.model_copy(update={"strategies_tried": list(_all_strategies_tried)})
+            """Patch with full escalation chain + clean telemetry signals."""
+            return resp.model_copy(update={
+                "strategies_tried": list(_all_strategies_tried),
+                "escalated": _escalations_done > 0,
+                "strategy_chain": list(_tried),
+                "fast_exit": {"fired": False, "reason": None},
+            })
 
         # Explicit mode override (A/B-test / calibration knob): honour the
         # forced strategy VERBATIM — never cascade to another arm on a low/empty
@@ -3537,13 +3553,26 @@ async def _corpus_search_agent_impl(
             cascade_level_b = "EXPLORE_CALLER"
             intersect_codes_b: list[str] = []
         else:
-            try:
-                ahca_docs = await _doc_ids_with_tag(db, _AHCA_TAG)
-                explore_pool = ahca_docs or None
-            except Exception:
-                explore_pool = None
-            cascade_level_b = "EXPLORE_AHCA" if explore_pool else "EXPLORE_OPEN"
-            intersect_codes_b = [_AHCA_TAG] if explore_pool else []
+            _b_payor_tags = [t for t in profile.tag_matches if t.startswith("j:payor.")]
+            if _b_payor_tags and pool_pre and pool_pre.document_ids:
+                # Plan-scoped query: explore within the pre-built candidate pool
+                # (which already includes plan docs + inherited AHCA via
+                # _augment_pool_with_inheritance). The old AHCA-only pool excluded
+                # plan-manual docs — root cause of natural-b returning 0 chunks for
+                # plan PA questions while forced-b (calibrated before this restriction)
+                # correctly found plan manual content (cmhc011: Sunshine inpatient
+                # psychiatric PA process is in Sunshine's plan manual, not AHCA docs).
+                explore_pool = list(pool_pre.document_ids)
+                cascade_level_b = "EXPLORE_PLAN_POOL"
+                intersect_codes_b = []
+            else:
+                try:
+                    ahca_docs = await _doc_ids_with_tag(db, _AHCA_TAG)
+                    explore_pool = ahca_docs or None
+                except Exception:
+                    explore_pool = None
+                cascade_level_b = "EXPLORE_AHCA" if explore_pool else "EXPLORE_OPEN"
+                intersect_codes_b = [_AHCA_TAG] if explore_pool else []
             logger.info(
                 "[%s] [trace:b:pool] level=%s pool_size=%d",
                 agent_id, cascade_level_b,
