@@ -2253,6 +2253,21 @@ def _strategy_order_for(
 
 _HYBRID_RERANK_HIGH = 0.40
 _HYBRID_RERANK_MED = 0.25
+
+# Cross-strategy escalation budget: how many additional strategy attempts
+# are allowed when synthesis abstains (returns confidence=low even though
+# chunks with high rerank were retrieved — "honest I don't know").
+# fast/copilot/real_time = 0: return first answer, let the user re-ask.
+# chat (default) = 1: one escalation attempt.
+# thinking/research = 2: escalate aggressively.
+def _get_escalation_budget(request: "CorpusSearchAgentRequest") -> int:
+    mode = (request.caller_mode or "").lower()
+    speed = (request.speed_budget or "").lower()
+    if mode in ("fast", "copilot") or speed == "real_time":
+        return 0
+    if mode in ("thinking", "research"):
+        return 2
+    return 1
 _HYBRID_DISTINCT_DOCS = 3
 
 _VECTOR_NEW_DOC_MIN = 2
@@ -2879,6 +2894,12 @@ async def corpus_search_agent(
     _best_resp: CorpusSearchAgentResponse | None = None
     response: CorpusSearchAgentResponse | None = None
 
+    # Cross-strategy escalation on synthesis abstain: how many times we're
+    # allowed to escalate beyond the first strategy when synthesis says "low"
+    # even though retrieval found chunks. 0 for fast/copilot, 1 for chat, 2+ for research.
+    _escalation_budget = _get_escalation_budget(request)
+    _escalations_done = 0
+
     for _attempt in range(_MAX_TRIES):
         # Attempt 0 honours the caller's explicit mode (if any).
         # Attempt 1+ clears it so the router takes over — the planner already
@@ -2927,16 +2948,44 @@ async def corpus_search_agent(
             (getattr(c, "rerank_score", 0.0) or 0.0 for c in (response.chunks or [])),
             default=0.0,
         )
-        if n_chunks > 0 and (
+
+        # Synthesis-abstain detection: chunks retrieved with high rerank BUT
+        # the LLM synthesis explicitly returned low confidence (it examined the
+        # chunks and said "the answer is not in these passages").  This is
+        # different from retrieval-low (no chunks / low scores) — the top_rerank
+        # exit would normally treat high-rerank as success, but synthesis already
+        # told us the chunks didn't contain the answer. Escalate to the next
+        # strategy if budget allows; returning an honest abstain when a better
+        # strategy exists is a silent failure from the user's perspective.
+        _is_synthesis_abstain = (
+            n_chunks > 0
+            and response.confidence == "low"
+            and top_rerank >= _HYBRID_RERANK_HIGH
+        )
+
+        if _is_synthesis_abstain and _escalations_done < _escalation_budget:
+            _escalations_done += 1
+            logger.info(
+                "[corpus_search_agent] attempt=%d strategy=%s synthesis_abstain "
+                "top_rerank=%.3f escalation=%d/%d → escalating",
+                _attempt, strategy_used, top_rerank,
+                _escalations_done, _escalation_budget,
+            )
+            # Store this abstain as best-so-far in case escalation also fails.
+            best_n = len(_best_resp.chunks or []) if _best_resp else -1
+            if n_chunks > best_n:
+                _best_resp = response
+            # Fall through to the next loop iteration (router picks next strategy).
+        elif n_chunks > 0 and (
             response.confidence in ("high", "medium")
             or top_rerank >= _HYBRID_RERANK_HIGH
         ):
             return response
-
-        # Low / empty result — store best and retry if budget allows.
-        best_n = len(_best_resp.chunks or []) if _best_resp else -1
-        if n_chunks > best_n:
-            _best_resp = response
+        else:
+            # Low / empty result — store best and retry if budget allows.
+            best_n = len(_best_resp.chunks or []) if _best_resp else -1
+            if n_chunks > best_n:
+                _best_resp = response
 
         if _attempt + 1 < _MAX_TRIES:
             logger.info(

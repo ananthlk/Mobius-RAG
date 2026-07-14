@@ -3240,12 +3240,12 @@ async def corpus_search(
         _req_dtag_keys = [
             t[len("d:"):]
             for t in (request.required_phrase_tag_codes or [])
-            if t.startswith("d:")
+            if t and t.startswith("d:")
         ]
         dtag_keys_corpus = _req_dtag_keys or [
             t[len("d:"):]
             for t in (bm25_expansion.get("domain_tags") or [])
-            if t.startswith("d:")
+            if t and t.startswith("d:")
         ]
 
         if query_embedding:
@@ -3301,12 +3301,12 @@ async def corpus_search(
         _req_dtag_keys_p = [
             t[len("d:"):]
             for t in (request.required_phrase_tag_codes or [])
-            if t.startswith("d:")
+            if t and t.startswith("d:")
         ]
         dtag_keys_precision = _req_dtag_keys_p or [
             t[len("d:"):]
             for t in (bm25_expansion.get("domain_tags") or [])
-            if t.startswith("d:")
+            if t and t.startswith("d:")
         ]
         if dtag_keys_precision:
             dtag_chunks_corpus = await _dtag_arm(
