@@ -2863,6 +2863,12 @@ class CorpusSearchAgentRequest(BaseModel):
     # "chat re-invokes → bandit drops prior → picks next" pattern without
     # the react loop managing arm state itself.
     prior_strategies_tried: list[str] = []
+    # When True, inherited-authority (AHCA 59G) chunks are boosted ABOVE plan
+    # contract_source_of_truth in the rerank merge — used exclusively by the
+    # escalation-integrated inherited-authority pass on synthesis abstains.
+    # Never set by external callers; only the outer corpus_search_agent loop
+    # sets this on the targeted escalation retry.
+    inherited_authority_escalation: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -3022,6 +3028,57 @@ async def corpus_search_agent(
             best_n = len(_best_resp.chunks or []) if _best_resp else -1
             if n_chunks > best_n:
                 _best_resp = response
+
+            # Inherited-authority escalation (Phase 1 ratified design):
+            # For plan-scoped abstains, run a targeted inherited-priority retry of
+            # strategy 'a' BEFORE falling to a different strategy. The binding AHCA
+            # 59G rule wins the rerank race on this pass (boost ABOVE plan CSoT).
+            # Structurally safe: confident plan answers never reach here (top_rerank
+            # exit fires first), so displacement risk on restatement = zero.
+            _is_plan_scoped = any(
+                "j:payor." in t
+                for t in ((response.query_profile or {}).get("tag_matches") or [])
+            )
+            if _is_plan_scoped and not request.inherited_authority_escalation:
+                _inh_esc_req = request.model_copy(update={
+                    "prior_strategies_tried": list(_tried),
+                    "mode": "a",
+                    "inherited_authority_escalation": True,
+                })
+                try:
+                    _inh_esc_resp = await _corpus_search_agent_impl(
+                        db, _inh_esc_req, caller, caller_id
+                    )
+                    _all_strategies_tried.extend(_inh_esc_resp.strategies_tried or [])
+                    _inh_n = len(_inh_esc_resp.chunks or [])
+                    _inh_conf = _inh_esc_resp.confidence or "low"
+                    _inh_top = max(
+                        (getattr(c, "rerank_score", 0.0) or 0.0
+                         for c in (_inh_esc_resp.chunks or [])),
+                        default=0.0,
+                    )
+                    logger.info(
+                        "[corpus_search_agent] inherited_authority_escalation: "
+                        "conf=%s top_rerank=%.3f chunks=%d",
+                        _inh_conf, _inh_top, _inh_n,
+                    )
+                    if _inh_conf in ("high", "medium"):
+                        rank_new = _conf_rank.get(_inh_conf, 0)
+                        rank_old = _conf_rank.get(
+                            (_best_resp.confidence or "low") if _best_resp else "low", 0
+                        )
+                        winner = _inh_esc_resp if rank_new > rank_old else (
+                            _best_resp or response
+                        )
+                        return _with_chain(winner)
+                    # Inherited pass also abstained — update best, fall to normal escalation.
+                    if _inh_n > (len(_best_resp.chunks or []) if _best_resp else -1):
+                        _best_resp = _inh_esc_resp
+                except Exception as _inh_exc:
+                    logger.warning(
+                        "[corpus_search_agent] inherited_authority_escalation failed: %s",
+                        _inh_exc,
+                    )
             # Fall through to the next loop iteration (router picks next strategy).
 
         elif n_chunks > 0 and (
@@ -4306,29 +4363,37 @@ async def _corpus_search_agent_impl(
                 seen_ids = {c.id for c in best_chunks}
                 new_chunks = [c for c in inh_resp.chunks if c.id not in seen_ids]
                 if new_chunks:
-                    # Boost inherited-authority (AHCA 59G) chunks before the merge sort.
-                    # AHCA docs lack the plan name in body text so BM25 scores them lower
-                    # than plan-manual chunks even when they're the authoritative answer.
-                    # 0.08 ≈ one standard deviation above typical plan-manual rerank scores;
-                    # parallels the authority-tier fix that lifted Aetna/Sunshine on gap_fill.
-                    _INH_BOOST = 0.08
-                    boosted_new = []
-                    for _ic in new_chunks:
-                        _raw = _ic.rerank_score or 0.0
-                        if _raw > 0.0:
-                            _ic = _ic.model_copy(update={
-                                "rerank_score": min(1.0, _raw + _INH_BOOST),
-                            })
-                        boosted_new.append(_ic)
+                    # Escalation-integrated boost (ratified design): only on the targeted
+                    # inherited-authority escalation retry does the AHCA boost fire.
+                    # On normal first-pass retrieval, inherited chunks compete on raw score
+                    # (no global boost — prevents displacement on confident plan answers).
+                    # On escalation (synthesis abstained → plan can't answer → retry with
+                    # priority override), boost AHCA chunks ABOVE plan CSoT so the binding
+                    # 59G section outranks plan-manual for this single retry only.
+                    if request.inherited_authority_escalation:
+                        _plan_top = max(
+                            (c.rerank_score or 0.0 for c in best_chunks), default=0.0
+                        )
+                        _inh_floor = min(1.0, _plan_top + 0.15)  # guaranteed above plan CSoT
+                        boosted_new = []
+                        for _ic in new_chunks:
+                            _raw = _ic.rerank_score or 0.0
+                            if _raw > 0.0:
+                                _ic = _ic.model_copy(update={
+                                    "rerank_score": max(_inh_floor, min(1.0, _raw + 0.45)),
+                                })
+                            boosted_new.append(_ic)
+                        new_chunks = boosted_new
                     merged = sorted(
-                        best_chunks + boosted_new,
+                        best_chunks + new_chunks,
                         key=lambda c: c.rerank_score or 0,
                         reverse=True,
                     )
                     best_chunks = merged
                     logger.info(
-                        "[%s] [inherited_authority] merged %d AHCA chunks (+%.2f boost) into results",
-                        agent_id, len(new_chunks), _INH_BOOST,
+                        "[%s] [inherited_authority] merged %d AHCA chunks%s into results",
+                        agent_id, len(new_chunks),
+                        " (+escalation boost)" if request.inherited_authority_escalation else "",
                     )
         except Exception as _inh_exc:
             logger.warning(
