@@ -4620,12 +4620,18 @@ async def _corpus_search_agent_impl(
                             boosted_new.append(_ic)
                         new_chunks = boosted_new
 
-                    # Sort by (score, title_overlap) so that within the boosted
-                    # inherited set — where all docs reach score=1.0 — the chunk
-                    # whose document name shares the most query terms ranks first.
-                    # This ensures the query-relevant inherited doc (e.g. 59G_1053
-                    # for an authorization query, 59G_1020 for a county query)
-                    # surfaces before irrelevant siblings with equal boosted scores.
+                    # Relevance-aware ranking within the inherited set:
+                    # (1) Compute query-term overlap with each chunk's doc title.
+                    # (2) Promote title-matching inherited chunks to score=1.0 so
+                    #     they reach the same tier regardless of raw retrieval score.
+                    #     Without this, a doc like 59G_1053 ("Authorization
+                    #     Requirements") can land at _inh_floor (0.968) if its raw
+                    #     vector score < 0.55, losing to siblings that hit 1.0,
+                    #     making pa_governing non-deterministic (sometimes correct,
+                    #     sometimes abstain depending on the reranker's exact scores).
+                    # (3) Sort by (score, title_overlap desc) so the query-relevant
+                    #     doc (59G_1053 for auth, 59G_1020 for county) ranks first
+                    #     among 1.0 chunks and lands in synthesis top-5.
                     import re as _re_inh
                     _inh_q_words = set(
                         _re_inh.findall(r"\b\w{4,}\b", (request.query or "").lower())
@@ -4636,6 +4642,16 @@ async def _corpus_search_agent_impl(
                     def _inh_title_overlap(c: object) -> int:
                         name = (getattr(c, "document_name", "") or "").lower()
                         return len(_inh_q_words & set(_re_inh.findall(r"\b\w+\b", name)))
+
+                    if request.inherited_authority_escalation and _inh_q_words:
+                        promoted_new = []
+                        for _ic in new_chunks:
+                            if _inh_title_overlap(_ic) > 0 and (
+                                _ic.rerank_score or 0
+                            ) < 1.0:
+                                _ic = _ic.model_copy(update={"rerank_score": 1.0})
+                            promoted_new.append(_ic)
+                        new_chunks = promoted_new
 
                     merged = sorted(
                         best_chunks + new_chunks,
