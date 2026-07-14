@@ -2900,6 +2900,13 @@ async def corpus_search_agent(
     _escalation_budget = _get_escalation_budget(request)
     _escalations_done = 0
 
+    # Accumulate strategies_tried across all attempts so the caller can see the
+    # full escalation chain (e.g. ['a', 'b']) not just the final strategy's entry.
+    _all_strategies_tried: list[Any] = []
+
+    # Confidence rank for keep-best semantics on escalation.
+    _conf_rank = {"high": 2, "medium": 1, "low": 0}
+
     for _attempt in range(_MAX_TRIES):
         # Attempt 0 honours the caller's explicit mode (if any).
         # Attempt 1+ clears it so the router takes over — the planner already
@@ -2915,6 +2922,13 @@ async def corpus_search_agent(
         if strategy_used not in _tried:
             _tried.append(strategy_used)
 
+        # Accumulate per-attempt strategies_tried for full escalation-chain visibility.
+        _all_strategies_tried.extend(response.strategies_tried or [])
+
+        def _with_chain(resp: CorpusSearchAgentResponse) -> CorpusSearchAgentResponse:
+            """Patch the response with the full cross-attempt strategies_tried list."""
+            return resp.model_copy(update={"strategies_tried": list(_all_strategies_tried)})
+
         # Explicit mode override (A/B-test / calibration knob): honour the
         # forced strategy VERBATIM — never cascade to another arm on a low/empty
         # result. The docstring above says overrides "suppress retry without
@@ -2925,12 +2939,12 @@ async def corpus_search_agent(
         # result as-is so each (query, strategy) cell reflects THAT strategy's
         # true performance, including its failures.
         if _is_override:
-            return response
+            return _with_chain(response)
 
         # Terminal: e=fail-fast (off-scope, retrying won't help),
         #            d=external (highest-recall tier, nothing beyond this).
         if strategy_used in ("e", "d"):
-            return response
+            return _with_chain(response)
 
         # Success: corpus chunks returned with decent confidence — done.
         #
@@ -2971,16 +2985,34 @@ async def corpus_search_agent(
                 _attempt, strategy_used, top_rerank,
                 _escalations_done, _escalation_budget,
             )
-            # Store this abstain as best-so-far in case escalation also fails.
+            # Store as best-so-far in case escalation also fails to find an answer.
             best_n = len(_best_resp.chunks or []) if _best_resp else -1
             if n_chunks > best_n:
                 _best_resp = response
             # Fall through to the next loop iteration (router picks next strategy).
+
         elif n_chunks > 0 and (
             response.confidence in ("high", "medium")
             or top_rerank >= _HYBRID_RERANK_HIGH
         ):
-            return response
+            # Keep-best on escalation: if we already escalated, the prior
+            # strategy's answer may have been stronger. Never regress — return
+            # whichever response has higher synthesis confidence (prefer original
+            # on tie so a marginal escalation doesn't silently replace a
+            # better-scoring original).
+            if _escalations_done > 0 and _best_resp is not None:
+                rank_new = _conf_rank.get(response.confidence or "low", 0)
+                rank_old = _conf_rank.get(_best_resp.confidence or "low", 0)
+                final = response if rank_new > rank_old else _best_resp
+                logger.info(
+                    "[corpus_search_agent] escalation keep-best: new=%s old=%s → keeping %s",
+                    response.confidence, _best_resp.confidence,
+                    "new" if final is response else "old",
+                )
+            else:
+                final = response
+            return _with_chain(final)
+
         else:
             # Low / empty result — store best and retry if budget allows.
             best_n = len(_best_resp.chunks or []) if _best_resp else -1
@@ -2995,7 +3027,8 @@ async def corpus_search_agent(
             )
 
     # All attempts exhausted — return best result found across all tries.
-    return _best_resp if _best_resp is not None else response  # type: ignore[return-value]
+    final = _best_resp if _best_resp is not None else response
+    return _with_chain(final)  # type: ignore[arg-type]
 
 
 def _persist_routing_decision_async(
