@@ -4502,10 +4502,16 @@ async def _corpus_search_agent_impl(
                         boosted_new = []
                         for _ic in new_chunks:
                             _raw = _ic.rerank_score or 0.0
-                            if _raw > 0.0:
-                                _ic = _ic.model_copy(update={
-                                    "rerank_score": max(_inh_floor, min(1.0, _raw + 0.45)),
-                                })
+                            # Boost ALL inherited chunks to at least _inh_floor,
+                            # even when _raw == 0.0. Inherited-authority docs are
+                            # authoritative by lineage, not by retrieval score —
+                            # a 1-chunk pinpoint doc (59G_1020 county) can have
+                            # zero vector/BM25 similarity to the current query
+                            # term while still being the canonical answer. The
+                            # floor guarantees it surfaces above plan CSoT.
+                            _ic = _ic.model_copy(update={
+                                "rerank_score": max(_inh_floor, min(1.0, _raw + 0.45)),
+                            })
                             boosted_new.append(_ic)
                         new_chunks = boosted_new
 
