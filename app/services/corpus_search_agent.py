@@ -4461,6 +4461,22 @@ async def _corpus_search_agent_impl(
                 caller=f"{caller}:agent:inherited_authority",
             )
             if inh_resp.chunks:
+                # In inherited-authority escalation mode, strip inherited-doc chunks
+                # from best_chunks BEFORE computing seen_ids. Inherited docs that landed
+                # in the main strategy-a pass (because they're in the cascade pool) would
+                # otherwise sit in seen_ids and be excluded from new_chunks — receiving no
+                # boost and staying at raw scores below Aetna-manual chunks. A 1-chunk
+                # pinpoint doc (59G_1020 county-of-residence) would stay below the top-k
+                # window even though it is the canonical answer.
+                # Removing inherited chunks here lets them re-enter through new_chunks and
+                # receive the escalation boost; no duplicates because their unboosted copies
+                # are gone from best_chunks before the merge at line 4518.
+                if request.inherited_authority_escalation and _all_inherited_doc_ids:
+                    _inh_strip_set = set(_all_inherited_doc_ids)
+                    best_chunks = [
+                        c for c in best_chunks
+                        if str(getattr(c, "document_id", "") or "") not in _inh_strip_set
+                    ]
                 seen_ids = {c.id for c in best_chunks}
                 new_chunks = [c for c in inh_resp.chunks if c.id not in seen_ids]
                 if new_chunks:
