@@ -4532,7 +4532,7 @@ async def _corpus_search_agent_impl(
                                 for r in _fb_rows
                             ]
                             inh_resp = inh_resp.model_copy(update={
-                                "chunks": list(inh_resp.chunks or []) + _fb_chunks,
+                                "chunks": _fb_chunks + list(inh_resp.chunks or []),
                             })
                             logger.info(
                                 "[%s] [inherited_authority] direct-fetch fallback: "
