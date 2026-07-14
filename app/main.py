@@ -4804,6 +4804,49 @@ async def delete_gcs_file(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/documents/{document_id}/extend")
+async def extend_document_ttl(
+    document_id: str,
+    body: dict = Body(default={}),
+    db: AsyncSession = Depends(get_db),
+):
+    """Extend (or set) the TTL on an ephemeral document.
+
+    Called by chat's Vault "Extend" action to keep the authoritative
+    expires_at in the RAG DB in sync — this is the value the cleanup
+    cron reads, so only moving the chat-side copy leaves the doc at
+    risk of premature sweep.
+
+    Body: {"days": N}  (required; no default — callers must be explicit)
+    Returns: {"document_id": str, "expires_at": ISO-8601}
+    """
+    from uuid import UUID
+    from datetime import timedelta as _timedelta
+
+    try:
+        doc_uuid = UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID")
+
+    days = body.get("days")
+    if not days or not isinstance(days, int) or days <= 0:
+        raise HTTPException(status_code=400, detail="days must be a positive integer")
+
+    result = await db.execute(select(Document).where(Document.id == doc_uuid))
+    document = result.scalar_one_or_none()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    document.expires_at = datetime.utcnow() + _timedelta(days=days)
+    await db.commit()
+    await db.refresh(document)
+
+    return {
+        "document_id": str(document.id),
+        "expires_at": document.expires_at.isoformat() + "Z",
+    }
+
+
 @app.delete("/documents/{document_id}")
 async def delete_document(
     document_id: str,

@@ -62,7 +62,14 @@ _RUBRIC_SYSTEM = (
     "- Lift the original fact text into the output lists VERBATIM. Do "
     "  not paraphrase.\n"
     "- A fact is a hit if the response asserts it directly OR clearly "
-    "  paraphrases it. Synonyms are fine.\n"
+    "  paraphrases it, AS PART OF ACTUALLY ANSWERING THE QUESTION. "
+    "  Synonyms are fine.\n"
+    "- A fact is NOT a hit when it appears only incidentally — in a "
+    "  disclaimer, in a generic \"the applicable rule is X\" trailer, or "
+    "  as an echo of the question's own wording — while the response "
+    "  does NOT use it to answer what was asked. Mentioning a fact is "
+    "  not the same as answering the question. If the response says it "
+    "  cannot answer, such incidental facts are MISSES, not hits.\n"
     "- A forbidden_fact is a hit if the response asserts that wrong "
     "  claim, even partially.\n"
     "- A must-fact is a miss if the response does not address it at all "
@@ -70,10 +77,12 @@ _RUBRIC_SYSTEM = (
     "- If the response is empty / fail-fast, all must-facts are misses "
     "  and there should be no hits.\n"
     "- ``honest_abstain`` = true when the response EXPLICITLY says it "
-    "  cannot answer from the provided sources (e.g. \"the passages do "
-    "  not contain this information\", \"no information was found\", "
-    "  \"I cannot determine from these chunks\") AND has zero "
-    "  forbidden_hits. This is qualitatively better than a confidently "
+    "  cannot answer the core question from the provided sources (e.g. "
+    "  \"the passages do not contain this information\", \"no "
+    "  information was found\", \"I cannot determine from these "
+    "  chunks\") AND has zero forbidden_hits — EVEN IF it incidentally "
+    "  cites a rule number or repeats terms from the question. An "
+    "  explicit decline is qualitatively better than a confidently "
     "  wrong answer — the system declined to hallucinate. Set false "
     "  otherwise (including when the response asserts wrong facts OR "
     "  is simply incomplete without explicitly disclaiming).\n"
@@ -223,6 +232,15 @@ def _score_rubric(
     if honest_abstain and n_forbidden_hit == 0 and normalized < 0.5:
         verdict = "honest_abstain"
         normalized = max(normalized, 0.30)
+    elif honest_abstain and n_forbidden_hit == 0:
+        # Safety net: the judge flagged an explicit decline, yet fact
+        # strings still scored ≥0.5 — they leaked into a disclaimer or a
+        # canned "the applicable rule is X" trailer rather than answering
+        # the question. An explicit "I cannot answer from these sources"
+        # is never fully correct; cap out of the correct band. (The rubric
+        # rules above should already have marked those facts as misses;
+        # this guards against a lenient judge pass.)
+        verdict = "partial"
     elif normalized >= 0.85:
         verdict = "correct"
     elif normalized >= 0.5:

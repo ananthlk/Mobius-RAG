@@ -1,81 +1,89 @@
-bank_version: payor_inheritance_aetna_v1
-# Inheritance-union recall probe: plan-scoped queries whose authoritative answer
-# lives in an AHCA Florida Medicaid 59G rule that Aetna Better Health of Florida
-# inherits. Measures the retrieval-union unlock (RAG migration 004 +
-# authority-inheritance union) at ANSWER level via the LLM judge — the Payor
-# agent's retrieval-only unit test is strict (exact rule filename in top-10:
-# 1/5) and flagged phrasing sensitivity (question-phrased queries, as used
-# here, retrieve the target rule less reliably than keyword phrasing — this
-# run measures whether synthesis still surfaces enough of the union to answer
-# correctly despite that). Source: mobius-payor/banks/inheritance_aetna.yaml
-# (registry-generated). ids + must_facts preserved verbatim; golden_answer
-# added here for the answer-quality judge.
+bank_version: payor_inheritance_aetna_v2_gapfill_cut
+generated_from: payor_inherited_authority(Aetna) + Aetna published-chunk coverage evidence
+note: >
+  v2 RE-CUT (2026-07-11, Payor agent) + golden_answers added here (Eval) for the
+  answer-quality judge. Two cuts, assigned by EVIDENCE (Aetna published-chunk
+  coverage per topic: prior-auth 153 chunks = plan covers it; county-of-residence
+  0 chunks = only the inherited 59G rule has it; hospice 96 chunks but all
+  provider-type lists, no coverage policy = gap-fill, confirmed by judge run
+  a4a4416a).
+  SCORING SEMANTICS — SCORE THE TWO CUTS SEPARATELY:
+    gap_fill    = the inheritance union must WIN. The answer must ground in the
+                  inherited AHCA 59G rule (59G ref in must_facts). A plan-manual-
+                  only answer is WRONG. This cut measures the INHERITANCE UNLOCK.
+    restatement = a plan-manual-grounded answer is CORRECT; AHCA surfacing is a
+                  bonus, never required. This cut is the DISPLACEMENT GUARD —
+                  it must NOT regress when the inheritance union is active.
+  ids + must_facts preserved verbatim from mobius-payor/banks/inheritance_aetna.yaml.
 queries:
-- id: aetna__medical_necessity
+# ── GAP-FILL: plan docs lack the answer; the inherited AHCA rule must ground it ──
+- id: aetna_inh2__county_residence
+  cut: gap_fill
   persona: clinical
   payer_specificity: strict
-  query: >
-    For a provider with Aetna Better Health of Florida Medicaid, how is medical
-    necessity determined under Florida Medicaid?
+  query: For Aetna Better Health of Florida Medicaid, how is a member's county of residence determined?
   golden_answer: >
-    Aetna Better Health of Florida Medicaid follows Florida Medicaid's 59G
-    definition of medical necessity in determining coverage.
-  must_facts:
-  - 59G
-  - medical necessity
-  - Aetna
-
-- id: aetna__prior_auth_reqs
+    Aetna Better Health of Florida Medicaid follows Florida Medicaid's 59G rules
+    for determining a member's county of residence; Aetna's own manual does not
+    restate this, so the inherited 59G definition governs.
+  must_facts: ["59G", "county of residence"]
+- id: aetna_inh2__definitions_rule
+  cut: gap_fill
   persona: clinical
   payer_specificity: strict
-  query: >
-    For Aetna Better Health of Florida, what are the Florida Medicaid prior
-    authorization requirements?
+  query: Which Florida Medicaid rule defines the standard policy definitions that apply to Aetna Better Health of Florida?
   golden_answer: >
-    Aetna Better Health of Florida's prior authorization requirements for
-    Medicaid services follow Florida Medicaid 59G authorization rules.
-  must_facts:
-  - 59G
-  - authorization
-  - Aetna
-
-- id: aetna__hospice_coverage
+    Florida Medicaid rule 59G-1.010 sets out the standard policy definitions,
+    and Aetna Better Health of Florida inherits those definitions.
+  must_facts: ["59G-1.010", "definitions"]
+- id: aetna_inh2__medical_necessity_standard
+  cut: gap_fill
   persona: clinical
   payer_specificity: strict
-  query: >
-    For Aetna Better Health of Florida Medicaid, what does the Florida Medicaid
-    hospice coverage policy cover?
+  query: Under what standard are generally accepted professional medical standards determined for Aetna Better Health of Florida Medicaid coverage decisions?
   golden_answer: >
-    Aetna Better Health of Florida Medicaid hospice coverage follows Florida
-    Medicaid rule 59G-4.140.
-  must_facts:
-  - 59G-4.140
-  - hospice
-  - Aetna
-
-- id: aetna__definitions
+    Coverage decisions apply the "generally accepted professional medical
+    standards" test from Florida Medicaid's 59G medical necessity definition,
+    which Aetna Better Health of Florida inherits.
+  must_facts: ["59G", "generally accepted professional medical standards"]
+- id: aetna_inh2__hospice_policy
+  cut: gap_fill
   persona: clinical
   payer_specificity: strict
-  query: >
-    Under Aetna Better Health of Florida Medicaid, what are the key Florida
-    Medicaid policy definitions?
+  query: What does the Florida Medicaid hospice coverage policy require for Aetna Better Health of Florida members?
   golden_answer: >
-    Aetna Better Health of Florida Medicaid uses the key policy definitions set
-    out in Florida Medicaid's 59G rules.
-  must_facts:
-  - 59G
-  - Aetna
-
-- id: aetna__county_residence
+    Hospice coverage for Aetna Better Health of Florida members follows Florida
+    Medicaid rule 59G-4.140; Aetna's manual lists hospice provider types but the
+    coverage policy itself is the inherited 59G-4.140 rule.
+  must_facts: ["59G-4.140", "hospice"]
+- id: aetna_inh2__pa_governing_rule
+  cut: gap_fill
+  persona: billing
+  payer_specificity: strict
+  query: Which Florida Medicaid rule governs the authorization requirements that Aetna Better Health of Florida must follow?
+  golden_answer: >
+    The authorization requirements Aetna Better Health of Florida must follow are
+    governed by Florida Medicaid's 59G authorization rules, which the plan inherits.
+  must_facts: ["59G", "authorization"]
+# ── RESTATEMENT: plan manual legitimately answers; do NOT penalize plan-grounded answers ──
+- id: aetna_inh2__pa_requirements
+  cut: restatement
+  persona: billing
+  payer_specificity: strict
+  query: What are the prior authorization requirements for Aetna Better Health of Florida?
+  golden_answer: >
+    Aetna Better Health of Florida's provider manual states its prior
+    authorization requirements directly; that plan-grounded answer is correct on
+    its own, and the underlying Florida Medicaid 59G authorization rule is
+    consistent background, not a required citation.
+  must_facts: ["Aetna", "prior authorization"]
+- id: aetna_inh2__medical_necessity_general
+  cut: restatement
   persona: clinical
   payer_specificity: strict
-  query: >
-    For Aetna Better Health of Florida Medicaid, how is county of residence
-    defined under Florida Medicaid?
+  query: How does Aetna Better Health of Florida define medical necessity?
   golden_answer: >
-    Aetna Better Health of Florida Medicaid follows Florida Medicaid's 59G
-    definition of county of residence.
-  must_facts:
-  - 59G
-  - county
-  - Aetna
+    Aetna Better Health of Florida defines medical necessity in its provider
+    manual, consistent with Florida Medicaid's 59G definition; the plan-grounded
+    answer is correct and does not require surfacing the 59G rule.
+  must_facts: ["Aetna", "medical necessity"]
