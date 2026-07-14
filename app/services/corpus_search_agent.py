@@ -2834,6 +2834,10 @@ class CorpusSearchAgentResponse(BaseModel):
     # what confidence the synthesis gave, and the top rerank score — the
     # discriminator for routing the 2 remaining gap_fill misses.
     inherited_boost: dict[str, Any] | None = None  # {fired, n_chunks, result_confidence, top_rerank}
+    # Doc IDs of inherited chunks that made it through the per-doc cap and got
+    # boosted on the escalation pass. Populated inside the impl when
+    # inherited_authority_escalation=True; read by the outer loop into _inh_boost_record.
+    inherited_doc_ids_boosted: list[str] = []
 
 
 class CorpusSearchAgentRequest(BaseModel):
@@ -3117,6 +3121,7 @@ async def corpus_search_agent(
                         "n_chunks": _inh_n,
                         "result_confidence": _inh_conf,
                         "top_rerank": round(_inh_top, 4),
+                        "boosted_doc_ids": _inh_esc_resp.inherited_doc_ids_boosted,
                     }
                     logger.info(
                         "[corpus_search_agent] inherited_authority_escalation: "
@@ -4409,6 +4414,11 @@ async def _corpus_search_agent_impl(
     confidence = _aggregate_confidence(outcomes, profile)
     hint = _generate_hint(outcomes, profile, confidence)
 
+    # Populated during the escalation-integrated boost pass so the outer loop's
+    # _inh_boost_record can tell EVAL which specific inherited docs survived the
+    # per-doc cap and got lifted. Empty on first-pass (no boost).
+    _inherited_doc_ids_boosted: list[str] = []
+
     # ── Inherited-authority supplemental pass ──────────────────────────
     # BM25/vector retrieval skips AHCA inherited docs (they don't contain
     # "aetna" in text). Force-retrieve them via include_document_ids so the
@@ -4417,9 +4427,18 @@ async def _corpus_search_agent_impl(
     # payor.aetna in document_tags.j_tags → coverage=1.0 without text match.
     if _all_inherited_doc_ids and not request.include_document_ids:
         try:
+            # On the escalation-integrated boost pass, over-fetch so every inherited
+            # doc gets at least 2 candidates before per-doc capping. Without this,
+            # a 26-chunk doc (59G-1.010) fills the k=5 window, starving a 1-chunk
+            # pinpoint doc (59G_1020 county-of-residence) which never appears in
+            # inh_resp.chunks at all — making the per-doc cap at boost-time useless.
+            # Over-fetch guarantees each doc in the inherited set gets a shot.
+            _PER_DOC_CHUNK_CAP = 2
+            _n_inherited_docs = len(_all_inherited_doc_ids)
+            _inh_k = max(request.k, _n_inherited_docs * _PER_DOC_CHUNK_CAP)
             inh_req = CorpusSearchRequest(
                 query=queries.hybrid,
-                k=request.k,
+                k=_inh_k,
                 mode="precision",
                 tag_mode="none",
                 filters=request.filters,
@@ -4449,6 +4468,29 @@ async def _corpus_search_agent_impl(
                             (c.rerank_score or 0.0 for c in best_chunks), default=0.0
                         )
                         _inh_floor = min(1.0, _plan_top + 0.15)  # guaranteed above plan CSoT
+
+                        # Per-doc chunk cap: apply BEFORE boosting so large inherited docs
+                        # (936-chunk SMMC contract, 26-chunk 59G-1.010) don't flood the
+                        # merged result and starve 1-chunk pinpoint docs (59G_1020).
+                        # Take top-_PER_DOC_CHUNK_CAP chunks per doc by raw rerank score.
+                        _doc_slot: dict[str, int] = {}
+                        _capped_new: list = []
+                        for _ic_sort in sorted(
+                            new_chunks,
+                            key=lambda c: c.rerank_score or 0.0,
+                            reverse=True,
+                        ):
+                            _did = str(getattr(_ic_sort, "document_id", "") or "")
+                            if _doc_slot.get(_did, 0) < _PER_DOC_CHUNK_CAP:
+                                _capped_new.append(_ic_sort)
+                                _doc_slot[_did] = _doc_slot.get(_did, 0) + 1
+                        new_chunks = _capped_new
+                        _inherited_doc_ids_boosted = list({
+                            str(getattr(c, "document_id", "") or "")
+                            for c in new_chunks
+                            if getattr(c, "document_id", None)
+                        })
+
                         boosted_new = []
                         for _ic in new_chunks:
                             _raw = _ic.rerank_score or 0.0
@@ -4458,6 +4500,7 @@ async def _corpus_search_agent_impl(
                                 })
                             boosted_new.append(_ic)
                         new_chunks = boosted_new
+
                     merged = sorted(
                         best_chunks + new_chunks,
                         key=lambda c: c.rerank_score or 0,
@@ -4465,9 +4508,11 @@ async def _corpus_search_agent_impl(
                     )
                     best_chunks = merged
                     logger.info(
-                        "[%s] [inherited_authority] merged %d AHCA chunks%s into results",
+                        "[%s] [inherited_authority] merged %d AHCA chunks%s into results "
+                        "(over-fetch k=%d, cap=%d/doc)",
                         agent_id, len(new_chunks),
                         " (+escalation boost)" if request.inherited_authority_escalation else "",
+                        _inh_k, _PER_DOC_CHUNK_CAP,
                     )
         except Exception as _inh_exc:
             logger.warning(
@@ -4630,4 +4675,5 @@ async def _corpus_search_agent_impl(
             "total_ms": int(total_elapsed_ms),
             "n_strategies": len(outcomes),
         },
+        inherited_doc_ids_boosted=_inherited_doc_ids_boosted,
     )
