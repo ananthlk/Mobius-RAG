@@ -54,6 +54,8 @@ from __future__ import annotations
 import asyncio
 import collections
 import logging
+import math as _math
+import os
 import re
 import time
 import uuid
@@ -393,6 +395,12 @@ _MODE_MIN: dict[str, str] = {
 
 # RRF k constant (Cormack 2009)
 _RRF_K = 60
+
+# When True, _dtag_arm computes per-tag IDF weights (log N/pool_size) and
+# applies them to each chunk's RRF contribution so rare tags (e.g.
+# claims.timely_filing, pool=17) pull harder than broad parents
+# (claims.general, pool=31k). Set DTAG_ARM_IDF=1 to activate.
+_DTAG_ARM_IDF: bool = os.getenv("DTAG_ARM_IDF", "").lower() in ("1", "true", "yes")
 
 # Max chars in text_preview fields inside trace logs / telemetry
 _PREVIEW_LEN = 120
@@ -1473,6 +1481,7 @@ async def _dtag_arm(
     filters: "CorpusFilters | None",
     include_document_ids: list[str] | None,
     search_id: str = "",
+    idf_mode: bool = False,
 ) -> list[dict[str, Any]]:
     """Retrieve chunks by chunk_d_tags membership.
 
@@ -1480,18 +1489,48 @@ async def _dtag_arm(
     codes.  The result joins the BM25+vector pool via RRF so tag-matched
     chunks (e.g. sparse table rows with no phrase overlap) become
     candidates even when ANN and BM25 miss them.
+
+    When ``idf_mode`` is True, each returned chunk is tagged with
+    ``_dtag_idf`` = log(N_total / pool_size) for the highest-IDF key it
+    matches (payer-scoped pool size).  _rrf_merge uses this to scale the
+    dtag arm's contribution so rare tags pull harder than broad parents.
     """
     if not dtag_keys:
         return []
     params: dict[str, Any] = {"k": k}
     filter_sql = _build_filter_clauses(filters, include_document_ids, params)
 
-    or_clauses: list[str] = []
+    # Build per-key placeholders before the IDF query so we can reuse them.
+    key_params: list[tuple[str, str]] = []
     for i, key in enumerate(dtag_keys):
         pname = f"_dt_key_{i}"
         params[pname] = key
-        or_clauses.append(f"chunk_d_tags ? :{pname}")
+        key_params.append((pname, key))
+
+    or_clauses = [f"chunk_d_tags ? :{pname}" for pname, _ in key_params]
     dtag_filter = " AND (" + " OR ".join(or_clauses) + ")"
+
+    # IDF mode: query per-tag pool sizes and total chunk count in one scan.
+    idf_weights: dict[str, float] = {}
+    if idf_mode:
+        case_exprs = ", ".join(
+            f"COUNT(*) FILTER (WHERE chunk_d_tags ? :{pname}) AS cnt_{i}"
+            for i, (pname, _) in enumerate(key_params)
+        )
+        count_sql = text(f"""
+            SELECT COUNT(*) AS n_total, {case_exprs}
+            FROM rag_published_embeddings
+            WHERE 1=1 {filter_sql}
+        """)
+        try:
+            count_row = (await db.execute(count_sql, params)).mappings().one_or_none()
+            if count_row:
+                n_total = max(1, count_row["n_total"] or 1)
+                for i, (_, key) in enumerate(key_params):
+                    pool_size = max(1, count_row[f"cnt_{i}"] or 1)
+                    idf_weights[key] = _math.log(n_total / pool_size)
+        except Exception as exc:
+            logger.warning("corpus_search dtag arm IDF count failed: %s", exc)
 
     sql = text(f"""
         SELECT {_BM25_COLS},
@@ -1520,10 +1559,17 @@ async def _dtag_arm(
         c["similarity"] = 0.5
         c["match_score"] = 0.5
         c["_arm"] = "dtag"
+        if idf_mode and idf_weights:
+            chunk_dtags = c.get("chunk_d_tags") or {}
+            c["_dtag_idf"] = max(
+                (idf_weights[key] for key in dtag_keys if key in chunk_dtags),
+                default=1.0,
+            )
         out.append(c)
 
     if search_id:
-        _log_stage("dtag_arm", search_id, returned=len(out), keys=dtag_keys)
+        _log_stage("dtag_arm", search_id, returned=len(out), keys=dtag_keys,
+                   idf_mode=idf_mode, idf_weights={k: round(v, 3) for k, v in idf_weights.items()})
     return out
 
 
@@ -1544,7 +1590,11 @@ def _rrf_merge(
             if not cid:
                 continue
             rank1 = rank0 + 1
-            contribution = 1.0 / (k + rank1)
+            # _dtag_idf is set by _dtag_arm in IDF mode: log(N/pool_size).
+            # Multiplying the contribution scales tag-rare chunks up and
+            # broad-tag chunks down without changing the BM25/vector arms.
+            idf_w = float(chunk.get("_dtag_idf") or 1.0)
+            contribution = idf_w / (k + rank1)
 
             if cid not in fused:
                 fused[cid] = dict(chunk)
@@ -3226,6 +3276,7 @@ async def corpus_search(
                     db, dtag_keys_corpus, k,
                     request.filters, request.include_document_ids,
                     search_id=search_id,
+                    idf_mode=_DTAG_ARM_IDF,
                 )
             )
             vec_chunks, dtag_chunks_corpus = await asyncio.gather(vec_task, dtag_task)
@@ -3262,6 +3313,7 @@ async def corpus_search(
                 db, dtag_keys_precision, k,
                 request.filters, request.include_document_ids,
                 search_id=search_id,
+                idf_mode=_DTAG_ARM_IDF,
             )
 
     else:  # recall
