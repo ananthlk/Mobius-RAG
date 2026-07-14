@@ -4427,15 +4427,18 @@ async def _corpus_search_agent_impl(
     # payor.aetna in document_tags.j_tags → coverage=1.0 without text match.
     if _all_inherited_doc_ids and not request.include_document_ids:
         try:
-            # On the escalation-integrated boost pass, over-fetch so every inherited
-            # doc gets at least 2 candidates before per-doc capping. Without this,
-            # a 26-chunk doc (59G-1.010) fills the k=5 window, starving a 1-chunk
-            # pinpoint doc (59G_1020 county-of-residence) which never appears in
-            # inh_resp.chunks at all — making the per-doc cap at boost-time useless.
-            # Over-fetch guarantees each doc in the inherited set gets a shot.
+            # Guarantee full-coverage retrieval for all inherited docs before the
+            # per-doc cap is applied. With include_document_ids hard-filtering to
+            # only the inherited set, k is bounded by the total chunks in those docs.
+            # A floor of _MAX_CHUNKS_PER_INHERITED_DOC per doc ensures a 26-chunk
+            # doc (59G-1.010) cannot flood the window and starve a 1-chunk pinpoint
+            # doc (59G_1020, county-of-residence): with k=350 and only ~100 total
+            # chunks across 7 inherited docs, every chunk enters the pool and the
+            # per-doc cap below does the reduction (not BM25/vector cutoff).
             _PER_DOC_CHUNK_CAP = 2
+            _MAX_CHUNKS_PER_INHERITED_DOC = 50
             _n_inherited_docs = len(_all_inherited_doc_ids)
-            _inh_k = max(request.k, _n_inherited_docs * _PER_DOC_CHUNK_CAP)
+            _inh_k = _n_inherited_docs * _MAX_CHUNKS_PER_INHERITED_DOC
             inh_req = CorpusSearchRequest(
                 query=queries.hybrid,
                 k=_inh_k,
@@ -4509,10 +4512,11 @@ async def _corpus_search_agent_impl(
                     best_chunks = merged
                     logger.info(
                         "[%s] [inherited_authority] merged %d AHCA chunks%s into results "
-                        "(over-fetch k=%d, cap=%d/doc)",
+                        "(full-coverage k=%d [%d docs × %d max], cap=%d/doc)",
                         agent_id, len(new_chunks),
                         " (+escalation boost)" if request.inherited_authority_escalation else "",
-                        _inh_k, _PER_DOC_CHUNK_CAP,
+                        _inh_k, _n_inherited_docs, _MAX_CHUNKS_PER_INHERITED_DOC,
+                        _PER_DOC_CHUNK_CAP,
                     )
         except Exception as _inh_exc:
             logger.warning(
