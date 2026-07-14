@@ -41,6 +41,13 @@ rev 00332).*
 >   **not yet built** (after cert).
 > - **Exploratory/overview intent** (§2, 2026-07-14): `exploratory_intent` feature + strong
 >   +b weight + `multi_domain → +b`. **Not yet built.** (See §2 below for design.)
+> - **`improvement_hint` population + materiality gate** (EVAL directive, 2026-07-14): three
+>   items queued AFTER inheritance GA cert — (1) populate `improvement_hint` (currently null)
+>   from `term_partition` required/high-selectivity tags + `untagged_meaningful_tokens`; (2)
+>   formalize the "N new docs vs prior" note as a fast-exit gate (< threshold new docs →
+>   fast-exit with hint instead of cosmetic rewrite pass); (3) learned-informed rewrite
+>   direction must use high-selectivity required tags, not paraphrase, AND thematic-procedural
+>   escalation (process + d:disputes.appeal) must go a→b not a→d. Spec in §3 Contract A.
 
 ---
 
