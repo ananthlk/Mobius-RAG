@@ -4436,7 +4436,12 @@ async def _corpus_search_agent_impl(
             # chunks across 7 inherited docs, every chunk enters the pool and the
             # per-doc cap below does the reduction (not BM25/vector cutoff).
             _PER_DOC_CHUNK_CAP = 2
-            _MAX_CHUNKS_PER_INHERITED_DOC = 50
+            # Ceiling sized to guarantee ALL chunks from all inherited docs enter
+            # the pool before the per-doc cap applies. With include_document_ids
+            # filtering to this set, k is bounded by the real chunk count (~1039 for
+            # Aetna: SMMC=936 + 59G docs=103). 200/doc × 7 docs = 1400 > 1039, so
+            # every chunk enters the pool regardless of per-doc BM25/vector rank.
+            _MAX_CHUNKS_PER_INHERITED_DOC = 200
             _n_inherited_docs = len(_all_inherited_doc_ids)
             _inh_k = _n_inherited_docs * _MAX_CHUNKS_PER_INHERITED_DOC
             inh_req = CorpusSearchRequest(
