@@ -133,6 +133,10 @@ COMMON_ENV=(
   # Without this, vector_store.get_vector_store() falls back to Chroma when
   # CHROMA_HOST is set, silently re-routing to the unstable Chroma VM.
   "VECTOR_STORE=pgvector"
+  # IDF-weighted dtag arm — weights rare tags (e.g. claims.timely_filing=17 chunks)
+  # higher than broad parents (claims.general=31k) in RRF fusion. Eval-gated:
+  # set to 1 for IDF head-to-head, unset for binary baseline.
+  "DTAG_ARM_IDF=1"
   # Chroma kept as legacy fallback for ad-hoc admin /vector_search?store=chroma
   # comparisons; ignored at runtime when VECTOR_STORE=pgvector.
   "CHROMA_HOST=34.170.243.161"
