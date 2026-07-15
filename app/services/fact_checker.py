@@ -41,6 +41,11 @@ logger = logging.getLogger(__name__)
 
 _FACT_CHECK_STAGE = "rag_fact_check"
 FACT_CHECKER_VERSION = "fact_check_v1.2026-07-15"  # EVAL-owned; bump via EVAL agent only
+# Measured per-query variance of THIS grader version (the judge-LLM noise band).
+# Cross-strategy grade deltas smaller than this are noise, not signal. It is a
+# property OF the version — re-measure and bump it together with FACT_CHECKER_VERSION
+# so the noise floor can never silently drift away from the grader it describes.
+FACT_CHECKER_SIGMA = 0.2
 _HALLUCINATION_PENALTY = 1.0  # each hallucinated/forbidden claim cancels one grounded fact
 
 

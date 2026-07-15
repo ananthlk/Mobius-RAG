@@ -264,10 +264,14 @@ async def get_grade_rollup(run_id: str):
             "gap_std":        _f(r["gap_std"]),
         }
 
+    # Noise band is a property of the grader version — imported, never hardcoded,
+    # so it can't drift away from the FACT_CHECKER_VERSION it belongs to.
+    from app.services.fact_checker import FACT_CHECKER_SIGMA, FACT_CHECKER_VERSION
     return {
         "run_id": run_id,
         "strategies": strategies,
-        "sigma_noise": 0.2,   # known fact-checker variance band
+        "sigma_noise": FACT_CHECKER_SIGMA,
+        "fact_checker_version": FACT_CHECKER_VERSION,
     }
 
 
