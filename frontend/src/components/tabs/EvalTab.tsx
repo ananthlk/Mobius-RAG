@@ -69,8 +69,8 @@ interface EvalResultRow {
 export interface ClaimEntry {
   fact: string
   status: 'validated' | 'unvalidated' | 'contradicted'
-  chunk_id: string | null
-  quote: string | null
+  chunk_id: number | null   // 1-based index into retrieved chunks (null = hallucinated, no backing passage)
+  support?: string | null   // inline evidence text (compact DB rows omit this; resolve from chunk_id instead)
 }
 
 interface ChunkSummary {
@@ -1034,7 +1034,13 @@ export function TwoGradeBar({
 // Layout: contradicted always prominent; validated collapsible; raw floats
 // behind a toggle.
 
-export function PerClaimLedger({ claims }: { claims: ClaimEntry[] }) {
+export function PerClaimLedger({
+  claims,
+  chunks,
+}: {
+  claims: ClaimEntry[]
+  chunks?: Array<{ text: string }> | null
+}) {
   const [showValidated, setShowValidated] = useState(false)
 
   const contradicted = claims.filter((c) => c.status === 'contradicted')
@@ -1049,6 +1055,11 @@ export function PerClaimLedger({ claims }: { claims: ClaimEntry[] }) {
 
   function ClaimRow({ claim }: { claim: ClaimEntry }) {
     const [open, setOpen] = useState(false)
+    // Resolve evidence: use inline support if present, else look up by 1-based chunk index.
+    // chunk_id null = hallucinated claim with no backing passage — no evidence shown.
+    const evidence = claim.support ||
+      (claim.chunk_id != null && chunks ? (chunks[claim.chunk_id - 1]?.text ?? null) : null)
+    const snippet = evidence ? evidence.slice(0, 120) : null
     return (
       <div
         style={{
@@ -1072,20 +1083,22 @@ export function PerClaimLedger({ claims }: { claims: ClaimEntry[] }) {
           </span>
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 13 }}>{claim.fact}</div>
-            {claim.quote && (
+            {snippet && (
               <div
-                style={{
-                  fontSize: 11, opacity: 0.7, marginTop: 3,
-                  fontStyle: 'italic', cursor: 'pointer',
-                }}
+                style={{ fontSize: 11, opacity: 0.7, marginTop: 3, fontStyle: 'italic', cursor: 'pointer' }}
                 onClick={() => setOpen((v) => !v)}
               >
-                {open ? '▾' : '▸'} {open ? claim.quote : `"${claim.quote.slice(0, 80)}…"`}
+                {open ? '▾' : '▸'} {open ? evidence : `"${snippet}${evidence!.length > 120 ? '…' : ''}"`}
               </div>
             )}
-            {claim.chunk_id && (
+            {claim.chunk_id != null && (
               <div style={{ fontSize: 10, opacity: 0.5, marginTop: 2 }}>
-                chunk {claim.chunk_id}
+                passage {claim.chunk_id}{!evidence ? ' · no evidence text' : ''}
+              </div>
+            )}
+            {claim.chunk_id == null && claim.status !== 'unvalidated' && (
+              <div style={{ fontSize: 10, opacity: 0.5, marginTop: 2, color: '#dc2626' }}>
+                no backing passage
               </div>
             )}
           </div>
@@ -1869,7 +1882,7 @@ function ResultDetailView({
       )}
 
       {r.per_claim_ledger && r.per_claim_ledger.length > 0 && (
-        <PerClaimLedger claims={r.per_claim_ledger} />
+        <PerClaimLedger claims={r.per_claim_ledger} chunks={responseForTrace.chunks ?? null} />
       )}
 
       <AgentPipelineTrace

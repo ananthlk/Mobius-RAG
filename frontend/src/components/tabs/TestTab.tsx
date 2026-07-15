@@ -367,7 +367,7 @@ export function TestTab() {
                 />
               )}
               {gradeData?.per_claim_ledger && gradeData.per_claim_ledger.length > 0 && (
-                <PerClaimLedger claims={gradeData.per_claim_ledger} />
+                <PerClaimLedger claims={gradeData.per_claim_ledger} chunks={response.chunks ?? null} />
               )}
               <AgentPipelineTrace response={response} />
             </>
