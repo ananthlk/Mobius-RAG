@@ -3437,6 +3437,7 @@ def _observe_async(
         retrieval_grade: float | None = None
         synthesis_grade: float | None = None
         synthesis_gap: float | None = None
+        _per_claim_ledger_raw: list | None = None
 
         try:
             # COVERAGE grade: only when must_facts are available (eval bank).
@@ -3465,6 +3466,7 @@ def _observe_async(
                 synthesis_grade = s_result.score
                 if retrieval_grade is not None:
                     synthesis_gap = round(synthesis_grade - retrieval_grade, 4)
+                _per_claim_ledger_raw = s_result.ledger()
         except Exception as exc:
             logger.warning("[observe] fact_check failed: %s", exc)
 
@@ -3479,10 +3481,8 @@ def _observe_async(
         _feature_vector = _routing.get("feature_vector") or _routing.get("features") or None
         _strategy_scores = _routing.get("scores") or None
 
-        # per_claim_ledger: compact array from synthesis grading result.
-        # Wired post EVAL rubric update — FactCheckResult will expose verdicts
-        # in the compact ledger format. Null until then.
-        _per_claim_ledger: list | None = None
+        # per_claim_ledger: compact array from EVAL's ledger() — versioned under FACT_CHECKER_VERSION.
+        _per_claim_ledger: list | None = _per_claim_ledger_raw if answer else None
 
         try:
             import json as _json
