@@ -34,7 +34,7 @@ from app.services.corpus_search_router import (
 
 logger = logging.getLogger(__name__)
 
-PRIORS_VERSION = "v2.6.2026-07-15-union-cap"
+PRIORS_VERSION = "v2.7.2026-07-15-union-extend-k"
 
 # ---------------------------------------------------------------------------
 # Impurity threshold for multi-invoke

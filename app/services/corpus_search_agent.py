@@ -2963,44 +2963,32 @@ async def _fan_out_execute(
 def _union_chunks(
     arm_responses: list["CorpusSearchAgentResponse"],
     k: int,
-    *,
-    secondary_cap_frac: float = 0.30,
 ) -> list["CorpusChunk"]:
     """Deduplicate and rank chunks from multiple fan-out arms.
 
-    Primary arm (arm_responses[0] = router's top strategy) fills 70% of k.
-    Secondary arm(s) fill the remaining 30% with non-duplicate chunks.
-    This prevents secondary-arm generic chunks from outscoring primary-arm
-    payer-specific chunks purely on rerank_score (scores aren't comparable
-    across retrieval strategies with different corpus scopes).
+    k here is the EXTENDED union cap (per_arm_k × n_arms), NOT single-strategy k.
 
-    Deduplication key: chunk.id (stable UUID).
-    Final result is sorted by rerank_score for presentation.
+    Why not global top-k at single-strategy k: multi-invoke fires because arm-2
+    has the answer that arm-1 missed. The missed chunk has a LOW rerank score —
+    that's exactly why arm-1 didn't surface it. A global top-k rerank at
+    single-strategy k would then drop that low-score-but-correct chunk from the
+    union, collapsing the union back to ≈ arm-1 alone.
+
+    By extending k to n_arms × per_arm_k, every arm's full top-k survives.
+    Synthesis receives all arms' chunks and can find the answer wherever it lives.
+
+    Deduplication key: chunk.id (stable UUID). When the same chunk appears in
+    multiple arms, the highest rerank_score wins.
     """
-    if not arm_responses:
-        return []
-
-    def _sorted_chunks(chunks: list[Any]) -> list[Any]:
-        return sorted(chunks or [], key=lambda c: -(c.rerank_score or 0.0))
-
-    primary = _sorted_chunks(arm_responses[0].chunks)
-    secondary_all: list[Any] = [
-        c for resp in arm_responses[1:]
-        for c in (resp.chunks or [])
-    ]
-    primary_ids = {getattr(c, "id", id(c)) for c in primary}
-    secondary = _sorted_chunks(
-        [c for c in secondary_all if getattr(c, "id", id(c)) not in primary_ids]
-    )
-
-    sec_cap = max(1, round(k * secondary_cap_frac))
-    pri_cap = k - sec_cap
-
-    result = primary[:pri_cap]
-    remaining = k - len(result)
-    result += secondary[:remaining]
-
-    return sorted(result, key=lambda c: -(c.rerank_score or 0.0))
+    best: dict[str, Any] = {}
+    for resp in arm_responses:
+        for c in (resp.chunks or []):
+            cid = getattr(c, "id", None) or id(c)
+            existing = best.get(cid)
+            if existing is None or (c.rerank_score or 0.0) > (existing.rerank_score or 0.0):
+                best[cid] = c
+    ranked = sorted(best.values(), key=lambda c: -(c.rerank_score or 0.0))
+    return ranked[:k]
 
 
 # ---------------------------------------------------------------------------
@@ -3725,7 +3713,11 @@ async def _corpus_search_agent_impl(
         _arm_resps = await _fan_out_execute(
             db, request, _fan_pairs, caller, caller_id,
         )
-        _merged = _union_chunks(_arm_resps, request.k)
+        # Extended k: per_arm_k × n_arms so every arm's full top-k survives.
+        # Single-strategy k would drop the complementary arm's low-rerank-but-correct
+        # chunks (low rerank is WHY multi-invoke fired in the first place).
+        _union_k = request.k * len(_invoke_all)
+        _merged = _union_chunks(_arm_resps, _union_k)
 
         # Multi-invoke always synthesises the union — skip_synthesis=True is a
         # latency hint for single-strategy retrieval, not for union synthesis.
