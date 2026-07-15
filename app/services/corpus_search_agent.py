@@ -3654,16 +3654,18 @@ async def _corpus_search_agent_impl(
     # Guarded on: no forced mode (would re-enter routing), no prior tries
     # (escalation path stays single-strategy so the ReAct loop terminates),
     # and not a fail-fast.  Uses _fan_out_execute so decompose (#4) reuses
-    # the same primitive.  Budget gate: skip_synthesis or real_time speed
-    # budget caps fan-out to N=1 (just run primary, no union).
+    # the same primitive.
+    # NOTE: skip_synthesis is NOT a gate here — the inner block already
+    # handles it (skips internal synthesis, returns chunks only for the
+    # caller to synthesise). The old skip_synthesis+real_time guard blocked
+    # multi-invoke on every natural chat call (chat always sets
+    # skip_synthesis=True) making multi-invoke dead code. Removed.
     _invoke_all = getattr(decision, "invoke_all", None)
-    _is_real_time = (request.speed_budget or "real_time") == "real_time"
     if (
         _invoke_all
         and not request.mode
         and not request.prior_strategies_tried
         and strategy_id != "e"
-        and not (request.skip_synthesis and _is_real_time)
     ):
         _fan_pairs = [(raw_query, s) for s in _invoke_all]
         _arm_resps = await _fan_out_execute(

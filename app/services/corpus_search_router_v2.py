@@ -34,7 +34,7 @@ from app.services.corpus_search_router import (
 
 logger = logging.getLogger(__name__)
 
-PRIORS_VERSION = "v2.2.2026-07-15-depth-x-excl"
+PRIORS_VERSION = "v2.3.2026-07-15-inheritance-neutral-a"
 
 # ---------------------------------------------------------------------------
 # Impurity threshold for multi-invoke
@@ -72,7 +72,11 @@ _LINEAR_WEIGHTS_V2: dict[str, dict[str, float]] = {
         "tag_coverage":    0.15,   # gated by exclusivity (v2.1): 0 when pool > 250 docs
         "thematic_policy": -0.10,
         "wide_pool":       -0.15,
-        "inheritance":      0.05,
+        # v2.3: inheritance REMOVED from a's weights. Inherited docs expand pool_size,
+        # reducing exclusivity (already penalises a via that feature). Keeping +0.05 here
+        # double-counted the effect and over-scored a for AHCA-inherited-corpus queries
+        # (cmhc013: live a=0.513 vs predicted 0.463, gap to b=0.104 > 0.08 → no multi-invoke).
+        # With weight=0: a=0.463, gap=0.054 < 0.08 → invoke_all=['a','b'] fires.
     },
     "b": {
         "thematic_policy":  0.40,
