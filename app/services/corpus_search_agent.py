@@ -3074,6 +3074,7 @@ async def corpus_search_agent(
         })
         response = await _corpus_search_agent_impl(db, attempt_request, caller, caller_id)
         _persist_routing_decision_async(attempt_request, response)
+        _observe_async(attempt_request, response, is_prod=True)
 
         # Fast-exit: if this attempt used the same query form we've already seen
         # with a different strategy, the corpus returned identical chunks.
@@ -3385,6 +3386,118 @@ def _persist_routing_decision_async(
         ))
     except Exception as exc:  # pragma: no cover — non-fatal
         logger.warning("persist_routing_decision scheduling failed: %s", exc)
+
+
+def _observe_async(
+    request: CorpusSearchAgentRequest,
+    response: CorpusSearchAgentResponse,
+    *,
+    must_facts: list[str] | None = None,
+    eval_run_id: str | None = None,
+    is_prod: bool = True,
+    corpus_version: str | None = None,
+) -> None:
+    """Schedule a fire-and-forget OBSERVE write to rag_query_decisions.
+
+    Computes two-grade QA when must_facts are available (eval bank queries),
+    otherwise logs NULL grades (prod inference has no must_facts). EVAL fills
+    grades offline via UPDATE for prod rows with known queries.
+
+    Two-call contract (EVAL-owned, stage=rag_fact_check):
+      retrieval_grade = check_facts(query, must_facts, chunks, answer=None)
+      synthesis_grade = check_facts(query, must_facts, chunks, answer=answer)
+      synthesis_gap   = retrieval_grade − synthesis_grade
+    """
+    import asyncio as _asyncio
+    from app.database import AsyncSessionLocal
+    from app.services.fact_checker import check_facts, FACT_CHECKER_VERSION
+
+    qp = response.query_profile or {}
+    query = qp.get("raw_query") or request.query or ""
+    strategy_used = response.strategy_used or "?"
+    invoke_all = response.invoke_all  # None for single-arm
+    chunks = response.chunks or []
+    answer = response.llm_answer
+    agent_id = (response.telemetry or {}).get("agent_id") or ""
+    priors_version = (response.routing or {}).get("priors_version") or ""
+
+    async def _run() -> None:
+        retrieval_grade: float | None = None
+        synthesis_grade: float | None = None
+        synthesis_gap: float | None = None
+
+        if must_facts:
+            try:
+                r_result = await check_facts(
+                    query=query,
+                    must_facts=must_facts,
+                    chunks=chunks,
+                    answer=None,
+                    correlation_id=agent_id,
+                )
+                retrieval_grade = r_result.score
+
+                if answer:
+                    s_result = await check_facts(
+                        query=query,
+                        must_facts=must_facts,
+                        chunks=chunks,
+                        answer=answer,
+                        correlation_id=agent_id,
+                    )
+                    synthesis_grade = s_result.score
+                    synthesis_gap = round(retrieval_grade - synthesis_grade, 4)
+            except Exception as exc:
+                logger.warning("[observe] fact_check failed: %s", exc)
+
+        try:
+            async with AsyncSessionLocal() as sess:
+                await sess.execute(
+                    sql_text("""
+                        INSERT INTO rag_query_decisions (
+                            agent_id, query, strategy_used, invoke_all,
+                            priors_version, n_chunks, top_rerank_score,
+                            corpus_version, fact_checker_version,
+                            retrieval_grade, synthesis_grade, synthesis_gap,
+                            is_prod, caller, caller_id, eval_run_id
+                        ) VALUES (
+                            :agent_id, :query, :strategy_used, :invoke_all,
+                            :priors_version, :n_chunks, :top_rerank_score,
+                            :corpus_version, :fact_checker_version,
+                            :retrieval_grade, :synthesis_grade, :synthesis_gap,
+                            :is_prod, :caller, :caller_id, :eval_run_id
+                        )
+                    """),
+                    {
+                        "agent_id": agent_id,
+                        "query": query,
+                        "strategy_used": strategy_used,
+                        "invoke_all": invoke_all,
+                        "priors_version": priors_version,
+                        "n_chunks": len(chunks),
+                        "top_rerank_score": max(
+                            (c.rerank_score for c in chunks if c.rerank_score is not None),
+                            default=None,
+                        ),
+                        "corpus_version": corpus_version,
+                        "fact_checker_version": FACT_CHECKER_VERSION if must_facts else None,
+                        "retrieval_grade": retrieval_grade,
+                        "synthesis_grade": synthesis_grade,
+                        "synthesis_gap": synthesis_gap,
+                        "is_prod": is_prod,
+                        "caller": (response.telemetry or {}).get("caller") or None,
+                        "caller_id": None,
+                        "eval_run_id": eval_run_id,
+                    },
+                )
+                await sess.commit()
+        except Exception as exc:
+            logger.warning("[observe] rag_query_decisions insert failed: %s", exc)
+
+    try:
+        _asyncio.create_task(_run())
+    except Exception as exc:
+        logger.warning("[observe] scheduling failed: %s", exc)
 
 
 async def _corpus_search_agent_impl(

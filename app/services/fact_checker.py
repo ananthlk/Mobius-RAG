@@ -21,8 +21,10 @@ Reusable as:
   * **eval calibration** — score each forced strategy's (chunks, answer) per query.
   * **runtime critic** — same call on a live turn to gate/flag ungrounded answers.
 
-LLM stage: reuses ``rag_eval_adjudicate`` (registered). Give it its own
-``rag_fact_check`` stage when wired as a runtime critic.
+LLM stage: ``rag_fact_check`` (registered in RAG_STAGES + chat allowlist).
+Eval harness uses the same stage; OBSERVE block in corpus_search_agent calls it
+at query time. FACT_CHECKER_VERSION is owned by the EVAL agent — bump it there
+on any rubric change so all callers' rows stay comparable.
 """
 from __future__ import annotations
 
@@ -37,7 +39,8 @@ from app.services import llm_manager_client
 
 logger = logging.getLogger(__name__)
 
-_FACT_CHECK_STAGE = "rag_eval_adjudicate"
+_FACT_CHECK_STAGE = "rag_fact_check"
+FACT_CHECKER_VERSION = "fact_check_v1.2026-07-15"  # EVAL-owned; bump via EVAL agent only
 _HALLUCINATION_PENALTY = 1.0  # each hallucinated/forbidden claim cancels one grounded fact
 
 

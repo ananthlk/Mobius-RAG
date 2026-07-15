@@ -71,6 +71,8 @@ RAG_STAGES: frozenset[str] = frozenset({
     "rag_strategy_c_validate",  # Strategy (c) LLM→Validate citation generation
     "rag_strategy_d_external",  # Strategy (d) External First synthesis
     "rag_multi_invoke_synth",   # Multi-invoke union synthesis (v2 router)
+    "rag_fact_check",           # two-grade QA critic (retrieval + synthesis);
+                                # EVAL agent owns the rubric + FACT_CHECKER_VERSION
     "rag_eval_adjudicate",      # eval harness LLM judge — uses bandit
                                 # routing for cross-model variety
 })
