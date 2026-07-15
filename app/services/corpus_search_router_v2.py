@@ -34,7 +34,7 @@ from app.services.corpus_search_router import (
 
 logger = logging.getLogger(__name__)
 
-PRIORS_VERSION = "v2.4.2026-07-15-explicit-strategy-guard"
+PRIORS_VERSION = "v2.5.2026-07-15-multi-terminal"
 
 # ---------------------------------------------------------------------------
 # Impurity threshold for multi-invoke

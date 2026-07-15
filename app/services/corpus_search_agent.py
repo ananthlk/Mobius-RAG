@@ -3113,8 +3113,13 @@ async def corpus_search_agent(
             return _with_chain(response)
 
         # Terminal: e=fail-fast (off-scope, retrying won't help),
-        #            d=external (highest-recall tier, nothing beyond this).
-        if strategy_used in ("e", "d"):
+        #            d=external (highest-recall tier, nothing beyond this),
+        #            multi=union of all qualifying strategies (nothing to escalate to).
+        # "multi" must be terminal: it already ran both arms and unioned results.
+        # Without this, the outer loop sees confidence='low' (skip_synthesis=True
+        # → no internal synthesis) + high-rerank chunks → synthesis_abstain fires
+        # → escalates with single 'a' → overwrites the union result. Defeat.
+        if strategy_used in ("e", "d", "multi"):
             return _with_chain(response)
 
         # Success: corpus chunks returned with decent confidence — done.
