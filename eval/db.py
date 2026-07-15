@@ -182,11 +182,29 @@ async def fetchrow(query: str, *args):
     return await _retrying("fetchrow", query, *args)
 
 
+_CLOSE_TIMEOUT_S = 10.0
+
+
 async def close_pool() -> None:
     """Close the pool. Call from CLI entrypoints before the loop exits so
     asyncio.run() doesn't tear down a loop with live connections. The next
-    get_pool() call recreates it, so this is always safe."""
+    get_pool() call recreates it, so this is always safe.
+
+    Bounded-graceful: ``asyncpg.Pool.close()`` waits INDEFINITELY for every
+    connection to be released and to close gracefully — against a degraded
+    proxy (or with any acquire leaked by a cancelled task) it never returns,
+    which left calibrate.py hanging at teardown as a zombie process
+    (observed 2026-07-15). Give graceful close a bounded window, then
+    ``terminate()`` (immediate socket close) so the process always exits."""
     global _pool, _pool_loop
     pool, _pool, _pool_loop = _pool, None, None
-    if pool is not None:
-        await pool.close()
+    if pool is None:
+        return
+    try:
+        await asyncio.wait_for(pool.close(), timeout=_CLOSE_TIMEOUT_S)
+    except (TimeoutError, asyncio.TimeoutError):
+        logger.warning(
+            "pool graceful close exceeded %.0fs (degraded proxy or leaked "
+            "acquire) — terminating connections", _CLOSE_TIMEOUT_S,
+        )
+        pool.terminate()
