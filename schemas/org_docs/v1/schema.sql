@@ -2,7 +2,8 @@
 -- Applied per-org into a dedicated schema within the mobius_org_docs database.
 -- The db-agent creates the schema (CREATE SCHEMA IF NOT EXISTS <slug>) then
 -- runs this file with SET search_path = <slug> so every object lands in that namespace.
--- RAG queries with schema-qualified references (e.g. "aetna_fl".org_chunks) —
+-- namespace_ref is OPAQUE (e.g. "org_aetnafl", not the bare slug) — supplied by roster service.
+-- RAG queries with schema-qualified references (e.g. "org_aetnafl".org_chunks) —
 -- a global-corpus query structurally cannot return an org-private row.
 --
 -- Requires: pgvector extension enabled on the host DB instance.
