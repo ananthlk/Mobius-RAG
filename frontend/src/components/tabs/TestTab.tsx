@@ -12,6 +12,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { API_BASE } from '../../config'
 import { AgentPipelineTrace, type AgentResponse } from './AgentPipelineTrace'
+import { TwoGradeBar, PerClaimLedger, type ClaimEntry } from './EvalTab'
 import './EvalTab.css'   // reuse styles (run-header, kv, section, etc.)
 import './TestTab.css'
 
@@ -62,6 +63,13 @@ export function TestTab() {
   })
   const [historyRefreshing, setHistoryRefreshing] = useState(false)
   const [isStoredResult, setIsStoredResult] = useState(false)
+  const [gradeData, setGradeData] = useState<{
+    retrieval_grade: number | null
+    synthesis_grade: number | null
+    synthesis_gap: number | null
+    per_claim_ledger: ClaimEntry[] | null
+    fact_checker_version: string | null
+  } | null>(null)
   const serverSeeded = useRef(false)
 
   function refreshHistory() {
@@ -117,6 +125,7 @@ export function TestTab() {
     setError(null)
     setResponse(null)
     setIsStoredResult(false)
+    setGradeData(null)
     try {
       const body: Record<string, unknown> = {
         query: trimmed,
@@ -165,6 +174,7 @@ export function TestTab() {
       setLoading(true)
       setError(null)
       setResponse(null)
+      setGradeData(null)
       try {
         const resp = await fetch(`${API_BASE}/api/routing/decisions/${item.id}`)
         if (!resp.ok) throw new Error(`${resp.status}`)
@@ -202,6 +212,16 @@ export function TestTab() {
         }
         setResponse(reconstructed)
         setIsStoredResult(true)
+        // Extract two-grade QA fields (populated when EVAL agent has computed grades).
+        if (row.retrieval_grade != null || row.per_claim_ledger != null) {
+          setGradeData({
+            retrieval_grade: row.retrieval_grade ?? null,
+            synthesis_grade: row.synthesis_grade ?? null,
+            synthesis_gap: row.synthesis_gap ?? null,
+            per_claim_ledger: row.per_claim_ledger ?? null,
+            fact_checker_version: row.fact_checker_version ?? null,
+          })
+        }
       } catch (e) {
         // Fall back to a fresh run if the stored fetch fails
         void run(item.query)
@@ -339,6 +359,16 @@ export function TestTab() {
                   </div>
                 )}
               </div>
+              {gradeData && (gradeData.retrieval_grade != null || gradeData.synthesis_grade != null) && (
+                <TwoGradeBar
+                  retrieval={gradeData.retrieval_grade}
+                  synthesis={gradeData.synthesis_grade}
+                  gap={gradeData.synthesis_gap}
+                />
+              )}
+              {gradeData?.per_claim_ledger && gradeData.per_claim_ledger.length > 0 && (
+                <PerClaimLedger claims={gradeData.per_claim_ledger} />
+              )}
               <AgentPipelineTrace response={response} />
             </>
           )}

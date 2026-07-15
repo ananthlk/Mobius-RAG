@@ -212,6 +212,65 @@ async def get_calibration_summary(run_id: str):
     return summary
 
 
+@router.get("/eval/runs/{run_id}/grade_rollup")
+async def get_grade_rollup(run_id: str):
+    """Two-grade QA rollup per strategy for an eval/calibration run.
+
+    Reads ``rag_query_decisions`` rows written by the EVAL agent during this run
+    (eval_run_id = run_id), groups by strategy_used, and returns mean ± std for
+    retrieval_grade / synthesis_grade / synthesis_gap.
+
+    Returns an empty ``strategies`` dict when grades have not been computed yet —
+    the frontend renders nothing rather than erroring.
+
+    ``sigma_noise`` is the known fact-checker variance (~0.2 per EVAL agent); the
+    frontend should gray out cross-strategy deltas smaller than this band.
+    """
+    from app.database import AsyncSessionLocal
+    async with AsyncSessionLocal() as db:
+        try:
+            rows = (await db.execute(sql_text(
+                """
+                SELECT strategy_used,
+                       COUNT(*)                                  AS n,
+                       ROUND(AVG(retrieval_grade)::numeric, 3)  AS ret_mean,
+                       ROUND(STDDEV(retrieval_grade)::numeric, 3) AS ret_std,
+                       ROUND(AVG(synthesis_grade)::numeric, 3)  AS syn_mean,
+                       ROUND(STDDEV(synthesis_grade)::numeric, 3) AS syn_std,
+                       ROUND(AVG(synthesis_gap)::numeric, 3)    AS gap_mean,
+                       ROUND(STDDEV(synthesis_gap)::numeric, 3) AS gap_std
+                FROM rag_query_decisions
+                WHERE eval_run_id = :run_id::uuid
+                  AND retrieval_grade IS NOT NULL
+                GROUP BY strategy_used
+                ORDER BY strategy_used
+                """
+            ), {"run_id": run_id})).mappings().all()
+        except Exception:
+            rows = []
+
+    def _f(v):
+        return float(v) if v is not None else None
+
+    strategies: dict = {}
+    for r in rows:
+        strategies[r["strategy_used"]] = {
+            "n": r["n"],
+            "retrieval_mean": _f(r["ret_mean"]),
+            "retrieval_std":  _f(r["ret_std"]),
+            "synthesis_mean": _f(r["syn_mean"]),
+            "synthesis_std":  _f(r["syn_std"]),
+            "gap_mean":       _f(r["gap_mean"]),
+            "gap_std":        _f(r["gap_std"]),
+        }
+
+    return {
+        "run_id": run_id,
+        "strategies": strategies,
+        "sigma_noise": 0.2,   # known fact-checker variance band
+    }
+
+
 # ---------------------------------------------------------------------------
 # Observability — timeline, A/B compare, drift (fingerprint-aware)
 # ---------------------------------------------------------------------------
@@ -479,7 +538,10 @@ async def list_routing_decisions(
 @router.get("/routing/decisions/{decision_id}")
 async def get_routing_decision(decision_id: str):
     """Full single-decision drilldown — every column. Use this to
-    inspect ‘why did the router pick X for this query?'."""
+    inspect ‘why did the router pick X for this query?’.
+    Also returns retrieval_grade / synthesis_grade / synthesis_gap / per_claim_ledger
+    from rag_query_decisions (keyed by agent_id) when available.
+    """
     from app.database import AsyncSessionLocal
     async with AsyncSessionLocal() as db:
         row = (await db.execute(sql_text(
@@ -498,7 +560,37 @@ async def get_routing_decision(decision_id: str):
         ), {"id": decision_id})).mappings().first()
         if not row:
             raise HTTPException(status_code=404, detail="decision not found")
-    return dict(row)
+        result = dict(row)
+
+        # Augment with two-grade QA from rag_query_decisions (best-effort — table
+        # may not yet have rows or per_claim_ledger column may not exist).
+        agent_id = result.get("agent_id")
+        if agent_id:
+            try:
+                grade_row = (await db.execute(sql_text(
+                    "SELECT retrieval_grade, synthesis_grade, synthesis_gap, "
+                    "       fact_checker_version, corpus_version "
+                    "FROM rag_query_decisions WHERE agent_id = :aid "
+                    "ORDER BY ts DESC LIMIT 1"
+                ), {"aid": agent_id})).mappings().first()
+                if grade_row:
+                    result["retrieval_grade"] = grade_row["retrieval_grade"]
+                    result["synthesis_grade"] = grade_row["synthesis_grade"]
+                    result["synthesis_gap"] = grade_row["synthesis_gap"]
+                    result["fact_checker_version"] = grade_row["fact_checker_version"]
+                    result["corpus_version"] = grade_row["corpus_version"]
+            except Exception:
+                pass  # rag_query_decisions not yet populated — silently skip
+            try:
+                ledger_row = (await db.execute(sql_text(
+                    "SELECT per_claim_ledger FROM rag_query_decisions "
+                    "WHERE agent_id = :aid ORDER BY ts DESC LIMIT 1"
+                ), {"aid": agent_id})).mappings().first()
+                if ledger_row:
+                    result["per_claim_ledger"] = ledger_row["per_claim_ledger"]
+            except Exception:
+                pass  # per_claim_ledger column may not exist yet
+    return result
 
 
 # ---------------------------------------------------------------------------

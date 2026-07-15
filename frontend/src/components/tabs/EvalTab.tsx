@@ -60,6 +60,17 @@ interface EvalResultRow {
   human_verdict_by?: string | null
   effective_verdict?: string | null
   routing_decision_id: string | null
+  // Two-grade QA — populated once EVAL agent wires up rag_query_decisions
+  retrieval_grade?: number | null
+  synthesis_grade?: number | null
+  synthesis_gap?: number | null
+}
+
+export interface ClaimEntry {
+  fact: string
+  status: 'validated' | 'unvalidated' | 'contradicted'
+  chunk_id: string | null
+  quote: string | null
 }
 
 interface ChunkSummary {
@@ -74,6 +85,11 @@ interface ResultDetail {
     llm_answer: string | null
     chunks_summary: ChunkSummary[]
     full_response: AgentResponse | null
+    // Two-grade QA fields (from rag_query_decisions via JOIN)
+    retrieval_grade?: number | null
+    synthesis_grade?: number | null
+    synthesis_gap?: number | null
+    per_claim_ledger?: ClaimEntry[] | null
   }
   routing: {
     scores?: Record<string, number>
@@ -124,6 +140,8 @@ export function EvalTab() {
   const [runDetail, setRunDetail] = useState<{ run: EvalRunRow; results: EvalResultRow[] } | null>(null)
   // 5-axis calibration summary (present only for forced-strategy calibration runs).
   const [calibSummary, setCalibSummary] = useState<any>(null)
+  // Two-grade QA rollup per strategy (from rag_query_decisions, keyed by eval_run_id).
+  const [gradeRollup, setGradeRollup] = useState<any>(null)
   const [expandedResultId, setExpandedResultId] = useState<string | null>(null)
   const [resultDetailCache, setResultDetailCache] = useState<Record<string, ResultDetail>>({})
   const [loading, setLoading] = useState(false)
@@ -299,6 +317,7 @@ export function EvalTab() {
     setResultDetailCache({})
     setFilter(null)
     setCalibSummary(null)
+    setGradeRollup(null)
     fetch(`${API_BASE}/api/eval/runs/${selectedRunId}`)
       .then((r) => r.json())
       .then((d) => setRunDetail(d))
@@ -310,6 +329,11 @@ export function EvalTab() {
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => setCalibSummary(d && Object.keys(d.strategies || {}).length ? d : null))
       .catch(() => setCalibSummary(null))
+    // Two-grade QA rollup — populated only when rag_query_decisions has rows for this run.
+    fetch(`${API_BASE}/api/eval/runs/${selectedRunId}/grade_rollup`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setGradeRollup(d && Object.keys(d.strategies || {}).length ? d : null))
+      .catch(() => setGradeRollup(null))
   }, [selectedRunId])
 
   // Expand-on-click: lazy fetch full drilldown for selected result.
@@ -488,6 +512,7 @@ export function EvalTab() {
           <>
             <RunHeader run={runDetail.run} />
             {calibSummary && <CalibrationSummaryPanel data={calibSummary} />}
+            {gradeRollup && <TwoGradeRollupPanel data={gradeRollup} />}
             <PRCurvePanel runId={runDetail.run.id} />
             <PipelineFunnel
               results={runDetail.results}
@@ -848,6 +873,258 @@ function DriftChip() {
 }
 
 // ── Calibration summary (5-axis + oracle) ───────────────────────────────
+
+// ── Two-grade QA Rollup (Panel B) ───────────────────────────────────────
+//
+// Per-strategy mean ± std for retrieval_grade / synthesis_grade / gap.
+// Read from GET /api/eval/runs/{id}/grade_rollup (rag_query_decisions rows).
+// Sigma band: delta < sigma_noise (~0.2) → gray out as within noise floor.
+
+function TwoGradeRollupPanel({ data }: { data: any }) {
+  const order = ['a', 'b', 'c', 'd', 'natural']
+  const strats = order.filter((s) => data.strategies?.[s])
+  const sigma = data.sigma_noise ?? 0.2
+  const fmt = (v: any) => (v === null || v === undefined ? '—' : Number(v).toFixed(3))
+  const label = (s: string) => (s === 'natural' ? 'router' : s)
+
+  // Gap display: negative = dropped facts (synthesizer bottleneck, amber),
+  // positive = hallucination bluff (red). Gray if within sigma noise.
+  function GapCell({ mean, std }: { mean: number | null; std: number | null }) {
+    if (mean === null || mean === undefined) return <td style={{ textAlign: 'right', opacity: 0.4 }}>—</td>
+    const noisy = (std ?? 0) >= sigma || Math.abs(mean) < sigma
+    const color = noisy ? 'var(--text-muted, #888)' : mean < 0 ? '#d97706' : '#dc2626'
+    const title = noisy
+      ? `Within noise floor (σ≈${sigma})`
+      : mean < 0
+      ? 'Synthesizer bottleneck — facts retrieved but dropped in answer'
+      : 'Hallucination bluff — answer claims facts not in chunks'
+    return (
+      <td style={{ textAlign: 'right', fontWeight: 600, color }} title={title}>
+        {mean > 0 ? '+' : ''}{fmt(mean)}
+        {noisy && <span style={{ fontSize: 10, opacity: 0.6 }}>~</span>}
+      </td>
+    )
+  }
+
+  function MetricCell({ mean, std }: { mean: number | null; std: number | null }) {
+    if (mean === null || mean === undefined) return <td style={{ textAlign: 'right', opacity: 0.4 }}>—</td>
+    const noisy = (std ?? 0) >= sigma
+    return (
+      <td style={{ textAlign: 'right', opacity: noisy ? 0.55 : 1 }} title={noisy ? `High variance (σ=${fmt(std)}) — treat as noisy` : undefined}>
+        {fmt(mean)}
+        {std !== null && std !== undefined && (
+          <span style={{ fontSize: 10, opacity: 0.55, marginLeft: 2 }}>±{fmt(std)}</span>
+        )}
+      </td>
+    )
+  }
+
+  if (strats.length === 0) return null
+  return (
+    <div style={{ border: '1px solid var(--border, #333)', borderRadius: 6, padding: 12, margin: '8px 0' }}>
+      <div style={{ fontWeight: 600, marginBottom: 6 }}>
+        🧮 Two-Grade QA Rollup — retrieval vs synthesis (mean ± std)
+        <span style={{ fontSize: 11, fontWeight: 400, marginLeft: 8, opacity: 0.6 }}>
+          |gap| &lt; σ{sigma} shown dimmed — within noise floor
+        </span>
+      </div>
+      <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
+        <thead>
+          <tr style={{ textAlign: 'right', opacity: 0.7 }}>
+            <th style={{ textAlign: 'left' }}>strategy</th>
+            <th>retrieval grade</th>
+            <th>synthesis grade</th>
+            <th>gap (syn − ret)</th>
+            <th>n</th>
+          </tr>
+        </thead>
+        <tbody>
+          {strats.map((s) => {
+            const c = data.strategies[s]
+            return (
+              <tr key={s} style={{ textAlign: 'right', borderTop: '1px solid var(--border, #2a2a2a)' }}>
+                <td style={{ textAlign: 'left', fontWeight: 600 }}>{label(s)}</td>
+                <MetricCell mean={c.retrieval_mean} std={c.retrieval_std} />
+                <MetricCell mean={c.synthesis_mean} std={c.synthesis_std} />
+                <GapCell mean={c.gap_mean} std={c.gap_std} />
+                <td style={{ textAlign: 'right', opacity: 0.6 }}>{c.n}</td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+// ── GapBadge — inline row badge for QuestionList ────────────────────────
+
+function GapBadge({ gap, synth }: { gap: number | null; synth: number }) {
+  const sigma = 0.2
+  const noisy = gap === null || Math.abs(gap) < sigma
+  const color = noisy ? undefined : gap! < 0 ? '#d97706' : '#dc2626'
+  const title = gap === null
+    ? 'No synthesis (no answer generated)'
+    : noisy
+    ? 'Within noise floor'
+    : gap < 0
+    ? 'Synthesizer dropped facts'
+    : 'Answer bluffs facts not in chunks'
+  return (
+    <span className="badge mini" style={{ color }} title={title}>
+      syn {synth.toFixed(2)}
+      {gap !== null && (
+        <span style={{ opacity: 0.7, marginLeft: 2 }}>
+          ({gap >= 0 ? '+' : ''}{gap.toFixed(2)})
+        </span>
+      )}
+    </span>
+  )
+}
+
+// ── TwoGradeBar — inline drilldown header ────────────────────────────────
+
+export function TwoGradeBar({
+  retrieval, synthesis, gap,
+}: { retrieval: number | null; synthesis: number | null; gap: number | null }) {
+  const sigma = 0.2
+  const fmt2 = (v: number) => v.toFixed(3)
+  const gapColor = gap === null || Math.abs(gap) < sigma
+    ? 'var(--text-muted, #888)'
+    : gap < 0 ? '#d97706' : '#dc2626'
+  const gapLabel = gap === null
+    ? 'n/a'
+    : gap < 0
+    ? 'synthesizer bottleneck'
+    : 'hallucination bluff'
+  return (
+    <div style={{
+      display: 'flex', gap: 12, padding: '8px 12px', margin: '6px 0',
+      background: 'var(--surface-alt, #f8f9fb)', borderRadius: 6,
+      border: '1px solid var(--border, #dde)', fontSize: 13,
+    }}>
+      <div>
+        <span style={{ opacity: 0.6, marginRight: 4 }}>retrieval</span>
+        <strong>{retrieval !== null ? fmt2(retrieval) : '—'}</strong>
+      </div>
+      <div style={{ opacity: 0.4 }}>→</div>
+      <div>
+        <span style={{ opacity: 0.6, marginRight: 4 }}>synthesis</span>
+        <strong>{synthesis !== null ? fmt2(synthesis) : '—'}</strong>
+      </div>
+      {gap !== null && (
+        <>
+          <div style={{ opacity: 0.4 }}>=</div>
+          <div>
+            <span style={{ opacity: 0.6, marginRight: 4 }}>gap</span>
+            <strong style={{ color: gapColor }}>
+              {gap >= 0 ? '+' : ''}{fmt2(gap)}
+            </strong>
+            <span style={{ fontSize: 11, opacity: 0.6, marginLeft: 6 }}>({gapLabel})</span>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+// ── PerClaimLedger — per-claim fact-check evidence ───────────────────────
+//
+// Renders the per_claim_ledger JSONB field from rag_query_decisions.
+// Layout: contradicted always prominent; validated collapsible; raw floats
+// behind a toggle.
+
+export function PerClaimLedger({ claims }: { claims: ClaimEntry[] }) {
+  const [showValidated, setShowValidated] = useState(false)
+
+  const contradicted = claims.filter((c) => c.status === 'contradicted')
+  const unvalidated  = claims.filter((c) => c.status === 'unvalidated')
+  const validated    = claims.filter((c) => c.status === 'validated')
+
+  const STATUS_STYLE: Record<string, React.CSSProperties> = {
+    contradicted: { color: '#dc2626', fontWeight: 600 },
+    unvalidated:  { color: '#92400e', opacity: 0.8 },
+    validated:    { color: '#16a34a' },
+  }
+
+  function ClaimRow({ claim }: { claim: ClaimEntry }) {
+    const [open, setOpen] = useState(false)
+    return (
+      <div
+        style={{
+          padding: '6px 10px', borderRadius: 4, marginBottom: 3,
+          background: claim.status === 'contradicted'
+            ? 'rgba(220,38,38,0.06)'
+            : claim.status === 'validated'
+            ? 'rgba(22,163,74,0.05)'
+            : 'rgba(0,0,0,0.03)',
+          border: '1px solid',
+          borderColor: claim.status === 'contradicted'
+            ? 'rgba(220,38,38,0.25)'
+            : claim.status === 'validated'
+            ? 'rgba(22,163,74,0.2)'
+            : 'var(--border, #e5e7eb)',
+        }}
+      >
+        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+          <span style={{ ...STATUS_STYLE[claim.status], fontSize: 11, flexShrink: 0, marginTop: 1 }}>
+            {claim.status === 'contradicted' ? '✗' : claim.status === 'validated' ? '✓' : '?'}
+          </span>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 13 }}>{claim.fact}</div>
+            {claim.quote && (
+              <div
+                style={{
+                  fontSize: 11, opacity: 0.7, marginTop: 3,
+                  fontStyle: 'italic', cursor: 'pointer',
+                }}
+                onClick={() => setOpen((v) => !v)}
+              >
+                {open ? '▾' : '▸'} {open ? claim.quote : `"${claim.quote.slice(0, 80)}…"`}
+              </div>
+            )}
+            {claim.chunk_id && (
+              <div style={{ fontSize: 10, opacity: 0.5, marginTop: 2 }}>
+                chunk {claim.chunk_id}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ margin: '8px 0', fontSize: 13 }}>
+      <div style={{ fontWeight: 600, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
+        📋 Per-claim ledger
+        <span style={{ fontSize: 11, fontWeight: 400, opacity: 0.6 }}>
+          {contradicted.length > 0 && <span style={{ color: '#dc2626', marginRight: 6 }}>{contradicted.length} contradicted</span>}
+          {unvalidated.length > 0 && <span style={{ color: '#92400e', marginRight: 6 }}>{unvalidated.length} unvalidated</span>}
+          {validated.length > 0 && <span style={{ color: '#16a34a' }}>{validated.length} validated</span>}
+        </span>
+      </div>
+
+      {contradicted.map((c, i) => <ClaimRow key={`contra-${i}`} claim={c} />)}
+      {unvalidated.map((c, i) => <ClaimRow key={`unv-${i}`} claim={c} />)}
+
+      {validated.length > 0 && (
+        <div>
+          <button
+            onClick={() => setShowValidated((v) => !v)}
+            style={{
+              background: 'none', border: 'none', cursor: 'pointer',
+              fontSize: 12, color: '#16a34a', padding: '4px 0',
+            }}
+          >
+            {showValidated ? '▾ hide validated' : `▸ show ${validated.length} validated claims`}
+          </button>
+          {showValidated && validated.map((c, i) => <ClaimRow key={`val-${i}`} claim={c} />)}
+        </div>
+      )}
+    </div>
+  )
+}
 
 function CalibrationSummaryPanel({ data }: { data: any }) {
   const order = ['a', 'b', 'c', 'd', 'natural']
@@ -1484,6 +1761,14 @@ function QuestionList({
                 {res.confidence && <span className="badge mini">{res.confidence}</span>}
                 {res.total_ms !== null && <span className="badge mini dim">{res.total_ms}ms</span>}
                 {res.routing_correct === false && <span className="badge mini warn">rt miss</span>}
+                {res.retrieval_grade != null && (
+                  <span className="badge mini grade-ret" title="retrieval grade">
+                    ret {res.retrieval_grade.toFixed(2)}
+                  </span>
+                )}
+                {res.synthesis_grade != null && (
+                  <GapBadge gap={res.synthesis_gap ?? null} synth={res.synthesis_grade} />
+                )}
               </span>
             </div>
             {expanded && (
@@ -1573,6 +1858,18 @@ function ResultDetailView({
           humanVerdictAt={r.human_verdict_at || null}
           onSave={onHumanVerdict}
         />
+      )}
+
+      {(r.retrieval_grade != null || r.synthesis_grade != null) && (
+        <TwoGradeBar
+          retrieval={r.retrieval_grade ?? null}
+          synthesis={r.synthesis_grade ?? null}
+          gap={r.synthesis_gap ?? null}
+        />
+      )}
+
+      {r.per_claim_ledger && r.per_claim_ledger.length > 0 && (
+        <PerClaimLedger claims={r.per_claim_ledger} />
       )}
 
       <AgentPipelineTrace
