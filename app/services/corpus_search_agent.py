@@ -58,11 +58,16 @@ from app.services.corpus_search_lexicon import (
 from app.services.corpus_search_router import (
     RoutePreferences,
     RouteDecision,
-    decide as router_decide,
+    decide as _router_decide_v1,
     decide_override as router_decide_override,
     persist_decision as router_persist_decision,
     PRIORS_VERSION,
 )
+import os as _os
+if _os.environ.get("ROUTER_VERSION") == "v2":
+    from app.services.corpus_search_router_v2 import decide as router_decide
+else:
+    router_decide = _router_decide_v1
 
 logger = logging.getLogger(__name__)
 
@@ -2888,6 +2893,88 @@ class CorpusSearchAgentRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Fan-out executor — shared primitive for multi-invoke (#1) and
+# decompose/reformulate (#4).
+#
+# Runs N (sub_query, strategy) pairs CONCURRENTLY via asyncio.gather INSIDE
+# one request. Must never make external HTTP calls — all work stays in-process
+# so the max=1 Cloud Run instance constraint (the 13/110 stall bug) is respected.
+#
+# Multi-invoke usage:  pairs = [(raw_query, "a"), (raw_query, "d")]
+# Decompose usage (#4): pairs = [("sub_q_1", strategy), ("sub_q_2", strategy)]
+#
+# Budget/mode gating (enforced by callers):
+#   speed_budget=real_time / skip_synthesis=True → N capped to 1 (no fan-out)
+#   chat.default → N ≤ 2 (multi-invoke or 2-sub-query decompose)
+#   chat.thinking → full fan-out
+# ---------------------------------------------------------------------------
+
+async def _fan_out_execute(
+    db: "AsyncSession",
+    base_request: "CorpusSearchAgentRequest",
+    pairs: list[tuple[str, str]],   # [(sub_query, forced_strategy), ...]
+    caller: str = "api",
+    caller_id: str | None = None,
+    *,
+    k_per_arm: int | None = None,
+) -> list["CorpusSearchAgentResponse"]:
+    """Run each (sub_query, strategy) pair as a forced-strategy sub-call.
+
+    Each arm uses skip_synthesis=True — the caller collects chunks from all
+    arms, deduplicates, and synthesises ONCE from the union. This avoids N
+    LLM synthesis calls for N=2 multi-invoke.
+
+    Returns results in the same order as pairs. A failed arm returns an empty
+    response (logged, not raised) so partial results are still usable.
+    """
+    import asyncio as _asyncio
+
+    k = k_per_arm or base_request.k
+
+    async def _run_arm(sub_query: str, strategy: str) -> "CorpusSearchAgentResponse":
+        try:
+            return await _corpus_search_agent_impl(
+                db,
+                base_request.model_copy(update={
+                    "query": sub_query,
+                    "mode": strategy,
+                    "skip_synthesis": True,
+                    "k": k,
+                    "prior_strategies_tried": [],
+                }),
+                caller, caller_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[fan_out] arm failed query=%r strategy=%s: %s", sub_query, strategy, exc)
+            return CorpusSearchAgentResponse(
+                chunks=[], confidence="low", query_profile={},
+                telemetry={"fan_out_arm_error": str(exc)},
+            )
+
+    return list(await _asyncio.gather(*[_run_arm(q, s) for q, s in pairs]))
+
+
+def _union_chunks(
+    arm_responses: list["CorpusSearchAgentResponse"],
+    k: int,
+) -> list["CorpusChunk"]:
+    """Deduplicate and rank chunks from multiple fan-out arms.
+
+    Deduplication key: chunk.id (stable UUID). When the same chunk appears
+    in multiple arms, the highest rerank_score wins. Returns top-k by score.
+    """
+    best: dict[str, Any] = {}
+    for resp in arm_responses:
+        for c in (resp.chunks or []):
+            cid = getattr(c, "id", None) or id(c)
+            existing = best.get(cid)
+            if existing is None or (c.rerank_score or 0.0) > (existing.rerank_score or 0.0):
+                best[cid] = c
+    ranked = sorted(best.values(), key=lambda c: -(c.rerank_score or 0.0))
+    return ranked[:k]
+
+
+# ---------------------------------------------------------------------------
 # The agent itself
 # ---------------------------------------------------------------------------
 
@@ -3555,6 +3642,78 @@ async def _corpus_search_agent_impl(
         # showing the final number.
         "score_breakdown": getattr(decision, "score_breakdown", {}),
     }
+
+    # ── Multi-invoke (router v2 only) ────────────────────────────────────
+    # Fires when the v2 router signals an impure leaf (top-2 scores close).
+    # Guarded on: no forced mode (would re-enter routing), no prior tries
+    # (escalation path stays single-strategy so the ReAct loop terminates),
+    # and not a fail-fast.  Uses _fan_out_execute so decompose (#4) reuses
+    # the same primitive.  Budget gate: skip_synthesis or real_time speed
+    # budget caps fan-out to N=1 (just run primary, no union).
+    _invoke_all = getattr(decision, "invoke_all", None)
+    _is_real_time = (request.speed_budget or "real_time") == "real_time"
+    if (
+        _invoke_all
+        and not request.mode
+        and not request.prior_strategies_tried
+        and strategy_id != "e"
+        and not (request.skip_synthesis and _is_real_time)
+    ):
+        _fan_pairs = [(raw_query, s) for s in _invoke_all]
+        _arm_resps = await _fan_out_execute(
+            db, request, _fan_pairs, caller, caller_id,
+        )
+        _merged = _union_chunks(_arm_resps, request.k)
+
+        if not request.skip_synthesis and _merged:
+            _mi_answer, _mi_conf, _mi_tel = await _synthesize_internal_answer(
+                raw_query, _merged,
+                stage="rag_multi_invoke_synth",
+                correlation_id=caller_id,
+            )
+        else:
+            _mi_answer, _mi_conf, _mi_tel = None, "low", {}
+
+        _query_profile_mi = {
+            "query_type": profile.query_type,
+            "coverage": round(profile.coverage, 3),
+            "tag_matches": profile.tag_matches,
+            "d_tags": [t for t in profile.tag_matches if t.startswith("d:")],
+            "j_tags": [t for t in profile.tag_matches if t.startswith("j:")],
+            "p_tags": [t for t in profile.tag_matches if t.startswith("p:")],
+            "literal_anchors": profile.literal_anchors,
+            "untagged_meaningful_tokens": profile.untagged_meaningful_tokens,
+            "semantic_core": getattr(profile, "semantic_core", profile.raw_query),
+            "raw_query": profile.raw_query,
+        }
+        logger.info(
+            "[%s] [trace:multi_invoke] strategies=%s union_chunks=%d confidence=%s",
+            agent_id, _invoke_all, len(_merged), _mi_conf,
+        )
+        return CorpusSearchAgentResponse(
+            chunks=_merged,
+            confidence=_mi_conf,
+            llm_answer=_mi_answer,
+            strategy_used="multi",
+            routing={
+                **routing_dump,
+                "invoke_all": _invoke_all,
+                "multi_invoke": True,
+                "arm_strategies": [a.strategy_used for a in _arm_resps],
+                "arm_chunk_counts": [len(a.chunks or []) for a in _arm_resps],
+            },
+            query_profile=_query_profile_mi,
+            queries_per_strategy=queries_per_strategy_dump,
+            escalated=False,
+            strategy_chain=_invoke_all,
+            telemetry={
+                "agent_id": agent_id,
+                "total_ms": int((time.monotonic() - t0) * 1000),
+                "multi_invoke_arms": len(_invoke_all),
+                "union_size": len(_merged),
+                **_mi_tel,
+            },
+        )
 
     # ── 1a.e. Strategy (e) — Fail Fast short-circuit ────────────────────
     if strategy_id == "e" and verdict and verdict.fail:

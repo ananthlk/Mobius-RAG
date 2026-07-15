@@ -102,6 +102,9 @@ class RouteDecision:
     prefs_resolved: dict[str, Any] = field(default_factory=dict)
     priors_version: str = "v1"
     fail_fast_reason: str | None = None     # populated when strategy == "e"
+    # v2 router: strategies to invoke concurrently; agent unions + synthesizes once.
+    # None → standard single-strategy semantics (v1 behavior unchanged).
+    invoke_all: list[str] | None = None
 
 
 # ============================================================================
