@@ -34,7 +34,7 @@ from app.services.corpus_search_router import (
 
 logger = logging.getLogger(__name__)
 
-PRIORS_VERSION = "v2.3.2026-07-15-inheritance-neutral-a"
+PRIORS_VERSION = "v2.3d.2026-07-15-multi-invoke-debug"
 
 # ---------------------------------------------------------------------------
 # Impurity threshold for multi-invoke

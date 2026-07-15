@@ -3661,12 +3661,35 @@ async def _corpus_search_agent_impl(
     # multi-invoke on every natural chat call (chat always sets
     # skip_synthesis=True) making multi-invoke dead code. Removed.
     _invoke_all = getattr(decision, "invoke_all", None)
+    # ── DEBUG: multi_invoke_considered — always emitted so EVAL can tell
+    # which layer prevents firing without needing to guess:
+    #   invoke_all_set=False → router didn't set it (gap/threshold/score issue)
+    #   invoke_all_set=True + dispatch_entered absent → one of the guards below blocked
+    #   dispatch_entered=True → block entered successfully
+    _ranked_scores = sorted(decision.scores.items(), key=lambda kv: -kv[1]) if decision.scores else []
+    _mi_debug: dict[str, Any] = {
+        "invoke_all_set": bool(_invoke_all),
+        "invoke_all": _invoke_all,
+        "mode_guard": not request.mode,
+        "prior_strategies_guard": not request.prior_strategies_tried,
+        "strategy_id_guard": strategy_id != "e",
+        "top2": [s for s, _ in _ranked_scores[:2]],
+        "gap": round(_ranked_scores[0][1] - _ranked_scores[1][1], 4) if len(_ranked_scores) >= 2 else None,
+        "dispatch_entered": False,  # overwritten to True if block fires
+    }
+    routing_dump["multi_invoke_considered"] = _mi_debug
+    logger.info(
+        "[%s] [trace:multi_invoke_debug] invoke_all=%s mode=%s prior_tried=%s sid=%s gap=%s",
+        agent_id, _invoke_all, request.mode, request.prior_strategies_tried,
+        strategy_id, _mi_debug.get("gap"),
+    )
     if (
         _invoke_all
         and not request.mode
         and not request.prior_strategies_tried
         and strategy_id != "e"
     ):
+        _mi_debug["dispatch_entered"] = True
         _fan_pairs = [(raw_query, s) for s in _invoke_all]
         _arm_resps = await _fan_out_execute(
             db, request, _fan_pairs, caller, caller_id,
