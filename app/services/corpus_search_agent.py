@@ -2833,6 +2833,12 @@ class CorpusSearchAgentResponse(BaseModel):
     escalated: bool = False          # True when cross-strategy escalation fired
     strategy_chain: list[str] = []  # ordered strategy IDs actually invoked
     fast_exit: dict[str, Any] | None = None  # {"fired": bool, "reason": str | None}
+    # Router v2 multi-invoke: strategies that actually ran concurrently when the
+    # v2 router signalled an impure leaf (top-2 scores within IMPURE_GAP_THRESHOLD).
+    # None when v1 router is active or when the leaf was clean (single strategy).
+    # Surfaced as a top-level field so eval can read it without drilling into
+    # the routing dict (where it also lives as routing["invoke_all"]).
+    invoke_all: list[str] | None = None
     # Inherited-authority escalation telemetry: populated when the plan-scoped
     # boost pass fires (inherited_authority_escalation=True inner call). Tells
     # EVAL exactly whether the boost ran, how many inherited chunks it returned,
@@ -3695,6 +3701,7 @@ async def _corpus_search_agent_impl(
             confidence=_mi_conf,
             llm_answer=_mi_answer,
             strategy_used="multi",
+            invoke_all=_invoke_all,   # top-level field — readable without drilling routing dict
             routing={
                 **routing_dump,
                 "invoke_all": _invoke_all,

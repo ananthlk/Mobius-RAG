@@ -34,7 +34,7 @@ from app.services.corpus_search_router import (
 
 logger = logging.getLogger(__name__)
 
-PRIORS_VERSION = "v2.0.2026-07-14-multi-invoke-linear-tweak"
+PRIORS_VERSION = "v2.1.2026-07-15-tag-coverage-exclusivity-gate"
 
 # ---------------------------------------------------------------------------
 # Impurity threshold for multi-invoke
@@ -90,15 +90,22 @@ _LINEAR_WEIGHTS_V2: dict[str, dict[str, float]] = {
 def _compute_linear_features_v2(profile_features: dict[str, Any]) -> dict[str, float]:
     """Compute normalized [0..1] feature values for v2 linear scoring.
 
-    Extends v1 with tag_coverage: continuous measure of how many topic (d:)
-    tags the query matched. 0 d-tags → 0.0 (no corpus-topic anchor → a is
-    risky). Plateaus at 1.0 for ≥3 matched d-tags.
+    Extends v1 with tag_coverage: rewards strategy-a when the query matches
+    NARROW topic tags (small corpus pool → the corpus has specific depth here).
+    A broad tag (dental.general, 600-doc pool) is NOT an a-signal — it only
+    says the payer has docs on the topic, not that a can find the specific answer.
+    Gate: exclusivity < 0.20 (pool > 250 docs) → tag_coverage = 0.
+    Fixes cmhc013 regression where a broad dental tag over-scored a vs b.
     """
     pool_size = max(1, int(profile_features.get("pool_size") or 500))
     tag_matches = profile_features.get("tag_matches") or []
     n_d_tags = sum(1 for t in tag_matches if str(t).startswith("d:"))
+    exclusivity = min(1.0, 50.0 / pool_size)
+    # Only reward a for narrow (exclusive) topic tags. Broad-pool tags don't
+    # tell us a can find the specific answer → zero the coverage boost.
+    tag_coverage = min(1.0, n_d_tags / 3.0) if exclusivity >= 0.20 else 0.0
     return {
-        "exclusivity":     min(1.0, 50.0 / pool_size),
+        "exclusivity":     exclusivity,
         "literal":         float(bool(profile_features.get("has_literal", False))),
         "corpus_depth":    float(
             bool(profile_features.get("has_j_payor_tag", False))
@@ -108,7 +115,7 @@ def _compute_linear_features_v2(profile_features: dict[str, Any]) -> dict[str, f
         "wide_pool":       float(pool_size > 500),
         "inheritance":     float(bool(profile_features.get("has_inherited_docs", False))),
         "crawlability":    float(profile_features.get("crawlability", 0.3)),
-        "tag_coverage":    min(1.0, n_d_tags / 3.0),
+        "tag_coverage":    tag_coverage,
     }
 
 
