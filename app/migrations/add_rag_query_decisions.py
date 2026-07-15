@@ -10,7 +10,8 @@ Captures IMMEDIATE two-grade QA at query time:
 
   retrieval_grade = fact_checker(must_facts, CHUNKS)   → router quality signal
   synthesis_grade = fact_checker(must_facts, ANSWER)   → synthesizer quality (prod only)
-  synthesis_gap   = retrieval_grade − synthesis_grade  → synthesis loss
+  synthesis_gap   = synthesis_grade − retrieval_grade  → neg = synthesis loss
+                                                          (drop), pos = hallucination (bluff)
 
 Credit assignment:
   - router_reward      = retrieval_grade  (computed at read time, not stored)
@@ -108,7 +109,7 @@ CREATE TABLE public.rag_query_decisions (
     fact_checker_version TEXT,
     retrieval_grade      DOUBLE PRECISION,        -- fact_checker(must_facts, CHUNKS)
     synthesis_grade      DOUBLE PRECISION,        -- fact_checker(must_facts, ANSWER)
-    synthesis_gap        DOUBLE PRECISION,        -- retrieval − synthesis
+    synthesis_gap        DOUBLE PRECISION,        -- synthesis − retrieval (neg=drop, pos=bluff)
     per_claim_ledger     JSONB,                   -- compact array (docstring spec)
 
     -- Mode + join keys ─────────────────────────────────────────────────
