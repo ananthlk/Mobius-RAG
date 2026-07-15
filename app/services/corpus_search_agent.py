@@ -3399,14 +3399,26 @@ def _observe_async(
 ) -> None:
     """Schedule a fire-and-forget OBSERVE write to rag_query_decisions.
 
-    Computes two-grade QA when must_facts are available (eval bank queries),
-    otherwise logs NULL grades (prod inference has no must_facts). EVAL fills
-    grades offline via UPDATE for prod rows with known queries.
+    Two-grade QA contract (EVAL-owned rubric, stage=rag_fact_check):
 
-    Two-call contract (EVAL-owned, stage=rag_fact_check):
       retrieval_grade = check_facts(query, must_facts, chunks, answer=None)
+        → COVERAGE: "are the gold facts in the retrieved chunks?"
+        → Requires must_facts (eval bank). NULL in prod (no gold at inference time).
+        → Eval supplies must_facts; prod retrieval_grade is NULL (EVAL backfills
+          for bank-matching queries via offline UPDATE if needed).
+
       synthesis_grade = check_facts(query, must_facts, chunks, answer=answer)
-      synthesis_gap   = retrieval_grade − synthesis_grade
+        → GROUNDING: "is the answer faithful to the chunks — or did it hallucinate?"
+        → With must_facts: coverage + faithfulness (eval mode).
+        → Without must_facts + answer present: GROUNDING-ONLY (faithfulness, no coverage).
+          EVAL will ship a grounding-only path in check_facts that returns a real
+          synthesis_grade even without gold facts (answer-vs-chunks faithfulness check).
+          DO NOT early-return before passing answer to check_facts — the answer must
+          always reach check_facts when present, even if must_facts is empty.
+
+      synthesis_gap = synthesis_grade − retrieval_grade
+        Negative = synthesis DROP (fact in chunks but dropped by synthesizer).
+        Positive = HALLUCINATION signal (answer asserts beyond chunk evidence).
     """
     import asyncio as _asyncio
     from app.database import AsyncSessionLocal
@@ -3426,8 +3438,9 @@ def _observe_async(
         synthesis_grade: float | None = None
         synthesis_gap: float | None = None
 
-        if must_facts:
-            try:
+        try:
+            # COVERAGE grade: only when must_facts are available (eval bank).
+            if must_facts:
                 r_result = await check_facts(
                     query=query,
                     must_facts=must_facts,
@@ -3437,20 +3450,23 @@ def _observe_async(
                 )
                 retrieval_grade = r_result.score
 
-                if answer:
-                    s_result = await check_facts(
-                        query=query,
-                        must_facts=must_facts,
-                        chunks=chunks,
-                        answer=answer,
-                        correlation_id=agent_id,
-                    )
-                    synthesis_grade = s_result.score
-                    # Sign: negative = synthesis DROP (fact in chunks but dropped by synthesizer)
-                    #       positive = HALLUCINATION signal (answer asserts beyond chunk evidence)
+            # GROUNDING grade: always call when answer is present.
+            # With must_facts: coverage + faithfulness. Without: grounding-only
+            # (EVAL ships grounding-only path in check_facts — answer-vs-chunks
+            # faithfulness check that works without gold facts).
+            if answer:
+                s_result = await check_facts(
+                    query=query,
+                    must_facts=must_facts or [],
+                    chunks=chunks,
+                    answer=answer,
+                    correlation_id=agent_id,
+                )
+                synthesis_grade = s_result.score
+                if retrieval_grade is not None:
                     synthesis_gap = round(synthesis_grade - retrieval_grade, 4)
-            except Exception as exc:
-                logger.warning("[observe] fact_check failed: %s", exc)
+        except Exception as exc:
+            logger.warning("[observe] fact_check failed: %s", exc)
 
         try:
             async with AsyncSessionLocal() as sess:
