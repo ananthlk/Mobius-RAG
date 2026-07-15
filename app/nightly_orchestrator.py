@@ -548,6 +548,23 @@ def start(opts: dict) -> dict:
     import uuid
     if _NIGHTLY.get("running"):
         return {"status": "already_running", **status()}
+    # Self-heal zombie rows: when a prior orchestrator thread died with the
+    # instance (max=1 recycle mid-embed is the recurring case), its nightly_runs
+    # row stays 'running' forever and confuses the UI/monitoring. Any 'running'
+    # row older than 3h can't be live (runs are minutes, evals <1h), so mark it
+    # failed persistently before starting the new run. Best-effort.
+    try:
+        import psycopg2 as _pg
+        _c = _pg.connect(_dsn(), connect_timeout=10)
+        _c.autocommit = True
+        _cu = _c.cursor()
+        _cu.execute("UPDATE nightly_runs SET status='failed' "
+                    "WHERE status='running' AND started_at < NOW() - INTERVAL '3 hours'")
+        if _cu.rowcount:
+            logger.info("[nightly] self-heal: marked %d zombie run row(s) failed", _cu.rowcount)
+        _cu.close(); _c.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[nightly] zombie self-heal skipped: %s", exc)
     # Resume: carry over a prior run's COMPLETED steps + baseline so we don't
     # re-run expensive work (esp. the ~32-min baseline eval). Steps that weren't
     # done are reset to pending and re-executed from where the run failed.
