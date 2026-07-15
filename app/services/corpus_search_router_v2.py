@@ -34,7 +34,7 @@ from app.services.corpus_search_router import (
 
 logger = logging.getLogger(__name__)
 
-PRIORS_VERSION = "v2.1.2026-07-15-tag-coverage-exclusivity-gate"
+PRIORS_VERSION = "v2.2.2026-07-15-depth-x-excl"
 
 # ---------------------------------------------------------------------------
 # Impurity threshold for multi-invoke
@@ -63,15 +63,20 @@ _LINEAR_WEIGHTS_V2: dict[str, dict[str, float]] = {
     "a": {
         "exclusivity":     0.30,
         "literal":         0.25,
-        "corpus_depth":    0.05,   # v2: neutered (was 0.20 — pumped a on all-payer queries)
-        "tag_coverage":    0.15,   # v2: new — 0 matched d-tags → no boost → downweights a
+        # v2.2: replaced binary corpus_depth (0.05) with depth_x_excl (corpus_depth × exclusivity).
+        # Binary was always 1 for any payer with >20 docs — told us nothing about whether
+        # the corpus has DEPTH ON THIS SPECIFIC TOPIC. depth_x_excl collapses to ~0 for
+        # broad-pool queries (exclusivity ≈ 0.1) while staying at 1.0 for narrow-pool ones.
+        # Fixes cmhc013: pool=276 → depth_x_excl=0.181 → a=0.463, gap to b=0.054 → multi-invoke.
+        "depth_x_excl":    0.05,
+        "tag_coverage":    0.15,   # gated by exclusivity (v2.1): 0 when pool > 250 docs
         "thematic_policy": -0.10,
         "wide_pool":       -0.15,
         "inheritance":      0.05,
     },
     "b": {
         "thematic_policy":  0.40,
-        "corpus_depth":     0.20,
+        "corpus_depth":     0.20,  # b: binary depth fine — wide retrieval benefits from any depth
         "literal":         -0.20,
         "exclusivity":      0.05,
     },
@@ -101,16 +106,22 @@ def _compute_linear_features_v2(profile_features: dict[str, Any]) -> dict[str, f
     tag_matches = profile_features.get("tag_matches") or []
     n_d_tags = sum(1 for t in tag_matches if str(t).startswith("d:"))
     exclusivity = min(1.0, 50.0 / pool_size)
-    # Only reward a for narrow (exclusive) topic tags. Broad-pool tags don't
-    # tell us a can find the specific answer → zero the coverage boost.
+    corpus_depth_binary = float(
+        bool(profile_features.get("has_j_payor_tag", False))
+        and (pool_size >= 20 or bool(profile_features.get("has_inherited_docs", False)))
+    )
+    # depth_x_excl: continuous composite replacing binary corpus_depth in a's weights.
+    # Binary corpus_depth is near-1 for any payer with documents (not discriminative).
+    # Multiplying by exclusivity scales the bonus to how SPECIFIC the topic match is:
+    # pool=25 (narrow topic) → 1.0; pool=276 (broad dental) → 0.18; pool=600 → 0.08.
+    depth_x_excl = corpus_depth_binary * exclusivity
+    # tag_coverage: only reward a for NARROW tags (exclusivity ≥ 0.20 = pool ≤ 250 docs).
     tag_coverage = min(1.0, n_d_tags / 3.0) if exclusivity >= 0.20 else 0.0
     return {
         "exclusivity":     exclusivity,
         "literal":         float(bool(profile_features.get("has_literal", False))),
-        "corpus_depth":    float(
-            bool(profile_features.get("has_j_payor_tag", False))
-            and (pool_size >= 20 or bool(profile_features.get("has_inherited_docs", False)))
-        ),
+        "corpus_depth":    corpus_depth_binary,   # kept for b's weight lookup (b uses binary)
+        "depth_x_excl":   depth_x_excl,           # a uses this composite instead
         "thematic_policy": float(bool(profile_features.get("thematic_policy", False))),
         "wide_pool":       float(pool_size > 500),
         "inheritance":     float(bool(profile_features.get("has_inherited_docs", False))),
