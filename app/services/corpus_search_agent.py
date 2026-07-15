@@ -2963,21 +2963,44 @@ async def _fan_out_execute(
 def _union_chunks(
     arm_responses: list["CorpusSearchAgentResponse"],
     k: int,
+    *,
+    secondary_cap_frac: float = 0.30,
 ) -> list["CorpusChunk"]:
     """Deduplicate and rank chunks from multiple fan-out arms.
 
-    Deduplication key: chunk.id (stable UUID). When the same chunk appears
-    in multiple arms, the highest rerank_score wins. Returns top-k by score.
+    Primary arm (arm_responses[0] = router's top strategy) fills 70% of k.
+    Secondary arm(s) fill the remaining 30% with non-duplicate chunks.
+    This prevents secondary-arm generic chunks from outscoring primary-arm
+    payer-specific chunks purely on rerank_score (scores aren't comparable
+    across retrieval strategies with different corpus scopes).
+
+    Deduplication key: chunk.id (stable UUID).
+    Final result is sorted by rerank_score for presentation.
     """
-    best: dict[str, Any] = {}
-    for resp in arm_responses:
-        for c in (resp.chunks or []):
-            cid = getattr(c, "id", None) or id(c)
-            existing = best.get(cid)
-            if existing is None or (c.rerank_score or 0.0) > (existing.rerank_score or 0.0):
-                best[cid] = c
-    ranked = sorted(best.values(), key=lambda c: -(c.rerank_score or 0.0))
-    return ranked[:k]
+    if not arm_responses:
+        return []
+
+    def _sorted_chunks(chunks: list[Any]) -> list[Any]:
+        return sorted(chunks or [], key=lambda c: -(c.rerank_score or 0.0))
+
+    primary = _sorted_chunks(arm_responses[0].chunks)
+    secondary_all: list[Any] = [
+        c for resp in arm_responses[1:]
+        for c in (resp.chunks or [])
+    ]
+    primary_ids = {getattr(c, "id", id(c)) for c in primary}
+    secondary = _sorted_chunks(
+        [c for c in secondary_all if getattr(c, "id", id(c)) not in primary_ids]
+    )
+
+    sec_cap = max(1, round(k * secondary_cap_frac))
+    pri_cap = k - sec_cap
+
+    result = primary[:pri_cap]
+    remaining = k - len(result)
+    result += secondary[:remaining]
+
+    return sorted(result, key=lambda c: -(c.rerank_score or 0.0))
 
 
 # ---------------------------------------------------------------------------
@@ -3704,7 +3727,11 @@ async def _corpus_search_agent_impl(
         )
         _merged = _union_chunks(_arm_resps, request.k)
 
-        if not request.skip_synthesis and _merged:
+        # Multi-invoke always synthesises the union — skip_synthesis=True is a
+        # latency hint for single-strategy retrieval, not for union synthesis.
+        # Honouring it here would produce ans=None for every multi-invoke response,
+        # defeating the feature for both eval scoring and production chat.
+        if _merged:
             _mi_answer, _mi_conf, _mi_tel = await _synthesize_internal_answer(
                 raw_query, _merged,
                 stage="rag_multi_invoke_synth",
