@@ -3670,7 +3670,10 @@ async def _corpus_search_agent_impl(
     _mi_debug: dict[str, Any] = {
         "invoke_all_set": bool(_invoke_all),
         "invoke_all": _invoke_all,
-        "mode_guard": not request.mode,
+        "request_mode": request.mode,
+        "explicit_strategy": explicit_strategy,  # None for "natural", set for "a"/"b" forced
+        "mode_guard_old": not request.mode,       # was False when mode="natural" → was blocking
+        "mode_guard_new": not explicit_strategy,  # True for "natural" (only False for forced strategies)
         "prior_strategies_guard": not request.prior_strategies_tried,
         "strategy_id_guard": strategy_id != "e",
         "top2": [s for s, _ in _ranked_scores[:2]],
@@ -3685,7 +3688,7 @@ async def _corpus_search_agent_impl(
     )
     if (
         _invoke_all
-        and not request.mode
+        and not explicit_strategy   # block only if a specific strategy was FORCED, not "natural" mode
         and not request.prior_strategies_tried
         and strategy_id != "e"
     ):
