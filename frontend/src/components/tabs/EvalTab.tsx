@@ -69,8 +69,8 @@ interface EvalResultRow {
 export interface ClaimEntry {
   fact: string
   status: 'validated' | 'unvalidated' | 'contradicted'
-  chunk_id: number | null   // 1-based index into retrieved chunks (null = hallucinated, no backing passage)
-  support?: string | null   // inline evidence text (compact DB rows omit this; resolve from chunk_id instead)
+  chunk_id: number | null   // 1-based passage index (null = hallucinated, no backing passage)
+  support: number           // graded score: 1.0=validated, 0.5=partial, 0.0=contradicted
 }
 
 interface ChunkSummary {
@@ -1055,10 +1055,11 @@ export function PerClaimLedger({
 
   function ClaimRow({ claim }: { claim: ClaimEntry }) {
     const [open, setOpen] = useState(false)
-    // Resolve evidence: use inline support if present, else look up by 1-based chunk index.
-    // chunk_id null = hallucinated claim with no backing passage — no evidence shown.
-    const evidence = claim.support ||
-      (claim.chunk_id != null && chunks ? (chunks[claim.chunk_id - 1]?.text ?? null) : null)
+    // Resolve evidence from chunk passage by 1-based index.
+    // chunk_id null = hallucinated claim with no backing passage.
+    const evidence = (claim.chunk_id != null && chunks)
+      ? (chunks[claim.chunk_id - 1]?.text ?? null)
+      : null
     const snippet = evidence ? evidence.slice(0, 120) : null
     return (
       <div
