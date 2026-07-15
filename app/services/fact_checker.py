@@ -74,6 +74,22 @@ class FactCheckResult:
     def n_supported(self) -> int:
         return sum(1 for v in self.verdicts if v.supported)
 
+    def ledger(self) -> list[dict[str, Any]]:
+        """Compact per-claim ledger — EVAL-owned schema, versioned under
+        FACT_CHECKER_VERSION. Consumers (OBSERVE row, answer card) persist this
+        verbatim. status ∈ validated|unvalidated|contradicted; chunk_id is the
+        1-based passage index (resolve against the query's retrieved chunks at
+        display time); NO verbatim quote persisted (kept out of the hot row —
+        UX pulls the quote from the chunk via chunk_id)."""
+        out: list[dict[str, Any]] = []
+        for v in self.verdicts:
+            status = ("contradicted" if v.contradicted
+                      else "validated" if v.support >= 0.5
+                      else "unvalidated")
+            out.append({"fact": v.fact[:160], "status": status,
+                        "chunk_id": v.passage, "support": v.support})
+        return out
+
 
 _SYSTEM = (
     "You are a strict grounding critic for a healthcare-policy assistant. You are "
@@ -133,6 +149,50 @@ _SYSTEM_CHUNK = (
     '  "reasoning": "<one terse sentence>"\n'
     "}\n"
 )
+
+
+_SYSTEM_GROUNDING = (
+    "You are a strict faithfulness critic for a healthcare-policy assistant. You are "
+    "given a QUESTION, the numbered RETRIEVED PASSAGES the system had, and the system's "
+    "ANSWER. There is NO answer key — judge the ANSWER only against the PASSAGES, never "
+    "your own outside knowledge. Your job: decide whether the answer is GROUNDED.\n\n"
+    "Enumerate EACH distinct factual claim the ANSWER asserts (a specific number, date, "
+    "code, policy, entity, timeframe, or requirement). For EACH claim decide:\n"
+    "  grounded — does a PASSAGE clearly back it? true|false. Paraphrase / synonyms are "
+    "fine.\n"
+    "  contradicted — does ANY passage assert something that CONFLICTS with the claim (a "
+    "different number, policy, entity, date)? true|false. A contradicted claim is the "
+    "WORST case — the answer would MISLEAD a reader (e.g. a wrong billing date).\n"
+    "  support = 1.0 fully backed · 0.5 core backed but a qualifier is off · 0.0 not "
+    "backed.\n"
+    "A claim that is neither grounded nor contradicted is a HALLUCINATION — asserted with "
+    "no passage support.\n\n"
+    "If the ANSWER makes no factual assertions — it declines, or says the information is "
+    "not in the provided sources — set honest_abstain=true and return an EMPTY results "
+    "list. An honest abstention is GOOD, not a failure. Do NOT invent claims the answer "
+    "did not make, and judge only what the answer actually asserts.\n\n"
+    "Output ONLY strict JSON, no markdown:\n"
+    "{\n"
+    '  "results": [{"claim": "<verbatim claim>", "grounded": true|false, '
+    '"contradicted": true|false, "support": 0.0|0.5|1.0, "passage": <int|null>, '
+    '"evidence": "<verbatim quote|null>"}],\n'
+    '  "honest_abstain": true|false,\n'
+    '  "reasoning": "<one terse sentence>"\n'
+    "}\n"
+)
+
+
+def _build_grounding_prompt(query, answer, chunks) -> str:
+    parts = [f"QUESTION:\n{query}", "", "RETRIEVED PASSAGES:"]
+    if not chunks:
+        parts.append("  (no passages retrieved)")
+    for i, c in enumerate(chunks, start=1):
+        text = (c.get("text") or "")[:700]
+        doc = c.get("document_name") or c.get("document_display_name") or "?"
+        parts.append(f"  [{i}] {doc} p.{c.get('page_number')}: {text}")
+    parts += ["", "SYSTEM ANSWER (enumerate and check EACH claim it asserts):",
+              (answer or "(empty / no answer)")[:1800]]
+    return "\n".join(parts)
 
 
 def _build_chunk_prompt(query, must_facts, chunks) -> str:
@@ -205,22 +265,33 @@ async def check_facts(
     must_facts = [f for f in (must_facts or []) if str(f).strip()]
     forbidden_facts = [f for f in (forbidden_facts or []) if str(f).strip()]
     n_must = max(1, len(must_facts))
-    if not must_facts:
-        return FactCheckResult(reasoning="no must_facts to check")
+    has_answer = bool(answer and str(answer).strip())
+    if not must_facts and not has_answer:
+        return FactCheckResult(reasoning="nothing to check (no must_facts, no answer)")
 
-    # Chunk-only (retrieval) mode when no answer is supplied: score whether the
-    # facts are present in the retrieved passages, independent of any synthesized
-    # answer. This is the correct measure for RETRIEVAL-strategy calibration —
-    # it does not penalize a strategy for a synthesizer that failed to use a
-    # chunk it retrieved.
-    chunk_only = not (answer and str(answer).strip())
+    # THREE grading modes:
+    #  - grounding_only: no gold must_facts but an answer IS present → reference-free
+    #    faithfulness critic. Enumerate the ANSWER's own claims and check each vs the
+    #    chunks (grounded / contradicted / hallucinated / honest-abstain). This is the
+    #    PROD / runtime-critic path — the compliance surface with no answer key, and the
+    #    real-world synthesis grade (chat has no gold facts at inference time).
+    #  - chunk_only: gold must_facts, no answer → pure retrieval coverage (calibration);
+    #    does not penalize a strategy for a synthesizer that failed to use a chunk.
+    #  - full: gold must_facts + answer → coverage + grounding (offline synth grade).
+    grounding_only = not must_facts and has_answer
+    chunk_only = bool(must_facts) and not has_answer
+
+    if grounding_only:
+        system, user = _SYSTEM_GROUNDING, _build_grounding_prompt(query, answer, chunks)
+    elif chunk_only:
+        system, user = _SYSTEM_CHUNK, _build_chunk_prompt(query, must_facts, chunks)
+    else:
+        system, user = _SYSTEM, _build_prompt(query, answer, must_facts, forbidden_facts, chunks)
 
     t0 = time.monotonic()
     try:
         raw, meta = await llm_manager_client.generate(
-            system=_SYSTEM_CHUNK if chunk_only else _SYSTEM,
-            user=(_build_chunk_prompt(query, must_facts, chunks) if chunk_only
-                  else _build_prompt(query, answer, must_facts, forbidden_facts, chunks)),
+            system=system, user=user,
             stage=_FACT_CHECK_STAGE, max_tokens=max_tokens, correlation_id=correlation_id,
         )
     except Exception as exc:  # noqa: BLE001
@@ -231,6 +302,51 @@ async def check_facts(
     elapsed = int((time.monotonic() - t0) * 1000)
     model = (meta or {}).get("model") or (meta or {}).get("provider") or "unknown"
     parsed = _parse(raw)
+
+    if grounding_only:
+        # Answer-driven: each result is a claim the answer asserted, judged vs chunks.
+        verdicts = []
+        for r in (parsed.get("results") or []):
+            if not isinstance(r, dict):
+                continue
+            claim = str(r.get("claim") or r.get("fact") or "").strip()
+            if not claim:
+                continue
+            grounded = bool(r.get("grounded"))
+            try:
+                sup = float(r.get("support", 1.0 if grounded else 0.0) or 0.0)
+            except (TypeError, ValueError):
+                sup = 1.0 if grounded else 0.0
+            sup = max(0.0, min(1.0, sup))
+            if not grounded:
+                sup = 0.0  # ungrounded claim earns no credit (it's a hallucination)
+            passage = r.get("passage")
+            try:
+                passage = int(passage) if passage is not None else None
+            except (TypeError, ValueError):
+                passage = None
+            ev = r.get("evidence")
+            verdicts.append(FactVerdict(fact=claim, support=sup, grounded=grounded,
+                                        contradicted=bool(r.get("contradicted")),
+                                        passage=passage, evidence=str(ev)[:200] if ev else None))
+        honest_abstain = bool(parsed.get("honest_abstain"))
+        n_claims = max(1, len(verdicts))
+        support_sum = sum(v.support for v in verdicts)
+        contradicted = [v.fact for v in verdicts if v.contradicted]
+        hallucinated = [v.fact for v in verdicts if not v.grounded and not v.contradicted]
+        if honest_abstain and not verdicts:
+            score = 1.0  # honest abstention = full credit (asserted nothing unsupported)
+        else:
+            # contradicted = confident-wrong → an EXTRA penalty beyond the 0 support it
+            # already earns; a mere unbacked claim is only penalized by dragging the mean.
+            penalty = _HALLUCINATION_PENALTY * len(contradicted)
+            score = max(0.0, min(1.0, (support_sum - penalty) / n_claims))
+        return FactCheckResult(
+            verdicts=verdicts, hallucinated_claims=hallucinated,
+            honest_abstain=honest_abstain, score=round(score, 3),
+            coverage=round(support_sum / n_claims, 3), model=f"factcheck/{model}",
+            elapsed_ms=elapsed, reasoning=str(parsed.get("reasoning") or "")[:300],
+        )
 
     by_text = {str(r.get("fact", "")).strip().lower(): r
                for r in (parsed.get("results") or []) if isinstance(r, dict)}
