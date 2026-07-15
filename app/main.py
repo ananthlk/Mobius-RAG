@@ -610,7 +610,11 @@ def version_fingerprint():
     a DEPLOYED agent over HTTP, so run_calibration reads THIS (not the driver's
     local checkout) to stamp each run's fingerprint — the mixed-build guard."""
     import os as _os
-    from app.services.corpus_search_router import PRIORS_VERSION
+    import os as _os2
+    if _os2.environ.get("ROUTER_VERSION") == "v2":
+        from app.services.corpus_search_router_v2 import PRIORS_VERSION
+    else:
+        from app.services.corpus_search_router import PRIORS_VERSION
     from app.services import corpus_search_agent as _csa
     retrieval_config = {
         "pool_wide_max": getattr(_csa, "_POOL_WIDE_MAX", None),
