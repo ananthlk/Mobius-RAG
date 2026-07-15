@@ -3468,22 +3468,50 @@ def _observe_async(
         except Exception as exc:
             logger.warning("[observe] fact_check failed: %s", exc)
 
+        # Build leaf_key per EVAL spec: "{action}:{arms}" where arms are sorted.
+        # action=union for multi-invoke, route for single-arm, floor for e.
+        _action = "union" if invoke_all else ("floor" if strategy_used == "e" else "route")
+        _arms = "+".join(sorted(invoke_all)) if invoke_all else strategy_used
+        _leaf_key = f"{_action}:{_arms}"
+
+        # feature_vector: raw linear features from routing decision
+        _routing = response.routing or {}
+        _feature_vector = _routing.get("feature_vector") or _routing.get("features") or None
+        _strategy_scores = _routing.get("scores") or None
+
+        # per_claim_ledger: compact array from synthesis grading result.
+        # Wired post EVAL rubric update — FactCheckResult will expose verdicts
+        # in the compact ledger format. Null until then.
+        _per_claim_ledger: list | None = None
+
         try:
+            import json as _json
             async with AsyncSessionLocal() as sess:
+                # corpus_version: read from corpus_state (bump-at-mutation, never derived)
+                _corpus_version: int | None = None
+                try:
+                    cv_row = await sess.execute(sql_text("SELECT corpus_version FROM corpus_state"))
+                    cv = cv_row.scalar_one_or_none()
+                    _corpus_version = int(cv) if cv is not None else None
+                except Exception:
+                    pass
                 await sess.execute(
                     sql_text("""
                         INSERT INTO rag_query_decisions (
-                            agent_id, query, strategy_used, invoke_all,
-                            priors_version, n_chunks, top_rerank_score,
-                            corpus_version, fact_checker_version,
-                            retrieval_grade, synthesis_grade, synthesis_gap,
-                            is_prod, caller, caller_id, eval_run_id
+                            id, agent_id, query, strategy_used, invoke_all,
+                            priors_version, leaf_key, feature_vector, strategy_scores,
+                            n_chunks, top_rerank_score, corpus_version,
+                            fact_checker_version, retrieval_grade, synthesis_grade,
+                            synthesis_gap, per_claim_ledger,
+                            is_prod, caller, caller_id, eval_run_id, correlation_id
                         ) VALUES (
-                            :agent_id, :query, :strategy_used, :invoke_all,
-                            :priors_version, :n_chunks, :top_rerank_score,
+                            gen_random_uuid(), :agent_id, :query, :strategy_used,
+                            :invoke_all, :priors_version, :leaf_key, :feature_vector,
+                            :strategy_scores, :n_chunks, :top_rerank_score,
                             :corpus_version, :fact_checker_version,
                             :retrieval_grade, :synthesis_grade, :synthesis_gap,
-                            :is_prod, :caller, :caller_id, :eval_run_id
+                            :per_claim_ledger, :is_prod, :caller, :caller_id,
+                            :eval_run_id, :correlation_id
                         )
                     """),
                     {
@@ -3492,20 +3520,25 @@ def _observe_async(
                         "strategy_used": strategy_used,
                         "invoke_all": invoke_all,
                         "priors_version": priors_version,
+                        "leaf_key": _leaf_key,
+                        "feature_vector": _json.dumps(_feature_vector) if _feature_vector else None,
+                        "strategy_scores": _json.dumps(_strategy_scores) if _strategy_scores else None,
                         "n_chunks": len(chunks),
                         "top_rerank_score": max(
                             (c.rerank_score for c in chunks if c.rerank_score is not None),
                             default=None,
                         ),
-                        "corpus_version": corpus_version,
-                        "fact_checker_version": FACT_CHECKER_VERSION if must_facts else None,
+                        "corpus_version": _corpus_version,
+                        "fact_checker_version": FACT_CHECKER_VERSION if (must_facts or answer) else None,
                         "retrieval_grade": retrieval_grade,
                         "synthesis_grade": synthesis_grade,
                         "synthesis_gap": synthesis_gap,
+                        "per_claim_ledger": _json.dumps(_per_claim_ledger) if _per_claim_ledger else None,
                         "is_prod": is_prod,
                         "caller": (response.telemetry or {}).get("caller") or None,
                         "caller_id": None,
                         "eval_run_id": eval_run_id,
+                        "correlation_id": agent_id,
                     },
                 )
                 await sess.commit()
