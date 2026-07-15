@@ -160,8 +160,8 @@ export function EvalTab() {
   const [runsCollapsed, setRunsCollapsed] = useState(false)
   const [triggering, setTriggering] = useState(false)
 
-  // Observability dashboard (timeline / A-B compare / drift) — default open.
-  const [dashOpen, setDashOpen] = useState(true)
+  // Observability dashboard (timeline / A-B compare / drift) — secondary strip, collapsed by default.
+  const [dashOpen, setDashOpen] = useState(false)
 
   // Initial: load runs.
   useEffect(() => {
@@ -375,6 +375,14 @@ export function EvalTab() {
     refreshRuns()
   }
 
+  // Cockpit drill: lazy-fetch full result detail (per_claim_ledger).
+  async function fetchDetailForCockpit(resultId: string): Promise<ResultDetail> {
+    if (resultDetailCache[resultId]) return resultDetailCache[resultId]
+    const d: ResultDetail = await fetch(`${API_BASE}/api/eval/results/${resultId}`).then(r => r.json())
+    setResultDetailCache(c => ({ ...c, [resultId]: d }))
+    return d
+  }
+
   // Filter the question list by clicking a stage tile.
   const filteredResults = !runDetail
     ? []
@@ -512,7 +520,13 @@ export function EvalTab() {
           <>
             <RunHeader run={runDetail.run} />
             {calibSummary && <CalibrationSummaryPanel data={calibSummary} />}
-            {gradeRollup && <TwoGradeRollupPanel data={gradeRollup} />}
+            {gradeRollup && (
+              <EvalCockpit
+                data={gradeRollup}
+                runResults={runDetail.results}
+                onFetchDetail={fetchDetailForCockpit}
+              />
+            )}
             <PRCurvePanel runId={runDetail.run.id} />
             <PipelineFunnel
               results={runDetail.results}
@@ -788,17 +802,30 @@ function ComparePanel({ runs, onPick: _onPick }: { runs: TimelineRun[]; onPick: 
       {new Date(r.ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} · {shortRun(r).slice(0, 22)}
     </option>
   )
+  const SIGMA = 0.2  // fact-checker variance floor — deltas smaller than this are noise
+  const fpKeys = data ? Object.keys(data.fingerprint_diff || {}) : []
+  // Attributable = exactly 1 fingerprint dim changed + not confounded.
+  // Unattributable = same build (fpKeys empty) — deltas are noise, not signal.
+  const attributable = data && !data.confounded && fpKeys.length > 0
+
   const delta = (k: string, label: string) => {
     const v = data?.deltas?.[k]
-    const cls = v == null ? '' : v > 0 ? 'up' : v < 0 ? 'down' : ''
+    const withinNoise = v != null && Math.abs(v) < SIGMA
+    // Only color UP/DOWN when attributable AND outside noise floor.
+    const cls = (!attributable || withinNoise || v == null) ? '' : v > 0 ? 'up' : v < 0 ? 'down' : ''
     return (
-      <div className="obs-delta">
+      <div className="obs-delta" style={{ opacity: !attributable ? 0.45 : 1 }}>
         <span className="obs-delta-label">{label}</span>
-        <span className={`obs-delta-val ${cls}`}>{v == null ? '—' : (v > 0 ? '+' : '') + v.toFixed(3)}</span>
+        <span
+          className={`obs-delta-val ${cls}`}
+          title={!attributable ? 'Not attributable — same build; delta is noise' : withinNoise ? `Within noise floor (|Δ|<σ${SIGMA})` : undefined}
+        >
+          {v == null ? '—' : (v > 0 ? '+' : '') + v.toFixed(3)}
+          {withinNoise && v != null && <span style={{ fontSize: 9, opacity: 0.5, marginLeft: 2 }}>~</span>}
+        </span>
       </div>
     )
   }
-  const fpKeys = data ? Object.keys(data.fingerprint_diff || {}) : []
 
   return (
     <div className="obs-panel">
@@ -815,7 +842,7 @@ function ComparePanel({ runs, onPick: _onPick }: { runs: TimelineRun[]; onPick: 
           {data.confounded ? (
             <div className="obs-banner warn">⚠ {data.confound_reason}</div>
           ) : fpKeys.length === 0 ? (
-            <div className="obs-banner ok">✓ same build — delta is noise / measurement only</div>
+            <div className="obs-banner">⊘ same build — delta is noise, not attributable to a change</div>
           ) : (
             <div className="obs-banner attrib">✓ attributable — 1 dim changed: {fpKeys.join(', ')}</div>
           )}
@@ -874,85 +901,326 @@ function DriftChip() {
 
 // ── Calibration summary (5-axis + oracle) ───────────────────────────────
 
-// ── Two-grade QA Rollup (Panel B) ───────────────────────────────────────
+// ── Eval Cockpit (hero + diagnostic + drill) ────────────────────────────
 //
-// Per-strategy mean ± std for retrieval_grade / synthesis_grade / gap.
-// Read from GET /api/eval/runs/{id}/grade_rollup (rag_query_decisions rows).
-// Sigma band: delta < sigma_noise (~0.2) → gray out as within noise floor.
+// Primary two-grade QA surface. Five sections:
+//   HERO:       grouped SVG bars per strategy (retrieval blue + synthesis green)
+//               with ±σ whiskers and gap color pill below each group
+//   DIAGNOSTIC: one-line fix direction per strategy derived from gap pattern
+//   DRILL:      strategy click → per-query table → per-claim ledger inline
+//   MODE TOGGLE: offline (lower bound, current) vs prod (truth, pending EVAL endpoint)
+//
+// ObservabilityDashboard (timeline / A-B / drift) is the secondary strip,
+// collapsed by default — click "Dashboard" in the toolbar to open.
 
-function TwoGradeRollupPanel({ data }: { data: any }) {
-  const order = ['a', 'b', 'c', 'd', 'natural']
-  const strats = order.filter((s) => data.strategies?.[s])
+function EvalCockpit({
+  data,
+  runResults,
+  onFetchDetail,
+}: {
+  data: any
+  runResults: EvalResultRow[]
+  onFetchDetail: (id: string) => Promise<ResultDetail>
+}) {
+  const [mode, setMode] = useState<'offline' | 'prod'>('offline')
+  const [drillStrategy, setDrillStrategy] = useState<string | null>(null)
+  const [detailCache, setDetailCache] = useState<Record<string, ResultDetail>>({})
+  const [expandedId, setExpandedId] = useState<string | null>(null)
+
   const sigma = data.sigma_noise ?? 0.2
-  const fmt = (v: any) => (v === null || v === undefined ? '—' : Number(v).toFixed(3))
-  const label = (s: string) => (s === 'natural' ? 'router' : s)
+  const order = ['a', 'b', 'c', 'd', 'natural']
+  const strats = order.filter(s => data.strategies?.[s])
+  const STRAT_LABEL: Record<string, string> = { natural: 'router', a: 'a', b: 'b', c: 'c', d: 'd' }
 
-  // Gap display: negative = dropped facts (synthesizer bottleneck, amber),
-  // positive = hallucination bluff (red). Gray if within sigma noise.
-  function GapCell({ mean, std }: { mean: number | null; std: number | null }) {
-    if (mean === null || mean === undefined) return <td style={{ textAlign: 'right', opacity: 0.4 }}>—</td>
-    const noisy = (std ?? 0) >= sigma || Math.abs(mean) < sigma
-    const color = noisy ? 'var(--text-muted, #888)' : mean < 0 ? '#d97706' : '#dc2626'
-    const title = noisy
-      ? `Within noise floor (σ≈${sigma})`
-      : mean < 0
-      ? 'Synthesizer bottleneck — facts retrieved but dropped in answer'
-      : 'Hallucination bluff — answer claims facts not in chunks'
-    return (
-      <td style={{ textAlign: 'right', fontWeight: 600, color }} title={title}>
-        {mean > 0 ? '+' : ''}{fmt(mean)}
-        {noisy && <span style={{ fontSize: 10, opacity: 0.6 }}>~</span>}
-      </td>
-    )
+  function diagnosis(s: string): { msg: string; color: string } {
+    const c = data.strategies[s]
+    if (!c) return { msg: '', color: 'inherit' }
+    const r = c.retrieval_mean ?? 0
+    const gap = c.gap_mean ?? 0
+    const gapNoisy = Math.abs(gap) < sigma || (c.gap_std ?? 0) >= sigma
+    if (r < 0.4) return { msg: 'Retrieval bottleneck — improve router coverage or corpus depth', color: '#dc2626' }
+    if (!gapNoisy && gap < 0) return { msg: 'Synthesizer dropping facts — facts retrieved but not conveyed', color: '#d97706' }
+    if (!gapNoisy && gap > 0) return { msg: 'Hallucination risk — answer asserts facts beyond retrieved chunks', color: '#dc2626' }
+    return { msg: 'Within noise floor — no clear actionable signal', color: 'var(--text-muted, #6b7280)' }
   }
 
-  function MetricCell({ mean, std }: { mean: number | null; std: number | null }) {
-    if (mean === null || mean === undefined) return <td style={{ textAlign: 'right', opacity: 0.4 }}>—</td>
-    const noisy = (std ?? 0) >= sigma
-    return (
-      <td style={{ textAlign: 'right', opacity: noisy ? 0.55 : 1 }} title={noisy ? `High variance (σ=${fmt(std)}) — treat as noisy` : undefined}>
-        {fmt(mean)}
-        {std !== null && std !== undefined && (
-          <span style={{ fontSize: 10, opacity: 0.55, marginLeft: 2 }}>±{fmt(std)}</span>
-        )}
-      </td>
-    )
+  const drillRows = drillStrategy
+    ? runResults.filter(r => r.strategy_executed === drillStrategy && (r.retrieval_grade != null || r.synthesis_grade != null))
+    : []
+
+  async function toggleDrillRow(id: string) {
+    if (expandedId === id) { setExpandedId(null); return }
+    setExpandedId(id)
+    if (detailCache[id]) return
+    const d = await onFetchDetail(id)
+    setDetailCache(c => ({ ...c, [id]: d }))
   }
 
-  if (strats.length === 0) return null
+  // SVG geometry
+  const W = 560, H = 180
+  const PL = 36, PR = 100, PT = 20, PB = 28
+  const plotW = W - PL - PR, plotH = H - PT - PB
+  const slotW = strats.length > 0 ? plotW / strats.length : plotW
+  const barW = Math.min(16, Math.floor((slotW - 24) / 2))
+  const ys = (v: number) => PT + (1 - Math.min(1, Math.max(0, v))) * plotH
+  const fmtG = (v: number) => (v >= 0 ? '+' : '') + v.toFixed(2)
+
   return (
-    <div style={{ border: '1px solid var(--border, #333)', borderRadius: 6, padding: 12, margin: '8px 0' }}>
-      <div style={{ fontWeight: 600, marginBottom: 6 }}>
-        🧮 Two-Grade QA Rollup — retrieval vs synthesis (mean ± std)
-        <span style={{ fontSize: 11, fontWeight: 400, marginLeft: 8, opacity: 0.6 }}>
-          |gap| &lt; σ{sigma} shown dimmed — within noise floor
-        </span>
+    <div style={{ border: '1px solid var(--border, #333)', borderRadius: 8, padding: 14, margin: '8px 0' }}>
+      {/* Header + mode toggle */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+        <div style={{ fontWeight: 700, fontSize: 14 }}>
+          Two-grade QA
+          <span style={{ fontWeight: 400, fontSize: 11, opacity: 0.5, marginLeft: 8 }}>
+            retrieval · synthesis · gap &nbsp;|&nbsp; σ≈{sigma} noise floor
+          </span>
+        </div>
+        <div style={{ display: 'flex', gap: 4 }}>
+          {(['offline', 'prod'] as const).map(m => (
+            <button
+              key={m}
+              onClick={() => m === 'offline' && setMode(m)}
+              disabled={m === 'prod'}
+              title={m === 'prod' ? 'Prod rollup endpoint — coming from EVAL Agent' : undefined}
+              style={{
+                padding: '2px 9px', fontSize: 11, borderRadius: 4,
+                border: `1px solid var(--border, #ccc)`,
+                background: mode === m ? 'var(--rag-accent, #6d28d9)' : 'transparent',
+                color: mode === m ? '#fff' : m === 'prod' ? 'var(--text-muted, #9ca3af)' : 'inherit',
+                cursor: m === 'prod' ? 'not-allowed' : 'pointer',
+                opacity: m === 'prod' ? 0.45 : 1,
+              }}
+            >
+              {m === 'offline' ? 'offline · lower bound' : 'prod · truth'}
+            </button>
+          ))}
+        </div>
       </div>
-      <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
-        <thead>
-          <tr style={{ textAlign: 'right', opacity: 0.7 }}>
-            <th style={{ textAlign: 'left' }}>strategy</th>
-            <th>retrieval grade</th>
-            <th>synthesis grade</th>
-            <th>gap (syn − ret)</th>
-            <th>n</th>
-          </tr>
-        </thead>
-        <tbody>
-          {strats.map((s) => {
+
+      {/* HERO: grouped SVG bars */}
+      {strats.length > 0 ? (
+        <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ display: 'block', overflow: 'visible' }}>
+          {/* Gridlines */}
+          {[0, 0.25, 0.5, 0.75, 1.0].map(g => (
+            <g key={g}>
+              <line x1={PL} x2={W - PR} y1={ys(g)} y2={ys(g)} stroke="var(--border, #e5e7eb)" strokeWidth={0.5} />
+              <text x={PL - 4} y={ys(g) + 4} fontSize={10} fill="var(--text-muted, #9ca3af)" textAnchor="end">
+                {g.toFixed(2)}
+              </text>
+            </g>
+          ))}
+
+          {/* Per-strategy bar groups */}
+          {strats.map((s, si) => {
             const c = data.strategies[s]
+            const cx = PL + (si + 0.5) * slotW
+            const retX = cx - barW - 2
+            const synX = cx + 2
+            const gap = c.gap_mean ?? null
+            const gapNoisy = gap === null || Math.abs(gap) < sigma || (c.gap_std ?? 0) >= sigma
+            const gapColor = gapNoisy ? '#9ca3af' : gap! < 0 ? '#d97706' : '#dc2626'
+            const isSelected = drillStrategy === s
+
             return (
-              <tr key={s} style={{ textAlign: 'right', borderTop: '1px solid var(--border, #2a2a2a)' }}>
-                <td style={{ textAlign: 'left', fontWeight: 600 }}>{label(s)}</td>
-                <MetricCell mean={c.retrieval_mean} std={c.retrieval_std} />
-                <MetricCell mean={c.synthesis_mean} std={c.synthesis_std} />
-                <GapCell mean={c.gap_mean} std={c.gap_std} />
-                <td style={{ textAlign: 'right', opacity: 0.6 }}>{c.n}</td>
-              </tr>
+              <g key={s} style={{ cursor: 'pointer' }} onClick={() => setDrillStrategy(isSelected ? null : s)}>
+                {/* Strategy label */}
+                <text
+                  x={cx} y={H - 6} fontSize={11} textAnchor="middle"
+                  fontWeight={isSelected ? 700 : 400}
+                  fill={isSelected ? 'var(--rag-accent, #6d28d9)' : 'var(--text-primary, #374151)'}
+                >
+                  {STRAT_LABEL[s] || s}
+                </text>
+
+                {/* Retrieval bar */}
+                {c.retrieval_mean != null && (
+                  <>
+                    <rect
+                      x={retX - barW / 2} y={ys(c.retrieval_mean)}
+                      width={barW} height={c.retrieval_mean * plotH}
+                      fill={isSelected ? '#1d4ed8' : '#3b82f6'} rx={2}
+                    />
+                    {c.retrieval_std != null && c.retrieval_std > 0 && (
+                      <line
+                        x1={retX} x2={retX}
+                        y1={ys(Math.min(1, c.retrieval_mean + c.retrieval_std))}
+                        y2={ys(Math.max(0, c.retrieval_mean - c.retrieval_std))}
+                        stroke="#1d4ed8" strokeWidth={1.5}
+                      />
+                    )}
+                  </>
+                )}
+
+                {/* Synthesis bar */}
+                {c.synthesis_mean != null && (
+                  <>
+                    <rect
+                      x={synX - barW / 2} y={ys(c.synthesis_mean)}
+                      width={barW} height={c.synthesis_mean * plotH}
+                      fill={isSelected ? '#15803d' : '#22c55e'} rx={2}
+                    />
+                    {c.synthesis_std != null && c.synthesis_std > 0 && (
+                      <line
+                        x1={synX} x2={synX}
+                        y1={ys(Math.min(1, c.synthesis_mean + c.synthesis_std))}
+                        y2={ys(Math.max(0, c.synthesis_mean - c.synthesis_std))}
+                        stroke="#15803d" strokeWidth={1.5}
+                      />
+                    )}
+                  </>
+                )}
+
+                {/* Gap pill (gap score below x-axis label area) */}
+                {gap !== null && (
+                  <text x={cx} y={ys(0) + 14} fontSize={10} fill={gapColor} textAnchor="middle">
+                    <title>{gapNoisy ? `Within noise floor (|gap|<σ${sigma})` : gap < 0 ? 'Synthesizer bottleneck' : 'Hallucination bluff'}</title>
+                    {gapNoisy ? '~' : fmtG(gap)}
+                  </text>
+                )}
+
+                {/* Selection ring around group */}
+                {isSelected && (
+                  <rect
+                    x={cx - slotW / 2 + 4} y={PT - 4}
+                    width={slotW - 8} height={plotH + 8}
+                    fill="none"
+                    stroke="var(--rag-accent, #6d28d9)" strokeWidth={1}
+                    strokeDasharray="3 2" rx={4}
+                  />
+                )}
+              </g>
             )
           })}
-        </tbody>
-      </table>
+
+          {/* Legend (top-right) */}
+          <g>
+            <rect x={W - PR + 8} y={PT} width={10} height={10} fill="#3b82f6" rx={2} />
+            <text x={W - PR + 22} y={PT + 9} fontSize={10} fill="var(--text-muted, #6b7280)">retrieval</text>
+            <rect x={W - PR + 8} y={PT + 16} width={10} height={10} fill="#22c55e" rx={2} />
+            <text x={W - PR + 22} y={PT + 25} fontSize={10} fill="var(--text-muted, #6b7280)">synthesis</text>
+            <text x={W - PR + 8} y={PT + 46} fontSize={10} fill="#9ca3af">~ = within σ</text>
+          </g>
+        </svg>
+      ) : (
+        <div style={{ padding: 12, opacity: 0.5, fontSize: 13 }}>
+          No grade data for this run. The EVAL agent writes grades after a --synthesize pass.
+        </div>
+      )}
+
+      {/* DIAGNOSTIC STRIP */}
+      {strats.length > 0 && (
+        <div style={{ marginTop: 6, paddingTop: 6, borderTop: '1px solid var(--border, #e5e7eb)', fontSize: 12 }}>
+          {strats.map(s => {
+            const { msg, color } = diagnosis(s)
+            if (!msg) return null
+            return (
+              <div key={s} style={{ display: 'flex', gap: 8, padding: '2px 0' }}>
+                <span style={{ fontWeight: 600, minWidth: 46, color: 'var(--text-muted, #6b7280)', flexShrink: 0 }}>
+                  {STRAT_LABEL[s] || s}
+                </span>
+                <span style={{ color }}>{msg}</span>
+              </div>
+            )
+          })}
+          {strats.length > 0 && (
+            <div style={{ marginTop: 4, opacity: 0.45, fontSize: 11 }}>
+              Click a strategy bar to drill into per-query results.
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* DRILL: per-query table for selected strategy */}
+      {drillStrategy && (
+        <div style={{ marginTop: 10, borderTop: '1px solid var(--border, #e5e7eb)', paddingTop: 10 }}>
+          <div style={{ fontWeight: 600, marginBottom: 6, fontSize: 13, display: 'flex', alignItems: 'center', gap: 8 }}>
+            Per-query — <strong>{STRAT_LABEL[drillStrategy] || drillStrategy}</strong>
+            <button
+              onClick={() => { setDrillStrategy(null); setExpandedId(null) }}
+              style={{ fontSize: 11, opacity: 0.5, background: 'none', border: 'none', cursor: 'pointer', padding: '0 4px' }}
+            >× close</button>
+          </div>
+          {drillRows.length === 0 ? (
+            <div style={{ fontSize: 12, opacity: 0.6 }}>
+              No grade data for this strategy in this run.
+            </div>
+          ) : (
+            <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ opacity: 0.6, textAlign: 'left' }}>
+                  <th style={{ padding: '3px 6px' }}>query</th>
+                  <th style={{ padding: '3px 6px', textAlign: 'right' }}>ret</th>
+                  <th style={{ padding: '3px 6px', textAlign: 'right' }}>syn</th>
+                  <th style={{ padding: '3px 6px', textAlign: 'right' }}>gap</th>
+                  <th style={{ padding: '3px 6px' }}>verdict</th>
+                </tr>
+              </thead>
+              <tbody>
+                {drillRows.map(r => {
+                  const gap = r.synthesis_gap ?? null
+                  const gapNoisy = gap === null || Math.abs(gap) < sigma
+                  const gapColor = gapNoisy ? 'var(--text-muted, #9ca3af)' : gap! < 0 ? '#d97706' : '#dc2626'
+                  const isExp = expandedId === r.id
+                  const detail = detailCache[r.id]
+                  return (
+                    <>
+                      <tr
+                        key={r.id}
+                        style={{
+                          borderTop: '1px solid var(--border, #e5e7eb)',
+                          cursor: 'pointer',
+                          background: isExp ? 'var(--surface-alt, rgba(0,0,0,0.03))' : undefined,
+                        }}
+                        onClick={() => void toggleDrillRow(r.id)}
+                      >
+                        <td style={{ padding: '4px 6px', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                          title={r.query}>
+                          {r.query}
+                        </td>
+                        <td style={{ padding: '4px 6px', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                          {r.retrieval_grade != null ? r.retrieval_grade.toFixed(2) : '—'}
+                        </td>
+                        <td style={{ padding: '4px 6px', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                          {r.synthesis_grade != null ? r.synthesis_grade.toFixed(2) : '—'}
+                        </td>
+                        <td style={{ padding: '4px 6px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: gapColor }}>
+                          {gap != null ? (gap >= 0 ? '+' : '') + gap.toFixed(2) : '—'}
+                          {gapNoisy && gap != null && <span style={{ fontSize: 9, opacity: 0.5 }}>~</span>}
+                        </td>
+                        <td style={{ padding: '4px 6px' }}>
+                          <span className={`verdict ${VERDICT_COLOR[r.effective_verdict || r.judge_verdict || ''] || ''}`}>
+                            {r.effective_verdict || r.judge_verdict || '?'}
+                          </span>
+                        </td>
+                      </tr>
+                      {isExp && (
+                        <tr key={`${r.id}-exp`}>
+                          <td colSpan={5} style={{ padding: '0 6px 10px' }}>
+                            {!detail && <div style={{ padding: 8, opacity: 0.5, fontSize: 12 }}>Loading…</div>}
+                            {detail?.result.per_claim_ledger && detail.result.per_claim_ledger.length > 0 && (
+                              <PerClaimLedger
+                                claims={detail.result.per_claim_ledger}
+                                chunks={
+                                  (detail.result.full_response as any)?.chunks as Array<{ text: string }> | null
+                                }
+                              />
+                            )}
+                            {detail && !detail.result.per_claim_ledger && (
+                              <div style={{ padding: 8, opacity: 0.4, fontSize: 12 }}>
+                                No per-claim ledger for this result.
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      )}
+                    </>
+                  )
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
     </div>
   )
 }
