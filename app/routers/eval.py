@@ -240,7 +240,7 @@ async def get_grade_rollup(run_id: str):
                        ROUND(AVG(synthesis_gap)::numeric, 3)    AS gap_mean,
                        ROUND(STDDEV(synthesis_gap)::numeric, 3) AS gap_std
                 FROM rag_query_decisions
-                WHERE eval_run_id = :run_id::uuid
+                WHERE eval_run_id = CAST(:run_id AS uuid)
                   AND retrieval_grade IS NOT NULL
                 GROUP BY strategy_used
                 ORDER BY strategy_used
