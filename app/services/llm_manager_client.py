@@ -70,6 +70,7 @@ RAG_STAGES: frozenset[str] = frozenset({
     "rag_strategy_b_synth",     # Strategy (b) Wide-Themes-Narrow synthesis pass
     "rag_strategy_c_validate",  # Strategy (c) LLM→Validate citation generation
     "rag_strategy_d_external",  # Strategy (d) External First synthesis
+    "rag_multi_invoke_synth",   # Multi-invoke union synthesis (v2 router)
     "rag_eval_adjudicate",      # eval harness LLM judge — uses bandit
                                 # routing for cross-model variety
 })
