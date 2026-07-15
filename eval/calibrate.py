@@ -58,7 +58,8 @@ import yaml  # noqa: E402
 from eval.judge import adjudicate  # noqa: E402
 from eval.db import close_pool, execute as db_execute, fetchrow as db_fetchrow  # noqa: E402
 from eval.run import insert_run, insert_result, finalize_run, _strip_nulls  # noqa: E402
-from app.services.fact_checker import check_facts  # noqa: E402  — retrieval critic (chunk-only recall)
+from uuid import uuid4  # noqa: E402
+from app.services.fact_checker import check_facts, FACT_CHECKER_VERSION  # noqa: E402  — retrieval + synthesis critic
 
 
 logging.basicConfig(
@@ -115,6 +116,7 @@ async def call_agent(
     forced_strategy: str,
     *,
     caller_mode: str | None = None,
+    synthesize: bool = False,
     timeout: float = _AGENT_CALL_PER_ATTEMPT_TIMEOUT_S,
 ) -> dict[str, Any]:
     """POST with mode=<strategy> override. Returns the response dict.
@@ -145,7 +147,11 @@ async def call_agent(
     body: dict[str, Any] = {
         "query": query,
         "k": 5,
-        "skip_synthesis": True,         # retrieval-only — we score the CHUNKS, not the synthesized answer
+        # Default: retrieval-only (score the CHUNKS, not the answer) — the fast
+        # priors-calibration path. synthesize=True requests a real answer so the
+        # cell also gets a SYNTHESIS grade (the two-grade cockpit's offline pass;
+        # a lower bound vs prod's stronger synthesizer).
+        "skip_synthesis": not synthesize,
     }
     if forced_strategy != "natural":
         body["mode"] = forced_strategy  # force the strategy; "natural" → router decides
@@ -323,6 +329,61 @@ async def _finalize_fingerprint_stable(run_id: str) -> None:
         logger.warning("fingerprint_stable finalize failed for %s: %s", run_id, exc)
 
 
+async def _read_corpus_version() -> int:
+    """Current corpus epoch (bump-at-mutation counter). 1 until RAG wires the
+    transactional bump into publish/republish/retag — a single honest epoch."""
+    try:
+        row = await db_fetchrow("SELECT corpus_version FROM corpus_state LIMIT 1")
+        return int(row["corpus_version"]) if row else 1
+    except Exception:
+        return 1
+
+
+async def _write_eval_decision(
+    *, run_id: str, qid: str, strategy: str, query: str, routing: dict,
+    retrieval_grade: float | None, synthesis_grade: float | None,
+    per_claim_ledger: list | None, n_chunks: int, top_rerank: float | None,
+    corpus_version: int,
+) -> None:
+    """Two-grade OBSERVE row for an eval/calibration cell → the cockpit
+    (Panel B per-strategy rollup + Panel A drill). Same table/schema as the
+    prod OBSERVE writer; eval rows carry eval_run_id + query_id so the rollup
+    can GROUP BY strategy_used WHERE eval_run_id = run and join back to
+    rag_eval_results. Client uuid + ON CONFLICT DO NOTHING = retry-safe."""
+    syn_gap = (round(synthesis_grade - retrieval_grade, 4)
+               if synthesis_grade is not None and retrieval_grade is not None
+               else None)
+    feature_vector = routing.get("feature_vector") or routing.get("features")
+    strategy_scores = routing.get("scores")
+    try:
+        await db_execute(
+            """
+            INSERT INTO rag_query_decisions
+              (id, agent_id, query, strategy_used, priors_version, leaf_key,
+               feature_vector, strategy_scores, n_chunks, top_rerank_score,
+               corpus_version, fact_checker_version, retrieval_grade,
+               synthesis_grade, synthesis_gap, per_claim_ledger,
+               is_prod, eval_run_id, query_id)
+            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9,$10,$11,$12,
+                    $13,$14,$15,$16::jsonb,false,$17,$18)
+            ON CONFLICT (id) DO NOTHING
+            """,
+            str(uuid4()),
+            f"eval:{run_id}:{qid}/{strategy}",
+            query, strategy,
+            str(routing.get("priors_version") or "calibration"),
+            f"route:{strategy}",
+            json.dumps(feature_vector) if feature_vector else None,
+            json.dumps(strategy_scores) if strategy_scores else None,
+            n_chunks, top_rerank, corpus_version, FACT_CHECKER_VERSION,
+            retrieval_grade, synthesis_grade, syn_gap,
+            json.dumps(_strip_nulls(per_claim_ledger)) if per_claim_ledger else None,
+            run_id, f"{qid}/{strategy}",
+        )
+    except Exception as exc:
+        logger.warning("[%s/%s] decision-row write failed: %s", qid, strategy, exc)
+
+
 async def run_calibration(
     bank: list[dict[str, Any]],
     endpoint: str,
@@ -334,6 +395,7 @@ async def run_calibration(
     bank_path: str = "eval/queries.yaml",
     bank_version: str = "?",
     priors_version: str = "v1.2026-05-01",
+    synthesize: bool = False,
 ) -> tuple[str, list[dict[str, Any]], dict[tuple[str, str], dict[str, Any]]]:
     """Run all (query × strategy) combos and PERSIST each result to
     ``rag_eval_results`` as it lands.
@@ -368,6 +430,7 @@ async def run_calibration(
         n_queries=n_total_planned,
     )
     logger.info("Calibration run_id=%s (writes to rag_eval_results live)", run_id)
+    corpus_version = await _read_corpus_version()
 
     raw_rows: list[dict[str, Any]] = []
 
@@ -391,7 +454,8 @@ async def run_calibration(
             t0 = time.monotonic()
             try:
                 response = await asyncio.wait_for(
-                    call_agent(endpoint, text, strategy, caller_mode=caller_mode),
+                    call_agent(endpoint, text, strategy, caller_mode=caller_mode,
+                               synthesize=synthesize),
                     timeout=agent_timeout_s,
                 )
             except asyncio.TimeoutError:
@@ -529,6 +593,25 @@ async def run_calibration(
                     verdict, score, reasoning, model, judge_ms = (
                         "unable_to_verify", 0.5, f"judge_error: {exc}", "error", 0)
 
+            # SYNTHESIS grade: did the ANSWER convey the golden facts (coverage +
+            # faithfulness)? This is an offline LOWER BOUND — the eval synthesizer
+            # is weaker than chat's (ReAct + custom prompts + card composer), so
+            # prod is the truth. Feeds the two-grade cockpit's synthesis column +
+            # the per-claim ledger. Retrieval grade above is unaffected if this fails.
+            syn_grade: float | None = None
+            syn_ledger: list | None = None
+            ans = response.get("llm_answer")
+            if must_facts and answered and ans and str(ans).strip():
+                try:
+                    fc_syn = await asyncio.wait_for(
+                        check_facts(query=text, must_facts=must_facts, chunks=chunks,
+                                    answer=ans, forbidden_facts=forbidden),
+                        timeout=judge_timeout_s)
+                    syn_grade = fc_syn.score
+                    syn_ledger = fc_syn.ledger()
+                except Exception as exc:
+                    logger.warning("[%s/%s] synthesis grade failed: %s", qid, strategy, exc)
+
             total_ms = (response.get("telemetry") or {}).get("total_ms") or elapsed_ms
 
             # Calibration metrics for the summary endpoint (5-axis aggregation).
@@ -591,6 +674,17 @@ async def run_calibration(
                 "full_response": response,
             })
             await insert_result(row)
+
+            # Two-grade cockpit row (retrieval + synthesis + per-claim ledger),
+            # keyed by eval_run_id so Panel B rolls up per strategy for this run.
+            await _write_eval_decision(
+                run_id=run_id, qid=qid, strategy=strategy, query=text,
+                routing=response.get("routing") or {},
+                retrieval_grade=recall_val, synthesis_grade=syn_grade,
+                per_claim_ledger=syn_ledger,
+                n_chunks=len(response.get("chunks") or []),
+                top_rerank=top_rerank, corpus_version=corpus_version,
+            )
 
             raw_rows.append({
                 "qid": qid, "strategy": strategy,
@@ -697,6 +791,7 @@ async def main_async(args):
             notes=args.notes,
             bank_path=args.bank,
             bank_version=bank_sha,
+            synthesize=args.synthesize,
         )
     finally:
         # CLI-only: close before asyncio.run() tears the loop down. The
@@ -722,6 +817,11 @@ def main():
     global STRATEGIES
     parser.add_argument("--notes", default="from-cli",
                         help="Notes string for the run row (shown in EvalTab).")
+    parser.add_argument("--synthesize", action="store_true",
+                        help="request a real answer per cell so it also gets a SYNTHESIS "
+                             "grade (the two-grade cockpit's offline pass; slower, and a "
+                             "lower bound vs prod's stronger synthesizer). Default off = "
+                             "fast retrieval-only priors calibration.")
     parser.add_argument("--strategies", default=",".join(STRATEGIES),
                         help="Comma-separated subset of strategies to run "
                              "(default: a,b,c,d). E.g. 'a,c,d' to skip (b).")

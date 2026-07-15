@@ -275,6 +275,63 @@ async def get_grade_rollup(run_id: str):
     }
 
 
+@router.get("/observe/prod_rollup")
+async def get_prod_rollup(window_hours: int = 24):
+    """Two-grade QA rollup over PROD OBSERVE rows (is_prod=true) — the synthesis
+    TRUTH: grounding grades on real chat answers, grouped by strategy over a
+    recent window. This is the cockpit's ``prod`` toggle source.
+
+    Prod has no gold facts at inference time, so retrieval_grade (coverage) is
+    typically null here — synthesis_grade (reference-free faithfulness) is the
+    live signal. ``n_contradicted`` counts rows whose ledger flags at least one
+    contradicted claim — the compliance-risk surface per strategy.
+    """
+    from app.database import AsyncSessionLocal
+    async with AsyncSessionLocal() as db:
+        try:
+            rows = (await db.execute(sql_text(
+                """
+                SELECT strategy_used,
+                       COUNT(*)                                     AS n,
+                       ROUND(AVG(synthesis_grade)::numeric, 3)      AS syn_mean,
+                       ROUND(STDDEV(synthesis_grade)::numeric, 3)   AS syn_std,
+                       COUNT(*) FILTER (
+                         WHERE per_claim_ledger @> '[{"status":"contradicted"}]'
+                       )                                            AS n_contradicted
+                FROM rag_query_decisions
+                WHERE is_prod = true
+                  AND ts >= now() - make_interval(hours => :h)
+                  AND synthesis_grade IS NOT NULL
+                GROUP BY strategy_used
+                ORDER BY strategy_used
+                """
+            ), {"h": window_hours})).mappings().all()
+        except Exception:
+            rows = []
+
+    def _f(v):
+        return float(v) if v is not None else None
+
+    strategies: dict = {}
+    for r in rows:
+        strategies[r["strategy_used"]] = {
+            "n": r["n"],
+            "synthesis_mean": _f(r["syn_mean"]),
+            "synthesis_std":  _f(r["syn_std"]),
+            "n_contradicted": r["n_contradicted"],
+        }
+
+    from app.services.fact_checker import FACT_CHECKER_SIGMA, FACT_CHECKER_VERSION
+    return {
+        "window_hours": window_hours,
+        "strategies": strategies,
+        "sigma_noise": FACT_CHECKER_SIGMA,
+        "fact_checker_version": FACT_CHECKER_VERSION,
+        "note": "prod synthesis grade = reference-free faithfulness (the truth); "
+                "retrieval coverage is eval-only (no gold facts in prod).",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Observability — timeline, A/B compare, drift (fingerprint-aware)
 # ---------------------------------------------------------------------------
