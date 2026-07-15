@@ -3446,7 +3446,9 @@ def _observe_async(
                         correlation_id=agent_id,
                     )
                     synthesis_grade = s_result.score
-                    synthesis_gap = round(retrieval_grade - synthesis_grade, 4)
+                    # Sign: negative = synthesis DROP (fact in chunks but dropped by synthesizer)
+                    #       positive = HALLUCINATION signal (answer asserts beyond chunk evidence)
+                    synthesis_gap = round(synthesis_grade - retrieval_grade, 4)
             except Exception as exc:
                 logger.warning("[observe] fact_check failed: %s", exc)
 
