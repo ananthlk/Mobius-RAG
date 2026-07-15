@@ -3495,6 +3495,7 @@ def _observe_async(
                     _corpus_version = int(cv) if cv is not None else None
                 except Exception:
                     pass
+                _decision_id = str(uuid.uuid4())
                 await sess.execute(
                     sql_text("""
                         INSERT INTO rag_query_decisions (
@@ -3505,7 +3506,7 @@ def _observe_async(
                             synthesis_gap, per_claim_ledger,
                             is_prod, caller, caller_id, eval_run_id, correlation_id
                         ) VALUES (
-                            gen_random_uuid(), :agent_id, :query, :strategy_used,
+                            :id, :agent_id, :query, :strategy_used,
                             :invoke_all, :priors_version, :leaf_key, :feature_vector,
                             :strategy_scores, :n_chunks, :top_rerank_score,
                             :corpus_version, :fact_checker_version,
@@ -3513,8 +3514,10 @@ def _observe_async(
                             :per_claim_ledger, :is_prod, :caller, :caller_id,
                             :eval_run_id, :correlation_id
                         )
+                        ON CONFLICT (id) DO NOTHING
                     """),
                     {
+                        "id": _decision_id,
                         "agent_id": agent_id,
                         "query": query,
                         "strategy_used": strategy_used,
