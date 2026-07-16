@@ -703,6 +703,10 @@ def decide(
     setattr(decision, "self_assessments", assessment_log)
     setattr(decision, "withdrawn", withdrawn)
     setattr(decision, "score_breakdown", score_breakdown)
+    # The linear feature vector IS the bandit's context (x) and the trace's
+    # "why" — carry it on every decision so one telemetry row can feed the
+    # cockpit, the card, the trace, AND the contextual bandit.
+    setattr(decision, "feature_vector", _lin_feats)
     return decision
 
 
@@ -807,12 +811,20 @@ def decide_override(
     forcing tool — caller doesn't want the router second-guessing).
     """
     resolved = resolve_preferences(prefs)
-    return RouteDecision(
+    # Even on the forced/override path we compute the linear features + scores.
+    # The strategy is forced, but the CONTEXT (feature_vector) and the
+    # counterfactual scores are what the trace explains and the bandit trains
+    # on — a forced calibration cell must still carry them, or the telemetry
+    # row (and every surface built on it) is blind for that cell.
+    _lin_feats = _compute_linear_features(profile_features)
+    _lin_scores = {sid: round(_linear_score_strategy(sid, _lin_feats), 4)
+                   for sid in _LINEAR_BASE}
+    decision = RouteDecision(
         strategy=forced_strategy,
         fallback=None,
         routing_method="override",
         query_class=derive_query_class(profile_features),
-        scores={},
+        scores=_lin_scores,
         prefs_resolved={
             "answer_shape": resolved.answer_shape,
             "accuracy_need": resolved.accuracy_need,
@@ -823,3 +835,5 @@ def decide_override(
         },
         priors_version=PRIORS_VERSION,
     )
+    setattr(decision, "feature_vector", _lin_feats)
+    return decision

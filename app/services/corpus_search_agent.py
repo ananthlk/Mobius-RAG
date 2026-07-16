@@ -3830,6 +3830,10 @@ async def _corpus_search_agent_impl(
         # Lets the trace UI explain "why a got 2.48" instead of just
         # showing the final number.
         "score_breakdown": getattr(decision, "score_breakdown", {}),
+        # The linear feature vector — the bandit's CONTEXT and the trace's
+        # "why this strategy". One telemetry row feeds cockpit + card + trace
+        # + contextual bandit; without this the last two are blind.
+        "feature_vector": getattr(decision, "feature_vector", {}),
     }
 
     # ── Multi-invoke (router v2 only) ────────────────────────────────────
