@@ -3,7 +3,7 @@ import logging
 import re
 from pathlib import Path
 from typing import Optional, List, Any
-from fastapi import FastAPI, UploadFile, HTTPException, Depends, Body, Query, Request, Header
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Body, Query, Request, Header
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, RedirectResponse, JSONResponse, HTMLResponse
