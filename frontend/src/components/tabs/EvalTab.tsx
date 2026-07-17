@@ -90,6 +90,11 @@ interface ResultDetail {
     synthesis_grade?: number | null
     synthesis_gap?: number | null
     per_claim_ledger?: ClaimEntry[] | null
+    // Linear routing fields (from rag_query_decisions via JOIN)
+    strategy_scores?: Record<string, number> | null
+    feature_vector?: Record<string, number> | null
+    leaf_key?: string | null
+    invoke_all?: string[] | null
   }
   routing: {
     scores?: Record<string, number>
@@ -926,15 +931,37 @@ function EvalCockpit({
   const [drillStrategy, setDrillStrategy] = useState<string | null>(null)
   const [detailCache, setDetailCache] = useState<Record<string, ResultDetail>>({})
   const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [prodData, setProdData] = useState<any>(null)
+  const [prodLoading, setProdLoading] = useState(false)
+  const [windowHours, setWindowHours] = useState(24)
 
-  const sigma = data.sigma_noise ?? 0.2
+  useEffect(() => {
+    if (mode !== 'prod') return
+    setProdLoading(true)
+    setProdData(null)
+    fetch(`${API_BASE}/api/observe/prod_rollup?window_hours=${windowHours}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => setProdData(d ?? null))
+      .catch(() => setProdData(null))
+      .finally(() => setProdLoading(false))
+  }, [mode, windowHours])
+
+  const activeData = mode === 'prod' ? (prodData ?? { strategies: {} }) : data
+  const sigma = activeData.sigma_noise ?? 0.2
   const order = ['a', 'b', 'c', 'd', 'natural']
-  const strats = order.filter(s => data.strategies?.[s])
+  const strats = order.filter(s => activeData.strategies?.[s])
   const STRAT_LABEL: Record<string, string> = { natural: 'router', a: 'a', b: 'b', c: 'c', d: 'd' }
 
   function diagnosis(s: string): { msg: string; color: string } {
-    const c = data.strategies[s]
+    const c = activeData.strategies[s]
     if (!c) return { msg: '', color: 'inherit' }
+    if (mode === 'prod') {
+      const syn = c.synthesis_mean ?? 0
+      const contra = c.n_contradicted ?? 0
+      if (contra > 0) return { msg: `${contra} contradicted claim${contra > 1 ? 's' : ''} — compliance risk`, color: '#dc2626' }
+      if (syn < 0.4) return { msg: 'Low synthesis faithfulness — check synthesizer', color: '#d97706' }
+      return { msg: 'Synthesis faithfulness within acceptable range', color: 'var(--text-muted, #6b7280)' }
+    }
     const r = c.retrieval_mean ?? 0
     const gap = c.gap_mean ?? 0
     const gapNoisy = Math.abs(gap) < sigma || (c.gap_std ?? 0) >= sigma
@@ -975,25 +1002,34 @@ function EvalCockpit({
             retrieval · synthesis · gap &nbsp;|&nbsp; σ≈{sigma} noise floor
           </span>
         </div>
-        <div style={{ display: 'flex', gap: 4 }}>
+        <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
           {(['offline', 'prod'] as const).map(m => (
             <button
               key={m}
-              onClick={() => m === 'offline' && setMode(m)}
-              disabled={m === 'prod'}
-              title={m === 'prod' ? 'Prod rollup endpoint — coming from EVAL Agent' : undefined}
+              onClick={() => setMode(m)}
               style={{
                 padding: '2px 9px', fontSize: 11, borderRadius: 4,
                 border: `1px solid var(--border, #ccc)`,
                 background: mode === m ? 'var(--rag-accent, #6d28d9)' : 'transparent',
-                color: mode === m ? '#fff' : m === 'prod' ? 'var(--text-muted, #9ca3af)' : 'inherit',
-                cursor: m === 'prod' ? 'not-allowed' : 'pointer',
-                opacity: m === 'prod' ? 0.45 : 1,
+                color: mode === m ? '#fff' : 'inherit',
+                cursor: 'pointer',
               }}
             >
-              {m === 'offline' ? 'offline · lower bound' : 'prod · truth'}
+              {m === 'offline' ? 'offline · eval' : 'prod · truth'}
             </button>
           ))}
+          {mode === 'prod' && (
+            <select
+              value={windowHours}
+              onChange={e => setWindowHours(Number(e.target.value))}
+              style={{ fontSize: 11, padding: '1px 4px', borderRadius: 4, border: '1px solid var(--border, #ccc)' }}
+            >
+              {[6, 12, 24, 48, 72].map(h => (
+                <option key={h} value={h}>{h}h</option>
+              ))}
+            </select>
+          )}
+          {prodLoading && <span style={{ fontSize: 11, opacity: 0.5 }}>loading…</span>}
         </div>
       </div>
 
@@ -1012,7 +1048,7 @@ function EvalCockpit({
 
           {/* Per-strategy bar groups */}
           {strats.map((s, si) => {
-            const c = data.strategies[s]
+            const c = activeData.strategies[s]
             const cx = PL + (si + 0.5) * slotW
             const retX = cx - barW - 2
             const synX = cx + 2
@@ -1070,11 +1106,18 @@ function EvalCockpit({
                   </>
                 )}
 
-                {/* Gap pill (gap score below x-axis label area) */}
-                {gap !== null && (
+                {/* Gap pill (offline mode) */}
+                {mode !== 'prod' && gap !== null && (
                   <text x={cx} y={ys(0) + 14} fontSize={10} fill={gapColor} textAnchor="middle">
                     <title>{gapNoisy ? `Within noise floor (|gap|<σ${sigma})` : gap < 0 ? 'Synthesizer bottleneck' : 'Hallucination bluff'}</title>
                     {gapNoisy ? '~' : fmtG(gap)}
+                  </text>
+                )}
+                {/* n_contradicted (prod mode) */}
+                {mode === 'prod' && (c.n_contradicted ?? 0) > 0 && (
+                  <text x={cx} y={ys(0) + 14} fontSize={10} fill="#dc2626" textAnchor="middle">
+                    <title>{c.n_contradicted} contradicted claims</title>
+                    ⚠{c.n_contradicted}
                   </text>
                 )}
 
@@ -1093,17 +1136,29 @@ function EvalCockpit({
           })}
 
           {/* Legend (top-right) */}
-          <g>
-            <rect x={W - PR + 8} y={PT} width={10} height={10} fill="#3b82f6" rx={2} />
-            <text x={W - PR + 22} y={PT + 9} fontSize={10} fill="var(--text-muted, #6b7280)">retrieval</text>
-            <rect x={W - PR + 8} y={PT + 16} width={10} height={10} fill="#22c55e" rx={2} />
-            <text x={W - PR + 22} y={PT + 25} fontSize={10} fill="var(--text-muted, #6b7280)">synthesis</text>
-            <text x={W - PR + 8} y={PT + 46} fontSize={10} fill="#9ca3af">~ = within σ</text>
-          </g>
+          {mode === 'prod' ? (
+            <g>
+              <rect x={W - PR + 8} y={PT} width={10} height={10} fill="#22c55e" rx={2} />
+              <text x={W - PR + 22} y={PT + 9} fontSize={10} fill="var(--text-muted, #6b7280)">synthesis</text>
+              <text x={W - PR + 8} y={PT + 30} fontSize={9} fill="#dc2626">⚠N = contradicted</text>
+            </g>
+          ) : (
+            <g>
+              <rect x={W - PR + 8} y={PT} width={10} height={10} fill="#3b82f6" rx={2} />
+              <text x={W - PR + 22} y={PT + 9} fontSize={10} fill="var(--text-muted, #6b7280)">retrieval</text>
+              <rect x={W - PR + 8} y={PT + 16} width={10} height={10} fill="#22c55e" rx={2} />
+              <text x={W - PR + 22} y={PT + 25} fontSize={10} fill="var(--text-muted, #6b7280)">synthesis</text>
+              <text x={W - PR + 8} y={PT + 46} fontSize={10} fill="#9ca3af">~ = within σ</text>
+            </g>
+          )}
         </svg>
       ) : (
         <div style={{ padding: 12, opacity: 0.5, fontSize: 13 }}>
-          No grade data for this run. The EVAL agent writes grades after a --synthesize pass.
+          {mode === 'prod'
+            ? prodLoading
+              ? 'Loading prod rollup…'
+              : "No prod grade data in the selected window. Grades populate once RAG's grounding-grade wire ships."
+            : 'No grade data for this run. The EVAL agent writes grades after a --synthesize pass.'}
         </div>
       )}
 
@@ -1130,8 +1185,8 @@ function EvalCockpit({
         </div>
       )}
 
-      {/* DRILL: per-query table for selected strategy */}
-      {drillStrategy && (
+      {/* DRILL: per-query table for selected strategy (offline only — no eval rows in prod) */}
+      {drillStrategy && mode !== 'prod' && (
         <div style={{ marginTop: 10, borderTop: '1px solid var(--border, #e5e7eb)', paddingTop: 10 }}>
           <div style={{ fontWeight: 600, marginBottom: 6, fontSize: 13, display: 'flex', alignItems: 'center', gap: 8 }}>
             Per-query — <strong>{STRAT_LABEL[drillStrategy] || drillStrategy}</strong>
@@ -2074,6 +2129,54 @@ function QuestionList({
   )
 }
 
+// ─── Linear router constants (baked-in, EVAL agent spec 2026-07-17) ──────────
+// score_s = LIN_BASE[s] + Σ (weight × feature_value)
+const LIN_BASE: Record<string, number> = { a: 0.40, b: 0.20, c: 0.05, d: 0.20 }
+const LIN_WEIGHTS: Record<string, Record<string, number>> = {
+  a: { exclusivity: 0.30, literal: 0.25, corpus_depth: 0.20, thematic_policy: -0.10, wide_pool: -0.15, inheritance: 0.05 },
+  b: { thematic_policy: 0.40, corpus_depth: 0.20, exclusivity: 0.05, literal: -0.20 },
+  c: {},
+  d: { crawlability: 0.40, wide_pool: 0.25, literal: -0.05, corpus_depth: -0.15, thematic_policy: -0.20, inheritance: -0.25 },
+}
+const TREE_NODES: Array<{ id: string; label: string; status: 'live' | 'partial' | 'not_built' }> = [
+  { id: 's_skim',      label: 's · skim',          status: 'not_built' },
+  { id: 'a',           label: 'a · BM25 cascade',  status: 'live' },
+  { id: 'b',           label: 'b · wide+themes',   status: 'live' },
+  { id: 'c',           label: 'c · reverse RAG',   status: 'live' },
+  { id: 'd',           label: 'd · external',      status: 'live' },
+  { id: 'union',       label: 'union [a+b]',       status: 'live' },
+  { id: 'reformulate', label: 'reformulate',        status: 'partial' },
+  { id: 'f_floor',     label: 'f · honest-floor',  status: 'not_built' },
+  { id: 'm_cached',    label: 'm · cached-replay', status: 'not_built' },
+]
+
+/** Parse leaf_key e.g. "route:a" | "union:a+b" | "reformulate:b" → set of taken node ids */
+function takenFromLeafKey(leafKey: string | null | undefined): Set<string> {
+  if (!leafKey) return new Set()
+  const [action, armsStr] = leafKey.split(':')
+  const arms = (armsStr ?? '').split('+').filter(Boolean)
+  const taken = new Set<string>(arms)
+  if (arms.length > 1) taken.add('union')
+  if (action === 'union') taken.add('union')
+  if (action === 'reformulate') taken.add('reformulate')
+  if (action === 'skim') taken.add('s_skim')
+  if (action === 'floor') taken.add('f_floor')
+  return taken
+}
+
+/** Client-side fallback: compute linear scores from feature_vector × baked weights */
+function computeLinearScores(fv: Record<string, number> | null | undefined): Record<string, number> {
+  const out: Record<string, number> = {}
+  for (const s of ['a', 'b', 'c', 'd']) {
+    let total = LIN_BASE[s] ?? 0
+    for (const [feat, w] of Object.entries(LIN_WEIGHTS[s] ?? {})) {
+      total += w * (fv?.[feat] ?? 0)
+    }
+    out[s] = Math.max(0, Math.min(2, total))
+  }
+  return out
+}
+
 function ResultDetailView({
   detail,
   onHumanVerdict,
@@ -2083,9 +2186,7 @@ function ResultDetailView({
 }) {
   const r = detail.result
 
-  // Prefer the captured full_response (post-migration runs); for legacy
-  // rows we don't have it — synthesize a minimal AgentResponse from
-  // the persisted columns so the trace still renders something useful.
+  // Prefer the captured full_response; synthesize a minimal one for legacy rows.
   const responseForTrace: AgentResponse =
     r.full_response ||
     ({
@@ -2120,18 +2221,92 @@ function ResultDetailView({
     model: r.judge_model,
   }
 
-  return (
-    <div>
-      <h3 className="result-detail-header">
-        <span className="qid">{r.query_id}</span>{' '}
-        <span className={`verdict ${VERDICT_COLOR[r.judge_verdict || 'unable_to_verify']}`}>
-          {r.judge_verdict}
-        </span>
-        {r.judge_score !== null && (
-          <span className="score">score {r.judge_score.toFixed(2)}</span>
-        )}
-      </h3>
+  // ── Linear scores ──────────────────────────────────────────────────────────
+  const fv = r.feature_vector as Record<string, number> | null | undefined
+  const stratScores: Record<string, number> =
+    (r.strategy_scores as Record<string, number> | null | undefined) ?? computeLinearScores(fv)
+  const scoreEntries = Object.entries(stratScores).sort(([, a], [, b]) => b - a)
+  const argmax = scoreEntries[0]?.[0] ?? null
+  const maxScore = Math.max(...Object.values(stratScores), 0.01)
+  const routeGap = argmax ? (stratScores[argmax] - (scoreEntries[1]?.[1] ?? 0)) : 0
+  const invokeAll = r.invoke_all as string[] | null | undefined
+  const isUnion = (invokeAll && invokeAll.length > 1) || routeGap < 0.08
+  const hasRouting = scoreEntries.length > 0
 
+  // ── Action tree ────────────────────────────────────────────────────────────
+  const taken = takenFromLeafKey(r.leaf_key as string | null | undefined)
+
+  // ── Credit-assignment text for section 6 ──────────────────────────────────
+  const SIGMA = 0.2
+  const gapGrade = r.synthesis_gap ?? null
+  const ledger: ClaimEntry[] | null = r.per_claim_ledger ?? null
+  const validated = ledger?.filter((c) => c.status === 'validated').length ?? 0
+  const totalClaims = ledger?.length ?? 0
+  const dropped = ledger?.filter((c) => c.status === 'unvalidated').length ?? 0
+  let creditLine = ''
+  if (gapGrade !== null) {
+    if (gapGrade < -SIGMA) {
+      creditLine = `Retrieved ${validated + dropped} of ${totalClaims} claims; answer dropped ${dropped} → synthesizer bottleneck`
+    } else if (gapGrade > SIGMA) {
+      creditLine = `Answer asserted facts beyond retrieved chunks → hallucination risk`
+    } else {
+      creditLine = `Within noise floor (|Δ| < σ${SIGMA}) — no clear synthesizer signal`
+    }
+  }
+
+  const s2 = (n: number) => n.toFixed(2)
+
+  return (
+    <div style={{ fontSize: 13 }}>
+
+      {/* ── Section 1: Header ─────────────────────────────────── */}
+      <div style={{ padding: '8px 0 10px', borderBottom: '1px solid var(--border)' }}>
+        <div style={{ fontSize: 11, opacity: 0.45, marginBottom: 3, fontVariantNumeric: 'tabular-nums' }}>
+          {r.query_id}
+        </div>
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8, lineHeight: 1.4 }}>{r.query}</div>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+          {(r.leaf_key || r.strategy_executed) && (
+            <span style={{
+              fontSize: 11, padding: '2px 7px', borderRadius: 4,
+              background: 'var(--rag-accent, #6d28d9)', color: '#fff', fontWeight: 600,
+            }}>
+              {r.leaf_key ?? r.strategy_executed}
+            </span>
+          )}
+          {r.judge_verdict && (
+            <span className={`verdict ${VERDICT_COLOR[r.judge_verdict] ?? ''}`}>{r.judge_verdict}</span>
+          )}
+          {r.retrieval_grade != null && (
+            <span style={{ fontSize: 11, padding: '2px 6px', background: 'var(--surface-alt)', borderRadius: 4 }}>
+              ret {s2(r.retrieval_grade)}
+            </span>
+          )}
+          {r.synthesis_grade != null && (
+            <span style={{ fontSize: 11, padding: '2px 6px', background: 'var(--surface-alt)', borderRadius: 4 }}>
+              syn {s2(r.synthesis_grade)}
+            </span>
+          )}
+          {gapGrade !== null && (
+            <span style={{
+              fontSize: 11, padding: '2px 6px', borderRadius: 4,
+              background: 'var(--surface-alt)',
+              color: Math.abs(gapGrade) < SIGMA ? undefined : gapGrade < 0 ? '#d97706' : '#dc2626',
+              fontWeight: Math.abs(gapGrade) >= SIGMA ? 600 : undefined,
+            }}>
+              gap {gapGrade >= 0 ? '+' : ''}{s2(gapGrade)}
+            </span>
+          )}
+          {r.judge_score !== null && r.judge_score !== undefined && (
+            <span style={{ fontSize: 11, opacity: 0.5 }}>judge {s2(r.judge_score)}</span>
+          )}
+          {r.total_ms != null && (
+            <span style={{ fontSize: 11, opacity: 0.4, marginLeft: 2 }}>{r.total_ms}ms</span>
+          )}
+        </div>
+      </div>
+
+      {/* Human verdict card */}
       {onHumanVerdict && (
         <HumanVerdictCard
           judgeVerdict={r.judge_verdict || null}
@@ -2142,24 +2317,288 @@ function ResultDetailView({
         />
       )}
 
+      {/* ── Section 2: The Path ───────────────────────────────── */}
+      <details style={{ marginTop: 8 }}>
+        <summary style={{ cursor: 'pointer', fontWeight: 600, padding: '5px 0', userSelect: 'none' }}>
+          The Path
+          <span style={{ fontSize: 11, fontWeight: 400, opacity: 0.45, marginLeft: 8 }}>
+            query → classify → route → retrieve → rerank → synthesize → grade
+          </span>
+        </summary>
+        <div style={{ paddingTop: 6 }}>
+          <AgentPipelineTrace response={responseForTrace} query={r.query} expected={r.expected} judge={judge} />
+        </div>
+      </details>
+
+      {/* ── Section 3: Routing Decision ───────────────────────── */}
+      {hasRouting && (
+        <details style={{ marginTop: 8 }} open>
+          <summary style={{ cursor: 'pointer', fontWeight: 600, padding: '5px 0', userSelect: 'none' }}>
+            Routing Decision
+            {argmax && (
+              <span style={{ fontSize: 11, fontWeight: 400, opacity: 0.45, marginLeft: 8 }}>
+                linear picked {argmax} ({s2(stratScores[argmax] ?? 0)})
+              </span>
+            )}
+          </summary>
+          <div style={{ paddingTop: 8 }}>
+
+            {/* Feature vector chips */}
+            {fv && Object.keys(fv).length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginBottom: 10 }}>
+                {Object.entries(fv).map(([k, v]) => (
+                  <span key={k} style={{
+                    fontSize: 11, padding: '2px 6px', borderRadius: 4,
+                    border: '1px solid var(--border)',
+                    background: v > 0.5 ? 'rgba(109,40,217,0.07)' : 'transparent',
+                    opacity: v === 0 ? 0.35 : 1,
+                    fontVariantNumeric: 'tabular-nums',
+                  }}>
+                    {k} <strong>{v.toFixed(2)}</strong>
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {/* Per-strategy score bars */}
+            <div style={{ marginBottom: 10 }}>
+              {scoreEntries.map(([s, score]) => {
+                const isWinner = s === argmax
+                const pct = (score / maxScore) * 100
+                return (
+                  <div key={s} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
+                    <span style={{
+                      width: 18, fontSize: 11,
+                      fontWeight: isWinner ? 700 : 400,
+                      opacity: isWinner ? 1 : 0.55,
+                    }}>
+                      {s}
+                    </span>
+                    <div style={{
+                      flex: 1, height: 10, borderRadius: 2, overflow: 'hidden',
+                      background: 'var(--surface-alt, #f3f4f6)',
+                    }}>
+                      <div style={{
+                        height: '100%', width: `${pct}%`,
+                        background: isWinner ? 'var(--rag-accent, #6d28d9)' : '#9ca3af',
+                        transition: 'width 0.25s',
+                      }} />
+                    </div>
+                    <span style={{
+                      fontSize: 11, width: 34, textAlign: 'right',
+                      fontVariantNumeric: 'tabular-nums',
+                      fontWeight: isWinner ? 600 : 400,
+                      opacity: isWinner ? 1 : 0.55,
+                    }}>
+                      {s2(score)}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+
+            {/* Contribution breakdown for the argmax strategy */}
+            {argmax && fv && Object.keys(LIN_WEIGHTS[argmax] ?? {}).length > 0 && (
+              <div style={{
+                fontSize: 12, borderTop: '1px solid var(--border)',
+                paddingTop: 8, marginBottom: 8,
+              }}>
+                <div style={{ fontWeight: 600, marginBottom: 5, opacity: 0.65 }}>
+                  Why {argmax} won — contribution table
+                </div>
+                <table style={{ borderCollapse: 'collapse', width: '100%', fontVariantNumeric: 'tabular-nums' }}>
+                  <tbody>
+                    <tr>
+                      <td style={{ padding: '2px 4px', opacity: 0.55 }}>base</td>
+                      <td style={{ padding: '2px 4px' }} />
+                      <td style={{ padding: '2px 4px', textAlign: 'right' }}>
+                        {(LIN_BASE[argmax] ?? 0).toFixed(2)}
+                      </td>
+                    </tr>
+                    {Object.entries(LIN_WEIGHTS[argmax] ?? {})
+                      .sort(([, a], [, b]) => Math.abs(b) - Math.abs(a))
+                      .map(([feat, w]) => {
+                        const fval = fv[feat] ?? 0
+                        const contrib = w * fval
+                        return (
+                          <tr key={feat} style={{ opacity: fval !== 0 ? 1 : 0.3 }}>
+                            <td style={{ padding: '2px 4px', opacity: 0.6 }}>{feat}</td>
+                            <td style={{ padding: '2px 4px', opacity: 0.45, fontSize: 11 }}>
+                              {fval.toFixed(2)} × {w >= 0 ? '+' : ''}{w.toFixed(2)}
+                            </td>
+                            <td style={{
+                              padding: '2px 4px', textAlign: 'right',
+                              color: contrib > 0 ? '#16a34a' : contrib < 0 ? '#dc2626' : undefined,
+                            }}>
+                              {contrib >= 0 ? '+' : ''}{contrib.toFixed(2)}
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    <tr style={{ borderTop: '1px solid var(--border)' }}>
+                      <td style={{ padding: '3px 4px', fontWeight: 600 }}>total</td>
+                      <td />
+                      <td style={{ padding: '3px 4px', textAlign: 'right', fontWeight: 600 }}>
+                        {s2(stratScores[argmax] ?? 0)}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* Gap annotation */}
+            {argmax && scoreEntries.length > 1 && (
+              <div style={{ fontSize: 11, opacity: 0.5 }}>
+                Gap to runner-up ({scoreEntries[1][0]}): {routeGap.toFixed(2)}
+                {' → '}
+                {invokeAll && invokeAll.length > 1
+                  ? `multi-invoke union [${invokeAll.join('+')}]`
+                  : isUnion
+                  ? 'narrow gap — may multi-invoke'
+                  : 'single arm'}
+              </div>
+            )}
+          </div>
+        </details>
+      )}
+
+      {/* ── Section 4: Action Tree ────────────────────────────── */}
+      {r.leaf_key && (
+        <details style={{ marginTop: 8 }}>
+          <summary style={{ cursor: 'pointer', fontWeight: 600, padding: '5px 0', userSelect: 'none' }}>
+            Action Tree
+            <span style={{ fontSize: 11, fontWeight: 400, opacity: 0.45, marginLeft: 8 }}>
+              {r.leaf_key} · green=taken · dashed=planned
+            </span>
+          </summary>
+          <div style={{ paddingTop: 8, display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+            {TREE_NODES.map((node) => {
+              const isTaken = taken.has(node.id)
+              let nodeStyle: React.CSSProperties
+              if (node.status === 'live' && isTaken) {
+                nodeStyle = {
+                  padding: '3px 8px', fontSize: 11, borderRadius: 4,
+                  border: '1px solid #16a34a', color: '#15803d',
+                  background: 'rgba(22,163,74,0.08)', fontWeight: 600,
+                }
+              } else if (node.status === 'live') {
+                nodeStyle = {
+                  padding: '3px 8px', fontSize: 11, borderRadius: 4,
+                  border: '1px solid var(--border)', color: 'var(--text-muted)',
+                  opacity: 0.6,
+                }
+              } else if (node.status === 'partial') {
+                nodeStyle = {
+                  padding: '3px 8px', fontSize: 11, borderRadius: 4,
+                  border: '1px dashed #d97706', color: '#92400e',
+                  background: 'rgba(217,119,6,0.05)',
+                }
+              } else {
+                nodeStyle = {
+                  padding: '3px 8px', fontSize: 11, borderRadius: 4,
+                  border: '1px dashed var(--border)', color: 'var(--text-muted)',
+                  opacity: 0.38,
+                }
+              }
+              return (
+                <span
+                  key={node.id}
+                  style={nodeStyle}
+                  title={
+                    node.status === 'not_built' ? 'Planned — not yet built' :
+                    node.status === 'partial' ? 'Partially built' :
+                    isTaken ? 'Taken this query' : 'Built, not taken'
+                  }
+                >
+                  {isTaken ? '→ ' : ''}{node.label}
+                </span>
+              )
+            })}
+          </div>
+        </details>
+      )}
+
+      {/* ── Section 5: Retrieval ──────────────────────────────── */}
+      {r.chunks_summary && r.chunks_summary.length > 0 && (
+        <details style={{ marginTop: 8 }}>
+          <summary style={{ cursor: 'pointer', fontWeight: 600, padding: '5px 0', userSelect: 'none' }}>
+            Retrieval
+            <span style={{ fontSize: 11, fontWeight: 400, opacity: 0.45, marginLeft: 8 }}>
+              {r.chunks_summary.length} chunks
+              {r.chunks_summary[0]?.rerank_score != null
+                ? ` · top ${r.chunks_summary[0].rerank_score.toFixed(3)}`
+                : ''}
+            </span>
+          </summary>
+          <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse', marginTop: 6 }}>
+            <thead>
+              <tr style={{ opacity: 0.5, textAlign: 'left' }}>
+                <th style={{ padding: '2px 5px', fontWeight: 500 }}>#</th>
+                <th style={{ padding: '2px 5px', fontWeight: 500 }}>document</th>
+                <th style={{ padding: '2px 5px', fontWeight: 500 }}>p</th>
+                <th style={{ padding: '2px 5px', fontWeight: 500, textAlign: 'right' }}>rerank</th>
+              </tr>
+            </thead>
+            <tbody>
+              {r.chunks_summary.map((c, i) => (
+                <tr key={i} style={{ borderTop: '1px solid var(--border)' }}>
+                  <td style={{ padding: '3px 5px', opacity: 0.45 }}>{i + 1}</td>
+                  <td
+                    style={{
+                      padding: '3px 5px', maxWidth: 240,
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    }}
+                    title={c.document_name ?? undefined}
+                  >
+                    {c.document_name ?? '—'}
+                  </td>
+                  <td style={{ padding: '3px 5px', opacity: 0.55 }}>{c.page_number ?? '—'}</td>
+                  <td style={{ padding: '3px 5px', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                    {c.rerank_score != null ? c.rerank_score.toFixed(3) : '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </details>
+      )}
+
+      {/* ── Section 6: Two Grades ─────────────────────────────── */}
       {(r.retrieval_grade != null || r.synthesis_grade != null) && (
-        <TwoGradeBar
-          retrieval={r.retrieval_grade ?? null}
-          synthesis={r.synthesis_grade ?? null}
-          gap={r.synthesis_gap ?? null}
-        />
+        <details style={{ marginTop: 8 }} open>
+          <summary style={{ cursor: 'pointer', fontWeight: 600, padding: '5px 0', userSelect: 'none' }}>
+            Two Grades
+          </summary>
+          <div style={{ paddingTop: 6 }}>
+            <TwoGradeBar
+              retrieval={r.retrieval_grade ?? null}
+              synthesis={r.synthesis_grade ?? null}
+              gap={r.synthesis_gap ?? null}
+            />
+            {creditLine && (
+              <div style={{ fontSize: 12, marginTop: 6, opacity: 0.65, fontStyle: 'italic' }}>
+                {creditLine}
+              </div>
+            )}
+          </div>
+        </details>
       )}
 
-      {r.per_claim_ledger && r.per_claim_ledger.length > 0 && (
-        <PerClaimLedger claims={r.per_claim_ledger} chunks={responseForTrace.chunks ?? null} />
+      {/* ── Section 7: Per-Claim Ledger ───────────────────────── */}
+      {ledger && ledger.length > 0 && (
+        <details style={{ marginTop: 8 }} open>
+          <summary style={{ cursor: 'pointer', fontWeight: 600, padding: '5px 0', userSelect: 'none' }}>
+            Per-Claim Ledger
+            <span style={{ fontSize: 11, fontWeight: 400, opacity: 0.45, marginLeft: 8 }}>
+              {validated}/{totalClaims} validated
+            </span>
+          </summary>
+          <div style={{ paddingTop: 6 }}>
+            <PerClaimLedger claims={ledger} chunks={responseForTrace.chunks ?? null} />
+          </div>
+        </details>
       )}
-
-      <AgentPipelineTrace
-        response={responseForTrace}
-        query={r.query}
-        expected={r.expected}
-        judge={judge}
-      />
     </div>
   )
 }

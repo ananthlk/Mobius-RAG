@@ -13,6 +13,7 @@ import { useEffect, useRef, useState } from 'react'
 import { API_BASE } from '../../config'
 import { AgentPipelineTrace, type AgentResponse } from './AgentPipelineTrace'
 import { TwoGradeBar, PerClaimLedger, type ClaimEntry } from './EvalTab'
+import { QueryTraceDrilldown } from './QueryTraceDrilldown'
 import './EvalTab.css'   // reuse styles (run-header, kv, section, etc.)
 import './TestTab.css'
 
@@ -63,6 +64,7 @@ export function TestTab() {
   })
   const [historyRefreshing, setHistoryRefreshing] = useState(false)
   const [isStoredResult, setIsStoredResult] = useState(false)
+  const [currentDecisionId, setCurrentDecisionId] = useState<string | null>(null)
   const [gradeData, setGradeData] = useState<{
     retrieval_grade: number | null
     synthesis_grade: number | null
@@ -125,6 +127,7 @@ export function TestTab() {
     setError(null)
     setResponse(null)
     setIsStoredResult(false)
+    setCurrentDecisionId(null)
     setGradeData(null)
     try {
       const body: Record<string, unknown> = {
@@ -212,6 +215,7 @@ export function TestTab() {
         }
         setResponse(reconstructed)
         setIsStoredResult(true)
+        setCurrentDecisionId(item.id)
         // Extract two-grade QA fields (populated when EVAL agent has computed grades).
         if (row.retrieval_grade != null || row.per_claim_ledger != null) {
           setGradeData({
@@ -359,17 +363,23 @@ export function TestTab() {
                   </div>
                 )}
               </div>
-              {gradeData && (gradeData.retrieval_grade != null || gradeData.synthesis_grade != null) && (
-                <TwoGradeBar
-                  retrieval={gradeData.retrieval_grade}
-                  synthesis={gradeData.synthesis_grade}
-                  gap={gradeData.synthesis_gap}
-                />
+              {isStoredResult && currentDecisionId ? (
+                <QueryTraceDrilldown decisionId={currentDecisionId} />
+              ) : (
+                <>
+                  {gradeData && (gradeData.retrieval_grade != null || gradeData.synthesis_grade != null) && (
+                    <TwoGradeBar
+                      retrieval={gradeData.retrieval_grade}
+                      synthesis={gradeData.synthesis_grade}
+                      gap={gradeData.synthesis_gap}
+                    />
+                  )}
+                  {gradeData?.per_claim_ledger && gradeData.per_claim_ledger.length > 0 && (
+                    <PerClaimLedger claims={gradeData.per_claim_ledger} chunks={response.chunks ?? null} />
+                  )}
+                  <AgentPipelineTrace response={response} />
+                </>
               )}
-              {gradeData?.per_claim_ledger && gradeData.per_claim_ledger.length > 0 && (
-                <PerClaimLedger claims={gradeData.per_claim_ledger} chunks={response.chunks ?? null} />
-              )}
-              <AgentPipelineTrace response={response} />
             </>
           )}
         </div>
