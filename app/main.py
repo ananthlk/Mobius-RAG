@@ -27,7 +27,7 @@ from app.config import (
     RAG_FRONTEND_URL,
 )
 from app.database import get_db, Base
-from app.models import Document, DocumentPage, ChunkingResult, HierarchicalChunk, ExtractedFact, ProcessingError, ChunkingJob, ChunkingEvent, LlmConfig, EmbeddingJob, ChunkEmbedding, PublishEvent, RagPublishedEmbedding, fact_to_category_scores_dict, PolicyLine, PolicyParagraph, PolicyLexiconCandidate, DocumentTextTag, DriveConnection
+from app.models import Document, DocumentPage, ChunkingResult, HierarchicalChunk, ExtractedFact, ProcessingError, ChunkingJob, ChunkingEvent, LlmConfig, EmbeddingJob, ChunkEmbedding, PublishEvent, RagPublishedEmbedding, fact_to_category_scores_dict, PolicyLine, PolicyParagraph, PolicyLexiconCandidate, DocumentTextTag, DriveConnection, EmbeddableUnit
 from app.services.error_tracker import log_error, classify_error
 from app.services.extract_text import extract_text_from_gcs, html_to_plain_text
 from app.services.chunking import split_paragraphs, split_paragraphs_from_markdown
@@ -408,6 +408,11 @@ async def _run_startup_migrations_background():
                 await migrate_chunk_tags()
             except Exception as migrate_err:
                 logger.warning(f"Startup migration (chunk_tags_to_published) skipped: {migrate_err}")
+            try:
+                from app.migrations.add_embeddable_units_cascade import migrate as migrate_eu_cascade
+                await migrate_eu_cascade()
+            except Exception as migrate_err:
+                logger.warning(f"Startup migration (embeddable_units_cascade) skipped: {migrate_err}")
             # payer canonical fix + chunk_tag backfill are done via admin endpoints
             # (POST /admin/fix_payer_canonical, POST /admin/backfill_chunk_tags)
             # because single-transaction UPDATEs on rag_published_embeddings (wide
@@ -4908,6 +4913,9 @@ async def delete_document(
         )
         await db.execute(
             delete(ChunkingResult).where(ChunkingResult.document_id == doc_uuid)
+        )
+        await db.execute(
+            delete(EmbeddableUnit).where(EmbeddableUnit.document_id == doc_uuid)
         )
         await db.execute(
             delete(ChunkEmbedding).where(ChunkEmbedding.document_id == doc_uuid)
@@ -11619,8 +11627,67 @@ async def publish_document_endpoint(
         if "not found" in msg.lower():
             raise HTTPException(status_code=404, detail=msg)
         if "no chunk embeddings" in msg.lower():
+            # Embed-then-publish: if the document has pages/chunks but no
+            # embeddings yet (e.g. upload bypassed inline pipeline or pipeline
+            # failed), run Path B inline then retry publish.
+            from datetime import datetime as _dt
+            from app.embedding_worker import process_embedding_job as _proc_emb
+
+            # Check whether we have anything to embed from.
+            _hc_res = await db.execute(
+                select(HierarchicalChunk.id)
+                .where(HierarchicalChunk.document_id == doc_uuid)
+                .limit(1)
+            )
+            _has_chunks = _hc_res.scalar_one_or_none() is not None
+
+            _pg_res = await db.execute(
+                select(DocumentPage.id)
+                .where(DocumentPage.document_id == doc_uuid)
+                .limit(1)
+            )
+            _has_pages = _pg_res.scalar_one_or_none() is not None
+
+            if not _has_chunks and not _has_pages:
+                raise HTTPException(status_code=400, detail=msg)
+
+            if not _has_chunks and _has_pages:
+                # Run full Path B inline (chunk → embed → publish in own session).
+                await db.close()
+                await _run_instant_pipeline(document_id, str(doc_uuid), doc_uuid)
+                return {
+                    "status": "ok",
+                    "document_id": document_id,
+                    "rows_written": None,
+                    "verification_passed": None,
+                    "verification_message": "embed-then-publish via inline Path B",
+                }
+
+            # Chunks exist but no embeddings — embed inline (auto-publish fires
+            # inside process_embedding_job), then do one final publish to
+            # ensure the rag_published_embeddings row is committed.
+            _emb_job = EmbeddingJob(
+                document_id=doc_uuid,
+                status="processing",
+                worker_id="inline-publish",
+                generator_id=gen or "B",
+                started_at=_dt.utcnow(),
+                created_at=_dt.utcnow(),
+                updated_at=_dt.utcnow(),
+            )
+            db.add(_emb_job)
+            await db.commit()
+            await db.refresh(_emb_job)
+            await _proc_emb(_emb_job, db, background_sync=False)
+            _emb_job.status = "completed"
+            _emb_job.completed_at = _dt.utcnow()
+            await db.commit()
+            try:
+                result = await publish_document(doc_uuid, db, generator_id=gen)
+            except ValueError as e2:
+                raise HTTPException(status_code=400, detail=str(e2))
+        else:
             raise HTTPException(status_code=400, detail=msg)
-        raise HTTPException(status_code=400, detail=msg)
 
     assert isinstance(result, PublishResult)
     event = PublishEvent(
