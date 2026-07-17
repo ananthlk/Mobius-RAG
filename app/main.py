@@ -13712,7 +13712,7 @@ async def retag_document(
 # Namespace is provisioned by the db-agent (POST /doc-store/provision).
 # ORG_DOCS_DATABASE_URL must be set for this endpoint to activate.
 
-@app.post("/org-docs/ingest")
+@app.post("/admin/org-docs/ingest")
 async def org_docs_ingest(
     file: UploadFile = File(...),
     namespace_ref: str = Form(...),
@@ -13853,7 +13853,7 @@ async def org_docs_ingest(
     }
 
 
-@app.get("/org-docs/search")
+@app.get("/admin/org-docs/search")
 async def org_docs_search(
     q: str,
     namespace_ref: str,
