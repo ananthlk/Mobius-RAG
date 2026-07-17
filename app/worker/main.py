@@ -396,6 +396,7 @@ async def worker_loop(*, instant_only: bool = False):
         ("chunking_config_snapshot", "app.migrations.add_chunking_config_snapshot"),
         ("embeddable_units", "app.migrations.add_embeddable_units"),
         ("embeddable_units_cascade", "app.migrations.add_embeddable_units_cascade"),
+        ("document_children_cascade", "app.migrations.add_document_children_cascade"),
         ("document_tags", "app.migrations.add_document_tags"),
         ("fix_offset_type", "app.migrations.fix_policy_lines_offset_type"),
         ("policy_lines_autovacuum", "app.migrations.tune_policy_lines_autovacuum"),

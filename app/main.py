@@ -413,6 +413,11 @@ async def _run_startup_migrations_background():
                 await migrate_eu_cascade()
             except Exception as migrate_err:
                 logger.warning(f"Startup migration (embeddable_units_cascade) skipped: {migrate_err}")
+            try:
+                from app.migrations.add_document_children_cascade import migrate as migrate_doc_cascade
+                await migrate_doc_cascade()
+            except Exception as migrate_err:
+                logger.warning(f"Startup migration (document_children_cascade) skipped: {migrate_err}")
             # payer canonical fix + chunk_tag backfill are done via admin endpoints
             # (POST /admin/fix_payer_canonical, POST /admin/backfill_chunk_tags)
             # because single-transaction UPDATEs on rag_published_embeddings (wide
