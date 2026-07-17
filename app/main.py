@@ -4229,6 +4229,10 @@ async def update_document_metadata(
         if pages_result.scalars().first() is not None:
             doc.status = "completed"
         # else: leave status as uploaded if no pages
+    # Allow phi_blocked: chat HIPAA gate marks extract-only docs that failed PHI
+    # classification so the zombie detector skips re-ingesting them.
+    elif body.get("status") == "phi_blocked" and doc.status in ("completed", "uploaded"):
+        doc.status = "phi_blocked"
     await db.commit()
     await db.refresh(doc)
     # Build same shape as list_documents: derive chunking_status from latest chunking_event when present
@@ -5226,10 +5230,24 @@ async def upload_file(
                     {"did": str(existing_doc.id)},
                 )
                 _chunks_count = int(_count_res.scalar() or 0)
-            # A doc with 0 published embeddings is a zombie (publish failed mid-flight).
-            # Treat it as new so the upload re-triggers ingest rather than returning
-            # an empty shell that will never be searchable.
-            if _chunks_count == 0:
+            # A doc with 0 published embeddings is either a zombie (publish failed
+            # mid-flight) or intentionally not embedded (PHI-blocked by HIPAA gate).
+            # Distinguish by status: phi_blocked → 409 with phi_blocked=True so chat
+            # can surface the cached audit verdict; otherwise delete and re-ingest.
+            if _chunks_count == 0 and existing_doc.status == "phi_blocked":
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "duplicate_file",
+                        "message": "This file was previously blocked by the HIPAA gate and cannot be ingested.",
+                        "document_id": str(existing_doc.id),
+                        "chunks_count": 0,
+                        "published_at": _published_at_iso,
+                        "original_filename": existing_doc.filename,
+                        "phi_blocked": True,
+                    }
+                )
+            elif _chunks_count == 0:
                 logger.warning(
                     "[upload] dedup hit zombie doc %s (0 embeddings) — re-ingesting",
                     existing_doc.id,
