@@ -359,18 +359,17 @@ async def grade_decision(
     from app.database import AsyncSessionLocal
     from app.services.fact_checker import check_facts, FACT_CHECKER_VERSION
 
-    # Reconstruct chunk objects from the serialized form the caller passes.
-    # If callers send full chunk dicts, wrap them; if they send bare text, wrap too.
-    class _ChunkShim:
-        def __init__(self, c):
-            if isinstance(c, dict):
-                self.text = c.get("text") or c.get("content") or ""
-                self.rerank_score = c.get("rerank_score")
-            else:
-                self.text = str(c)
-                self.rerank_score = None
-
-    chunks = [_ChunkShim(c) for c in raw_chunks]
+    # check_facts expects dicts with a "text" key. Normalize whatever the caller
+    # sends (full chunk dicts, bare strings) into that form.
+    chunks = [
+        c if isinstance(c, dict) else {"text": str(c), "rerank_score": None}
+        for c in raw_chunks
+    ]
+    # Ensure every dict has a "text" key (callers may use "content").
+    chunks = [
+        c if "text" in c else {**c, "text": c.get("content") or ""}
+        for c in chunks
+    ]
 
     try:
         fc = await check_facts(
