@@ -13934,21 +13934,25 @@ async def org_docs_search(
         raise HTTPException(status_code=500, detail=f"Query embedding failed: {str(_e)[:200]}")
 
     ns = namespace_ref
-    emb_str = f"[{','.join(str(v) for v in q_emb)}]"
+    # Inline the embedding as a literal float array — avoids SQLAlchemy text()
+    # misparssing `:emb::vector` (the `::` PostgreSQL cast after a named param
+    # confuses the bind-parameter substitution → "syntax error at or near ':'").
+    # emb_str is machine-generated floats, not user input, so inlining is safe.
+    emb_literal = f"'{','.join(str(v) for v in q_emb)}'::vector"
 
     async with OrgDocsSessionLocal() as org_db:
         rows = await org_db.execute(
             text(
                 f'SELECT c.id, c.text, c.page_number, c.section_path, '
                 f'       d.filename, d.display_name, d.visibility, '
-                f'       1 - (c.embedding <=> :emb::vector) AS score '
+                f'       1 - (c.embedding <=> {emb_literal}) AS score '
                 f'FROM "{ns}".org_chunks c '
                 f'JOIN "{ns}".org_documents d ON d.id = c.document_id '
                 f'WHERE d.visibility = :vis AND d.status = \'ready\' '
-                f'ORDER BY c.embedding <=> :emb::vector '
+                f'ORDER BY c.embedding <=> {emb_literal} '
                 f'LIMIT :k'
             ),
-            {"emb": emb_str, "vis": visibility, "k": k},
+            {"vis": visibility, "k": k},
         )
         results = [dict(r._mapping) for r in rows.fetchall()]
 
