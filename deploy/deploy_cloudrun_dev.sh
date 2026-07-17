@@ -114,6 +114,7 @@ gcloud builds submit --project="$PROJECT_ID" --tag="$IMAGE" .
 # succeeds but downstream chat retrieval never sees the doc.
 # Contract reference: mobius-chat/docs/rag_population_agent_setup.md.
 CHAT_DB_URL_FOR_RAG="postgresql+psycopg2://postgres:${DB_PASS_ENC}@/mobius_chat?host=%2Fcloudsql%2F${PROJECT_ID}%3A${REGION}%3A${CLOUD_SQL_INSTANCE}"
+ORG_DOCS_DB_URL="postgresql+asyncpg://postgres:${DB_PASS_ENC}@/mobius_org_docs?host=%2Fcloudsql%2F${PROJECT_ID}%3A${REGION}%3A${CLOUD_SQL_INSTANCE}"
 
 COMMON_ENV=(
   "ENV=staging"
@@ -155,6 +156,9 @@ COMMON_ENV=(
   # chat retrieval forever — exactly the failure mode that stranded
   # 23 humana docs on 2026-04-27 after a deploy reset env vars.
   "AUTO_PUBLISH_ON_EMBED=1"
+  # Org-docs DB: per-org namespace in mobius_org_docs (same Cloud SQL instance).
+  # Gates POST /org-docs/ingest + GET /org-docs/search.
+  "ORG_DOCS_DATABASE_URL=${ORG_DOCS_DB_URL}"
 )
 
 COMMON_SECRETS=(
