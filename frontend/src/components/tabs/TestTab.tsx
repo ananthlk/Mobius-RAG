@@ -172,15 +172,11 @@ export function TestTab() {
       }
       const data = (await resp.json()) as AgentResponse
       setResponse(data)
-      // Pull the routing decision ID so QueryTraceDrilldown can render for this fresh run.
-      // The routing decision is written at the start of the agent call, so it's in the DB now.
-      fetch(`${API_BASE}/api/routing/decisions?limit=1`)
-        .then((r) => r.ok ? r.json() : null)
-        .then((dec) => {
-          const id = dec?.decisions?.[0]?.id as string | undefined
-          if (id) setCurrentDecisionId(id)
-        })
-        .catch(() => { /* ignore — drilldown is best-effort for fresh runs */ })
+      // Use the pre-generated decision ID returned in the response so the
+      // drilldown always pins to exactly this run's rag_routing_decisions row.
+      if (data.routing_decision_id) {
+        setCurrentDecisionId(data.routing_decision_id)
+      }
       setHistory((h) => [
         {
           query: trimmed,

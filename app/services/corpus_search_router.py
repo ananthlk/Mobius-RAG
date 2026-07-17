@@ -718,6 +718,7 @@ async def persist_decision(
     profile_features: dict[str, Any],
     decision: RouteDecision,
     response_dump: dict[str, Any],
+    decision_id: str | None = None,
 ) -> None:
     """Append-only write of one routing decision + immediate outcome.
 
@@ -726,14 +727,21 @@ async def persist_decision(
     request. ``db_session_factory`` is the AsyncSessionLocal callable
     so we can open an independent session (the agent's session may
     already be in use elsewhere).
+
+    ``decision_id``: caller may pre-generate the UUID so it can be
+    included in the API response before the async write completes.
+    When None, Postgres generates one via DEFAULT gen_random_uuid().
     """
     from sqlalchemy import text as _t
 
+    id_clause = "id, " if decision_id else ""
+    id_placeholder = ":decision_id, " if decision_id else ""
+
     try:
         async with db_session_factory() as db:
-            await db.execute(_t("""
+            await db.execute(_t(f"""
                 INSERT INTO rag_routing_decisions (
-                  agent_id, query,
+                  {id_clause}agent_id, query,
                   query_type, query_class, coverage,
                   has_d_tag, has_literal, is_exploratory,
                   tag_matches, literal_anchors, untagged_meaningful,
@@ -744,7 +752,7 @@ async def persist_decision(
                   confidence, n_chunks, top_rerank, total_ms,
                   per_strategy_telemetry
                 ) VALUES (
-                  :agent_id, :query,
+                  {id_placeholder}:agent_id, :query,
                   :query_type, :query_class, :coverage,
                   :has_d_tag, :has_literal, :is_exploratory,
                   :tag_matches, :literal_anchors, :untagged_meaningful,
@@ -755,7 +763,7 @@ async def persist_decision(
                   :confidence, :n_chunks, :top_rerank, :total_ms,
                   :per_strategy_telemetry
                 )
-            """), {
+            """), {"decision_id": decision_id,
                 "agent_id": agent_id,
                 "query": query,
                 "query_type": profile_features.get("query_type"),

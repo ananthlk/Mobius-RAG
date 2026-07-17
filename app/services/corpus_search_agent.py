@@ -2839,6 +2839,10 @@ class CorpusSearchAgentResponse(BaseModel):
     # Surfaced as a top-level field so eval can read it without drilling into
     # the routing dict (where it also lives as routing["invoke_all"]).
     invoke_all: list[str] | None = None
+    # Stable ID of the rag_routing_decisions row written for this request.
+    # Pre-generated before the async fire-and-forget write so the frontend
+    # can pin the trace to exactly this record without a racy ?limit=1 fetch.
+    routing_decision_id: str | None = None
     # Inherited-authority escalation telemetry: populated when the plan-scoped
     # boost pass fires (inherited_authority_escalation=True inner call). Tells
     # EVAL exactly whether the boost ran, how many inherited chunks it returned,
@@ -3070,6 +3074,7 @@ async def corpus_search_agent(
     # 'a+inh', 'b']. Distinct from _tried (which tracks unique strategy IDs
     # for router-exclusion) — _chain is the narrative EVAL reads for pathing.
     _chain: list[str] = []
+    _routing_decision_id: str | None = None
 
     for _attempt in range(_MAX_TRIES):
         # Attempt 0 honours the caller's explicit mode (if any).
@@ -3080,7 +3085,7 @@ async def corpus_search_agent(
             "mode": request.mode if _attempt == 0 else None,
         })
         response = await _corpus_search_agent_impl(db, attempt_request, caller, caller_id)
-        _persist_routing_decision_async(attempt_request, response)
+        _routing_decision_id = _persist_routing_decision_async(attempt_request, response)
         _eval_run_id = request.eval_run_id or None
         _observe_async(
             attempt_request,
@@ -3124,6 +3129,7 @@ async def corpus_search_agent(
                 "strategy_chain": list(_chain),   # full ordered path, not deduped _tried
                 "fast_exit": {"fired": False, "reason": None},
                 "inherited_boost": _inh_boost_record,  # None when boost never fired
+                "routing_decision_id": _routing_decision_id,
             })
 
         # Explicit mode override (A/B-test / calibration knob): honour the
@@ -3322,7 +3328,7 @@ async def corpus_search_agent(
 def _persist_routing_decision_async(
     request: CorpusSearchAgentRequest,
     response: CorpusSearchAgentResponse,
-) -> None:
+) -> str | None:
     """Schedule a fire-and-forget write to rag_routing_decisions from
     the response object. Reconstructs the RouteDecision from the
     response.routing dict so we don't need to drag state through the
@@ -3387,6 +3393,8 @@ def _persist_routing_decision_async(
         },
     }
 
+    import uuid as _uuid_mod
+    pre_id = str(_uuid_mod.uuid4())
     try:
         import asyncio as _asyncio
         from app.database import AsyncSessionLocal
@@ -3397,9 +3405,12 @@ def _persist_routing_decision_async(
             profile_features=profile_features,
             decision=decision,
             response_dump=response_dump,
+            decision_id=pre_id,
         ))
+        return pre_id
     except Exception as exc:  # pragma: no cover — non-fatal
         logger.warning("persist_routing_decision scheduling failed: %s", exc)
+        return None
 
 
 def _observe_async(

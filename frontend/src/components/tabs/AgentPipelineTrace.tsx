@@ -130,6 +130,7 @@ export interface AgentResponse {
     phrase_strict?: string
     vector_broad?: string
   } | null
+  routing_decision_id?: string | null
 }
 
 export interface ScoringTraceItem {
