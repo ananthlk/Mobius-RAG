@@ -95,7 +95,7 @@ interface DecisionRow {
   fallback_strategy: string | null
 }
 
-export function QueryTraceDrilldown({ decisionId }: { decisionId: string }) {
+export function QueryTraceDrilldown({ decisionId, isStoredResult }: { decisionId: string; isStoredResult?: boolean }) {
   const [row, setRow] = useState<DecisionRow | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -231,6 +231,13 @@ export function QueryTraceDrilldown({ decisionId }: { decisionId: string }) {
           )
         })}
       </div>
+
+      {/* ── Stored-result hint ──────────────────────────────── */}
+      {isStoredResult && (
+        <div style={{ fontSize: 11, opacity: 0.45, marginBottom: 10, fontStyle: 'italic' }}>
+          Stage details (cleanup · rewrite · chunks) available on a live run — ▶ Re-run live above.
+        </div>
+      )}
 
       {/* ── Two-grade hero ────────────────────────────────── */}
       {(row.retrieval_grade != null || row.synthesis_grade != null) && (

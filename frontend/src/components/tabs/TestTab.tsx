@@ -392,7 +392,7 @@ export function TestTab() {
                   )}
                 </div>
                 {currentDecisionId ? (
-                  <QueryTraceDrilldown decisionId={currentDecisionId} />
+                  <QueryTraceDrilldown decisionId={currentDecisionId} isStoredResult={isStoredResult} />
                 ) : (
                   <>
                     {gradeData && (gradeData.retrieval_grade != null || gradeData.synthesis_grade != null) && (
