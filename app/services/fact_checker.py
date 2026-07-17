@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import asyncio
 import time
 from dataclasses import dataclass, field
 from typing import Any, Sequence
@@ -47,6 +48,14 @@ FACT_CHECKER_VERSION = "fact_check_v1.2026-07-15"  # EVAL-owned; bump via EVAL a
 # so the noise floor can never silently drift away from the grader it describes.
 FACT_CHECKER_SIGMA = 0.2
 _HALLUCINATION_PENALTY = 1.0  # each hallucinated/forbidden claim cancels one grounded fact
+# Judge LLM (Vertex) rate-limits under eval load (429 Resource exhausted). A 429
+# is TRANSIENT — retrying almost always succeeds. Without this the judge scored the
+# cell 0/wrong, silently corrupting recall (worst for natural mode, which makes the
+# most LLM calls). Retry transient errors; only a persistent failure returns error.
+_FC_RETRIES = 4
+_FC_BACKOFF_S = (2.0, 5.0, 12.0, 25.0)
+_FC_TRANSIENT = ("429", "resource exhausted", "rate limit", "ratelimit",
+                 "503", "unavailable", "timeout", "deadline", "500")
 
 
 @dataclass
@@ -74,6 +83,8 @@ class FactCheckResult:
     model: str = ""
     elapsed_ms: int = 0
     reasoning: str = ""
+    error: bool = False            # judge LLM call failed (after retries) — score is NOT trustworthy
+    error_transient: bool = False  # failure was a transient 429/timeout — treat as unable_to_verify, not wrong
 
     @property
     def n_supported(self) -> int:
@@ -294,15 +305,29 @@ async def check_facts(
         system, user = _SYSTEM, _build_prompt(query, answer, must_facts, forbidden_facts, chunks)
 
     t0 = time.monotonic()
-    try:
-        raw, meta = await llm_manager_client.generate(
-            system=system, user=user,
-            stage=_FACT_CHECK_STAGE, max_tokens=max_tokens, correlation_id=correlation_id,
-        )
-    except Exception as exc:  # noqa: BLE001
-        elapsed = int((time.monotonic() - t0) * 1000)
-        logger.warning("fact_checker LLM call failed: %s", exc)
-        return FactCheckResult(model="error", elapsed_ms=elapsed, reasoning=f"fact_check_error: {exc}")
+    raw = meta = None
+    for attempt in range(_FC_RETRIES + 1):
+        try:
+            raw, meta = await llm_manager_client.generate(
+                system=system, user=user,
+                stage=_FACT_CHECK_STAGE, max_tokens=max_tokens, correlation_id=correlation_id,
+            )
+            break
+        except Exception as exc:  # noqa: BLE001
+            transient = any(s in str(exc).lower() for s in _FC_TRANSIENT)
+            if attempt < _FC_RETRIES and transient:
+                logger.info("fact_checker %s (attempt %d/%d) — retrying in %.0fs",
+                            str(exc)[:60], attempt + 1, _FC_RETRIES + 1, _FC_BACKOFF_S[attempt])
+                await asyncio.sleep(_FC_BACKOFF_S[attempt])
+                continue
+            elapsed = int((time.monotonic() - t0) * 1000)
+            logger.warning("fact_checker LLM call failed after %d attempts (transient=%s): %s",
+                           attempt + 1, transient, exc)
+            # error/error_transient let callers treat a rate-limit failure as
+            # unable_to_verify (EXCLUDE from recall), never as a 0/wrong score.
+            return FactCheckResult(model="error", elapsed_ms=elapsed,
+                                   reasoning=f"fact_check_error: {exc}",
+                                   error=True, error_transient=transient)
 
     elapsed = int((time.monotonic() - t0) * 1000)
     model = (meta or {}).get("model") or (meta or {}).get("provider") or "unknown"

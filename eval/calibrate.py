@@ -549,6 +549,12 @@ async def run_calibration(
                         check_facts(query=text, must_facts=must_facts,
                                     chunks=chunks, forbidden_facts=forbidden),
                         timeout=judge_timeout_s)
+                    if fc.error:
+                        # Judge LLM failed (429/500 after retries) — the chunks
+                        # were NOT actually verified. Marking this wrong/0 silently
+                        # corrupts recall (it did — natural mode's 0.344 was mostly
+                        # judge 429s on correctly-routed cells). Exclude it instead.
+                        raise RuntimeError(fc.reasoning or "fact_check judge error")
                     recall_val = fc.score
                     n_contra = sum(1 for v in fc.verdicts if v.contradicted)
                     # Precision = distinct chunks that were RELEVANT (cited as
