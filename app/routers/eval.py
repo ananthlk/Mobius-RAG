@@ -332,6 +332,88 @@ async def get_prod_rollup(window_hours: int = 24):
     }
 
 
+@router.patch("/observe/decisions/{correlation_id}/grade")
+async def grade_decision(
+    correlation_id: str,
+    body: dict = Body(...),
+):
+    """Grade a prod OBSERVE row post-synthesis.
+
+    Called by chat callers that skip_synthesis=True (they synthesize their own
+    answer) — after the LLM produces the final answer, the caller PATCHes back
+    with ``{answer, chunks}`` so the grounding critic can run and populate
+    synthesis_grade + per_claim_ledger on the existing rag_query_decisions row.
+
+    Idempotent: a second PATCH with the same correlation_id simply overwrites.
+    Fire-and-forget safe for the caller — returns 204 No Content immediately if
+    grading succeeds; 404 if no row found; 422 if answer missing.
+    """
+    answer: str | None = body.get("answer")
+    if not answer:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=422, detail="answer is required")
+
+    raw_chunks = body.get("chunks") or []
+    query: str = body.get("query") or ""
+
+    from app.database import AsyncSessionLocal
+    from app.services.fact_checker import check_facts, FACT_CHECKER_VERSION
+
+    # Reconstruct chunk objects from the serialized form the caller passes.
+    # If callers send full chunk dicts, wrap them; if they send bare text, wrap too.
+    class _ChunkShim:
+        def __init__(self, c):
+            if isinstance(c, dict):
+                self.text = c.get("text") or c.get("content") or ""
+                self.rerank_score = c.get("rerank_score")
+            else:
+                self.text = str(c)
+                self.rerank_score = None
+
+    chunks = [_ChunkShim(c) for c in raw_chunks]
+
+    try:
+        fc = await check_facts(
+            query=query,
+            must_facts=[],
+            chunks=chunks,
+            answer=answer,
+        )
+        synthesis_grade = fc.score
+        ledger = fc.ledger()
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "[observe/grade] fact_check failed for %s: %s", correlation_id, exc
+        )
+        return {"graded": False, "error": str(exc)}
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(sql_text(
+            """
+            UPDATE rag_query_decisions
+               SET synthesis_grade      = :sg,
+                   per_claim_ledger     = CAST(:ledger AS jsonb),
+                   fact_checker_version = :fcv
+             WHERE correlation_id = :cid
+               AND is_prod = true
+            RETURNING id
+            """
+        ), {
+            "sg": synthesis_grade,
+            "ledger": __import__("json").dumps(ledger),
+            "fcv": FACT_CHECKER_VERSION,
+            "cid": correlation_id,
+        })
+        updated = result.fetchall()
+        await db.commit()
+
+    if not updated:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=f"no prod row for correlation_id={correlation_id}")
+
+    return {"graded": True, "synthesis_grade": synthesis_grade, "n_claims": len(ledger)}
+
+
 # ---------------------------------------------------------------------------
 # Observability — timeline, A/B compare, drift (fingerprint-aware)
 # ---------------------------------------------------------------------------
@@ -548,6 +630,24 @@ async def get_eval_result(result_id: str):
             ), {"id": result["routing_decision_id"]})).mappings().first()
             if r2:
                 routing = dict(r2)
+                # Augment result with rag_query_decisions fields (grades, ledger, linear scores)
+                try:
+                    rqd = (await db.execute(sql_text(
+                        "SELECT retrieval_grade, synthesis_grade, synthesis_gap, "
+                        "       fact_checker_version, per_claim_ledger, "
+                        "       strategy_scores, feature_vector, leaf_key, invoke_all "
+                        "FROM rag_query_decisions WHERE agent_id = :aid "
+                        "ORDER BY ts DESC LIMIT 1"
+                    ), {"aid": routing["agent_id"]})).mappings().first()
+                    if rqd:
+                        for col in (
+                            "retrieval_grade", "synthesis_grade", "synthesis_gap",
+                            "fact_checker_version", "per_claim_ledger",
+                            "strategy_scores", "feature_vector", "leaf_key", "invoke_all",
+                        ):
+                            result[col] = rqd[col]
+                except Exception:
+                    pass
 
     return {"result": result, "routing": routing}
 
