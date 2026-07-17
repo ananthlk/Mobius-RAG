@@ -492,3 +492,99 @@ run happens in a clean corpus-fingerprint window (Payor holds mutations). Owners
 **Sequencing:** 0 blocks all · 1 makes the router load-bearing (real chat behavior) · 2 is the
 highest-value deterministic win · 3 is honesty/UX · 4 refines routing · 5 is the compounding
 substrate. Within each phase: build → EVAL certifies the joint → next.
+
+---
+
+## 8. Router v2 — the QA-updated action-tree (from the GA-baseline forensic, 2026-07-14)
+
+*Derived from the durable-baseline joint forensic (run `53f3aefe`, all 110 cells + LOO simulation;
+full per-question log in `eval/ga-baseline-joint-forensic.md`). This section supersedes the linear
+`_LINEAR_WEIGHTS` framing in §2 as the router's TARGET architecture.*
+
+**Evidence (measured, LOO-honest):**
+`linear router 0.476` · `tree single-route 0.438` (WORSE — 22 queries too sparse to train a tree) ·
+`tree + multi-invoke-on-impure 0.533` (+0.057, **43% of the 0.133 router→oracle gap**) ·
+`oracle 0.609`. **Conclusion: the lever is escalation TARGETED by leaf-impurity, not better
+single-routing.** The tree structure is right but must be *learned on production data*, not shipped
+against 22 queries.
+
+### The model
+Replace the linear score's argmax with a **shallow decision tree over the binary retrieval
+features**, where each leaf maps to an **ACTION** (not just a strategy), and **every query updates
+the leaf's per-action estimate via QA reward** (online).
+
+Action space per leaf:
+```
+{ s | a | b | d            (terminal retrieve)
+  reformulate → a          (b if corpus-hit else c)
+  multi-invoke (a∪d)       (run top-2, QA picks)
+  f-floor                  (honest, labeled) }
+```
+
+### The tree (layered)
+1. **TOP SPLIT — `structured_field_hit` AND scope-match → `s`** (deterministic field read, *carries
+   the field's restriction/provenance*; scope-mismatch falls through). This **skims** the
+   field-answerable queries to ~1.0 AND **purifies the content-availability impurity**: cmhc001 vs
+   cmhc019 (Sunshine a=1.0 / Aetna a=0.5, feature-identical, opposite) both become `s`≈1.0 because
+   `s` *reads the field* instead of gambling on retrieval. `s` is a layer ABOVE a/b/d, not a peer.
+2. **BODY — retrieval tree** on binary features (`has_dtag` → `thematic`/`literal`/`exclusivity`/
+   `crawlability`):
+   - clean leaves → terminal `a`/`b`/`d` (the leaf's empirical winner)
+   - `no-dtag` → NOT `a` (route `b`/`d` — a has no tag to boost)
+   - **impure leaf** (a≈d, high variance) → **reformulate** (`b` if `n_chunks>0` else `c`) → retry
+     `a`; if still undecided → **multi-invoke a∪d**
+3. **FLOOR — nothing grounds → `f`** (cite-or-label honest floor; *replaces `c`-as-terminal*, which
+   the forensic proved is a hallucination engine — confident-wrong on cmhc014/017/020).
+
+### Leaf purity = confidence AND the escalation trigger (unified)
+- **Pure leaf** (one action dominates) → route it, single pass, high confidence.
+- **Impure leaf** (top-2 close, high variance) → reformulate/multi-invoke. **Purity self-calibrates
+  as QA data accumulates:** sparsity-impurity converges → route confidently; irreducible
+  content-impurity stays high → "always escalate here." Routing, confidence, and escalate-or-not all
+  fall out of the leaf's per-action (mean, variance).
+
+### QA-updated online loop (the reward)
+Each query: route → execute → **QA** → reward → update `(leaf, action)` estimate. QA is two-tier:
+**automated** = the per-claim validation ledger (`fact-recall − hallucination`, fires on 100% of
+traffic) + **human** = thumbs/no-derate (sparse, corrects the automated). `corpus_fingerprint`
+moves → decay/re-explore affected leaves (ingest credentialing → that leaf's `a`-estimate rises,
+`d` falls, routing shifts on its own). **Multi-invoke doubles as exploration** on impure leaves.
+The 110 *seeds*; production QA *runs* it. **The QA joint must be certified first — garbage QA is a
+garbage teacher.**
+
+### Reformulate rule (v1, deliberately simple)
+`n_chunks > 0` → **b**-reformulate (grounded: reads the hit, localizes, hands `a` a sharper query);
+`n_chunks == 0` → **c**-reformulate (generative: decomposes from the question). One signal; the
+bandit learns a finer boundary later.
+
+### Reformulate is 1 → N: fan-out execution (Ananth, 2026-07-14)
+A rewrite is **not 1→1**. A decompose splits one query into **multiple sub-queries** ("standard PA
+timeframe" + "urgent PA timeframe"; each must-fact its own retrieval), and each sub-query is its own
+**thread**. The escalation machinery must therefore carry the **ammunition to run multiple threads**:
+- **Fan-out primitive:** run N `(sub-query, strategy)` pairs **concurrently** (async gather),
+  collect per-thread results, **assemble** (each thread → its fact/sub-answer), stitch with the
+  per-claim **validation ledger**, compose one answer.
+- **Do the fan-out INSIDE a single `corpus_search` request** (internal `asyncio.gather` over the
+  sub-retrievals), NOT by the caller making N concurrent external calls — this respects the
+  hard `max=1` in-process-state constraint on the endpoint ([[feedback_rag_api_max1_inprocess_state]])
+  while still running N threads internally. One request in, N threads inside, one assembled answer out.
+- **Shared infra with multi-invoke:** `a∪d` is just a 2-thread fan-out (N strategies on 1 query);
+  decompose is N sub-queries on 1 strategy. **Build the concurrent-fan-out executor once**, use it
+  for both.
+- **Budget/mode-gated:** fan-out is N× retrieval + N× judge — expensive. `fast` = no fan-out (N=1);
+  `chat` = small N; `thinking` = up to the full decomposition. Cost-aware, and `log what was
+  dropped` if N is capped.
+
+### Build order (evidence-based)
+1. **Multi-invoke on impure leaves** (Stage 3) — the measured +0.057, bounded (2× cost only on ~half).
+2. **Linear tweak** (neuter constant `corpus_depth`, add `tag_coverage`) — fixes structural leaks;
+   keeps linear as the bootstrap while the tree matures.
+3. **`s` as top-split** (scope-match + restriction-carrying) · **`f` replaces `c`** · **validation
+   ledger as the QA/reward**.
+4. **Reformulate action** (`b`/`c` by corpus-hit).
+5. **Tree leaves + QA-bandit** — matures on production reward; do NOT hard-route on the 22-query bank.
+
+### Retest
+Add `s` as a **6th path** and re-run the 110 (`queries_cmhc.yaml` × {a,b,c,d,s,natural}); confirm the
+multi-invoke gain holds and displacement stays 2/2. Then **production QA over weeks is the real
+validation** vs this durable baseline (`53f3aefe`). A 22-query retest is a smoke test, not proof.
