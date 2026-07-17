@@ -722,34 +722,27 @@ async def get_routing_decision(decision_id: str):
             raise HTTPException(status_code=404, detail="decision not found")
         result = dict(row)
 
-        # Augment with two-grade QA from rag_query_decisions (best-effort — table
-        # may not yet have rows or per_claim_ledger column may not exist).
+        # Augment with two-grade QA + bandit fields from rag_query_decisions
+        # (best-effort — table may not yet have rows for this agent call).
         agent_id = result.get("agent_id")
         if agent_id:
             try:
-                grade_row = (await db.execute(sql_text(
+                qd_row = (await db.execute(sql_text(
                     "SELECT retrieval_grade, synthesis_grade, synthesis_gap, "
-                    "       fact_checker_version, corpus_version "
+                    "       fact_checker_version, corpus_version, per_claim_ledger, "
+                    "       strategy_scores, feature_vector, leaf_key, invoke_all "
                     "FROM rag_query_decisions WHERE agent_id = :aid "
                     "ORDER BY ts DESC LIMIT 1"
                 ), {"aid": agent_id})).mappings().first()
-                if grade_row:
-                    result["retrieval_grade"] = grade_row["retrieval_grade"]
-                    result["synthesis_grade"] = grade_row["synthesis_grade"]
-                    result["synthesis_gap"] = grade_row["synthesis_gap"]
-                    result["fact_checker_version"] = grade_row["fact_checker_version"]
-                    result["corpus_version"] = grade_row["corpus_version"]
+                if qd_row:
+                    for col in (
+                        "retrieval_grade", "synthesis_grade", "synthesis_gap",
+                        "fact_checker_version", "corpus_version", "per_claim_ledger",
+                        "strategy_scores", "feature_vector", "leaf_key", "invoke_all",
+                    ):
+                        result[col] = qd_row.get(col)
             except Exception:
                 pass  # rag_query_decisions not yet populated — silently skip
-            try:
-                ledger_row = (await db.execute(sql_text(
-                    "SELECT per_claim_ledger FROM rag_query_decisions "
-                    "WHERE agent_id = :aid ORDER BY ts DESC LIMIT 1"
-                ), {"aid": agent_id})).mappings().first()
-                if ledger_row:
-                    result["per_claim_ledger"] = ledger_row["per_claim_ledger"]
-            except Exception:
-                pass  # per_claim_ledger column may not exist yet
     return result
 
 

@@ -74,6 +74,9 @@ interface DecisionRow {
   strategy_executed: string | null
   confidence: string | null
   total_ms: number | null
+  // from rag_routing_decisions — always present
+  scores: Record<string, number> | null
+  // from rag_query_decisions JOIN — present only if EVAL agent has graded
   leaf_key: string | null
   invoke_all: string[] | null
   feature_vector: Record<string, number> | null
@@ -81,7 +84,7 @@ interface DecisionRow {
   retrieval_grade: number | null
   synthesis_grade: number | null
   synthesis_gap: number | null
-  per_claim_ledger: ClaimEntry[] | null
+  per_claim_ledger: ClaimEntry[] | string | null
   fact_checker_version: string | null
   query_type: string | null
   query_class: string | null
@@ -115,16 +118,24 @@ export function QueryTraceDrilldown({ decisionId }: { decisionId: string }) {
 
   const SIGMA = 0.2
   const fv = row.feature_vector
-  const stratScores: Record<string, number> = row.strategy_scores ?? computeLinearScores(fv)
+  // Score priority: eval-augmented strategy_scores > routing scores > computed linear fallback
+  const stratScores: Record<string, number> =
+    row.strategy_scores ?? row.scores ?? computeLinearScores(fv)
   const scoreEntries = Object.entries(stratScores).sort(([, a], [, b]) => b - a)
   const argmax = scoreEntries[0]?.[0] ?? null
-  const maxScore = Math.max(...Object.values(stratScores), 0.01)
+  const maxScore = scoreEntries.length > 0 ? Math.max(...Object.values(stratScores), 0.01) : 0.01
   const routeGap = argmax ? (stratScores[argmax] - (scoreEntries[1]?.[1] ?? 0)) : 0
   const invokeAll = row.invoke_all
   const isUnion = (invokeAll && invokeAll.length > 1) || routeGap < 0.08
   const taken = takenFromLeafKey(row.leaf_key)
   const gapGrade = row.synthesis_gap ?? null
-  const ledger = row.per_claim_ledger ?? null
+  // Defensive parse: per_claim_ledger may come back as a JSON string from older DB rows
+  let ledger: ClaimEntry[] | null = null
+  try {
+    const raw = row.per_claim_ledger
+    if (Array.isArray(raw)) ledger = raw
+    else if (typeof raw === 'string' && raw.length > 0) ledger = JSON.parse(raw) as ClaimEntry[]
+  } catch { ledger = null }
   const validated = ledger?.filter((c) => c.status === 'validated').length ?? 0
   const totalClaims = ledger?.length ?? 0
   const s2 = (n: number) => n.toFixed(3)

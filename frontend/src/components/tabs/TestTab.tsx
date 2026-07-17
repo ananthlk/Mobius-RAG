@@ -9,13 +9,32 @@
  * History sidebar: seeded from /api/routing/decisions on mount (shows
  * recent chat queries), then extended locally by queries run in this tab.
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, Component, type ReactNode } from 'react'
 import { API_BASE } from '../../config'
 import { AgentPipelineTrace, type AgentResponse } from './AgentPipelineTrace'
 import { TwoGradeBar, PerClaimLedger, type ClaimEntry } from './EvalTab'
 import { QueryTraceDrilldown } from './QueryTraceDrilldown'
 import './EvalTab.css'   // reuse styles (run-header, kv, section, etc.)
 import './TestTab.css'
+
+class TraceErrorBoundary extends Component<
+  { children: ReactNode },
+  { hasError: boolean; msg: string }
+> {
+  constructor(props: { children: ReactNode }) {
+    super(props)
+    this.state = { hasError: false, msg: '' }
+  }
+  static getDerivedStateFromError(e: unknown) {
+    return { hasError: true, msg: String(e) }
+  }
+  render() {
+    if (this.state.hasError) {
+      return <div className="eval-error" style={{ fontSize: 12 }}>Trace render error: {this.state.msg}</div>
+    }
+    return this.props.children
+  }
+}
 
 const CALLER_MODES = [
   'chat.default',
@@ -148,6 +167,15 @@ export function TestTab() {
       }
       const data = (await resp.json()) as AgentResponse
       setResponse(data)
+      // Pull the routing decision ID so QueryTraceDrilldown can render for this fresh run.
+      // The routing decision is written at the start of the agent call, so it's in the DB now.
+      fetch(`${API_BASE}/api/routing/decisions?limit=1`)
+        .then((r) => r.ok ? r.json() : null)
+        .then((dec) => {
+          const id = dec?.decisions?.[0]?.id as string | undefined
+          if (id) setCurrentDecisionId(id)
+        })
+        .catch(() => { /* ignore — drilldown is best-effort for fresh runs */ })
       setHistory((h) => [
         {
           query: trimmed,
@@ -227,9 +255,7 @@ export function TestTab() {
           })
         }
       } catch (e) {
-        // Fall back to a fresh run if the stored fetch fails
-        void run(item.query)
-        return
+        setError(`Could not load stored decision: ${e}`)
       } finally {
         setLoading(false)
       }
@@ -363,8 +389,10 @@ export function TestTab() {
                   </div>
                 )}
               </div>
-              {isStoredResult && currentDecisionId ? (
-                <QueryTraceDrilldown decisionId={currentDecisionId} />
+              {currentDecisionId ? (
+                <TraceErrorBoundary>
+                  <QueryTraceDrilldown decisionId={currentDecisionId} />
+                </TraceErrorBoundary>
               ) : (
                 <>
                   {gradeData && (gradeData.retrieval_grade != null || gradeData.synthesis_grade != null) && (
@@ -377,9 +405,9 @@ export function TestTab() {
                   {gradeData?.per_claim_ledger && gradeData.per_claim_ledger.length > 0 && (
                     <PerClaimLedger claims={gradeData.per_claim_ledger} chunks={response.chunks ?? null} />
                   )}
-                  <AgentPipelineTrace response={response} />
                 </>
               )}
+              {!isStoredResult && <AgentPipelineTrace response={response} />}
             </>
           )}
         </div>
