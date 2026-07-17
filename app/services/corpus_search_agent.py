@@ -3077,11 +3077,13 @@ async def corpus_search_agent(
         })
         response = await _corpus_search_agent_impl(db, attempt_request, caller, caller_id)
         _persist_routing_decision_async(attempt_request, response)
+        _eval_run_id = request.eval_run_id or None
         _observe_async(
             attempt_request,
             response,
-            is_prod=True,
-            eval_run_id=request.eval_run_id or None,
+            # rqd_prod_not_eval constraint: is_prod and eval_run_id are mutually exclusive
+            is_prod=not bool(_eval_run_id),
+            eval_run_id=_eval_run_id,
         )
 
         # Fast-exit: if this attempt used the same query form we've already seen
