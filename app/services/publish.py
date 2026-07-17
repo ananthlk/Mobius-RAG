@@ -258,6 +258,7 @@ async def publish_document(
     for row in rows:
         db.add(row)
     await db.flush()
+    await db.execute(sa_text("UPDATE corpus_state SET corpus_version = corpus_version + 1"))
 
     # Step 5 of the Chroma → pgvector migration: populate the typed
     # ``embedding_vec vector(1536)`` column alongside the JSONB

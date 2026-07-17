@@ -758,6 +758,7 @@ async def _cascade_delete_document(db: AsyncSession, doc_uuid) -> None:
         "DELETE FROM documents WHERE id = :doc_id",
     ):
         await db.execute(_text(stmt), {"doc_id": doc_uuid})
+    await db.execute(_text("UPDATE corpus_state SET corpus_version = corpus_version + 1"))
 
 
 @app.post("/admin/cleanup_expired_documents")
@@ -4914,6 +4915,7 @@ async def delete_document(
         await db.execute(
             delete(RagPublishedEmbedding).where(RagPublishedEmbedding.document_id == doc_uuid)
         )
+        await db.execute(text("UPDATE corpus_state SET corpus_version = corpus_version + 1"))
         await db.execute(
             delete(PublishEvent).where(PublishEvent.document_id == doc_uuid)
         )
@@ -13235,6 +13237,7 @@ async def delete_document_cascade(
             text("DELETE FROM rag_published_embeddings WHERE document_id = :doc_id"),
             {"doc_id": doc_uuid}
         )
+        await db.execute(text("UPDATE corpus_state SET corpus_version = corpus_version + 1"))
         await db.execute(
             text("DELETE FROM publish_events WHERE document_id = :doc_id"),
             {"doc_id": doc_uuid}
