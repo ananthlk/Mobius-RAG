@@ -167,7 +167,7 @@ async def _load_lexicon_snapshot(db: AsyncSession) -> list[dict[str, Any]]:
             result = await db.execute(
                 text(
                     "SELECT kind, code, spec FROM policy_lexicon_entries "
-                    "WHERE active = true"
+                    "WHERE active = true ORDER BY kind, code"
                 )
             )
             rows = result.mappings().all()
