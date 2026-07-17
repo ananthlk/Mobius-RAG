@@ -20,6 +20,8 @@ frontend/.vite
 frontend/eslint.config.js
 frontend/tsconfig*.json
 frontend/vite.config.*
+# frontend/.gitignore has "dist" — override it so Cloud Build receives the built bundle
+!frontend/dist
 
 # Local databases / data
 *.sqlite
