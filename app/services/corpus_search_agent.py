@@ -2899,6 +2899,10 @@ class CorpusSearchAgentRequest(BaseModel):
     # Eval run linkage — set by the eval runner so _observe_async can write
     # eval_run_id to rag_query_decisions for grade_rollup aggregation.
     eval_run_id: str | None = None
+    # Gold facts from eval bank — passed by eval runner so _observe_async can
+    # compute retrieval_grade (coverage check) in addition to synthesis_grade.
+    # Never set by prod callers; NULL in prod means retrieval_grade stays NULL.
+    eval_must_facts: list[str] | None = None
 
 
 # ---------------------------------------------------------------------------

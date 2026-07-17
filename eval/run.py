@@ -153,6 +153,7 @@ async def call_agent(
     caller_mode: str | None,
     *,
     eval_run_id: str | None = None,
+    must_facts: list[str] | None = None,
     timeout: int = 120,
 ) -> dict[str, Any]:
     """POST to the agent endpoint, return response dict."""
@@ -161,6 +162,8 @@ async def call_agent(
         body["caller_mode"] = caller_mode
     if eval_run_id:
         body["eval_run_id"] = eval_run_id
+    if must_facts:
+        body["eval_must_facts"] = must_facts
 
     def _do() -> dict[str, Any]:
         req = urllib.request.Request(
@@ -361,7 +364,12 @@ async def run_eval(
 
         logger.info("[%s] %s", qid, query[:80])
         t_call = time.monotonic()
-        response = await call_agent(endpoint, query, caller_mode, eval_run_id=run_id)
+        must_facts = (expected.get("must_facts") or []) if expected else []
+        response = await call_agent(
+            endpoint, query, caller_mode,
+            eval_run_id=run_id,
+            must_facts=must_facts or None,
+        )
         call_ms = int((time.monotonic() - t_call) * 1000)
         if "error" in response:
             logger.warning("[%s] agent ERROR: %s", qid, response["error"])
