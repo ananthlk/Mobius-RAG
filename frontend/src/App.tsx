@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef, Component, type ReactNode } from 'react'
 import { API_BASE } from './config'
 import './App.css'
 import { Header } from './components/Header'
@@ -16,6 +16,29 @@ import { UploadTab } from './components/tabs/UploadTab'
 import { RepositoryTab } from './components/tabs/RepositoryTab'
 import { TestTab } from './components/tabs/TestTab'
 import { EvalTab } from './components/tabs/EvalTab'
+
+class TabErrorBoundary extends Component<
+  { children: ReactNode; tab: string },
+  { hasError: boolean; msg: string }
+> {
+  constructor(props: { children: ReactNode; tab: string }) {
+    super(props)
+    this.state = { hasError: false, msg: '' }
+  }
+  static getDerivedStateFromError(e: unknown) {
+    return { hasError: true, msg: String(e) }
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding: 24, color: 'var(--color-error, #dc2626)', fontSize: 13 }}>
+          <strong>{this.props.tab} tab error:</strong> {this.state.msg}
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
 
 interface UploadResponse {
   filename: string
@@ -1492,7 +1515,9 @@ function App() {
               />
             </TabPanel>
             <TabPanel id="test" isActive={shellTab === 'test'}>
-              <TestTab />
+              <TabErrorBoundary tab="Chat Queries">
+                <TestTab />
+              </TabErrorBoundary>
             </TabPanel>
             <TabPanel id="eval" isActive={shellTab === 'eval'}>
               <EvalTab />

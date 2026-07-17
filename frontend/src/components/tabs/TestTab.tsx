@@ -18,15 +18,20 @@ import './EvalTab.css'   // reuse styles (run-header, kv, section, etc.)
 import './TestTab.css'
 
 class TraceErrorBoundary extends Component<
-  { children: ReactNode },
+  { children: ReactNode; boundaryKey?: string },
   { hasError: boolean; msg: string }
 > {
-  constructor(props: { children: ReactNode }) {
+  constructor(props: { children: ReactNode; boundaryKey?: string }) {
     super(props)
     this.state = { hasError: false, msg: '' }
   }
   static getDerivedStateFromError(e: unknown) {
     return { hasError: true, msg: String(e) }
+  }
+  componentDidUpdate(prev: { boundaryKey?: string }) {
+    if (prev.boundaryKey !== this.props.boundaryKey && this.state.hasError) {
+      this.setState({ hasError: false, msg: '' })
+    }
   }
   render() {
     if (this.state.hasError) {
@@ -373,42 +378,42 @@ export function TestTab() {
             <div className="eval-empty">Running through the pipeline…</div>
           )}
           {response && (
-            <>
-              <div className="trace-run-header">
-                <RunSummaryHeader response={response} />
-                {isStoredResult && (
-                  <div className="stored-result-bar">
-                    <span className="badge mini dim">Stored result — routing &amp; scores only, no chunks</span>
-                    <button
-                      className="run-btn small"
-                      onClick={() => void run()}
-                      disabled={loading || !query.trim()}
-                    >
-                      ▶ Re-run live
-                    </button>
-                  </div>
-                )}
-              </div>
-              {currentDecisionId ? (
-                <TraceErrorBoundary>
+            <TraceErrorBoundary boundaryKey={query + String(currentDecisionId)}>
+              <>
+                <div className="trace-run-header">
+                  <RunSummaryHeader response={response} />
+                  {isStoredResult && (
+                    <div className="stored-result-bar">
+                      <span className="badge mini dim">Stored result — routing &amp; scores only, no chunks</span>
+                      <button
+                        className="run-btn small"
+                        onClick={() => void run()}
+                        disabled={loading || !query.trim()}
+                      >
+                        ▶ Re-run live
+                      </button>
+                    </div>
+                  )}
+                </div>
+                {currentDecisionId ? (
                   <QueryTraceDrilldown decisionId={currentDecisionId} />
-                </TraceErrorBoundary>
-              ) : (
-                <>
-                  {gradeData && (gradeData.retrieval_grade != null || gradeData.synthesis_grade != null) && (
-                    <TwoGradeBar
-                      retrieval={gradeData.retrieval_grade}
-                      synthesis={gradeData.synthesis_grade}
-                      gap={gradeData.synthesis_gap}
-                    />
-                  )}
-                  {gradeData?.per_claim_ledger && gradeData.per_claim_ledger.length > 0 && (
-                    <PerClaimLedger claims={gradeData.per_claim_ledger} chunks={response.chunks ?? null} />
-                  )}
-                </>
-              )}
-              {!isStoredResult && <AgentPipelineTrace response={response} />}
-            </>
+                ) : (
+                  <>
+                    {gradeData && (gradeData.retrieval_grade != null || gradeData.synthesis_grade != null) && (
+                      <TwoGradeBar
+                        retrieval={gradeData.retrieval_grade}
+                        synthesis={gradeData.synthesis_grade}
+                        gap={gradeData.synthesis_gap}
+                      />
+                    )}
+                    {gradeData?.per_claim_ledger && gradeData.per_claim_ledger.length > 0 && (
+                      <PerClaimLedger claims={gradeData.per_claim_ledger} chunks={response.chunks ?? null} />
+                    )}
+                  </>
+                )}
+                {!isStoredResult && <AgentPipelineTrace response={response} />}
+              </>
+            </TraceErrorBoundary>
           )}
         </div>
       </div>
