@@ -3429,6 +3429,10 @@ def _observe_async(
     strategy_used = response.strategy_used or "?"
     invoke_all = response.invoke_all  # None for single-arm
     chunks = response.chunks or []
+    # check_facts expects dicts (uses .get()); CorpusChunk Pydantic objects need
+    # conversion. Keep original Pydantic objects in `chunks` for .rerank_score
+    # access in the INSERT; pass serialized dicts only to check_facts.
+    chunks_for_grader = [c.model_dump() if hasattr(c, "model_dump") else c for c in chunks]
     answer = response.llm_answer
     agent_id = (response.telemetry or {}).get("agent_id") or ""
     priors_version = (response.routing or {}).get("priors_version") or ""
@@ -3445,7 +3449,7 @@ def _observe_async(
                 r_result = await check_facts(
                     query=query,
                     must_facts=must_facts,
-                    chunks=chunks,
+                    chunks=chunks_for_grader,
                     answer=None,
                     correlation_id=agent_id,
                 )
@@ -3459,7 +3463,7 @@ def _observe_async(
                 s_result = await check_facts(
                     query=query,
                     must_facts=must_facts or [],
-                    chunks=chunks,
+                    chunks=chunks_for_grader,
                     answer=answer,
                     correlation_id=agent_id,
                 )
