@@ -13706,6 +13706,201 @@ async def retag_document(
     return {"status": "queued", **job_info}
 
 
+# ── Org-docs ingest ──────────────────────────────────────────────────
+# Path B clone that writes chunks + embeddings into the per-org namespace
+# within the mobius_org_docs DB instead of the global rag_published_embeddings.
+# Namespace is provisioned by the db-agent (POST /doc-store/provision).
+# ORG_DOCS_DATABASE_URL must be set for this endpoint to activate.
+
+@app.post("/org-docs/ingest")
+async def org_docs_ingest(
+    file: UploadFile = File(...),
+    namespace_ref: str = Form(...),
+    uploaded_by: str = Form(...),
+    visibility: str = Form("org"),
+    display_name: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+):
+    """Ingest a document into a per-org namespace (org_documents + org_chunks).
+
+    Runs: extract text → chunk → embed → INSERT into {namespace_ref}.org_documents
+    and {namespace_ref}.org_chunks (schema provisioned by db-agent).
+
+    Returns: {document_id, chunks_written, namespace_ref, status}
+    """
+    from app.database import OrgDocsSessionLocal
+    if OrgDocsSessionLocal is None:
+        raise HTTPException(
+            status_code=503,
+            detail="ORG_DOCS_DATABASE_URL not configured — org-docs ingest unavailable.",
+        )
+
+    import hashlib as _hl
+    if visibility not in ("org", "member"):
+        raise HTTPException(status_code=400, detail="visibility must be 'org' or 'member'")
+    if not namespace_ref or not namespace_ref.startswith("org_"):
+        raise HTTPException(status_code=400, detail="namespace_ref must start with 'org_' (use /doc-store/provision to get one)")
+
+    # ── Read + hash ──────────────────────────────────────────────────
+    buf = bytearray()
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        buf.extend(chunk)
+        if len(buf) > 100 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="File exceeds 100 MB limit")
+    content = bytes(buf)
+    content_hash = _hl.sha256(content).hexdigest()
+    filename = file.filename or "upload"
+    _display = display_name.strip() or filename
+
+    # ── Extract text ──────────────────────────────────────────────────
+    from app.services.extract_text import extract_text_from_bytes, split_into_paragraphs
+    ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+    try:
+        doc_text = extract_text_from_bytes(content, ext)
+    except Exception as _e:
+        logger.warning("[org-docs] text extraction failed for %s: %s", filename, _e)
+        doc_text = ""
+
+    if not doc_text.strip():
+        raise HTTPException(status_code=422, detail="Could not extract text from file — check format or enable OCR.")
+
+    # ── Chunk (paragraph split — no hierarchical chunking needed) ────
+    paragraphs = split_into_paragraphs(doc_text)
+    if not paragraphs:
+        raise HTTPException(status_code=422, detail="No paragraphs produced from extracted text.")
+
+    # ── Embed ─────────────────────────────────────────────────────────
+    from app.services.embedding_provider import get_embedding_provider
+    import asyncio as _asyncio
+    texts = [p["text"] for p in paragraphs]
+    _provider = get_embedding_provider()
+    try:
+        embeddings = await _asyncio.to_thread(_provider.embed, texts)
+    except Exception as _e:
+        logger.error("[org-docs] embedding failed for %s: %s", filename, _e)
+        raise HTTPException(status_code=500, detail=f"Embedding failed: {str(_e)[:200]}")
+
+    # ── Write to org namespace ────────────────────────────────────────
+    import uuid as _uuid_mod
+    ns = namespace_ref  # e.g. "org_aetnafl"
+
+    async with OrgDocsSessionLocal() as org_db:
+        # Dedup: check content_hash
+        _dup = await org_db.execute(
+            text(f'SELECT id FROM "{ns}".org_documents WHERE content_hash = :ch LIMIT 1'),
+            {"ch": content_hash},
+        )
+        _dup_row = _dup.scalar_one_or_none()
+        if _dup_row:
+            return {
+                "document_id": str(_dup_row),
+                "chunks_written": 0,
+                "namespace_ref": namespace_ref,
+                "status": "duplicate",
+                "message": "File already ingested in this org namespace.",
+            }
+
+        # Insert org_documents row
+        _doc_id = _uuid_mod.uuid4()
+        await org_db.execute(
+            text(
+                f'INSERT INTO "{ns}".org_documents '
+                f'(id, filename, display_name, uploaded_by, visibility, status, content_hash, created_at, updated_at) '
+                f'VALUES (:id, :fn, :dn, :ub, :vis, :st, :ch, now(), now())'
+            ),
+            {
+                "id": str(_doc_id), "fn": filename, "dn": _display,
+                "ub": uploaded_by, "vis": visibility, "st": "ready", "ch": content_hash,
+            },
+        )
+
+        # Insert org_chunks rows
+        rows_written = 0
+        for i, (para, emb) in enumerate(zip(paragraphs, embeddings)):
+            if emb is None:
+                continue
+            _chunk_sha = _hl.sha256(para["text"].encode("utf-8")).hexdigest()
+            await org_db.execute(
+                text(
+                    f'INSERT INTO "{ns}".org_chunks '
+                    f'(document_id, text, embedding, page_number, paragraph_index, section_path, content_sha, created_at) '
+                    f'VALUES (:did, :txt, :emb, :pg, :pi, :sp, :sha, now()) '
+                    f'ON CONFLICT (content_sha) WHERE content_sha <> \'\' DO NOTHING'
+                ),
+                {
+                    "did": str(_doc_id),
+                    "txt": para["text"],
+                    "emb": f"[{','.join(str(v) for v in emb)}]",
+                    "pg": para.get("page_number", 0),
+                    "pi": para.get("paragraph_index", i),
+                    "sp": para.get("section_path", ""),
+                    "sha": _chunk_sha,
+                },
+            )
+            rows_written += 1
+
+        await org_db.commit()
+        logger.info("[org-docs] ingested %s → ns=%s doc=%s chunks=%d", filename, ns, _doc_id, rows_written)
+
+    return {
+        "document_id": str(_doc_id),
+        "chunks_written": rows_written,
+        "namespace_ref": namespace_ref,
+        "status": "ready",
+    }
+
+
+@app.get("/org-docs/search")
+async def org_docs_search(
+    q: str,
+    namespace_ref: str,
+    k: int = 10,
+    visibility: str = "org",
+):
+    """Vector search within a single org namespace.
+
+    Returns top-k chunks by cosine similarity. Complements the global
+    corpus search — callers merge and rerank the two result sets.
+    """
+    from app.database import OrgDocsSessionLocal
+    if OrgDocsSessionLocal is None:
+        raise HTTPException(status_code=503, detail="ORG_DOCS_DATABASE_URL not configured.")
+    if not namespace_ref.startswith("org_"):
+        raise HTTPException(status_code=400, detail="Invalid namespace_ref.")
+
+    from app.services.embedding_provider import get_embedding_provider
+    import asyncio as _asyncio
+    _srch_provider = get_embedding_provider()
+    try:
+        [q_emb] = await _asyncio.to_thread(_srch_provider.embed, [q])
+    except Exception as _e:
+        raise HTTPException(status_code=500, detail=f"Query embedding failed: {str(_e)[:200]}")
+
+    ns = namespace_ref
+    emb_str = f"[{','.join(str(v) for v in q_emb)}]"
+
+    async with OrgDocsSessionLocal() as org_db:
+        rows = await org_db.execute(
+            text(
+                f'SELECT c.id, c.text, c.page_number, c.section_path, '
+                f'       d.filename, d.display_name, d.visibility, '
+                f'       1 - (c.embedding <=> :emb::vector) AS score '
+                f'FROM "{ns}".org_chunks c '
+                f'JOIN "{ns}".org_documents d ON d.id = c.document_id '
+                f'WHERE d.visibility = :vis AND d.status = \'ready\' '
+                f'ORDER BY c.embedding <=> :emb::vector '
+                f'LIMIT :k'
+            ),
+            {"emb": emb_str, "vis": visibility, "k": k},
+        )
+        results = [dict(r._mapping) for r in rows.fetchall()]
+
+    return {"results": results, "namespace_ref": namespace_ref, "query": q}
+
+
 # Serve frontend static files (for Cloud Run / single-container deployment)
 # Must be last so API routes take precedence
 _frontend_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"

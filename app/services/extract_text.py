@@ -1,3 +1,4 @@
+import re
 import fitz  # PyMuPDF
 from google.cloud import storage
 from bs4 import BeautifulSoup
@@ -18,6 +19,62 @@ def html_to_plain_text(html: str) -> str:
     lines = (line.strip() for line in text.splitlines())
     chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
     return "\n".join(chunk for chunk in chunks if chunk)
+
+
+def extract_text_from_bytes(content: bytes, ext: str) -> str:
+    """Extract plain text from raw file bytes. Supports PDF, HTML, TXT.
+
+    Returns a single string (pages joined with double-newline for PDFs).
+    Raises ValueError if the format is unsupported or extraction fails.
+    """
+    ext = (ext or "").lower().strip(".")
+    if ext == "pdf":
+        doc = fitz.open(stream=content, filetype="pdf")
+        try:
+            parts = []
+            for page in doc:
+                t = page.get_text()
+                if t.strip():
+                    parts.append(t)
+            return "\n\n".join(parts)
+        finally:
+            doc.close()
+    elif ext in ("html", "htm"):
+        return html_to_plain_text(content.decode("utf-8", errors="replace"))
+    elif ext in ("txt", "md", "csv"):
+        return content.decode("utf-8", errors="replace")
+    else:
+        # Attempt PDF heuristic, then UTF-8 decode
+        try:
+            doc = fitz.open(stream=content, filetype="pdf")
+            try:
+                parts = [page.get_text() for page in doc if page.get_text().strip()]
+                return "\n\n".join(parts)
+            finally:
+                doc.close()
+        except Exception:
+            return content.decode("utf-8", errors="replace")
+
+
+def split_into_paragraphs(text: str) -> list[dict]:
+    """Split text into paragraph dicts (text, paragraph_index, page_number, section_path).
+
+    Splits on double-newline boundaries; trims noise.  Used by org-doc ingest
+    where full Path-B hierarchical chunking is not needed.
+    """
+    raw = re.split(r"\n\s*\n+", text.strip())
+    paras = []
+    for i, p in enumerate(raw):
+        p = p.strip()
+        if len(p) < 20:
+            continue
+        paras.append({
+            "text": p,
+            "paragraph_index": i,
+            "page_number": 0,
+            "section_path": "",
+        })
+    return paras
 
 
 async def extract_text_from_gcs(gcs_path: str) -> list[dict]:

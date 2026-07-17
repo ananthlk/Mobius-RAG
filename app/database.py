@@ -73,3 +73,34 @@ Base = declarative_base()
 async def get_db():
     async with AsyncSessionLocal() as session:
         yield session
+
+
+# ── Org-docs DB (mobius_org_docs) ────────────────────────────────────
+# Separate engine for the per-org namespace DB. None when ORG_DOCS_DATABASE_URL
+# is unset — callers check before using (endpoint returns 503 if None).
+from app.config import ORG_DOCS_DATABASE_URL as _ORG_DOCS_URL
+
+OrgDocsSessionLocal: async_sessionmaker | None = None
+
+if _ORG_DOCS_URL:
+    _org_connect_args: dict = {}
+    if "asyncpg" in _ORG_DOCS_URL:
+        _org_connect_args = {
+            "timeout": 15,
+            "server_settings": {
+                "statement_timeout": str(DB_STATEMENT_TIMEOUT_MS),
+                "idle_in_transaction_session_timeout": str(DB_IDLE_IN_TXN_TIMEOUT_MS),
+                "application_name": "mobius-rag-org-docs",
+                "hnsw.ef_search": "100",
+            },
+        }
+    _org_engine = create_async_engine(
+        _ORG_DOCS_URL,
+        echo=False,
+        connect_args=_org_connect_args,
+        pool_size=3,
+        max_overflow=5,
+        pool_pre_ping=True,
+        pool_recycle=300,
+    )
+    OrgDocsSessionLocal = async_sessionmaker(_org_engine, class_=AsyncSession, expire_on_commit=False)

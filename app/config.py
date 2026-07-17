@@ -55,6 +55,15 @@ if not DATABASE_URL:
         "See docs/MIGRATE_LOCAL_TO_CLOUD.md"
     )
 
+# ── Org-docs database (mobius_org_docs) ──────────────────────────────
+# Optional: if unset, POST /org-docs/ingest returns 503 so the endpoint
+# stays dark until the env is wired. Same Cloud SQL instance, different
+# database — pointed at mob-org-docs-db or mobius_org_docs DB.
+ORG_DOCS_DATABASE_URL: str | None = (
+    os.getenv("ORG_DOCS_DATABASE_URL")
+    or os.getenv("CHAT_ORG_DOCS_DATABASE_URL")
+)
+
 # ── Database pool + server-side timeouts ─────────────────────────────
 # Pool sizing: the old pool_size=1/max_overflow=2 was so tight that a
 # running chunking worker starved the API of fresh connections, causing
