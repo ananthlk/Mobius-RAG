@@ -542,23 +542,25 @@ export function AgentPipelineTrace({ response, query, expected, judge }: AgentPi
                           </tr>
                         )
                       }
+                      const f2 = (v: number | null | undefined) => v == null ? '—' : v.toFixed(2)
+                      const f3 = (v: number | null | undefined) => v == null ? '—' : v.toFixed(3)
                       return (
                         <tr key={s} className={`breakdown-row ${winner ? 'breakdown-winner' : ''}`}>
                           <td className="mono">{winner && '★ '}{s}</td>
-                          <td className="mono dim-text">{br.accuracy?.prior.toFixed(2)} × {br.accuracy?.weight.toFixed(2)}</td>
-                          <td className="mono">{br.accuracy?.contrib.toFixed(3)}</td>
+                          <td className="mono dim-text">{f2(br.accuracy?.prior)} × {f2(br.accuracy?.weight)}</td>
+                          <td className="mono">{f3(br.accuracy?.contrib)}</td>
                           <td className="mono dim-text">
-                            {br.recall?.est.toFixed(2)} × {br.recall?.weight.toFixed(2)}
+                            {f2(br.recall?.est)} × {f2(br.recall?.weight)}
                             {br.recall && br.recall.est !== br.recall.static && (
-                              <span className="dim-text"> (static {br.recall.static.toFixed(2)})</span>
+                              <span className="dim-text"> (static {f2(br.recall.static)})</span>
                             )}
                           </td>
-                          <td className="mono">{br.recall?.contrib.toFixed(3)}</td>
-                          <td className="mono dim-text">{br.speed?.prior.toFixed(2)} × {br.speed?.weight.toFixed(2)}</td>
-                          <td className="mono">{br.speed?.contrib.toFixed(3)}</td>
-                          <td className="mono dim-text">{br.shape?.match.toFixed(2)} × {br.shape?.weight.toFixed(2)}</td>
-                          <td className="mono">{br.shape?.contrib.toFixed(3)}</td>
-                          <td className="mono"><strong>{br.total.toFixed(3)}</strong></td>
+                          <td className="mono">{f3(br.recall?.contrib)}</td>
+                          <td className="mono dim-text">{f2(br.speed?.prior)} × {f2(br.speed?.weight)}</td>
+                          <td className="mono">{f3(br.speed?.contrib)}</td>
+                          <td className="mono dim-text">{f2(br.shape?.match)} × {f2(br.shape?.weight)}</td>
+                          <td className="mono">{f3(br.shape?.contrib)}</td>
+                          <td className="mono"><strong>{f3(br.total)}</strong></td>
                         </tr>
                       )
                     })}
