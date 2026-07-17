@@ -13853,6 +13853,60 @@ async def org_docs_ingest(
     }
 
 
+@app.get("/admin/org-docs/list")
+async def org_docs_list(
+    namespace_ref: str,
+    visibility: str | None = None,
+):
+    """List documents in an org namespace with chunk counts.
+
+    Returns rows from {namespace_ref}.org_documents joined with a chunk
+    count from {namespace_ref}.org_chunks.  Optionally filter by visibility.
+    """
+    from app.database import OrgDocsSessionLocal
+    if OrgDocsSessionLocal is None:
+        raise HTTPException(status_code=503, detail="ORG_DOCS_DATABASE_URL not configured.")
+    if not namespace_ref.startswith("org_"):
+        raise HTTPException(status_code=400, detail="Invalid namespace_ref.")
+
+    ns = namespace_ref
+    vis_clause = "AND d.visibility = :vis" if visibility else ""
+    params: dict = {"ns_placeholder": None}  # unused; f-string builds ns literal
+    if visibility:
+        params["vis"] = visibility
+
+    async with OrgDocsSessionLocal() as org_db:
+        rows = await org_db.execute(
+            text(
+                f'SELECT d.id, d.filename, d.display_name, d.uploaded_by, '
+                f'       d.visibility, d.status, d.created_at, '
+                f'       COUNT(c.id)::int AS chunks_count '
+                f'FROM "{ns}".org_documents d '
+                f'LEFT JOIN "{ns}".org_chunks c ON c.document_id = d.id '
+                f'WHERE 1=1 {vis_clause} '
+                f'GROUP BY d.id, d.filename, d.display_name, d.uploaded_by, '
+                f'         d.visibility, d.status, d.created_at '
+                f'ORDER BY d.created_at DESC'
+            ),
+            {k: v for k, v in params.items() if k != "ns_placeholder"},
+        )
+        documents = [
+            {
+                "document_id": str(r.id),
+                "filename": r.filename,
+                "display_name": r.display_name,
+                "uploaded_by": r.uploaded_by,
+                "visibility": r.visibility,
+                "status": r.status,
+                "chunks_count": r.chunks_count,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows.fetchall()
+        ]
+
+    return {"documents": documents, "namespace_ref": namespace_ref, "count": len(documents)}
+
+
 @app.get("/admin/org-docs/search")
 async def org_docs_search(
     q: str,
