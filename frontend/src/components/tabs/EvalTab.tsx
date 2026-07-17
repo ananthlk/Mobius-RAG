@@ -165,8 +165,6 @@ export function EvalTab() {
   const [runsCollapsed, setRunsCollapsed] = useState(false)
   const [triggering, setTriggering] = useState(false)
 
-  // Observability dashboard (timeline / A-B compare / drift) — secondary strip, collapsed by default.
-  const [dashOpen, setDashOpen] = useState(false)
 
   // Initial: load runs.
   useEffect(() => {
@@ -440,13 +438,6 @@ export function EvalTab() {
         >
           {bankOpen ? '× Close Bank Editor' : '✎ Edit Bank'}
         </button>
-        <button
-          className={`eval-toolbar-btn ${dashOpen ? 'active' : ''}`}
-          onClick={() => setDashOpen((v) => !v)}
-          title="Toggle the eval observability dashboard (timeline / A-B compare / drift)"
-        >
-          {dashOpen ? '× Hide Dashboard' : '📈 Dashboard'}
-        </button>
         {bankOpen && bankDirty && (
           <button
             className="eval-toolbar-btn save"
@@ -516,10 +507,9 @@ export function EvalTab() {
         {!runsCollapsed && runs.length === 0 && <div className="eval-empty">No runs yet.</div>}
       </div>
 
-      {/* ── Main content (vertical: header → stats → funnel → questions) ── */}
+      {/* ── Main content (metrics → two-grade hero → per-query drill → [collapsed] routing observability) ── */}
       <div className="eval-main">
-        {dashOpen && <ObservabilityDashboard onPick={setSelectedRunId} />}
-        {!runDetail && !loading && !dashOpen && <div className="eval-empty">Pick a run.</div>}
+        {!runDetail && !loading && <div className="eval-empty">Pick a run.</div>}
         {loading && <div className="eval-empty">Loading…</div>}
         {runDetail && (
           <>
@@ -532,12 +522,6 @@ export function EvalTab() {
                 onFetchDetail={fetchDetailForCockpit}
               />
             )}
-            <PRCurvePanel runId={runDetail.run.id} />
-            <PipelineFunnel
-              results={runDetail.results}
-              filter={filter}
-              onFilter={setFilter}
-            />
             <QuestionList
               results={filteredResults}
               expandedResultId={expandedResultId}
@@ -548,6 +532,27 @@ export function EvalTab() {
               clearFilter={() => setFilter(null)}
               totalResults={runDetail.results.length}
             />
+            <details style={{ marginTop: 12, border: '1px solid var(--border, #e5e7eb)', borderRadius: 6 }}>
+              <summary style={{
+                cursor: 'pointer', padding: '8px 12px', fontWeight: 600, fontSize: 13,
+                userSelect: 'none', listStyle: 'none', display: 'flex', alignItems: 'center', gap: 6,
+              }}>
+                <span style={{ fontSize: 10, opacity: 0.5 }}>▶</span>
+                Routing observability
+                <span style={{ fontWeight: 400, fontSize: 11, opacity: 0.45, marginLeft: 4 }}>
+                  P-R scatter · pipeline funnel · timeline · A/B · drift
+                </span>
+              </summary>
+              <div style={{ padding: '10px 12px 12px' }}>
+                <PRCurvePanel runId={runDetail.run.id} />
+                <PipelineFunnel
+                  results={runDetail.results}
+                  filter={filter}
+                  onFilter={setFilter}
+                />
+                <ObservabilityDashboard onPick={setSelectedRunId} />
+              </div>
+            </details>
           </>
         )}
       </div>
