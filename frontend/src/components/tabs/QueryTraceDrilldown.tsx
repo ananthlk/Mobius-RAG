@@ -138,7 +138,7 @@ export function QueryTraceDrilldown({ decisionId }: { decisionId: string }) {
   } catch { ledger = null }
   const validated = ledger?.filter((c) => c.status === 'validated').length ?? 0
   const totalClaims = ledger?.length ?? 0
-  const s2 = (n: number) => n.toFixed(3)
+  const s2 = (n: number | null | undefined) => (n == null ? '—' : n.toFixed(3))
 
   // Which stages are "lit" based on available data
   const activeStages = new Set<string>([
@@ -262,7 +262,7 @@ export function QueryTraceDrilldown({ decisionId }: { decisionId: string }) {
                     background: v > 0.5 ? 'rgba(109,40,217,0.07)' : 'transparent',
                     opacity: v === 0 ? 0.35 : 1, fontVariantNumeric: 'tabular-nums',
                   }}>
-                    {k} <strong>{v.toFixed(2)}</strong>
+                    {k} <strong>{v != null ? v.toFixed(2) : '—'}</strong>
                   </span>
                 ))}
               </div>

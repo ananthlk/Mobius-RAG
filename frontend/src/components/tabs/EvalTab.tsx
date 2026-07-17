@@ -1311,11 +1311,11 @@ export function TwoGradeBar({
   retrieval, synthesis, gap,
 }: { retrieval: number | null; synthesis: number | null; gap: number | null }) {
   const sigma = 0.2
-  const fmt2 = (v: number) => v.toFixed(3)
-  const gapColor = gap === null || Math.abs(gap) < sigma
+  const fmt2 = (v: number | null | undefined) => (v == null ? '—' : v.toFixed(3))
+  const gapColor = gap == null || Math.abs(gap) < sigma
     ? 'var(--text-muted, #888)'
     : gap < 0 ? '#d97706' : '#dc2626'
-  const gapLabel = gap === null
+  const gapLabel = gap == null
     ? 'n/a'
     : gap < 0
     ? 'synthesizer bottleneck'
@@ -1328,14 +1328,14 @@ export function TwoGradeBar({
     }}>
       <div>
         <span style={{ opacity: 0.6, marginRight: 4 }}>retrieval</span>
-        <strong>{retrieval !== null ? fmt2(retrieval) : '—'}</strong>
+        <strong>{fmt2(retrieval)}</strong>
       </div>
       <div style={{ opacity: 0.4 }}>→</div>
       <div>
         <span style={{ opacity: 0.6, marginRight: 4 }}>synthesis</span>
-        <strong>{synthesis !== null ? fmt2(synthesis) : '—'}</strong>
+        <strong>{fmt2(synthesis)}</strong>
       </div>
-      {gap !== null && (
+      {gap != null && (
         <>
           <div style={{ opacity: 0.4 }}>=</div>
           <div>
