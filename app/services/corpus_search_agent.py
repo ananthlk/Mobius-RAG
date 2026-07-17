@@ -2896,6 +2896,9 @@ class CorpusSearchAgentRequest(BaseModel):
     # Never set by external callers; only the outer corpus_search_agent loop
     # sets this on the targeted escalation retry.
     inherited_authority_escalation: bool = False
+    # Eval run linkage — set by the eval runner so _observe_async can write
+    # eval_run_id to rag_query_decisions for grade_rollup aggregation.
+    eval_run_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -3074,7 +3077,12 @@ async def corpus_search_agent(
         })
         response = await _corpus_search_agent_impl(db, attempt_request, caller, caller_id)
         _persist_routing_decision_async(attempt_request, response)
-        _observe_async(attempt_request, response, is_prod=True)
+        _observe_async(
+            attempt_request,
+            response,
+            is_prod=True,
+            eval_run_id=request.eval_run_id or None,
+        )
 
         # Fast-exit: if this attempt used the same query form we've already seen
         # with a different strategy, the corpus returned identical chunks.
