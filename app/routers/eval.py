@@ -926,12 +926,18 @@ async def _run_eval_task(rel_bank: str, notes: str, endpoint: str):
         if str(repo) not in sys.path:
             sys.path.insert(0, str(repo))
         from eval.run import run_eval
+        import os as _os
+        if _os.environ.get("ROUTER_VERSION") == "v2":
+            from app.services.corpus_search_router_v2 import PRIORS_VERSION as _PRIORS_VERSION
+        else:
+            from app.services.corpus_search_router import PRIORS_VERSION as _PRIORS_VERSION
 
         async with _RUN_LOCK:
             run_id = await run_eval(
                 bank_path=repo / rel_bank,
                 endpoint=endpoint,
                 notes=notes,
+                priors_version=_PRIORS_VERSION,
             )
             _LATEST_RUN_ID["id"] = run_id
             logger.info("[eval-trigger] run finished: %s", run_id)
