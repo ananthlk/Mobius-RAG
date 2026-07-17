@@ -3798,8 +3798,21 @@ def integrity_report() -> dict:
                     "ORDER BY updated_at DESC NULLS LAST LIMIT 1")
         r = cur.fetchone()
         cur_rev = int(r[0]) if r else 0
-        stale_tags = one("SELECT count(*) FROM document_tags "
-                         "WHERE lexicon_revision IS DISTINCT FROM %s", (cur_rev,))
+        # Stale = ACTIONABLE staleness only: docs the retag can actually process.
+        # Excluded (they'd otherwise count as stale forever after any revision
+        # bump, permanently failing the gate and blocking push — bit us on the
+        # first two scheduled nightly runs, 2026-07-16/17):
+        #   * ephemeral docs (expires_at set) — retag deliberately skips them
+        #   * needs_ocr quarantined docs — no text layer, nothing to retag
+        #   * line-less docs — the line-based retag has nothing to recompute
+        stale_tags = one(
+            "SELECT count(*) FROM document_tags dt "
+            "JOIN documents d ON d.id = dt.document_id "
+            "WHERE dt.lexicon_revision IS DISTINCT FROM %s "
+            "AND d.expires_at IS NULL "
+            f"AND d.{_NQ} "
+            "AND EXISTS (SELECT 1 FROM policy_lines pl WHERE pl.document_id = dt.document_id)",
+            (cur_rev,))
         # The other integrity dimensions (mirror /pipeline_health).
         sitemap_orphans = one(
             "SELECT count(*) FROM documents d WHERE NOT EXISTS "

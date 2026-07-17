@@ -449,7 +449,19 @@ def _run_nightly(opts: dict) -> None:
 
         # 5 — integrity gate
         _step("gate", "running")
-        rep = _rag_get("/admin/integrity/report", timeout=60)
+        # The report aggregates ~a dozen corpus-wide counts and can exceed 60s
+        # right after a heavy embed step (cold caches / autovacuum) — one
+        # timeout here killed the whole 2026-07-17 scheduled run. Retry with
+        # growing timeouts; only fail the run if the gate is truly unreadable.
+        rep = None
+        for _attempt, _to in enumerate((90, 150, 240), start=1):
+            rep = _try(lambda _t=_to: _rag_get("/admin/integrity/report", timeout=_t))
+            if rep is not None:
+                break
+            _log("gate", f"report attempt {_attempt} failed; retrying")
+            time.sleep(15)
+        if rep is None:
+            raise RuntimeError("integrity report unreachable after 3 attempts")
         gaps = rep.get("gaps", {})
         pub = int(rep.get("published") or 0)
         tot = int(rep.get("documents_total") or 1)
