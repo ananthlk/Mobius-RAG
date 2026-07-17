@@ -3863,6 +3863,13 @@ async def _corpus_search_agent_impl(
         # "why this strategy". One telemetry row feeds cockpit + card + trace
         # + contextual bandit; without this the last two are blind.
         "feature_vector": getattr(decision, "feature_vector", {}),
+        # Classify flags — derived in classify_query but not in the 7-feature
+        # linear vector; surfaced here so the diagnostics card can show them
+        # alongside the routing decision without re-deriving from tag_matches.
+        "classify_flags": {
+            "is_exploratory": profile_features.get("is_exploratory", False),
+            "has_service_specificity": profile_features.get("has_service_specificity", False),
+        },
     }
 
     # ── Multi-invoke (router v2 only) ────────────────────────────────────
@@ -5245,6 +5252,10 @@ async def _corpus_search_agent_impl(
             "agent_id": agent_id,
             "total_ms": int(total_elapsed_ms),
             "n_strategies": len(outcomes),
+            # Synthesis telemetry — present when synthesis ran, absent otherwise.
+            # used_passages: indices into the passages offered to the LLM that
+            # it actually cited (cross-links to per_claim_ledger chunk_ids).
+            **(synth_tel if final_llm_answer else {}),
         },
         inherited_doc_ids_boosted=_inherited_doc_ids_boosted,
     )
