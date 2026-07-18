@@ -13938,7 +13938,7 @@ async def org_docs_search(
     # misparssing `:emb::vector` (the `::` PostgreSQL cast after a named param
     # confuses the bind-parameter substitution → "syntax error at or near ':'").
     # emb_str is machine-generated floats, not user input, so inlining is safe.
-    emb_literal = f"'{','.join(str(v) for v in q_emb)}'::vector"
+    emb_literal = f"'[{','.join(str(v) for v in q_emb)}]'::vector"
 
     async with OrgDocsSessionLocal() as org_db:
         rows = await org_db.execute(
