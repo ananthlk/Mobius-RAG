@@ -202,6 +202,15 @@ Bypassing costs the expensive path the store exists to avoid → verification is
 
 ### 8.5 Schema/API additions
 - `fact_query` request: `bypass_fact_store: bool`, `verify_freshness: bool`.
-- `verified_via` gains: `explicit_verify | scheduled | bandit_verify`.
+- `verified_via` gains: `explicit_verify | scheduled | bandit_verify` and (ratified 2026-07-18) **`browser`** — live page-fetch verification, a **direct-accept tier** for *operational* facts (portals/URLs/phones/EDI) where the live payer page — not the corpus — is the source of truth. Direct-accept requires an attached `source_url` + the value present on that page (evidence, not assertion). Corpus-grounding is the wrong certifier for operational data, so browser-accept is NOT forced through my two-grade; I retain spot-audit rights.
 - New event `fact_drift { fact_id, stored_value, live_answer, detected_at, trigger }`.
-- `fact_query_decision` gains: `verify_outcome ∈ {confirm, drift, none}`, `drift_detected bool`, `verify_trigger`.
+- `fact_query_decision` gains: `verify_outcome ∈ {confirm, drift, none, `**`pending_compare`**`}`, `drift_detected bool`, `verify_trigger`. (ratified 2026-07-18) **`pending_compare`** = the async window while `fact_compare` runs; kept distinct from `none` so "never verified" ≠ "verifying now".
+
+### 8.6 Negative-verdict policy (ratified 2026-07-18, payor's refinement)
+The comparator returns **three** states, not two — read `agree` + `contradicted` together:
+- **`agree=true`** → certify (candidate→accepted) / confirm-and-extend (accepted). Mutate.
+- **`contradicted=true`** → a chunk asserts a CONFLICTING value → **drift** (accepted→stale) / **reject** (candidate). Mutate. This is the only negative that mutates.
+- **`agree=false` AND `contradicted=false` = `low_coverage`** → the corpus simply lacks the fact. **NO mutation.** Staling an accepted fact or rejecting a candidate here would punish a good fact for a thin corpus. Certification: stays `candidate` (needs source/human, per §4). Freshness: stays `accepted`.
+- **`agree=null` (error)** → transient judge failure → **NO mutation** (payor's `pending_compare` stays).
+
+Telemetry (`verify_outcome`) SHOULD carry `low_coverage`/`compare_error`/`live_unavailable` distinctly (not collapsed to `none`) so the freshness sweep can separate thin-corpus from judge-failure from retrieval-down. DB CHECK extension requested.
