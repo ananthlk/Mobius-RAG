@@ -413,6 +413,78 @@ async def grade_decision(
     return {"graded": True, "synthesis_grade": synthesis_grade, "n_claims": len(ledger)}
 
 
+@router.post("/eval/fact_compare")
+async def fact_compare(body: dict = Body(...)):
+    """EVAL-owned two-grade comparator for the payor fact store (spec §8.1).
+
+    Given a STORED fact + LIVE corpus chunks, judge whether the live evidence is
+    CONSISTENT with the stored fact. Certification (candidate → accepted) and
+    freshness re-verification (accepted → confirm/drift) are the SAME operation:
+        agree     → certify / confirm-and-extend
+        not agree → reject   / drift (cert_status=stale)
+        agree=None → judge failed (transient); caller MUST NOT mutate.
+
+    EVAL grades; PAYOR writes (single-writer on schema `facts`). No mutation here.
+    Consistency, not identity: the stored value SUPPORTED by any live chunk = agree
+    even if the chunks say more; a chunk asserting a CONFLICTING value = drift.
+    """
+    stored = body.get("stored") or {}
+    value = str(stored.get("value") or stored.get("answer_text") or "").strip()
+    query = body.get("query") or stored.get("predicate") or ""
+    record_type = stored.get("record_type") or "atomic"
+    raw_chunks = body.get("live_chunks") or []
+    if not value:
+        raise HTTPException(status_code=422, detail="stored.value or stored.answer_text required")
+
+    from app.services.fact_checker import check_facts, FACT_CHECKER_VERSION
+
+    chunks = [c if isinstance(c, dict) else {"text": str(c)} for c in raw_chunks]
+    chunks = [c if "text" in c else {**c, "text": c.get("content") or ""} for c in chunks]
+
+    tau_r = float(os.getenv("FACT_COMPARE_TAU_R", "0.5"))
+
+    # retrieval grade: is the stored value supported by the live chunks?
+    try:
+        fc = await check_facts(query=query, must_facts=[value], chunks=chunks)
+    except Exception as exc:  # noqa: BLE001
+        return {"agree": None, "grades": {"retrieval": None, "synthesis": None},
+                "reason": f"comparator_error: {exc}", "error": True}
+    if fc.error:
+        # transient judge failure — cannot adjudicate; caller must NOT mutate.
+        return {"agree": None, "grades": {"retrieval": None, "synthesis": None},
+                "reason": "unable_to_verify (judge transient failure)",
+                "error": True, "error_transient": fc.error_transient,
+                "fact_checker_version": FACT_CHECKER_VERSION}
+
+    retrieval = round(float(fc.coverage), 3)
+    contradicted = any(v.contradicted for v in fc.verdicts)
+    agree = (retrieval >= tau_r) and not contradicted
+
+    # synthesis grade: only meaningful for qa records (an answer to ground).
+    synthesis = None
+    if record_type == "qa" and stored.get("answer_text"):
+        try:
+            fcs = await check_facts(query=query, must_facts=[],
+                                    answer=str(stored["answer_text"]), chunks=chunks)
+            if not fcs.error:
+                synthesis = round(float(fcs.score), 3)
+        except Exception:  # noqa: BLE001
+            synthesis = None
+
+    # evidence snippet for the re-cert queue on disagree (proposed_value extraction = v2).
+    evidence = next((str(v.evidence)[:200] for v in fc.verdicts if v.evidence), None)
+
+    return {
+        "agree": agree,
+        "grades": {"retrieval": retrieval, "synthesis": synthesis},
+        "contradicted": contradicted,
+        "reason": (fc.reasoning or "")[:300],
+        "evidence": evidence,
+        "fact_checker_version": FACT_CHECKER_VERSION,
+        "tau_r": tau_r,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Observability — timeline, A/B compare, drift (fingerprint-aware)
 # ---------------------------------------------------------------------------
