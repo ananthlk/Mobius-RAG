@@ -200,7 +200,7 @@ QueryClass = Literal[
     "vague",              # VAGUE classification (no tags, no literals)
 ]
 
-PRIORS_VERSION = "v2.4.2026-07-07-zero-cooc-service-specific-override"  # +inherited-authority a boost (v1.2.7) + service-specificity d penalty (v1.2.8) + zero-cooc/service-specific override (v1.2.9)
+PRIORS_VERSION = "v2.5.2026-07-17-d-crawl-dampen-penalties"  # corpus_depth+inheritance penalties for d scaled by (1-crawlability); lifts d on high-crawl payers (sunshine 0.80) without touching aetna/molina (0.00)
 
 # v1.2 update — derived from N=5 strategy×query verdict matrix
 # (eval/calibration/strategy_matrix_n5_20260503-183648.json) with
@@ -526,10 +526,25 @@ def _compute_linear_features(profile_features: dict[str, Any]) -> dict[str, floa
 
 
 def _linear_score_strategy(sid: str, feats: dict[str, float]) -> float:
-    """Compute the linear score for one strategy."""
+    """Compute the linear score for one strategy.
+
+    Strategy-d adjustment (2026-07-17 EVAL forensic): the corpus_depth and
+    inheritance penalties were over-firing on high-crawlability payers
+    (e.g. Sunshine Health, crawl=0.80) where web retrieval is genuinely
+    strong — d scored ~0.07 despite actual retrieval 0.75–1.00 on 8/10
+    oracle queries in the CMHC bank.  Fix: dampen negative penalties by
+    (1 − crawlability), so they fully apply on aetna/molina (crawl=0.00)
+    and nearly vanish on sunshine (crawl=0.80).
+    """
     base = _LINEAR_BASE.get(sid, 0.0)
     weights = _LINEAR_WEIGHTS.get(sid, {})
-    return base + sum(w * feats.get(feat, 0.0) for feat, w in weights.items())
+    crawl = feats.get("crawlability", 0.0)
+    score = base
+    for feat, w in weights.items():
+        if sid == "d" and w < 0 and feat in ("corpus_depth", "inheritance"):
+            w = w * (1.0 - crawl)
+        score += w * feats.get(feat, 0.0)
+    return score
 
 
 def decide(
