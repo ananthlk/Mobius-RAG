@@ -1,40 +1,51 @@
 """Migration: schema ``facts`` — Payor Fact Store (payor_fact + fact_query_decision).
 
-Spec: docs/payor-fact-store-spec.md (EVAL authored; payor builds logic/API; DB
-agent owns this migration/placement/indexes; RAG reads). Persistence review
-folded 2026-07-18: placement RESOLVED as shared mobius_rag DB, schema
-``facts``, with SCHEMA-SCOPED SINGLE-WRITER ownership:
+CANONICAL RESHAPE (2026-07-18). Payor's migrations 006+007 created a first
+cut of this schema on dev before the persistence review landed (19 facts +
+telemetry accumulating), so this migration must work BOTH ways:
+  - fresh environment → creates the full canonical shape;
+  - live dev         → reshapes in place, preserving all rows.
+From this migration on, the DB agent owns facts.* DDL; payor owns the rows
+(agreed with payor agent 2026-07-18 — their 006/007 stay as history, no new
+payor-side DDL).
 
-  - group role ``mobius_facts_rw``  (NOLOGIN): full DML on schema facts —
-    payor's login user is GRANTed INTO this group at deploy time.
-  - group role ``mobius_facts_ro``  (NOLOGIN): SELECT only — RAG's reader
-    joins this group.
+Spec: docs/payor-fact-store-spec.md (EVAL authored; payor builds logic/API;
+DB agent owns migration/placement/indexes; RAG reads). Persistence review
+folded: placement RESOLVED as shared mobius_rag DB, schema ``facts``, with
+SCHEMA-SCOPED SINGLE-WRITER ownership:
+  - group role ``mobius_facts_rw`` (NOLOGIN): full DML — payor's login user
+    is GRANTed INTO this group at deploy time.
+  - group role ``mobius_facts_ro`` (NOLOGIN): SELECT — RAG's reader joins.
   - PUBLIC gets nothing. The schema boundary IS the ownership boundary.
 
 Index philosophy (same as rag_query_decisions): only what the query path
-touches today —
-  - UNIQUE(payer_key, predicate) doubles as the serve-path btree.
-  - GIN on j_tags, PARTIAL on cert_status='accepted' (the §2.1 gate only ever
-    serves accepted rows).
-  - HNSW on embedding (m=16, ef_construction=64 — org_docs/corpus standard),
-    PARTIAL on accepted.
-  - d_tags/p_tags GINs DEFERRED: §2.2 tag_overlap runs in-memory on the gated
-    shortlist at Phase-1 scale. Add when a measured query needs them.
+touches — UNIQUE(payer_key,predicate) doubles as the serve btree; GIN(j_tags)
+and HNSW(embedding, m=16/ef_construction=64) both PARTIAL on
+cert_status='accepted' (§2.1's gate only serves accepted rows; payor's
+candidate-visibility scan tolerates a seq scan at current scale — revisit if
+candidates grow); d/p-tag GINs DEFERRED (§2.2 tag_overlap runs in-memory on
+the gated shortlist).
 
-``vector(1536)`` is pinned deliberately: §7.2 requires vec_sim comparability
-with the corpus embedder — enforce it in the type (answer-cache
-output_dimensionality gotcha: a mismatched-dims embed writes fine and then
-cosine is garbage).
+``vector(1536)`` pinned: §7.2 requires vec_sim comparability with the corpus
+embedder — enforced in the type (answer-cache output_dimensionality gotcha).
 
-fact_query_decision write contract (binding on payor's writer, mirrors
-rag_query_decisions verbatim): telemetry_id CLIENT-generated uuid4 + INSERT
-... ON CONFLICT DO NOTHING; fire-and-forget off the serve path; ONE shared
-pool. The async outcome fill UPDATEs ONLY user_feedback / downstream_grade
-(and §8's verify_outcome / drift_detected / verify_trigger from the
-verify-and-recertify loop). Join keys to rag_query_decisions: correlation_id
-(prod) / (eval_run_id, query_id) (eval) — same keys, joins work out of the
-box; query_embedding is NULLABLE and written for eval/sampled rows only
-(sweeps recompute from ``query`` text).
+VOCABULARY NOTES (live data admitted, pending spec ratification by EVAL):
+  - verified_via includes 'browser' (payor's writer emits it; spec has
+    rag_probe|web|human|eval_cert + §8.5's explicit_verify|scheduled|
+    bandit_verify). Either the spec adopts 'browser' or payor maps it to
+    'web' — until ruled, the CHECK admits it.
+  - verify_outcome includes 'pending_compare' (payor's in-flight state while
+    EVAL's async two_grade_compare runs) alongside §8.5's confirm|drift|none.
+    Semantically useful — recommend the spec adopt it.
+
+fact_query_decision write contract (binding, mirrors rag_query_decisions):
+telemetry_id CLIENT-generated uuid4 + ON CONFLICT DO NOTHING; fire-and-forget
+off the serve path; ONE shared pool. Async fills UPDATE ONLY user_feedback /
+downstream_grade / verify_outcome / drift_detected / verify_trigger. Join
+keys to rag_query_decisions: correlation_id (prod, cross-DB no FK) /
+(eval_run_id, query_id) (eval, real FK to rag_eval_runs CASCADE).
+query_embedding NULLABLE — eval/sampled rows only; sweeps recompute from
+``query`` text.
 
 Idempotent — safe to re-run.
 """
@@ -49,11 +60,15 @@ import asyncpg
 from app.config import DATABASE_URL
 
 
+_VERIFIED_VIA_CHECK = ("('rag_probe','web','browser','human','eval_cert',"
+                       "'explicit_verify','scheduled','bandit_verify')")
+_VERIFY_OUTCOME_CHECK = "('confirm','drift','none','pending_compare')"
+
 _DDL = [
     "CREATE EXTENSION IF NOT EXISTS vector;",
     "CREATE SCHEMA IF NOT EXISTS facts;",
 
-    # ── ownership roles (group roles; login users join at deploy time) ──
+    # ── ownership group roles ──
     """
     DO $$ BEGIN
         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='mobius_facts_rw') THEN
@@ -65,65 +80,40 @@ _DDL = [
     END $$;
     """,
 
-    # ── the fact record (spec §1) ──
-    """
+    # ── fresh-environment create (no-ops on live dev) ──
+    f"""
     CREATE TABLE IF NOT EXISTS facts.payor_fact (
         fact_id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        -- STORE/SERVE key
-        payer_key          TEXT NOT NULL,        -- canonical triple payer|state|program
-        predicate          TEXT NOT NULL,        -- stable slug
+        payer_key          TEXT NOT NULL,
+        predicate          TEXT NOT NULL,
         record_type        TEXT NOT NULL CHECK (record_type IN ('atomic','qa')),
-        -- VALUE
         value              JSONB,
         answer_text        TEXT,
-        question           TEXT,                 -- qa only
-        -- QUERY SURFACE
-        d_tags             TEXT[] NOT NULL DEFAULT '{}',
-        p_tags             TEXT[] NOT NULL DEFAULT '{}',
-        j_tags             TEXT[] NOT NULL DEFAULT '{}',  -- includes payer identity tag (the gate key)
-        embedding          vector(1536),         -- MUST match corpus embedder dims
-        -- SCOPE / COMPLIANCE (migration-005 semantics)
-        scope              TEXT,                 -- NULL = unrestricted
-        -- PROVENANCE
-        source_ref         JSONB,                -- {doc_id, url, page, quote}
-        authority_level    TEXT,                 -- contract_source_of_truth | payer_website | operational_suggested | ...
-        -- FRESHNESS
+        question           TEXT,
+        d_tags             TEXT[] NOT NULL DEFAULT '{{}}',
+        p_tags             TEXT[] NOT NULL DEFAULT '{{}}',
+        j_tags             TEXT[] NOT NULL DEFAULT '{{}}',
+        embedding          vector(1536),
+        scope              TEXT,
+        source_ref         JSONB,
+        authority_level    TEXT,
         effective_date     DATE,
         valid_until        DATE,
         ttl_days           INTEGER,
         last_verified_at   TIMESTAMPTZ,
-        verified_via       TEXT CHECK (verified_via IS NULL OR verified_via IN
-                               ('rag_probe','web','human','eval_cert',
-                                'explicit_verify','scheduled','bandit_verify')),  -- §8.5
-        confidence         TEXT CHECK (confidence IS NULL OR confidence IN ('high','medium','low')),
-        -- CERTIFICATION (EVAL owns)
+        verified_via       TEXT,
+        confidence         TEXT,
         retrieval_grade    NUMERIC,
-        synthesis_grade    NUMERIC,              -- atomic: NULL
+        synthesis_grade    NUMERIC,
         cert_status        TEXT NOT NULL DEFAULT 'candidate'
                            CHECK (cert_status IN ('accepted','candidate','rejected','stale')),
         cert_run_id        UUID,
         fact_checker_version TEXT,
         created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
         updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-        UNIQUE (payer_key, predicate)            -- doubles as the serve-path btree
+        UNIQUE (payer_key, predicate)
     );
     """,
-
-    # gate index: §2.1 only ever serves accepted rows
-    """
-    CREATE INDEX IF NOT EXISTS idx_fact_jtags_accepted
-        ON facts.payor_fact USING gin (j_tags)
-        WHERE cert_status = 'accepted';
-    """,
-    # vector shortlist, servable rows only
-    """
-    CREATE INDEX IF NOT EXISTS idx_fact_embedding_accepted
-        ON facts.payor_fact USING hnsw (embedding vector_cosine_ops)
-        WITH (m = 16, ef_construction = 64)
-        WHERE cert_status = 'accepted';
-    """,
-
-    # ── telemetry: one row per fact_query call (spec §3 + §8.5) ──
     """
     CREATE TABLE IF NOT EXISTS facts.fact_query_decision (
         telemetry_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -132,12 +122,12 @@ _DDL = [
         query_d_tags     TEXT[] NOT NULL DEFAULT '{}',
         query_p_tags     TEXT[] NOT NULL DEFAULT '{}',
         query_j_tags     TEXT[] NOT NULL DEFAULT '{}',
-        query_embedding  vector(1536),          -- NULLABLE: eval/sampled rows only
+        query_embedding  vector(1536),
         payer_key        TEXT,
         gate_applied     BOOLEAN NOT NULL DEFAULT false,
         gate_excluded_n  INTEGER,
-        shortlist        JSONB,                 -- candidates + component scores, compact
-        served_fact_id   UUID REFERENCES facts.payor_fact(fact_id) ON DELETE SET NULL,
+        shortlist        JSONB,
+        served_fact_id   UUID,
         served_predicate TEXT,
         served_score     NUMERIC,
         hit              BOOLEAN NOT NULL DEFAULT false,
@@ -147,21 +137,77 @@ _DDL = [
         tau              NUMERIC,
         blend_version    TEXT,
         is_prod          BOOLEAN NOT NULL DEFAULT false,
-        corpus_version   BIGINT,                -- from corpus_state; drift attribution on fall-throughs
-        -- join keys to rag_query_decisions (same keys, joins work out of the box)
-        correlation_id   TEXT,                  -- prod rows (chat turn; cross-DB, NO FK by design)
-        eval_run_id      UUID REFERENCES public.rag_eval_runs(id) ON DELETE CASCADE,
-        query_id         TEXT,                  -- eval rows, e.g. 'cmhc001'
-        -- outcome (async fill — the ONLY UPDATEable columns, + §8 verify loop)
+        corpus_version   BIGINT,
+        correlation_id   TEXT,
+        eval_run_id      UUID,
+        query_id         TEXT,
         user_feedback    TEXT,
         downstream_grade NUMERIC,
-        verify_outcome   TEXT NOT NULL DEFAULT 'none'
-                         CHECK (verify_outcome IN ('confirm','drift','none')),
+        verify_outcome   TEXT NOT NULL DEFAULT 'none',
         drift_detected   BOOLEAN NOT NULL DEFAULT false,
         verify_trigger   TEXT
     );
     """,
 
+    # ── reshape: columns the first cut lacked ──
+    "ALTER TABLE facts.fact_query_decision ADD COLUMN IF NOT EXISTS corpus_version BIGINT;",
+
+    # verify_outcome: coalesce legacy NULLs, then enforce
+    "UPDATE facts.fact_query_decision SET verify_outcome='none' WHERE verify_outcome IS NULL;",
+    "ALTER TABLE facts.fact_query_decision ALTER COLUMN verify_outcome SET DEFAULT 'none';",
+    "ALTER TABLE facts.fact_query_decision ALTER COLUMN verify_outcome SET NOT NULL;",
+
+    # ── reshape: CHECK constraints (guarded; live data verified compatible) ──
+    f"""
+    DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='payor_fact_verified_via_check') THEN
+            ALTER TABLE facts.payor_fact ADD CONSTRAINT payor_fact_verified_via_check
+                CHECK (verified_via IS NULL OR verified_via IN {_VERIFIED_VIA_CHECK});
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='payor_fact_confidence_check') THEN
+            ALTER TABLE facts.payor_fact ADD CONSTRAINT payor_fact_confidence_check
+                CHECK (confidence IS NULL OR confidence IN ('high','medium','low'));
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='fqd_verify_outcome_check') THEN
+            ALTER TABLE facts.fact_query_decision ADD CONSTRAINT fqd_verify_outcome_check
+                CHECK (verify_outcome IN {_VERIFY_OUTCOME_CHECK});
+        END IF;
+    END $$;
+    """,
+
+    # ── reshape: foreign keys (guarded; orphan-checked before adding) ──
+    """
+    DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='fqd_served_fact_fk') THEN
+            ALTER TABLE facts.fact_query_decision ADD CONSTRAINT fqd_served_fact_fk
+                FOREIGN KEY (served_fact_id) REFERENCES facts.payor_fact(fact_id) ON DELETE SET NULL;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='fqd_eval_run_fk') THEN
+            ALTER TABLE facts.fact_query_decision ADD CONSTRAINT fqd_eval_run_fk
+                FOREIGN KEY (eval_run_id) REFERENCES public.rag_eval_runs(id) ON DELETE CASCADE;
+        END IF;
+    END $$;
+    """,
+
+    # ── reshape: index swap to the canonical lean set ──
+    "DROP INDEX IF EXISTS facts.ix_pf_dtags;",       # deferred until measured need
+    "DROP INDEX IF EXISTS facts.ix_pf_ptags;",
+    "DROP INDEX IF EXISTS facts.ix_pf_jtags;",       # replaced by partial
+    "DROP INDEX IF EXISTS facts.ix_pf_embedding;",   # replaced by partial
+    "DROP INDEX IF EXISTS facts.ix_pf_accepted;",    # redundant with UNIQUE(payer_key,predicate) prefix
+    """
+    CREATE INDEX IF NOT EXISTS idx_fact_jtags_accepted
+        ON facts.payor_fact USING gin (j_tags)
+        WHERE cert_status = 'accepted';
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_fact_embedding_accepted
+        ON facts.payor_fact USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 16, ef_construction = 64)
+        WHERE cert_status = 'accepted';
+    """,
+    "DROP INDEX IF EXISTS facts.ix_fqd_created;",
+    "DROP INDEX IF EXISTS facts.ix_fqd_payer;",
     "CREATE INDEX IF NOT EXISTS idx_fqd_created ON facts.fact_query_decision (created_at DESC);",
     "CREATE INDEX IF NOT EXISTS idx_fqd_payer_created ON facts.fact_query_decision (payer_key, created_at DESC);",
     """
@@ -189,10 +235,10 @@ async def migrate():
     url = DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
     conn = await asyncpg.connect(url)
     try:
-        for i, ddl in enumerate(_DDL, 1):
+        for ddl in _DDL:
             await conn.execute(ddl)
-        print(f"  Applied {len(_DDL)} DDL statements — schema facts, payor_fact, "
-              "fact_query_decision, indexes, roles + grants")
+        print(f"  Applied {len(_DDL)} DDL statements — facts schema at canonical shape "
+              "(create-or-reshape), roles + grants ensured")
     finally:
         await conn.close()
 
