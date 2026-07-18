@@ -62,7 +62,7 @@ from app.config import DATABASE_URL
 
 _VERIFIED_VIA_CHECK = ("('rag_probe','web','browser','human','eval_cert',"
                        "'explicit_verify','scheduled','bandit_verify')")
-_VERIFY_OUTCOME_CHECK = "('confirm','drift','none','pending_compare')"
+_VERIFY_OUTCOME_CHECK = "('confirm','drift','none','pending_compare','live_unavailable')"
 
 _DDL = [
     "CREATE EXTENSION IF NOT EXISTS vector;",
@@ -168,11 +168,15 @@ _DDL = [
             ALTER TABLE facts.payor_fact ADD CONSTRAINT payor_fact_confidence_check
                 CHECK (confidence IS NULL OR confidence IN ('high','medium','low'));
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='fqd_verify_outcome_check') THEN
-            ALTER TABLE facts.fact_query_decision ADD CONSTRAINT fqd_verify_outcome_check
-                CHECK (verify_outcome IN {_VERIFY_OUTCOME_CHECK});
-        END IF;
     END $$;
+    """,
+
+    # verify_outcome vocabulary evolves (pending_compare, live_unavailable, ...);
+    # recreate the CHECK every run so the canonical list here is always live.
+    "ALTER TABLE facts.fact_query_decision DROP CONSTRAINT IF EXISTS fqd_verify_outcome_check;",
+    f"""
+    ALTER TABLE facts.fact_query_decision ADD CONSTRAINT fqd_verify_outcome_check
+        CHECK (verify_outcome IN {_VERIFY_OUTCOME_CHECK});
     """,
 
     # ── reshape: foreign keys (guarded; orphan-checked before adding) ──
