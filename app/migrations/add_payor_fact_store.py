@@ -62,7 +62,8 @@ from app.config import DATABASE_URL
 
 _VERIFIED_VIA_CHECK = ("('rag_probe','web','browser','human','eval_cert',"
                        "'explicit_verify','scheduled','bandit_verify')")
-_VERIFY_OUTCOME_CHECK = "('confirm','drift','none','pending_compare','live_unavailable')"
+_VERIFY_OUTCOME_CHECK = ("('confirm','drift','none','pending_compare',"
+                         "'low_coverage','compare_error','live_unavailable')")
 
 _DDL = [
     "CREATE EXTENSION IF NOT EXISTS vector;",
