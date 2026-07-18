@@ -200,7 +200,7 @@ QueryClass = Literal[
     "vague",              # VAGUE classification (no tags, no literals)
 ]
 
-PRIORS_VERSION = "v2.6.2026-07-17-ab-crawl-dampen-overconfidence"  # a+b corpus_depth dampened by (1-crawl); b thematic dampened; a -0.25*crawl penalty; d v2.5 unchanged; LAST linear tune — next gains from query rewrite + payor intelligence
+PRIORS_VERSION = "v2.5.2026-07-17-d-crawl-dampen-penalties"  # corpus_depth+inheritance penalties for d scaled by (1-crawlability); lifts d on high-crawl payers (sunshine 0.80) without touching aetna/molina (0.00)
 
 # v1.2 update — derived from N=5 strategy×query verdict matrix
 # (eval/calibration/strategy_matrix_n5_20260503-183648.json) with
@@ -528,39 +528,22 @@ def _compute_linear_features(profile_features: dict[str, Any]) -> dict[str, floa
 def _linear_score_strategy(sid: str, feats: dict[str, float]) -> float:
     """Compute the linear score for one strategy.
 
-    Crawlability-gated adjustments (all confirmed by full-22 argmax sim before shipping):
-
-    v2.5 (2026-07-17): Strategy d — dampen corpus_depth + inheritance PENALTIES by
-    (1 − crawlability).  d was over-penalised on crawlable payers (sunshine 0.80)
-    where web retrieval is strong; penalties nearly vanish there, stay full on
-    aetna/molina (crawl=0.00).
-
-    v2.6 (2026-07-17): Strategies a + b — dampen corpus_depth BONUS by
-    (1 − crawlability); dampen b's thematic_policy bonus the same way; add
-    −0.25×crawl flat penalty to a.  Root: on high-crawl payer-detail queries
-    both a (linear 0.74, actual retrieval 0.33) and b (linear 0.80, actual 0.10)
-    were over-scored vs d (linear 0.44, actual 1.00).  Full-22 sim: NET +0.030,
-    zero harms, b-oracle (cmhc009/011/018) unchanged, a-guardrails (cmhc001/007)
-    hold.  This is the LAST linear-weight tune; next gains from query rewrite +
-    payor intelligence (root fixes).
+    Strategy-d adjustment (2026-07-17 EVAL forensic): the corpus_depth and
+    inheritance penalties were over-firing on high-crawlability payers
+    (e.g. Sunshine Health, crawl=0.80) where web retrieval is genuinely
+    strong — d scored ~0.07 despite actual retrieval 0.75–1.00 on 8/10
+    oracle queries in the CMHC bank.  Fix: dampen negative penalties by
+    (1 − crawlability), so they fully apply on aetna/molina (crawl=0.00)
+    and nearly vanish on sunshine (crawl=0.80).
     """
     base = _LINEAR_BASE.get(sid, 0.0)
     weights = _LINEAR_WEIGHTS.get(sid, {})
     crawl = feats.get("crawlability", 0.0)
     score = base
     for feat, w in weights.items():
-        # v2.5: d — dampen negative penalties on crawlable payers
         if sid == "d" and w < 0 and feat in ("corpus_depth", "inheritance"):
             w = w * (1.0 - crawl)
-        # v2.6: a + b — dampen corpus_depth bonus; b also dampens thematic_policy
-        if sid in ("a", "b") and w > 0 and feat == "corpus_depth":
-            w = w * (1.0 - crawl)
-        if sid == "b" and w > 0 and feat == "thematic_policy":
-            w = w * (1.0 - crawl)
         score += w * feats.get(feat, 0.0)
-    # v2.6: a — flat crawlability penalty (web availability discounts corpus advantage)
-    if sid == "a":
-        score -= 0.25 * crawl
     return score
 
 
