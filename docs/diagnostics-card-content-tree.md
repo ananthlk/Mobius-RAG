@@ -29,7 +29,7 @@ summary: `cleanup {tok_in}→{tok_kept} · {query_type} · scored {top_strategy}
 - **gate** — Fail-fast gate. status: ok if passed / warn if fired. telemetry: `response.gate {passed, reason}` where reason ∈ phi_detected·jailbreak·self_referential·no_domain_match (first-match-wins; bypassed if include_document_ids set).
 - **cleanup** — `_tokenize`: pre-extract 5 literal regexes → split rest. telemetry: from `query_profile` → {literal_anchors, tag_matches (kept), untagged_meaningful, dropped=noise}. summary `{n} tokens → {kept} kept`.
 - **rewrite** — 3 variants, always computed. telemetry: `response.queries_per_strategy {hybrid, phrase_strict, vector_broad}`. summary `3 per-strategy variants`.
-- **classify** — QueryProfile. telemetry: `query_profile {query_type, coverage, d_tags, j_tags, p_tags, literal_anchors, semantic_core}` + GAP: `_is_exploratory`, `_has_service_specificity` (RAG adding). summary `{query_type} · coverage {cov}`.
+- **classify** — QueryProfile. telemetry: `query_profile {query_type, coverage, d_tags, j_tags, p_tags, literal_anchors, semantic_core}` + `routing.classify_flags {is_exploratory, has_service_specificity}` (LIVE, rev 00423). summary `{query_type} · coverage {cov}`.
 - **scorer** — linear v1. `strategyScores` ← `routing.scores`. telemetry: `routing.score_breakdown` (per-feature contribution: base + Σ weight×feature), `routing.feature_vector` (7: exclusivity, literal, corpus_depth, thematic_policy, wide_pool, inheritance, crawlability), `routing.self_assessments` (a,b est_recall), withdrawn. summary `{top} wins {score}` · TRIGGERS why-A-won bars. Note `multi_invoke_considered` here.
 
 ## 2 · ACT  (latency = Σ strategy ms) status ok
@@ -43,7 +43,7 @@ NOTE: if `invoke_all` set → TWO retrieve branches (a+b union). If `strategy_ch
   - **d · external (6)**: resolve-payer → sitemap → search(Vertex Grounding→DDG/CSE→plain) → rerank-hits → fetch+extract(5 URLs, 8s) → LLM-synth. telemetry ← `strategies_tried[d]` + GAP: per-tier/per-URL fetch breakdown (RAG adding).
 - **rerank** — weighted formula (NOT a model): `(0.25·sim + 0.10·auth + 0.05·len + [0/0.20]·jpd + [0/0.55]·coverage)/MAX`. thresholds high≥0.55 med≥0.35 low≥0.18. telemetry ← `scoring_trace` per-chunk signals. summary `top {top_rerank}`.
 - **assemble** — page-dedup (doc,page) + content-dedup (sha/200c) + promoted-neighbors exempt (cap 10). summary `{n}/{k} · {mode}`. telemetry: chunk order.
-- **synthesize** — 7-rule prompt, ≤12 chunks×1500c, JSON{answer,used_passages,confidence}, honest-abstain, 59G attribution, two-phase streaming. telemetry ← `telemetry.{llm_ms, model, used_passages, n_passages_offered}` + GAP: raw used_passages detail. summary `answer built · {confidence}`.
+- **synthesize** — 7-rule prompt, ≤12 chunks×1500c, JSON{answer,used_passages,confidence}, honest-abstain, 59G attribution, two-phase streaming. telemetry ← `telemetry.{llm_ms, model, used_passages, n_passages_offered}` (LIVE, rev 00423 — `used_passages` = cited passage indices → cross-link to per_claim_ledger chunk_ids). summary `answer built · {confidence}`.
 
 ## 3 · OBSERVE status ok
 summary: `retrieval {rg} · synthesis {sg} · {passed}/{total} validated · 1 row`
@@ -64,5 +64,6 @@ summary: `gap {gap} → {single/multi} · {fast_exit} · bandit not wired`
 ## NOT-BUILT leaves (REASON action tree) — render as gray planned nodes
 `s` structured-read · `reformulate` re-query · `f` honest-floor · `m` cached-replay · `research` fanout.
 
-## Telemetry GAPS (RAG adding — render "not captured yet")
-1. `_is_exploratory` / `_has_service_specificity` (classify) 2. strategy-d fetch-tier/per-URL breakdown 3. synthesis used_passages detail 4. `caller_id` (row, NULL).
+## Telemetry GAPS
+CLOSED (live rev 00423): ~~classify_flags~~ ✓ · ~~synthesis used_passages/llm_ms/model/n_passages_offered~~ ✓
+OPEN (RAG queued): strategy-d fetch-tier/per-URL breakdown · `caller_id` (row, NULL). Render "not captured yet" for these two only.
