@@ -13767,6 +13767,131 @@ async def org_docs_ingest(
     if not doc_text.strip():
         raise HTTPException(status_code=422, detail="Could not extract text from file — check format or enable OCR.")
 
+    # ── PHI / HIPAA gate (pre-embed, P0) ─────────────────────────────
+    # Mirror of chat instant-RAG gate: classify doc text pre-embed, check
+    # org HIPAA mode, write audit, hard-stop on phi+not-allowed.
+    # PHI_CLASSIFIER_URL unset → gate skipped (warns; set in prod).
+    # Audit table: compliance.hipaa_analysis_log in the RAG DB — DB agent
+    # must run the same schema as chat mig 042 on this DB.
+    import json as _json_mod
+    import urllib.request as _urllib_req
+    import uuid as _uuid_phi
+    _phi_url = (os.environ.get("PHI_CLASSIFIER_URL") or "").rstrip("/")
+    _phi_verdict: dict = {}
+    _phi_txn_id = ""
+    if _phi_url:
+        _content_sha256 = _hl.sha256(doc_text.encode("utf-8")).hexdigest()
+        # 1. Call /classify
+        try:
+            _phi_body = _json_mod.dumps({
+                "text": doc_text,
+                "document_id": f"org:{namespace_ref}:{content_hash[:12]}",
+            }).encode()
+            _phi_req = _urllib_req.Request(
+                f"{_phi_url}/classify",
+                data=_phi_body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with _urllib_req.urlopen(_phi_req, timeout=45) as _r:
+                _phi_verdict = _json_mod.loads(_r.read())
+        except Exception as _e:
+            logger.warning("[org-docs-hipaa] classify failed for %s: %s", filename, _e)
+            _phi_verdict = {"gate": "indeterminate", "phi_flag": True, "error": str(_e)}
+
+        _gate = str(_phi_verdict.get("gate") or "indeterminate")
+        if _gate not in ("clean", "phi", "indeterminate"):
+            _gate = "indeterminate"
+        _phi_flag = bool(_phi_verdict.get("phi_flag", True))
+
+        # 2. Check /hipaa-mode (fail-safe: False on error)
+        _hipaa_allowed = False
+        try:
+            _mreq = _urllib_req.Request(f"{_phi_url}/hipaa-mode", method="GET")
+            with _urllib_req.urlopen(_mreq, timeout=10) as _r:
+                _mode_resp = _json_mod.loads(_r.read())
+            _hipaa_allowed = bool(_mode_resp.get("allowed", False))
+        except Exception as _e:
+            logger.warning("[org-docs-hipaa] hipaa-mode fetch failed for %s: %s", filename, _e)
+
+        _blocked = (_gate in ("phi", "indeterminate")) and not _hipaa_allowed
+        _action_taken = (
+            "blocked_phi" if (_gate == "phi" and not _hipaa_allowed) else
+            "published_private" if (_gate == "phi" and _hipaa_allowed) else
+            "blocked_indeterminate" if _gate == "indeterminate" else
+            "allowed"
+        )
+
+        # 3. Write audit (fail-closed on phi; best-effort on clean)
+        _phi_txn_id = str(_uuid_phi.uuid4())
+        try:
+            await db.execute(
+                text("""
+                    INSERT INTO compliance.hipaa_analysis_log
+                        (id, transaction_id, document_id, content_sha256, user_id, org_slug,
+                         gate, phi_flag, ceiling, hipaa_mode_allowed, action_taken,
+                         evidence_categories, classifier_version, layers_run, confidence, reason)
+                    VALUES
+                        (:id, :txn, :doc_id, :sha256, :uid, :org,
+                         :gate, :phi_flag, :ceiling, :mode_allowed, :action_taken,
+                         :cats, :clf_ver, :layers, :confidence, :reason)
+                    ON CONFLICT (id) DO NOTHING
+                """),
+                {
+                    "id": _phi_txn_id,
+                    "txn": _phi_txn_id,
+                    "doc_id": f"org:{namespace_ref}:{content_hash[:12]}",
+                    "sha256": _content_sha256,
+                    "uid": uploaded_by,
+                    "org": namespace_ref,
+                    "gate": _gate,
+                    "phi_flag": _phi_flag,
+                    "ceiling": str(_phi_verdict.get("recommended_ceiling") or "private"),
+                    "mode_allowed": _hipaa_allowed,
+                    "action_taken": _action_taken,
+                    "cats": list(_phi_verdict.get("identifiers_found") or []),
+                    "clf_ver": str(_phi_verdict.get("classifier_version") or ""),
+                    "layers": list(_phi_verdict.get("layers_run") or []),
+                    "confidence": (
+                        float(_phi_verdict["confidence"])
+                        if _phi_verdict.get("confidence") is not None else None
+                    ),
+                    "reason": str(_phi_verdict.get("reason") or ""),
+                },
+            )
+            await db.commit()
+        except Exception as _e:
+            if _blocked:
+                logger.error(
+                    "[org-docs-hipaa] AUDIT WRITE FAILED + phi blocked for %s — fail-closed: %s",
+                    filename, _e,
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail={"status": "phi_blocked", "reason": "audit_write_failed"},
+                )
+            logger.warning(
+                "[org-docs-hipaa] audit write failed for %s (gate=%s, not blocked): %s",
+                filename, _gate, _e,
+            )
+
+        logger.info(
+            "[org-docs-hipaa] gate=%s action=%s txn=%s blocked=%s for %s",
+            _gate, _action_taken, _phi_txn_id[:8], _blocked, filename,
+        )
+        if _blocked:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "status": "phi_blocked",
+                    "gate": _gate,
+                    "reason": str(_phi_verdict.get("reason") or ""),
+                    "transaction_id": _phi_txn_id,
+                },
+            )
+    else:
+        logger.warning("[org-docs-hipaa] PHI_CLASSIFIER_URL unset — gate skipped for %s", filename)
+
     # ── Chunk (paragraph split — no hierarchical chunking needed) ────
     paragraphs = split_into_paragraphs(doc_text)
     if not paragraphs:
@@ -13843,13 +13968,20 @@ async def org_docs_ingest(
             rows_written += 1
 
         await org_db.commit()
-        logger.info("[org-docs] ingested %s → ns=%s doc=%s chunks=%d", filename, ns, _doc_id, rows_written)
+        logger.info(
+            "[org-docs] ingested ns=%s doc=%s file=%s uploaded_by=%s "
+            "visibility=%s chunks=%d phi_gate=%s phi_txn=%s",
+            ns, _doc_id, filename, uploaded_by, visibility, rows_written,
+            _phi_verdict.get("gate", "skipped") if _phi_url else "skipped",
+            _phi_txn_id[:8] if _phi_txn_id else "—",
+        )
 
     return {
         "document_id": str(_doc_id),
         "chunks_written": rows_written,
         "namespace_ref": namespace_ref,
         "status": "ready",
+        "phi_gate": _phi_verdict.get("gate", "skipped") if _phi_url else "skipped",
     }
 
 
@@ -13957,6 +14089,88 @@ async def org_docs_search(
         results = [dict(r._mapping) for r in rows.fetchall()]
 
     return {"results": results, "namespace_ref": namespace_ref, "query": q}
+
+
+@app.patch("/admin/org-docs/{document_id}")
+async def org_docs_update(
+    document_id: str,
+    namespace_ref: str = Query(...),
+    visibility: str | None = None,
+    status: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Update visibility and/or status of an org document.
+
+    namespace_ref must match the org namespace that owns the document.
+    visibility: 'org' | 'member'. status: 'ready' | 'archived' | ...
+    """
+    from app.database import OrgDocsSessionLocal
+    if OrgDocsSessionLocal is None:
+        raise HTTPException(status_code=503, detail="ORG_DOCS_DATABASE_URL not configured.")
+    if not namespace_ref.startswith("org_"):
+        raise HTTPException(status_code=400, detail="Invalid namespace_ref.")
+    if visibility is not None and visibility not in ("org", "member"):
+        raise HTTPException(status_code=400, detail="visibility must be 'org' or 'member'")
+    if visibility is None and status is None:
+        raise HTTPException(status_code=400, detail="Provide at least one of: visibility, status")
+
+    ns = namespace_ref
+    sets, params = [], {"doc_id": document_id}
+    if visibility is not None:
+        sets.append("visibility = :vis")
+        params["vis"] = visibility
+    if status is not None:
+        sets.append("status = :st")
+        params["st"] = status
+    sets.append("updated_at = now()")
+
+    async with OrgDocsSessionLocal() as org_db:
+        result = await org_db.execute(
+            text(f'UPDATE "{ns}".org_documents SET {", ".join(sets)} WHERE id = :doc_id'),
+            params,
+        )
+        if result.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Document not found in this namespace.")
+        await org_db.commit()
+
+    return {"document_id": document_id, "namespace_ref": namespace_ref, "updated": True}
+
+
+@app.delete("/admin/org-docs/{document_id}")
+async def org_docs_delete(
+    document_id: str,
+    namespace_ref: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete an org document and all its chunks from the namespace."""
+    from app.database import OrgDocsSessionLocal
+    if OrgDocsSessionLocal is None:
+        raise HTTPException(status_code=503, detail="ORG_DOCS_DATABASE_URL not configured.")
+    if not namespace_ref.startswith("org_"):
+        raise HTTPException(status_code=400, detail="Invalid namespace_ref.")
+
+    ns = namespace_ref
+    async with OrgDocsSessionLocal() as org_db:
+        # Verify exists before delete
+        _chk = await org_db.execute(
+            text(f'SELECT id FROM "{ns}".org_documents WHERE id = :doc_id LIMIT 1'),
+            {"doc_id": document_id},
+        )
+        if _chk.scalar_one_or_none() is None:
+            raise HTTPException(status_code=404, detail="Document not found in this namespace.")
+
+        await org_db.execute(
+            text(f'DELETE FROM "{ns}".org_chunks WHERE document_id = :doc_id'),
+            {"doc_id": document_id},
+        )
+        await org_db.execute(
+            text(f'DELETE FROM "{ns}".org_documents WHERE id = :doc_id'),
+            {"doc_id": document_id},
+        )
+        await org_db.commit()
+
+    logger.info("[org-docs] deleted doc=%s from ns=%s", document_id, namespace_ref)
+    return {"document_id": document_id, "namespace_ref": namespace_ref, "deleted": True}
 
 
 # Serve frontend static files (for Cloud Run / single-container deployment)
