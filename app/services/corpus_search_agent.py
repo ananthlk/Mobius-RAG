@@ -3699,6 +3699,12 @@ async def _corpus_search_agent_impl(
                             "fact_predicate": _served.get("predicate"),
                             "fact_score": _served.get("score"),
                             "fact_cert_grades": _cert.get("grades"),
+                            "fact_provenance": {
+                                "source_ref": _served.get("source_ref"),
+                                "freshness": _served.get("freshness"),
+                                "cert_status": _cert.get("status"),
+                                "authority_level": _served.get("authority_level"),
+                            },
                         },
                         strategy_chain=["s"],
                         fast_exit={"fired": True, "reason": "fact_store_hit"},
