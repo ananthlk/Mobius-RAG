@@ -3576,6 +3576,47 @@ def _observe_async(
                     },
                 )
                 await sess.commit()
+
+                # ── Prod trace write (gated — PHI clearance pending) ──────────
+                # Writes full_response jsonb to rag_query_traces keyed by
+                # decision_id (FK → rag_query_decisions(id) ON DELETE CASCADE).
+                # Gate: RAG_QUERY_TRACE_ENABLED env var must be set.
+                # DO NOT enable until PHI skill rules on query/answer masking —
+                # raw_query and llm_answer can contain PHI.
+                import os as _qt_os
+                if _qt_os.environ.get("RAG_QUERY_TRACE_ENABLED"):
+                    try:
+                        _full_resp = {
+                            "query_profile": qp,
+                            "routing": response.routing or {},
+                            "strategies_tried": response.strategies_tried or [],
+                            "strategy_chain": response.strategy_chain or [],
+                            "confidence": response.confidence,
+                            "llm_answer": response.llm_answer,
+                            "fast_exit": response.fast_exit,
+                            "chunks": [
+                                (c.model_dump() if hasattr(c, "model_dump") else c)
+                                for c in (response.chunks or [])
+                            ],
+                            "telemetry": response.telemetry or {},
+                        }
+                        await sess.execute(
+                            sql_text("""
+                                INSERT INTO rag_query_traces
+                                    (decision_id, full_response, is_prod, corpus_version)
+                                VALUES (:did, :fr::jsonb, :is_prod, :cv)
+                                ON CONFLICT (decision_id) DO NOTHING
+                            """),
+                            {
+                                "did": _decision_id,
+                                "fr": _json.dumps(_full_resp),
+                                "is_prod": is_prod,
+                                "cv": _corpus_version,
+                            },
+                        )
+                        await sess.commit()
+                    except Exception as _qt_exc:
+                        logger.warning("[observe] rag_query_traces insert failed: %s", _qt_exc)
         except Exception as exc:
             logger.warning("[observe] rag_query_decisions insert failed: %s", exc)
 
