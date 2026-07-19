@@ -13759,16 +13759,20 @@ async def org_docs_ingest(
     import uuid as _uuid_mod
     _doc_id = _uuid_mod.uuid4()
     # Resolve org_slug via reverse lookup on the provisioner control table.
-    # Namespace-suffix derivation is lossy (hyphens→underscores folding) and
-    # would produce 'david_lawrence_center' instead of roster's 'david-lawrence-center'.
-    # The org_docs_namespaces row was written FROM the canonical slug at provision time,
-    # so it is authoritative-by-construction. NEVER derive from namespace string.
+    # org_docs_namespaces lives in mobius_org_docs (OrgDocsSessionLocal), NOT
+    # mobius_rag — using the main `db` session would silently miss every row.
+    # The row was written FROM the canonical slug at provision time (authoritative).
     from sqlalchemy import text as _sql_text_org
-    _ns_row = await db.execute(
-        _sql_text_org("SELECT org_slug FROM org_docs_namespaces WHERE namespace = :ns"),
-        {"ns": namespace_ref},
-    )
-    _ns_slug_result = _ns_row.scalar_one_or_none()
+    _ns_slug_result = None
+    try:
+        async with OrgDocsSessionLocal() as _org_db:
+            _ns_row = await _org_db.execute(
+                _sql_text_org("SELECT org_slug FROM org_docs_namespaces WHERE namespace = :ns"),
+                {"ns": namespace_ref},
+            )
+            _ns_slug_result = _ns_row.scalar_one_or_none()
+    except Exception as _ns_exc:
+        logger.warning("[org_docs_ingest] org_slug lookup failed: %s", _ns_exc)
     _org_slug = _ns_slug_result if _ns_slug_result else "__unresolved__"
     _org_source = "gate" if _ns_slug_result else "unresolved"
 
