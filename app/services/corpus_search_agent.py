@@ -3635,7 +3635,20 @@ async def _corpus_search_agent_impl(
     # On miss or any error: silent fall-through to a/b/c/d routing.
     import os as _fs_os
     _fact_url = (_fs_os.environ.get("MOBIUS_PAYOR_URL") or "https://mobius-payor-ortabkknqa-uc.a.run.app").rstrip("/")
-    if _fact_url:
+    # Interim intent-guard: conceptual/thematic queries need synthesis, not a
+    # discrete fact lookup. Without vector signal (embeddings not yet backfilled)
+    # the store's tag-only blend can match on shared tags regardless of intent,
+    # serving e.g. auth_url for "philosophy of pre-auth" at score 1.0.
+    # Drop these through to a/b/c/d until payor's vector backfill lands.
+    _CONCEPTUAL_MARKERS = (
+        "philosophy", "approach", "why does", "why do", "how does", "how do",
+        "explain", "tell me about", "what is the", "overview", "describe",
+        "understanding", "background on", "rationale", "strategy",
+    )
+    _raw_lower = raw_query.lower()
+    _is_conceptual = any(m in _raw_lower for m in _CONCEPTUAL_MARKERS)
+
+    if _fact_url and not _is_conceptual:
         try:
             import httpx as _fs_httpx
             _fs_payload = {
