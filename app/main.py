@@ -13758,9 +13758,19 @@ async def org_docs_ingest(
     # Pre-generate doc_id here so it doubles as correlation_id in the HIPAA audit
     import uuid as _uuid_mod
     _doc_id = _uuid_mod.uuid4()
-    # Derive org_slug from namespace_ref (convention: namespace = "org_" + slug)
-    _org_slug = namespace_ref[4:] if namespace_ref.startswith("org_") else "__unresolved__"
-    _org_source = "gate" if namespace_ref.startswith("org_") else "unresolved"
+    # Resolve org_slug via reverse lookup on the provisioner control table.
+    # Namespace-suffix derivation is lossy (hyphens→underscores folding) and
+    # would produce 'david_lawrence_center' instead of roster's 'david-lawrence-center'.
+    # The org_docs_namespaces row was written FROM the canonical slug at provision time,
+    # so it is authoritative-by-construction. NEVER derive from namespace string.
+    from sqlalchemy import text as _sql_text_org
+    _ns_row = await db.execute(
+        _sql_text_org("SELECT org_slug FROM org_docs_namespaces WHERE namespace = :ns"),
+        {"ns": namespace_ref},
+    )
+    _ns_slug_result = _ns_row.scalar_one_or_none()
+    _org_slug = _ns_slug_result if _ns_slug_result else "__unresolved__"
+    _org_source = "gate" if _ns_slug_result else "unresolved"
 
     # ── Extract text ──────────────────────────────────────────────────
     from app.services.extract_text import extract_text_from_bytes, split_into_paragraphs
