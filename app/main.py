@@ -13755,6 +13755,13 @@ async def org_docs_ingest(
     filename = file.filename or "upload"
     _display = display_name.strip() or filename
 
+    # Pre-generate doc_id here so it doubles as correlation_id in the HIPAA audit
+    import uuid as _uuid_mod
+    _doc_id = _uuid_mod.uuid4()
+    # Derive org_slug from namespace_ref (convention: namespace = "org_" + slug)
+    _org_slug = namespace_ref[4:] if namespace_ref.startswith("org_") else "__unresolved__"
+    _org_source = "gate" if namespace_ref.startswith("org_") else "unresolved"
+
     # ── Extract text ──────────────────────────────────────────────────
     from app.services.extract_text import extract_text_from_bytes, split_into_paragraphs
     ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
@@ -13815,14 +13822,16 @@ async def org_docs_ingest(
             logger.warning("[org-docs-hipaa] hipaa-mode fetch failed for %s: %s", filename, _e)
 
         _blocked = (_gate in ("phi", "indeterminate")) and not _hipaa_allowed
+        # action_taken values must satisfy CHECK constraint (mig 042)
         _action_taken = (
             "blocked_phi" if (_gate == "phi" and not _hipaa_allowed) else
             "published_private" if (_gate == "phi" and _hipaa_allowed) else
             "blocked_indeterminate" if _gate == "indeterminate" else
-            "allowed"
+            "published"
         )
 
         # 3. Write audit (fail-closed on phi; best-effort on clean)
+        # Columns from mig 042 + mig 043 (correlation_id, gate_source, org_source).
         _phi_txn_id = str(_uuid_phi.uuid4())
         try:
             await db.execute(
@@ -13830,20 +13839,22 @@ async def org_docs_ingest(
                     INSERT INTO compliance.hipaa_analysis_log
                         (id, transaction_id, document_id, content_sha256, user_id, org_slug,
                          gate, phi_flag, ceiling, hipaa_mode_allowed, action_taken,
-                         evidence_categories, classifier_version, layers_run, confidence, reason)
+                         evidence_categories, classifier_version, layers_run, confidence, reason,
+                         correlation_id, gate_source, org_source)
                     VALUES
                         (:id, :txn, :doc_id, :sha256, :uid, :org,
                          :gate, :phi_flag, :ceiling, :mode_allowed, :action_taken,
-                         :cats, :clf_ver, :layers, :confidence, :reason)
+                         :cats, :clf_ver, :layers, :confidence, :reason,
+                         :correlation_id, :gate_source, :org_source)
                     ON CONFLICT (id) DO NOTHING
                 """),
                 {
                     "id": _phi_txn_id,
                     "txn": _phi_txn_id,
-                    "doc_id": f"org:{namespace_ref}:{content_hash[:12]}",
+                    "doc_id": str(_doc_id),
                     "sha256": _content_sha256,
                     "uid": uploaded_by,
-                    "org": namespace_ref,
+                    "org": _org_slug,
                     "gate": _gate,
                     "phi_flag": _phi_flag,
                     "ceiling": str(_phi_verdict.get("recommended_ceiling") or "private"),
@@ -13857,6 +13868,9 @@ async def org_docs_ingest(
                         if _phi_verdict.get("confidence") is not None else None
                     ),
                     "reason": str(_phi_verdict.get("reason") or ""),
+                    "correlation_id": str(_doc_id),
+                    "gate_source": "org_docs_ingest",
+                    "org_source": _org_source,
                 },
             )
             await db.commit()
@@ -13909,7 +13923,6 @@ async def org_docs_ingest(
         raise HTTPException(status_code=500, detail=f"Embedding failed: {str(_e)[:200]}")
 
     # ── Write to org namespace ────────────────────────────────────────
-    import uuid as _uuid_mod
     ns = namespace_ref  # e.g. "org_aetnafl"
 
     async with OrgDocsSessionLocal() as org_db:
@@ -13928,8 +13941,7 @@ async def org_docs_ingest(
                 "message": "File already ingested in this org namespace.",
             }
 
-        # Insert org_documents row
-        _doc_id = _uuid_mod.uuid4()
+        # Insert org_documents row (_doc_id generated before gate for audit correlation)
         await org_db.execute(
             text(
                 f'INSERT INTO "{ns}".org_documents '
