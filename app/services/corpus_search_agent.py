@@ -3640,10 +3640,13 @@ async def _corpus_search_agent_impl(
     # the store's tag-only blend can match on shared tags regardless of intent,
     # serving e.g. auth_url for "philosophy of pre-auth" at score 1.0.
     # Drop these through to a/b/c/d until payor's vector backfill lands.
+    # Block on open-ended intent verbs (why/how/explain/describe), NOT on
+    # interrogative stems ("what is the" = most common fact-lookup phrasing;
+    # "strategy" collides with timely-filing + module names). Both were removed.
     _CONCEPTUAL_MARKERS = (
         "philosophy", "approach", "why does", "why do", "how does", "how do",
-        "explain", "tell me about", "what is the", "overview", "describe",
-        "understanding", "background on", "rationale", "strategy",
+        "explain", "tell me about", "overview", "describe",
+        "understanding", "background on", "rationale",
     )
     _raw_lower = raw_query.lower()
     _is_conceptual = any(m in _raw_lower for m in _CONCEPTUAL_MARKERS)
