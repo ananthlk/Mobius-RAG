@@ -69,6 +69,34 @@ _DDL = [
     """,
     # Retention sweeps / recent-first admin reads.
     "CREATE INDEX IF NOT EXISTS idx_rqt_ts ON rag_query_traces (ts DESC);",
+
+    # ── PHI-ADJACENT HARDENING (2026-07-19, EVAL flag: raw query + llm_answer
+    #    can carry PHI — chunks are ingest-gated, query/answer are not).
+    #    Ruling-independent controls applied immediately; the write gate
+    #    (HIPAA-mode vs classify-and-mask) + any phi_masked/phi_flag columns
+    #    await the PHI agent's ruling and will amend this migration. ──
+    # Tamper-proof, NOT delete-proof (deliberately different from
+    # hipaa_analysis_log): UPDATE is blocked — a stored trace can never be
+    # edited after the fact — but DELETE stays open because (a) the FK
+    # cascade from rag_query_decisions must work (eval-run cleanup), and
+    # (b) for PHI-adjacent content, deletability under retention policy is
+    # data-minimization, a feature. The audit log is the evidence record;
+    # this is the display record.
+    """
+    CREATE OR REPLACE FUNCTION public.rqt_no_update() RETURNS trigger AS $$
+    BEGIN
+        RAISE EXCEPTION 'rag_query_traces rows are immutable once written (PHI-adjacent trace)';
+    END $$ LANGUAGE plpgsql;
+    """,
+    "DROP TRIGGER IF EXISTS trg_rqt_no_update ON public.rag_query_traces;",
+    """
+    CREATE TRIGGER trg_rqt_no_update
+        BEFORE UPDATE ON public.rag_query_traces
+        FOR EACH ROW EXECUTE FUNCTION public.rqt_no_update();
+    """,
+    # Fail-safe access posture until the PHI ruling defines the role model:
+    # nothing implicit; readers get explicit grants when ruled.
+    "REVOKE ALL ON public.rag_query_traces FROM PUBLIC;",
 ]
 
 
