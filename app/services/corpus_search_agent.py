@@ -3625,22 +3625,23 @@ async def _corpus_search_agent_impl(
     )
 
     # ── 1b. Payor fact store (strategy s) — fast-exit pre-route ────────
-    # Gate: only call when at least one j:payor.* tag is present (payer known).
-    # No re-embedding: the store embeds the query itself at query time.
-    # On hit: return pre-certified answer directly — do NOT re-ground through
-    # synthesis critic (cert grades ARE the grounding signal).
+    # No RAG-side payer pre-gate: the store self-tags from query text and
+    # decides hit/miss internally (~230ms, fast miss on non-payer queries).
+    # classify_query's j:payor.* tags lag the store's own resolver (single-
+    # word-match gap hits "Sunshine Health"/"Aetna" etc.), so gating here
+    # would silently skip the call for most real payer queries.
+    # On hit: return pre-certified answer — do NOT re-ground through synthesis.
     # On miss or any error: silent fall-through to a/b/c/d routing.
     import os as _fs_os
     _fact_url = (_fs_os.environ.get("MOBIUS_PAYOR_URL") or "https://mobius-payor-ortabkknqa-uc.a.run.app").rstrip("/")
-    _j_payor_tags = [t for t in profile.tag_matches if t.startswith("j:payor.")]
-    if _fact_url and _j_payor_tags:
+    if _fact_url:
         try:
             import httpx as _fs_httpx
             _fs_payload = {
                 "query": raw_query,
                 "d_tags": [t for t in profile.tag_matches if t.startswith("d:")],
                 "p_tags": [t for t in profile.tag_matches if t.startswith("p:")],
-                "j_tags": _j_payor_tags,
+                "j_tags": [t for t in profile.tag_matches if t.startswith("j:")],
                 "intent_scope": None,
                 "k": 5,
             }
