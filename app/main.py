@@ -13780,10 +13780,11 @@ async def org_docs_ingest(
     # PHI_CLASSIFIER_URL unset → gate skipped (warns; set in prod).
     # Audit table: compliance.hipaa_analysis_log in the RAG DB — DB agent
     # must run the same schema as chat mig 042 on this DB.
+    import os as _os
     import json as _json_mod
     import urllib.request as _urllib_req
     import uuid as _uuid_phi
-    _phi_url = (os.environ.get("PHI_CLASSIFIER_URL") or "").rstrip("/")
+    _phi_url = (_os.environ.get("PHI_CLASSIFIER_URL") or "").rstrip("/")
     _phi_verdict: dict = {}
     _phi_txn_id = ""
     if _phi_url:
