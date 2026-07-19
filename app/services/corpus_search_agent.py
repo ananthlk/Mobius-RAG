@@ -35,6 +35,7 @@ import logging
 import re
 import time
 import uuid
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -3671,7 +3672,7 @@ async def _corpus_search_agent_impl(
                         confidence="high",
                         llm_answer=_served.get("answer_text") or "",
                         strategy_used="s",
-                        query_profile=profile.model_dump(),
+                        query_profile=dataclasses.asdict(profile),
                         routing={
                             "strategy": "s",
                             "method": "fact_store",
