@@ -13895,12 +13895,17 @@ async def org_docs_ingest(
             _gate, _action_taken, _phi_txn_id[:8], _blocked, filename,
         )
         if _blocked:
+            _reason = str(_phi_verdict.get("reason") or "")
+            if not _reason:
+                # Build human-readable reason from identifiers when classifier omits reason field
+                _cats = list(_phi_verdict.get("identifiers_found") or _phi_verdict.get("identifier_labels") or [])
+                _reason = f"Detected: {', '.join(_cats)}" if _cats else f"PHI gate: {_gate}"
             raise HTTPException(
                 status_code=409,
                 detail={
                     "status": "phi_blocked",
                     "gate": _gate,
-                    "reason": str(_phi_verdict.get("reason") or ""),
+                    "reason": _reason,
                     "transaction_id": _phi_txn_id,
                 },
             )
