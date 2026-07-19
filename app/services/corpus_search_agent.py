@@ -3667,8 +3667,26 @@ async def _corpus_search_agent_impl(
                         agent_id, _served.get("predicate"),
                         _served.get("score") or 0.0, _fs_data.get("telemetry_id"),
                     )
+                    _src = _served.get("source_ref") or {}
+                    _synth_chunk = CorpusChunk(
+                        id=f"fact_store_{_fs_data.get('telemetry_id') or 'hit'}",
+                        text=_served.get("answer_text") or "",
+                        document_id=_src.get("doc") or "fact_store",
+                        document_name=_served.get("predicate") or "payor fact store",
+                        page_number=None,
+                        paragraph_index=None,
+                        source_type="fact_store",
+                        similarity=float(_served.get("score") or 1.0),
+                        rerank_score=float(_served.get("score") or 1.0),
+                        confidence_label="high",
+                        retrieval_arms=["fact_store"],
+                        authority_level=_served.get("authority_level"),
+                        payer=_served.get("payer_key"),
+                        state=None,
+                        jpd_tags=[t for t in profile.tag_matches if t.startswith(("j:", "p:", "d:"))],
+                    )
                     return CorpusSearchAgentResponse(
-                        chunks=[],
+                        chunks=[_synth_chunk],
                         confidence="high",
                         llm_answer=_served.get("answer_text") or "",
                         strategy_used="s",
