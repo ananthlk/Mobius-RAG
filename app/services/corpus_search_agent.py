@@ -3645,11 +3645,17 @@ async def _corpus_search_agent_impl(
                 "intent_scope": None,
                 "k": 5,
             }
-            async with _fs_httpx.AsyncClient(timeout=3.0) as _fs_client:
+            logger.info("[%s] [fact_store:s] calling fact_query url=%s", agent_id, _fact_url)
+            async with _fs_httpx.AsyncClient(timeout=15.0) as _fs_client:
                 _fs_resp = await _fs_client.post(
                     f"{_fact_url}/api/skills/v1/fact_query",
                     json=_fs_payload,
                 )
+            logger.info(
+                "[%s] [fact_store:s] response status=%d hit=%s",
+                agent_id, _fs_resp.status_code,
+                _fs_resp.json().get("hit") if _fs_resp.status_code == 200 else "n/a",
+            )
             if _fs_resp.status_code == 200:
                 _fs_data = _fs_resp.json()
                 if _fs_data.get("hit"):
