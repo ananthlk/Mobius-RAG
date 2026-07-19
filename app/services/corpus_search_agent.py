@@ -3146,12 +3146,13 @@ async def corpus_search_agent(
 
         # Terminal: e=fail-fast (off-scope, retrying won't help),
         #            d=external (highest-recall tier, nothing beyond this),
-        #            multi=union of all qualifying strategies (nothing to escalate to).
+        #            multi=union of all qualifying strategies (nothing to escalate to),
+        #            s=payor fact store (pre-certified; synthesis re-grounding forbidden).
         # "multi" must be terminal: it already ran both arms and unioned results.
         # Without this, the outer loop sees confidence='low' (skip_synthesis=True
         # → no internal synthesis) + high-rerank chunks → synthesis_abstain fires
         # → escalates with single 'a' → overwrites the union result. Defeat.
-        if strategy_used in ("e", "d", "multi"):
+        if strategy_used in ("e", "d", "multi", "s"):
             return _with_chain(response)
 
         # Success: corpus chunks returned with decent confidence — done.
@@ -3622,6 +3623,65 @@ async def _corpus_search_agent_impl(
         profile.tag_matches, profile.literal_anchors,
         profile.untagged_meaningful_tokens,
     )
+
+    # ── 1b. Payor fact store (strategy s) — fast-exit pre-route ────────
+    # Gate: only call when at least one j:payor.* tag is present (payer known).
+    # No re-embedding: the store embeds the query itself at query time.
+    # On hit: return pre-certified answer directly — do NOT re-ground through
+    # synthesis critic (cert grades ARE the grounding signal).
+    # On miss or any error: silent fall-through to a/b/c/d routing.
+    import os as _fs_os
+    _fact_url = (_fs_os.environ.get("MOBIUS_PAYOR_URL") or "https://mobius-payor-ortabkknqa-uc.a.run.app").rstrip("/")
+    _j_payor_tags = [t for t in profile.tag_matches if t.startswith("j:payor.")]
+    if _fact_url and _j_payor_tags:
+        try:
+            import httpx as _fs_httpx
+            _fs_payload = {
+                "query": raw_query,
+                "d_tags": [t for t in profile.tag_matches if t.startswith("d:")],
+                "p_tags": [t for t in profile.tag_matches if t.startswith("p:")],
+                "j_tags": _j_payor_tags,
+                "intent_scope": None,
+                "k": 5,
+            }
+            async with _fs_httpx.AsyncClient(timeout=3.0) as _fs_client:
+                _fs_resp = await _fs_client.post(
+                    f"{_fact_url}/api/skills/v1/fact_query",
+                    json=_fs_payload,
+                )
+            if _fs_resp.status_code == 200:
+                _fs_data = _fs_resp.json()
+                if _fs_data.get("hit"):
+                    _served = _fs_data.get("served") or {}
+                    _cert = _served.get("cert") or {}
+                    logger.info(
+                        "[%s] [fact_store:s] hit predicate=%s score=%.3f telemetry_id=%s",
+                        agent_id, _served.get("predicate"),
+                        _served.get("score") or 0.0, _fs_data.get("telemetry_id"),
+                    )
+                    return CorpusSearchAgentResponse(
+                        chunks=[],
+                        confidence="high",
+                        llm_answer=_served.get("answer_text") or "",
+                        strategy_used="s",
+                        query_profile=profile.model_dump(),
+                        routing={
+                            "strategy": "s",
+                            "method": "fact_store",
+                            "priors_version": PRIORS_VERSION,
+                            "fact_telemetry_id": _fs_data.get("telemetry_id"),
+                            "fact_predicate": _served.get("predicate"),
+                            "fact_score": _served.get("score"),
+                            "fact_cert_grades": _cert.get("grades"),
+                        },
+                        strategy_chain=["s"],
+                        fast_exit={"fired": True, "reason": "fact_store_hit"},
+                        telemetry={"agent_id": agent_id},
+                    )
+        except Exception as _fs_exc:
+            logger.warning(
+                "[%s] [fact_store:s] error (fall-through): %s", agent_id, _fs_exc
+            )
 
     # ── 1a. Route — fail-fast gate + Router.decide ─────────────────────
     # Stage 1: fail-fast gate (PHI / jailbreak / no-d-tag → refuse).
