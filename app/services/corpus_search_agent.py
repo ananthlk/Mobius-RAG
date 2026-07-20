@@ -2963,7 +2963,7 @@ async def _fan_out_execute(
                 caller, caller_id,
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("[fan_out] arm failed query=%r strategy=%s: %s", sub_query, strategy, exc)
+            logger.warning("[fan_out] arm failed query_len=%d strategy=%s: %s", len(sub_query), strategy, exc)
             return CorpusSearchAgentResponse(
                 chunks=[], confidence="low", query_profile={},
                 telemetry={"fan_out_arm_error": str(exc)},
