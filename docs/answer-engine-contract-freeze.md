@@ -43,6 +43,9 @@ Plus `llm_answer` (served text) — chat + eval read it; must stay.
 1. `RAG_ANSWER_ENGINE=legacy|shape` flag, default legacy — instant flip-back, no deploy.
 2. Contract frozen (this doc) — flag flip invisible to consumers.
 3. Git tag `answer-engine/baseline-v0` @ cmhc `run_id` — hard fallback.
+   **Checkpoint SHAs (clean, verified by Broadcaster 2026-07-20):** mobius-rag `2b46980` · mobius-chat `270ff57`
+   (both on main, pushed, reachable). SHAs are immutable → no rush to tag; will tag both @ these SHAs annotated
+   with the cmhc baseline `run_id` once it lands.
 
 ## Open contract decision (needs EVAL sign-off before build)
 Per-slot routing vs per-query routing in the `routing` dict + decision row. Options: (a) keep per-query
