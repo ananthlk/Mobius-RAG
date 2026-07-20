@@ -3627,7 +3627,9 @@ def _observe_async(
                             None, _redact, (response.llm_answer or "")
                         )
                         _phi_flag_trace = _phi_q or _phi_a
-                        _evidence_cats = list({*_cats_q, *_cats_a})
+                        # Union ALL identifiers_found from both redaction calls; sorted
+                        # for determinism. Never truncate — store the complete set.
+                        _evidence_cats = sorted(set(_cats_q) | set(_cats_a))
 
                         # Structural scrub: only store PHI-safe query_profile fields.
                         # semantic_core, untagged_meaningful_tokens, literal_anchors
