@@ -97,6 +97,32 @@ _DDL = [
     # Fail-safe access posture until the PHI ruling defines the role model:
     # nothing implicit; readers get explicit grants when ruled.
     "REVOKE ALL ON public.rag_query_traces FROM PUBLIC;",
+
+    # ── PHI RULING APPLIED (2026-07-19): PHI-FREE BY CONSTRUCTION ──
+    # The write path scrubs PHI fail-closed (RAG wires PHI's /redact before
+    # INSERT), so this is a diagnostics store, not compliance-of-record.
+    # Control tier: RESTRICTED READ (minimum-necessary) + NORMAL WRITE.
+    # The UPDATE-block trigger above is KEPT as belt-and-braces (traces are
+    # write-once; no ruling requires it, nothing is hurt by it).
+    # phi_flag + evidence_categories are populated by RAG from the /redact
+    # response — CATEGORY LABELS ONLY, never values (name matches
+    # hipaa_analysis_log's column per the established identifiers_found→
+    # evidence_categories mapping, so cross-table tooling sees one name).
+    "ALTER TABLE public.rag_query_traces ADD COLUMN IF NOT EXISTS phi_flag BOOLEAN;",
+    ("ALTER TABLE public.rag_query_traces "
+     "ADD COLUMN IF NOT EXISTS evidence_categories TEXT[] NOT NULL DEFAULT '{}';"),
+    """
+    DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='mobius_trace_writer') THEN
+            CREATE ROLE mobius_trace_writer NOLOGIN;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='mobius_trace_ro') THEN
+            CREATE ROLE mobius_trace_ro NOLOGIN;
+        END IF;
+    END $$;
+    """,
+    "GRANT INSERT ON public.rag_query_traces TO mobius_trace_writer;",
+    "GRANT SELECT ON public.rag_query_traces TO mobius_trace_ro;",
 ]
 
 
