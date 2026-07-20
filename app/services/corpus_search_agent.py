@@ -3711,10 +3711,10 @@ async def _corpus_search_agent_impl(
 
     logger.info(
         "[%s] [trace:classify] query_type=%s coverage=%.2f "
-        "tag_matches=%s literal_anchors=%s untagged_meaningful=%s",
+        "tag_matches=%s literal_anchors=%s untagged_meaningful_count=%d",
         agent_id, profile.query_type, profile.coverage,
         profile.tag_matches, profile.literal_anchors,
-        profile.untagged_meaningful_tokens,
+        len(profile.untagged_meaningful_tokens),
     )
 
     # ── 1b. Payor fact store (strategy s) — fast-exit pre-route ────────
