@@ -3648,7 +3648,7 @@ def _observe_async(
                                     (decision_id, full_response, is_prod,
                                      corpus_version, phi_flag, evidence_categories)
                                 VALUES
-                                    (:did, :fr::jsonb, :is_prod,
+                                    (:did, CAST(:fr AS jsonb), :is_prod,
                                      :cv, :phi_flag, :ev_cats)
                                 ON CONFLICT (decision_id) DO NOTHING
                             """),
