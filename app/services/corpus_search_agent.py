@@ -3576,6 +3576,94 @@ def _observe_async(
                     },
                 )
                 await sess.commit()
+
+                # ── rag_query_traces scrub-write ──────────────────────────────
+                # PHI ruling: scrub raw_query + llm_answer via POST /redact,
+                # store the masked full_response. Always writes a row (never
+                # suppresses the row itself) — fail-closed on field only.
+                # PK = _decision_id (FK → rag_query_decisions(id)).
+                # Built on PHI skill's /redact shape:
+                #   {redacted_text, gate, phi_flag, identifiers_found, redaction}
+                #   redaction=clean|masked → store redacted_text
+                #   redaction=suppressed   → "[redaction unavailable]"
+                import os as _qt_os, urllib.request as _qt_req, json as _qt_json
+                _phi_url_qt = (_qt_os.environ.get("PHI_CLASSIFIER_URL") or "").rstrip("/")
+                if _phi_url_qt:
+                    try:
+                        def _redact(text: str) -> tuple[str, bool, list]:
+                            """Call /redact; return (scrubbed_text, phi_flag, categories)."""
+                            try:
+                                _body = _qt_json.dumps({"text": text}).encode()
+                                _req = _qt_req.Request(
+                                    f"{_phi_url_qt}/redact",
+                                    data=_body,
+                                    headers={"Content-Type": "application/json"},
+                                    method="POST",
+                                )
+                                with _qt_req.urlopen(_req, timeout=5) as _r:
+                                    _rd = _qt_json.loads(_r.read())
+                                _scrubbed = (
+                                    _rd.get("redacted_text") or "[redaction unavailable]"
+                                    if _rd.get("redaction") in ("clean", "masked")
+                                    else "[redaction unavailable]"
+                                )
+                                return (
+                                    _scrubbed,
+                                    bool(_rd.get("phi_flag")),
+                                    list(_rd.get("identifiers_found") or []),
+                                )
+                            except Exception:
+                                return ("[redaction unavailable]", True, [])
+
+                        import asyncio as _qt_asyncio
+                        _scrubbed_query, _phi_q, _cats_q = await _qt_asyncio.get_event_loop().run_in_executor(
+                            None, _redact, query
+                        )
+                        _scrubbed_answer, _phi_a, _cats_a = await _qt_asyncio.get_event_loop().run_in_executor(
+                            None, _redact, (response.llm_answer or "")
+                        )
+                        _phi_flag_trace = _phi_q or _phi_a
+                        _evidence_cats = list({*_cats_q, *_cats_a})
+
+                        _scrubbed_qp = dict(qp)
+                        _scrubbed_qp["raw_query"] = _scrubbed_query
+
+                        _full_resp_scrubbed = {
+                            "query_profile": _scrubbed_qp,
+                            "routing": response.routing or {},
+                            "strategies_tried": response.strategies_tried or [],
+                            "strategy_chain": response.strategy_chain or [],
+                            "confidence": response.confidence,
+                            "llm_answer": _scrubbed_answer,
+                            "fast_exit": response.fast_exit,
+                            "chunks": [
+                                (c.model_dump() if hasattr(c, "model_dump") else c)
+                                for c in (response.chunks or [])
+                            ],
+                            "telemetry": response.telemetry or {},
+                        }
+                        await sess.execute(
+                            sql_text("""
+                                INSERT INTO rag_query_traces
+                                    (decision_id, full_response, is_prod,
+                                     corpus_version, phi_flag, evidence_categories)
+                                VALUES
+                                    (:did, :fr::jsonb, :is_prod,
+                                     :cv, :phi_flag, :ev_cats)
+                                ON CONFLICT (decision_id) DO NOTHING
+                            """),
+                            {
+                                "did": _decision_id,
+                                "fr": _qt_json.dumps(_full_resp_scrubbed),
+                                "is_prod": is_prod,
+                                "cv": _corpus_version,
+                                "phi_flag": _phi_flag_trace,
+                                "ev_cats": _evidence_cats,
+                            },
+                        )
+                        await sess.commit()
+                    except Exception as _qt_exc:
+                        logger.warning("[observe] rag_query_traces insert failed: %s", _qt_exc)
         except Exception as exc:
             logger.warning("[observe] rag_query_decisions insert failed: %s", exc)
 
