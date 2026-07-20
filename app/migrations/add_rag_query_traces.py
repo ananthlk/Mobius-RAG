@@ -123,6 +123,73 @@ _DDL = [
     """,
     "GRANT INSERT ON public.rag_query_traces TO mobius_trace_writer;",
     "GRANT SELECT ON public.rag_query_traces TO mobius_trace_ro;",
+
+    # ── RETENTION MECHANISM (PHI ruling on deletability, 2026-07-19):
+    #    DELETE only via the bounded, logged, automated prune — never ad-hoc
+    #    per-row (the display store must not become a quiet selective-erase
+    #    surface). Enforced STRUCTURALLY: the delete trigger allows a row
+    #    delete only when (a) it is an FK-cascade action (pg_trigger_depth()
+    #    > 0 — eval-run cleanup keeps working), or (b) the session-local
+    #    prune flag is set, which only rqt_retention_prune() does. The
+    #    window defaults to 90 days (PHI's suggestion; exact value is a
+    #    pending Ananth business input — parameterized). The 5GB trip-wire
+    #    remains the secondary guard. Every prune run logs a row. ──
+    """
+    CREATE TABLE IF NOT EXISTS public.rqt_prune_log (
+        id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        pruned_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+        window_used  INTERVAL NOT NULL,
+        rows_deleted BIGINT NOT NULL,
+        run_by       TEXT NOT NULL DEFAULT current_user
+    );
+    """,
+    """
+    CREATE OR REPLACE FUNCTION public.rqt_guard_delete() RETURNS trigger AS $$
+    BEGIN
+        IF pg_trigger_depth() > 1
+           OR current_setting('mobius.rqt_retention_prune', true) = 'on' THEN
+            RETURN OLD;
+        END IF;
+        RAISE EXCEPTION 'rag_query_traces rows are deleted only by the bounded retention prune (rqt_retention_prune) or FK cascade';
+    END $$ LANGUAGE plpgsql;
+    """,
+    "DROP TRIGGER IF EXISTS trg_rqt_guard_delete ON public.rag_query_traces;",
+    """
+    CREATE TRIGGER trg_rqt_guard_delete
+        BEFORE DELETE ON public.rag_query_traces
+        FOR EACH ROW EXECUTE FUNCTION public.rqt_guard_delete();
+    """,
+    """
+    CREATE OR REPLACE FUNCTION public.rqt_retention_prune(window_arg INTERVAL DEFAULT '90 days')
+    RETURNS BIGINT
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = public
+    AS $$
+    DECLARE n BIGINT;
+    BEGIN
+        IF window_arg < INTERVAL '7 days' THEN
+            RAISE EXCEPTION 'retention window below 7-day floor (got %)', window_arg;
+        END IF;
+        PERFORM set_config('mobius.rqt_retention_prune', 'on', true);  -- txn-local
+        DELETE FROM public.rag_query_traces WHERE ts < now() - window_arg;
+        GET DIAGNOSTICS n = ROW_COUNT;
+        INSERT INTO public.rqt_prune_log (window_used, rows_deleted) VALUES (window_arg, n);
+        PERFORM set_config('mobius.rqt_retention_prune', 'off', true);
+        RETURN n;
+    END $$;
+    """,
+    """
+    DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='mobius_trace_pruner') THEN
+            CREATE ROLE mobius_trace_pruner NOLOGIN;
+        END IF;
+    END $$;
+    """,
+    "REVOKE ALL ON FUNCTION public.rqt_retention_prune(INTERVAL) FROM PUBLIC;",
+    "GRANT EXECUTE ON FUNCTION public.rqt_retention_prune(INTERVAL) TO mobius_trace_pruner;",
+    "REVOKE ALL ON public.rqt_prune_log FROM PUBLIC;",
+    "GRANT SELECT ON public.rqt_prune_log TO mobius_trace_ro;",
 ]
 
 
