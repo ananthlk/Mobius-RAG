@@ -131,9 +131,11 @@ _DDL = [
     #    delete only when (a) it is an FK-cascade action (pg_trigger_depth()
     #    > 0 — eval-run cleanup keeps working), or (b) the session-local
     #    prune flag is set, which only rqt_retention_prune() does. The
-    #    window defaults to 90 days (PHI's suggestion; exact value is a
-    #    pending Ananth business input — parameterized). The 5GB trip-wire
-    #    remains the secondary guard. Every prune run logs a row. ──
+    #    window: 180 days (DECIDED by Ananth 2026-07-19 — longer support/
+    #    audit reach; finite + bounded per PHI's ruling). At ~<=50MB/day
+    #    dev traffic, 180d ~ <=9GB worst case, so the 5GB trip-wire may
+    #    fire first at higher traffic — both guards are bounded, that's
+    #    the design. Every prune run logs a row. ──
     """
     CREATE TABLE IF NOT EXISTS public.rqt_prune_log (
         id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -160,7 +162,7 @@ _DDL = [
         FOR EACH ROW EXECUTE FUNCTION public.rqt_guard_delete();
     """,
     """
-    CREATE OR REPLACE FUNCTION public.rqt_retention_prune(window_arg INTERVAL DEFAULT '90 days')
+    CREATE OR REPLACE FUNCTION public.rqt_retention_prune(window_arg INTERVAL DEFAULT '180 days')
     RETURNS BIGINT
     LANGUAGE plpgsql
     SECURITY DEFINER
