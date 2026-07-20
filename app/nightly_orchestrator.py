@@ -408,11 +408,16 @@ def _run_nightly(opts: dict) -> None:
         if dry_run:
             _step("chunk", "skipped", "dry run")
         else:
+            # Emit a concrete sub-label before EACH slow poll so the UI never
+            # shows a static "running" during the multi-minute build-eu / remediate
+            # phases (emit-progress norm: name the action, not "working…").
+            _step("chunk", "running", "build-eu: deriving embeddable units from lines…")
             _rag_post("/admin/build-eu-from-lines", {}, timeout=30)
-            _poll_job("/admin/build-eu-from-lines/status", 60)
+            eu = _poll_job("/admin/build-eu-from-lines/status", 60)
+            _step("chunk", "running", f"build-eu done ({eu.get('done','?')}/{eu.get('total','?')}) · remediating chunk/tag gaps…")
             _rag_post("/admin/integrity/remediate", {}, timeout=30)
-            _poll_job("/admin/integrity/remediate/status", 15)
-            _step("chunk", "done", "build-eu + remediate")
+            rem = _poll_job("/admin/integrity/remediate/status", 15)
+            _step("chunk", "done", f"build-eu ({eu.get('done','?')}) + remediate ({rem.get('done','?') if isinstance(rem, dict) else 'ok'})")
         if _stopping():
             raise RuntimeError("stopped")
 
