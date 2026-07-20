@@ -3094,6 +3094,8 @@ async def corpus_search_agent(
             # rqd_prod_not_eval constraint: is_prod and eval_run_id are mutually exclusive
             is_prod=not bool(_eval_run_id),
             eval_run_id=_eval_run_id,
+            caller=caller,
+            caller_id=caller_id,
         )
 
         # Fast-exit: if this attempt used the same query form we've already seen
@@ -3423,6 +3425,8 @@ def _observe_async(
     eval_run_id: str | None = None,
     is_prod: bool = True,
     corpus_version: str | None = None,
+    caller: str = "api",
+    caller_id: str | None = None,
 ) -> None:
     """Schedule a fire-and-forget OBSERVE write to rag_query_decisions.
 
@@ -3569,8 +3573,8 @@ def _observe_async(
                         "synthesis_gap": synthesis_gap,
                         "per_claim_ledger": _json.dumps(_per_claim_ledger) if _per_claim_ledger else None,
                         "is_prod": is_prod,
-                        "caller": (response.telemetry or {}).get("caller") or None,
-                        "caller_id": None,
+                        "caller": caller or (response.telemetry or {}).get("caller") or None,
+                        "caller_id": caller_id,
                         "eval_run_id": eval_run_id,
                         "correlation_id": agent_id,
                     },
