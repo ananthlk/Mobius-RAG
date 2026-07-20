@@ -3629,11 +3629,25 @@ def _observe_async(
                         _phi_flag_trace = _phi_q or _phi_a
                         _evidence_cats = list({*_cats_q, *_cats_a})
 
-                        _scrubbed_qp = dict(qp)
-                        _scrubbed_qp["raw_query"] = _scrubbed_query
+                        # Structural scrub: only store PHI-safe query_profile fields.
+                        # semantic_core, untagged_meaningful_tokens, literal_anchors
+                        # all derive from raw query text and can carry identifiers —
+                        # field allowlist is whack-a-mole; exclude the raw-text-derived
+                        # fields entirely and replace with PHI-safe summaries.
+                        _safe_qp = {
+                            "raw_query": _scrubbed_query,   # /redact-scrubbed above
+                            "query_type": qp.get("query_type"),
+                            "coverage": qp.get("coverage"),
+                            "tag_matches": qp.get("tag_matches") or [],
+                            "literal_anchor_count": len(qp.get("literal_anchors") or []),
+                            "untagged_meaningful_count": len(qp.get("untagged_meaningful_tokens") or []),
+                            # semantic_core: excluded (raw query rewrite, PHI-bearing)
+                            # literal_anchors: excluded (regex-matched tokens, can include SSN/MRN patterns)
+                            # untagged_meaningful_tokens: excluded (raw token array, PHI-bearing)
+                        }
 
                         _full_resp_scrubbed = {
-                            "query_profile": _scrubbed_qp,
+                            "query_profile": _safe_qp,
                             "routing": response.routing or {},
                             "strategies_tried": response.strategies_tried or [],
                             "strategy_chain": response.strategy_chain or [],
