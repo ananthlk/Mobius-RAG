@@ -8,6 +8,7 @@ Swallows ALL exceptions — must never raise into the query path.
 fields must contain ONLY counts/enums — never query text or chunk text (PHI §4).
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -21,11 +22,19 @@ _seq_lock = threading.Lock()
 _seq: dict[str, int] = {}
 
 
+def _do_post(req: urllib.request.Request) -> None:
+    try:
+        urllib.request.urlopen(req, timeout=2)
+    except Exception:
+        pass
+
+
 def emit_progress(cid: str | None, event: str, **fields: object) -> None:
     """Emit a pipeline stage event to chat's progress channel.
 
     No-op when cid is None/empty (eval path, unit tests).
     Never raises — all exceptions are swallowed silently.
+    The HTTP POST runs on a thread-pool worker so it never blocks the event loop.
     """
     if not cid:
         return
@@ -43,7 +52,12 @@ def emit_progress(cid: str | None, event: str, **fields: object) -> None:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        urllib.request.urlopen(req, timeout=2)
         logger.debug("emit_progress cid=%s event=%s seq=%d", cid[:8], event, seq)
+        try:
+            loop = asyncio.get_running_loop()
+            loop.run_in_executor(None, _do_post, req)
+        except RuntimeError:
+            # No running event loop (sync test context) — post inline.
+            _do_post(req)
     except Exception:
         pass
