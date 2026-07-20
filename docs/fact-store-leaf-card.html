@@ -1,0 +1,60 @@
+<!-- Reference mockup: the `s · fact_store` diagnostics drill-down leaf (provenance + freshness + drift-watch).
+     Owner of content: Eval. UX formalizes into a design spec; Chat Agent implements in the DIAGNOSTICS tab.
+     Data source (corpus_search strategy-s response): routing.{fact_telemetry_id, fact_predicate, fact_score,
+     fact_cert_grades} (LIVE) + served.{source_ref, authority_level, freshness{last_verified_at, valid_until,
+     stale}, cert{status,grades}} (RAG pass-through pending). Uses CDS CSS vars — theme-aware. -->
+<div style="background: var(--surface-2); border: 0.5px solid var(--border); border-radius: 12px; padding: 1.1rem 1.25rem; max-width: 640px; font-family: var(--font-sans);">
+
+  <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;">
+    <div>
+      <div style="font-size: 13px; color: var(--text-secondary); display:flex; align-items:center; gap:6px;">
+        <i class="ti ti-building-bank" style="font-size:15px"></i> Sunshine Health · FL Medicaid
+      </div>
+      <div style="font-size: 16px; font-weight: 500; margin-top: 2px;">EDI payer ID</div>
+    </div>
+    <div style="text-align:right;">
+      <div style="font-family: var(--font-mono); font-size: 22px; font-weight: 500;">68069</div>
+      <span style="display:inline-block; margin-top:4px; font-size:12px; padding:3px 9px; border-radius:999px; background: var(--bg-success); color: var(--text-success);">certified · score 1.00</span>
+    </div>
+  </div>
+
+  <div style="border-top:0.5px solid var(--border); margin:14px 0 12px;"></div>
+  <div style="font-size:12px; color:var(--text-muted); margin-bottom:8px;">how this answer was derived</div>
+  <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(180px,1fr)); gap:8px 20px; font-size:13.5px;">
+    <div style="display:flex; justify-content:space-between; gap:8px;"><span style="color:var(--text-secondary);">extraction</span><span>corpus-grounded</span></div>
+    <div style="display:flex; justify-content:space-between; gap:8px;"><span style="color:var(--text-secondary);">retrieval grade</span><span style="font-family:var(--font-mono);">1.00</span></div>
+    <div style="display:flex; justify-content:space-between; gap:8px;"><span style="color:var(--text-secondary);">synthesis grade</span><span style="color:var(--text-muted);">n/a · direct read</span></div>
+    <div style="display:flex; justify-content:space-between; gap:8px;"><span style="color:var(--text-secondary);">grader</span><span style="font-family:var(--font-mono); font-size:12px;">fact_check_v1</span></div>
+  </div>
+
+  <div style="border-top:0.5px solid var(--border); margin:14px 0 12px;"></div>
+  <div style="font-size:12px; color:var(--text-muted); margin-bottom:8px;">sources that derived it — watched for change</div>
+  <div style="border:0.5px solid var(--border); border-radius: var(--radius); padding:10px 12px; margin-bottom:8px;">
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+      <div style="display:flex; align-items:center; gap:8px; font-size:13.5px;"><i class="ti ti-file-text" style="font-size:16px; color:var(--text-accent);"></i> Sunshine Health Provider Manual</div>
+      <span style="font-size:11px; padding:2px 8px; border-radius:999px; background:var(--bg-success); color:var(--text-success);">live · watched</span>
+    </div>
+    <div style="font-size:12.5px; color:var(--text-secondary); margin-top:6px; padding-left:24px;">“…providers should use Sunshine Health Payer ID: <span style="font-family:var(--font-mono); color:var(--text-primary);">68069</span>”</div>
+  </div>
+  <div style="border:0.5px solid var(--border-warning); border-radius: var(--radius); padding:10px 12px;">
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+      <div style="display:flex; align-items:center; gap:8px; font-size:13.5px;"><i class="ti ti-map-pin" style="font-size:16px; color:var(--text-warning);"></i> exact source pointer <span style="font-family:var(--font-mono); font-size:12px; color:var(--text-secondary);">doc_id · chunk_id · page</span></div>
+      <span style="font-size:11px; padding:2px 8px; border-radius:999px; background:var(--bg-warning); color:var(--text-warning);">proposed</span>
+    </div>
+    <div style="font-size:12.5px; color:var(--text-secondary); margin-top:6px; padding-left:24px;">comparator sees the grounding chunk; persisting doc/chunk/page lets drift-watch pinpoint which source changed.</div>
+  </div>
+
+  <div style="border-top:0.5px solid var(--border); margin:14px 0 12px;"></div>
+  <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(150px,1fr)); gap:10px;">
+    <div style="background:var(--surface-1); border-radius:var(--radius); padding:10px 12px;"><div style="font-size:12px; color:var(--text-muted);">last verified</div><div style="font-size:15px; font-weight:500; margin-top:2px;">Jul 5, 2026</div></div>
+    <div style="background:var(--surface-1); border-radius:var(--radius); padding:10px 12px;"><div style="font-size:12px; color:var(--text-muted);">valid until</div><div style="font-size:15px; font-weight:500; margin-top:2px;">Jul 18, 2027</div></div>
+    <div style="background:var(--surface-1); border-radius:var(--radius); padding:10px 12px;"><div style="font-size:12px; color:var(--text-muted);">status</div><div style="font-size:15px; font-weight:500; margin-top:2px; color:var(--text-success);">fresh</div></div>
+  </div>
+
+  <div style="border-top:0.5px solid var(--border); margin:14px 0 12px;"></div>
+  <div style="font-size:12px; color:var(--text-muted); margin-bottom:8px;">drift watch — §8 re-verify loop</div>
+  <div style="font-size:13px; color:var(--text-secondary); margin-bottom:5px;">last re-verify: <span style="color:var(--text-primary);">confirm</span> — re-derived from live sources, still grounds at 1.00</div>
+  <div style="font-size:13px; color:var(--text-secondary); margin-bottom:5px;">next check: auto at 80% of TTL, or on demand</div>
+  <div style="font-size:13px; color:var(--text-secondary);">if a watched source changes so the fact no longer grounds → <span style="color:var(--text-warning);">drift</span> → status <span style="color:var(--text-primary);">stale</span> → re-cert queue (and, with the pointer above, which source).</div>
+
+</div>

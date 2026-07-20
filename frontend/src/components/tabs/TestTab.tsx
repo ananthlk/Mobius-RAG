@@ -14,6 +14,8 @@ import { API_BASE } from '../../config'
 import { AgentPipelineTrace, type AgentResponse } from './AgentPipelineTrace'
 import { TwoGradeBar, PerClaimLedger, type ClaimEntry } from './EvalTab'
 import { QueryTraceDrilldown } from './QueryTraceDrilldown'
+import { DiagnosticsCard, STUB_TREE } from './DiagnosticsCard'
+import { mapToTree, type GradeRow } from './DiagnosticsCard.mapper'
 import './EvalTab.css'   // reuse styles (run-header, kv, section, etc.)
 import './TestTab.css'
 
@@ -391,6 +393,23 @@ export function TestTab() {
                     </div>
                   )}
                 </div>
+
+                {/* ── DiagnosticsCard: real data from live query ── */}
+                <DiagnosticsCard
+                  tree={mapToTree(
+                    query,
+                    response,
+                    gradeData ? ({
+                      retrieval_grade: gradeData.retrieval_grade,
+                      synthesis_grade: gradeData.synthesis_grade,
+                      synthesis_gap: gradeData.synthesis_gap,
+                      per_claim_ledger: gradeData.per_claim_ledger,
+                      fact_checker_version: gradeData.fact_checker_version,
+                    } satisfies GradeRow) : null,
+                  )}
+                  mode="eval"
+                />
+
                 {currentDecisionId ? (
                   <QueryTraceDrilldown decisionId={currentDecisionId} isStoredResult={isStoredResult} />
                 ) : (
@@ -410,6 +429,25 @@ export function TestTab() {
                 {!isStoredResult && <AgentPipelineTrace response={response} />}
               </>
             </TraceErrorBoundary>
+          )}
+
+          {/* ── DiagnosticsCard preview (stub) — remove once EVAL wires real data ── */}
+          {!response && !loading && (
+            <div style={{ marginTop: 24 }}>
+              <div className="section-label" style={{ marginBottom: 8, fontSize: 11, color: '#8892a4', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+                DiagnosticsCard preview — stub data
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                <div>
+                  <div style={{ fontSize: 10, color: '#aab0c0', marginBottom: 4, fontFamily: 'monospace' }}>mode=eval</div>
+                  <DiagnosticsCard tree={STUB_TREE} mode="eval" />
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: '#aab0c0', marginBottom: 4, fontFamily: 'monospace' }}>mode=chat</div>
+                  <DiagnosticsCard tree={STUB_TREE} mode="chat" />
+                </div>
+              </div>
+            </div>
           )}
         </div>
       </div>
