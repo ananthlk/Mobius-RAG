@@ -64,6 +64,7 @@ from app.services.corpus_search_router import (
     persist_decision as router_persist_decision,
     PRIORS_VERSION,
 )
+from app.services.progress_emit import emit_progress
 import os as _os
 if _os.environ.get("ROUTER_VERSION") == "v2":
     from app.services.corpus_search_router_v2 import decide as router_decide
@@ -700,6 +701,7 @@ async def _strategy_wide_themes_wide(
         ranked[0].code if ranked else None,
         dominant_share, int(themes_ms),
     )
+    emit_progress(caller_id, "themes", n=n_themes)  # emit 4
 
     # ── Step 3: NARROW — BM25 per theme (parallel) ───────────────────────
     # Each theme runs an independent corpus_search. SQLAlchemy AsyncSessions
@@ -3732,6 +3734,7 @@ async def _corpus_search_agent_impl(
         profile.tag_matches, profile.literal_anchors,
         len(profile.untagged_meaningful_tokens),
     )
+    emit_progress(caller_id, "understanding")  # emit 1
 
     # ── 1b. Payor fact store (strategy s) — fast-exit pre-route ────────
     # No RAG-side payer pre-gate: the store self-tags from query text and
@@ -3771,6 +3774,7 @@ async def _corpus_search_agent_impl(
                 "k": 5,
             }
             logger.info("[%s] [fact_store:s] calling fact_query url=%s", agent_id, _fact_url)
+            emit_progress(caller_id, "fact_check")  # emit 2
             async with _fs_httpx.AsyncClient(timeout=15.0) as _fs_client:
                 _fs_resp = await _fs_client.post(
                     f"{_fact_url}/api/skills/v1/fact_query",
@@ -3809,6 +3813,7 @@ async def _corpus_search_agent_impl(
                         state=None,
                         jpd_tags=[t for t in profile.tag_matches if t.startswith(("j:", "p:", "d:"))],
                     )
+                    emit_progress(caller_id, "composing")  # emit 7 (strategy s fast-exit)
                     return CorpusSearchAgentResponse(
                         chunks=[_synth_chunk],
                         confidence="high",
@@ -4278,6 +4283,7 @@ async def _corpus_search_agent_impl(
                 len(explore_pool) if explore_pool else 0,
             )
 
+        emit_progress(caller_id, "searching")  # emit 3 for strategy b
         explore = await _strategy_wide_themes_wide(
             db, profile, request,
             pool_doc_ids=explore_pool,
@@ -4302,6 +4308,7 @@ async def _corpus_search_agent_impl(
         # returns only chunks and the rubric-judge can't fairly score
         # claims like "yes, prior auth required" which need synthesis.
         b_chunks_for_response = explore["union_chunks"][: max(request.k, 15)]
+        emit_progress(caller_id, "composing")  # emit 7 (strategy b)
         b_llm_answer, b_synth_conf, b_synth_tel = await _synthesize_internal_answer(
             raw_query, b_chunks_for_response,
             stage="rag_strategy_b_synth",
@@ -4485,6 +4492,7 @@ async def _corpus_search_agent_impl(
         from app.services.corpus_search_strategy_d import (
             strategy_d_external,
         )
+        emit_progress(caller_id, "external")  # emit 6
         d_result = await strategy_d_external(
             db, raw_query,
             agent_id=agent_id,
@@ -4932,6 +4940,7 @@ async def _corpus_search_agent_impl(
             required_phrase_weights=_derive_required_phrase_weights(profile, partition),
             required_phrase_tag_codes=_derive_required_phrase_tag_codes(profile, partition),
         )
+        emit_progress(caller_id, "searching")  # emit 3 (each arm; no-op on repeat)
         t_strategy = time.monotonic()
         sub_response: CorpusSearchResponse = await corpus_search(
             db, sub_request,
@@ -4940,6 +4949,8 @@ async def _corpus_search_agent_impl(
         )
         elapsed_ms = (time.monotonic() - t_strategy) * 1000.0
         chunks = sub_response.chunks
+        if chunks:
+            emit_progress(caller_id, "ranking", n=len(chunks))  # emit 5
         succeeded, note = _strategy_success(
             strategy, chunks, profile, prior_doc_ids=seen_doc_ids
         )
@@ -5352,6 +5363,7 @@ async def _corpus_search_agent_impl(
         final_llm_answer = None
         synth_tel: dict[str, Any] = {}
     else:
+        emit_progress(caller_id, "composing")  # emit 7 (strategy a)
         final_llm_answer, synth_conf, synth_tel = await _synthesize_internal_answer(
             raw_query, final_chunks,
             stage="rag_strategy_a_synth",
