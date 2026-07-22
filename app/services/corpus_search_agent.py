@@ -1497,6 +1497,7 @@ async def _estimate_internal_recall(
     db: AsyncSession,
     profile: QueryProfile,
     pool_size: int,
+    pool_doc_ids: list[str] | None = None,
 ) -> tuple[float, str, str | None]:
     """Return (estimated_recall, reason, missing_token) for internal-corpus strategies.
 
@@ -1595,13 +1596,23 @@ async def _estimate_internal_recall(
             try:
                 # Use ILIKE rather than tsvector — codes like "H0019"
                 # don't tokenise predictably under english stemming.
-                row = await db.execute(
-                    sql_text(
+                # Scope to pool when available: "anchor absent from this arm's
+                # pool" → withdraw is correct; "absent from 1.9M rows" is too
+                # broad and causes a 74GB full seq-scan.
+                if pool_doc_ids:
+                    _anchor_sql = (
+                        "SELECT 1 FROM rag_published_embeddings "
+                        "WHERE document_id = ANY(CAST(:pool AS uuid[])) "
+                        "AND text ILIKE :pat LIMIT 1"
+                    )
+                    _anchor_params: dict = {"pat": f"%{anchor}%", "pool": pool_doc_ids}
+                else:
+                    _anchor_sql = (
                         "SELECT 1 FROM rag_published_embeddings "
                         "WHERE text ILIKE :pat LIMIT 1"
-                    ),
-                    {"pat": f"%{anchor}%"},
-                )
+                    )
+                    _anchor_params = {"pat": f"%{anchor}%"}
+                row = await db.execute(sql_text(_anchor_sql), _anchor_params)
                 if row.first() is None:
                     missing_literal = anchor
                     break
@@ -1620,19 +1631,27 @@ async def _estimate_internal_recall(
     if len(deduped) >= 2:
         joined = " ".join(deduped)
         try:
-            # Tier 1 — same paragraph. plainto_tsquery requires all
-            # tokens (stemmed) in the same chunk. Cheapest check; if
-            # any chunk hits, we have grounded co-occurrence.
-            row = await db.execute(
-                sql_text(
+            # Tier 1 — same paragraph scoped to the arm's pool.
+            if pool_doc_ids:
+                _t1_sql = (
+                    "SELECT COUNT(*) FROM ("
+                    "  SELECT 1 FROM rag_published_embeddings "
+                    "  WHERE document_id = ANY(CAST(:pool AS uuid[])) "
+                    "  AND search_vec @@ plainto_tsquery('english', :q) "
+                    "  LIMIT 1"
+                    ") s"
+                )
+                _t1_params: dict = {"q": joined, "pool": pool_doc_ids}
+            else:
+                _t1_sql = (
                     "SELECT COUNT(*) FROM ("
                     "  SELECT 1 FROM rag_published_embeddings "
                     "  WHERE search_vec @@ plainto_tsquery('english', :q) "
                     "  LIMIT 1"
                     ") s"
-                ),
-                {"q": joined},
-            )
+                )
+                _t1_params = {"q": joined}
+            row = await db.execute(sql_text(_t1_sql), _t1_params)
             n_para = int(row.scalar() or 0)
 
             if n_para >= 1:
@@ -1644,15 +1663,24 @@ async def _estimate_internal_recall(
                 doc_sets: list[set[str]] = []
                 empty_token: str | None = None
                 for tok in deduped:
-                    rows = await db.execute(
-                        sql_text(
+                    if pool_doc_ids:
+                        _tok_sql = (
+                            "SELECT DISTINCT document_id::text "
+                            "FROM rag_published_embeddings "
+                            "WHERE document_id = ANY(CAST(:pool AS uuid[])) "
+                            "AND search_vec @@ plainto_tsquery('english', :q) "
+                            "LIMIT 1000"
+                        )
+                        _tok_params: dict = {"q": tok, "pool": pool_doc_ids}
+                    else:
+                        _tok_sql = (
                             "SELECT DISTINCT document_id::text "
                             "FROM rag_published_embeddings "
                             "WHERE search_vec @@ plainto_tsquery('english', :q) "
                             "LIMIT 1000"
-                        ),
-                        {"q": tok},
-                    )
+                        )
+                        _tok_params = {"q": tok}
+                    rows = await db.execute(sql_text(_tok_sql), _tok_params)
                     s = {r[0] for r in rows}
                     if not s:
                         empty_token = tok
@@ -3959,6 +3987,7 @@ async def _corpus_search_agent_impl(
         # Internal self-assessment for (a) and (b).
         a_recall, a_reason, _missing_token = await _estimate_internal_recall(
             db, profile, pool_size_pre,
+            pool_doc_ids=list(pool_pre.document_ids) if pool_pre and pool_pre.document_ids else None,
         )
         # (b) is slightly more permissive — vector finds semantic matches
         # without exact tag presence. Bumps the floor a touch.
