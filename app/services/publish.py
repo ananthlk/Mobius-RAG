@@ -28,6 +28,19 @@ class PublishResult:
     rows_written: int
     verification_passed: bool
     verification_message: str | None  # None if passed, else reason
+    # Per-kind tag-join coverage for THIS doc (drift drill-down), counted in the
+    # row loop from the same _chunk_tags_by_pos lookup publish uses to copy tags.
+    # source_* = policy_paragraph positions carrying that kind; joined_* = chunks
+    # that actually received it. source>0 & joined==0 = the position-join silently
+    # dropped this doc. Defaulted + appended last so positional construction at
+    # every existing call site stays valid.
+    chunks_total: int = 0
+    tags_joined_d: int = 0
+    tags_joined_p: int = 0
+    tags_joined_j: int = 0
+    tags_source_d: int = 0
+    tags_source_p: int = 0
+    tags_source_j: int = 0
 
 
 def _build_text_for_chunk(chunk: HierarchicalChunk) -> str:
@@ -163,6 +176,16 @@ async def publish_document(
     except Exception:
         pass  # non-fatal; chunk_d/p/j_tags stay NULL for this doc
 
+    # Per-doc tag-join coverage (drift drill-down). source_* = policy_paragraph
+    # positions carrying that kind (pre-join); joined_* is counted in the row
+    # loop as chunks actually receive the tag. source>0 & joined==0 = the
+    # position join (page,order_index)==(page,paragraph_index) silently dropped
+    # this doc — publish.py NULLs on miss + the load above is except:pass.
+    _src_d = sum(1 for _v in _chunk_tags_by_pos.values() if _v["d"])
+    _src_p = sum(1 for _v in _chunk_tags_by_pos.values() if _v["p"])
+    _src_j = sum(1 for _v in _chunk_tags_by_pos.values() if _v["j"])
+    _j_d = _j_p = _j_j = 0
+
     # Document metadata (contract: empty string when null)
     doc_filename = _str_or_empty(doc.filename)
     doc_display_name = _str_or_empty(doc.display_name)
@@ -216,6 +239,16 @@ async def publish_document(
         content_sha = _content_sha(document_id, ce.source_id, text)
         model_str = (ce.model or "").strip() if ce.model else ""
 
+        # Look up chunk tags once so we can BOTH copy them and count join hits.
+        _ct_dd = _chunk_tags_by_pos.get((page_number, paragraph_index))
+        if _ct_dd:
+            if _ct_dd["d"]:
+                _j_d += 1
+            if _ct_dd["p"]:
+                _j_p += 1
+            if _ct_dd["j"]:
+                _j_j += 1
+
         row = RagPublishedEmbedding(
             id=ce.id,
             document_id=document_id,
@@ -247,12 +280,32 @@ async def publish_document(
             updated_at=now,
             source_verification_status=source_verification_status,
             **({
-                "chunk_d_tags": _ct["d"],
-                "chunk_p_tags": _ct["p"],
-                "chunk_j_tags": _ct["j"],
-            } if (_ct := _chunk_tags_by_pos.get((page_number, paragraph_index))) else {}),
+                "chunk_d_tags": _ct_dd["d"],
+                "chunk_p_tags": _ct_dd["p"],
+                "chunk_j_tags": _ct_dd["j"],
+            } if _ct_dd else {}),
         )
         rows.append(row)
+
+    # Emit per-doc tag-join coverage (built above) as a structured signal BEFORE
+    # downstream reads it, and shout on a full-miss (source tagged but nothing
+    # joined). Bundled into PublishResult for the integrity/nightly path.
+    import logging as _pub_log
+    _tagcov = dict(
+        chunks_total=len(rows),
+        tags_joined_d=_j_d, tags_joined_p=_j_p, tags_joined_j=_j_j,
+        tags_source_d=_src_d, tags_source_p=_src_p, tags_source_j=_src_j,
+    )
+    for _k, _s, _jn in (("d", _src_d, _j_d), ("p", _src_p, _j_p), ("j", _src_j, _j_j)):
+        if _s > 0 and _jn == 0:
+            _pub_log.getLogger(__name__).warning(
+                "[publish] tag-join MISS doc=%s kind=%s: %d source paragraphs tagged, 0 chunks joined",
+                document_id, _k, _s,
+            )
+    _pub_log.getLogger(__name__).info(
+        "[publish] tag-join doc=%s chunks=%d joined(d/p/j)=%d/%d/%d source(d/p/j)=%d/%d/%d",
+        document_id, len(rows), _j_d, _j_p, _j_j, _src_d, _src_p, _src_j,
+    )
 
     await db.execute(delete(RagPublishedEmbedding).where(RagPublishedEmbedding.document_id == document_id))
     for row in rows:
@@ -385,6 +438,7 @@ async def publish_document(
             rows_written=expected_count,
             verification_passed=True,
             verification_message="published OK; downstream sync running in background",
+            **_tagcov,
         )
 
     try:
@@ -409,6 +463,7 @@ async def publish_document(
                     f"published OK but downstream sync incomplete — {sync_summary}; "
                     f"chroma_msg={sync_res.chroma_message!r} chat_msg={sync_res.chat_pg_message!r}"
                 ),
+                **_tagcov,
             )
     except Exception as sync_exc:
         # Defensive: a bug in sync code path must not fail publish.
@@ -422,4 +477,5 @@ async def publish_document(
         rows_written=expected_count,
         verification_passed=True,
         verification_message=sync_summary,
+        **_tagcov,
     )
