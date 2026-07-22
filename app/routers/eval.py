@@ -53,6 +53,7 @@ def _summarize_cells(rows: list) -> dict:
     per: dict = collections.defaultdict(
         lambda: {"recall": [], "prec": [], "answered": 0, "n": 0, "contra": 0, "lat": []})
     byq: dict = collections.defaultdict(dict)   # base qid -> {strategy: recall}
+    _FORCED_ARMS = {"a", "b", "c", "d", "s"}
     for r in rows:
         c = r["calib"] or {}
         s = r["strategy"] or c.get("strategy")
@@ -70,7 +71,7 @@ def _summarize_cells(rows: list) -> dict:
         rec = c.get("recall")
         if rec is not None:
             p["recall"].append(rec)
-            if s in ("a", "b", "c", "d"):
+            if s in _FORCED_ARMS:
                 byq[(r["query_id"] or "").split("/")[0]][s] = rec
 
     def _agg(p: dict) -> dict:
@@ -96,8 +97,15 @@ def _summarize_cells(rows: list) -> dict:
     oracle = round(statistics.mean(oracle_vals), 3) if oracle_vals else None
     router_s = strategies.get("natural")
     router_recall = router_s["recall"] if router_s else None
-    best_single = max((strategies[s]["recall"] for s in ("a", "b", "c", "d") if s in strategies), default=0.0)
+    best_single = max(
+        (strategies[s]["recall"] for s in _FORCED_ARMS if s in strategies), default=0.0
+    )
     ref = router_recall if router_recall is not None else best_single
+    # union_oracle_proxy: per query, 1 if ANY forced arm got recall >= 0.67 (correct threshold).
+    # Ceiling for step-4 union/shape work — answers "is router 0.65 physically reachable?"
+    # Uses recall >= 0.67 (= "correct" verdict threshold) so it's computable from calib JSON alone.
+    union_vals = [1.0 if any(r >= 0.67 for r in v.values()) else 0.0 for v in byq.values() if v]
+    union_oracle_proxy = round(statistics.mean(union_vals), 3) if union_vals else None
     return {
         "n_queries": len(byq),
         "strategies": strategies,
@@ -105,6 +113,7 @@ def _summarize_cells(rows: list) -> dict:
         "router_recall": router_recall,
         "best_single_recall": round(best_single, 3),
         "routing_headroom": (round(oracle - ref, 3) if oracle is not None else None),
+        "union_oracle_proxy": union_oracle_proxy,  # ceiling: any arm correct per query
         "composite_weights": {"recall": _W_RECALL, "precision": _W_PREC, "speed": _W_SPEED},
         "router_composite": (router_s.get("composite") if router_s else None),
     }

@@ -3029,6 +3029,7 @@ async def corpus_search_agent(
     _is_override = explicit_mode in {
         "explore", "validate", "external",
         "a", "b", "c", "d",
+        "s",  # forced-s: fires fact-store gate, returns hit or clean miss, no cascade
         "precision", "cascade",
         "recall", "themes", "discovery",
         "reverse_rag", "llm_validate",
@@ -3762,7 +3763,11 @@ async def _corpus_search_agent_impl(
     _raw_lower = raw_query.lower()
     _is_conceptual = any(m in _raw_lower for m in _CONCEPTUAL_MARKERS)
 
-    if _fact_url and not _is_conceptual:
+    _force_s = explicit_mode == "s"
+    # Forced a/b/c/d (and other non-s overrides) must bypass the fact-store so
+    # each calibration cell measures its OWN strategy, not s's answer.
+    _force_other = _is_override and not _force_s
+    if _fact_url and not _is_conceptual and not _force_other:
         try:
             import httpx as _fs_httpx
             _fs_payload = {
@@ -3839,10 +3844,38 @@ async def _corpus_search_agent_impl(
                         fast_exit={"fired": True, "reason": "fact_store_hit"},
                         telemetry={"agent_id": agent_id},
                     )
+                elif _force_s:
+                    # forced mode=s + no hit → clean miss; do NOT fall through to a/b/c/d
+                    return CorpusSearchAgentResponse(
+                        chunks=[],
+                        confidence="low",
+                        llm_answer="",
+                        strategy_used="s",
+                        query_profile=dataclasses.asdict(profile),
+                        routing={"strategy": "s", "method": "fact_store_miss",
+                                 "priors_version": PRIORS_VERSION},
+                        strategy_chain=["s"],
+                        fast_exit={"fired": True, "reason": "fact_store_miss"},
+                        telemetry={"agent_id": agent_id},
+                    )
         except Exception as _fs_exc:
             logger.warning(
                 "[%s] [fact_store:s] error (fall-through): %s", agent_id, _fs_exc
             )
+            if _force_s:
+                # Error on forced-s → clean miss rather than falling through
+                return CorpusSearchAgentResponse(
+                    chunks=[],
+                    confidence="low",
+                    llm_answer="",
+                    strategy_used="s",
+                    query_profile=dataclasses.asdict(profile),
+                    routing={"strategy": "s", "method": "fact_store_error",
+                             "priors_version": PRIORS_VERSION},
+                    strategy_chain=["s"],
+                    fast_exit={"fired": True, "reason": "fact_store_error"},
+                    telemetry={"agent_id": agent_id},
+                )
 
     # ── 1a. Route — fail-fast gate + Router.decide ─────────────────────
     # Stage 1: fail-fast gate (PHI / jailbreak / no-d-tag → refuse).

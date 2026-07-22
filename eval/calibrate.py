@@ -69,10 +69,11 @@ logging.basicConfig(
 logger = logging.getLogger("calibrate")
 
 
-STRATEGIES = ["a", "b", "c", "d", "natural"]   # a-d forced; "natural" = router decides.
-# The 4 forced paths give per-strategy priors + the derived oracle (per-query max);
-# "natural" is the router's ACTUAL pick — measured alongside so a run shows
-# router-vs-oracle-vs-strategy in one place. "e" is a gate, not a competing path.
+STRATEGIES = ["a", "b", "c", "d", "s", "natural"]   # a-d/s forced; "natural" = router decides.
+# The 4 corpus forced arms + "s" (fact-store) give per-strategy priors + the derived oracle
+# (per-query max over all forced arms); "natural" is the router's ACTUAL pick — measured
+# alongside so a run shows router-vs-oracle-vs-strategy in one place. "e" is a gate, not
+# a competing path. "s" fires the fact-store gate directly (mode=s, see corpus_search_agent.py).
 
 
 # ---------------------------------------------------------------------------

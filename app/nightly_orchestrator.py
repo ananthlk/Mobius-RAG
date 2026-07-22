@@ -234,7 +234,8 @@ def _compute_lift(base: dict | None, fin: dict | None) -> dict | None:
     if not base or not fin:
         return None
     out = {}
-    for k in ("router_recall", "oracle_recall", "best_single_recall", "routing_headroom"):
+    for k in ("router_recall", "oracle_recall", "best_single_recall", "routing_headroom",
+               "union_oracle_proxy"):
         bv, fv = base.get(k), fin.get(k)
         d = round(fv - bv, 3) if isinstance(bv, (int, float)) and isinstance(fv, (int, float)) else None
         out[k] = {"baseline": bv, "final": fv, "delta": d}
@@ -429,6 +430,16 @@ def _run_nightly(opts: dict) -> None:
             _try(lambda: _rag_post("/admin/db/execute", {"sql":
                 "UPDATE embedding_jobs SET status='pending', started_at=NULL "
                 "WHERE status='processing' AND now()-started_at > interval '10 min'"}, timeout=60))
+            # Reset phantom-completed jobs: status=completed but no chunk_embeddings written.
+            # Happens when the embedding worker crashes after marking the job done but before
+            # committing the embedding rows. publish_unpublished silently skips these docs,
+            # so without this reset they accumulate and never recover.
+            _try(lambda: _rag_post("/admin/db/execute", {"sql":
+                "UPDATE embedding_jobs SET status='pending', started_at=NULL, completed_at=NULL "
+                "WHERE status='completed' "
+                "AND NOT EXISTS ("
+                "  SELECT 1 FROM chunk_embeddings ce WHERE ce.document_id = embedding_jobs.document_id"
+                ")"}, timeout=60))
             t = 0
             pub = None
             while t < embed_budget * 60 and not _stopping():
