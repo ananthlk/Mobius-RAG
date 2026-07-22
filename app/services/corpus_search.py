@@ -411,6 +411,15 @@ _DTAG_ARM_IDF: bool = os.getenv("DTAG_ARM_IDF", "").lower() in ("1", "true", "ye
 # pools adequately; the dtag arm's authority-only sort adds no signal.
 _DTAG_ARM_MAX_POOL_DOCS = 200
 
+# For tiny pinned pools, PostgreSQL declines the HNSW index (the doc-id
+# filter is too selective — "can't push doc-id into the graph walk") and
+# falls back to Bitmap Heap Scan + exact cosine sort over ALL pool chunks.
+# DB EXPLAIN (2026-07-22): 19-doc Sunshine pool → ~10,910 chunks → exact
+# sort → 357-2951ms cold. 300-doc pool → HNSW → 1ms. Skip embed + vector
+# arm entirely for tiny pools; BM25 via the skip-GIN path already exhausts
+# the pool by direct document_id fetch.
+_TINY_POOL_VEC_MAX = 50  # pools ≤ 50 docs skip the vector arm
+
 # Max chars in text_preview fields inside trace logs / telemetry
 _PREVIEW_LEN = 120
 
@@ -3422,42 +3431,54 @@ async def corpus_search(
             )
 
     else:  # recall
-        query_embedding, embed_ms, _cache_hit = await _embed_with_cache(
-            request.query, search_id
-        )
-        if query_embedding:
-            # Recall mode: still classify the query via lexicon so we
-            # can apply the metadata-J filter to the vector arm.
-            from app.services.corpus_search_lexicon import (
-                expand_query_via_lexicon as _expand,
+        # Guard: tiny pinned pools (≤ _TINY_POOL_VEC_MAX docs) trigger exact
+        # cosine sort instead of HNSW (DB EXPLAIN 2026-07-22: 19-doc pool →
+        # Bitmap Heap Scan over ~10,910 chunks → 2-3s cold; 300-doc pool →
+        # HNSW → 1ms). Skip embed + vector arm entirely; vec_chunks stays []
+        # and strategy cascade continues without paying the exact-sort cost.
+        _tiny_pool_size = len(request.include_document_ids) if request.include_document_ids else 0
+        if request.include_document_ids and _tiny_pool_size <= _TINY_POOL_VEC_MAX:
+            if search_id:
+                _log_stage("recall_arm_skipped", search_id,
+                           reason="tiny_pinned_pool_hnsw_disabled",
+                           pool_size=_tiny_pool_size)
+        else:
+            query_embedding, embed_ms, _cache_hit = await _embed_with_cache(
+                request.query, search_id
             )
-            try:
-                _exp_for_vec = await _expand(db, request.query)
-            except Exception:
-                _exp_for_vec = None
-            tv = time.monotonic()
-            # Recall mode: instead of a flat k * N candidate count, fetch
-            # MORE candidates from SQL (over_fetch_factor=8) and post-
-            # filter by a similarity threshold. Many corpora contain
-            # large clusters of duplicate-text chunks (multi-page form
-            # PDFs with repeating headers) that all tie at one specific
-            # similarity score and crowd the HNSW result list. With a
-            # threshold, those tied boilerplate chunks are dropped if
-            # they're below the floor, and the higher-similarity unique
-            # content underneath the cluster gets reached. The rerank
-            # below may dramatically shift scores, so we want to bring
-            # forward EVERYTHING that has a reasonable initial sim, not
-            # just the first k that happens to come out of HNSW.
-            vec_chunks = await _vector_arm(
-                db, query_embedding, k * 2,
-                request.filters, request.include_document_ids,
-                search_id=search_id,
-                expansion=_exp_for_vec,
-                tag_mode=request.tag_mode,
-                min_similarity=request.min_similarity,
-                over_fetch_factor=8,
-            )
-            vec_ms = (time.monotonic() - tv) * 1000
+            if query_embedding:
+                # Recall mode: still classify the query via lexicon so we
+                # can apply the metadata-J filter to the vector arm.
+                from app.services.corpus_search_lexicon import (
+                    expand_query_via_lexicon as _expand,
+                )
+                try:
+                    _exp_for_vec = await _expand(db, request.query)
+                except Exception:
+                    _exp_for_vec = None
+                tv = time.monotonic()
+                # Recall mode: instead of a flat k * N candidate count, fetch
+                # MORE candidates from SQL (over_fetch_factor=8) and post-
+                # filter by a similarity threshold. Many corpora contain
+                # large clusters of duplicate-text chunks (multi-page form
+                # PDFs with repeating headers) that all tie at one specific
+                # similarity score and crowd the HNSW result list. With a
+                # threshold, those tied boilerplate chunks are dropped if
+                # they're below the floor, and the higher-similarity unique
+                # content underneath the cluster gets reached. The rerank
+                # below may dramatically shift scores, so we want to bring
+                # forward EVERYTHING that has a reasonable initial sim, not
+                # just the first k that happens to come out of HNSW.
+                vec_chunks = await _vector_arm(
+                    db, query_embedding, k * 2,
+                    request.filters, request.include_document_ids,
+                    search_id=search_id,
+                    expansion=_exp_for_vec,
+                    tag_mode=request.tag_mode,
+                    min_similarity=request.min_similarity,
+                    over_fetch_factor=8,
+                )
+                vec_ms = (time.monotonic() - tv) * 1000
 
     # ── 3. Fuse ───────────────────────────────────────────────────────────
     tr = time.monotonic()
