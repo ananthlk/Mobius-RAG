@@ -1174,12 +1174,20 @@ async def _bm25_arm(
         to the OR query — the doc-id filter is doing the selectivity work, and
         multiple cascade round-trips add 3-4× latency for no quality gain.
         """
-        # ── short-circuit: doc-id-pinned pool ─────────────────────────────
-        if include_document_ids:
+        # ── short-circuit: tiny doc-id-pinned pool (≤20 docs) ────────────
+        # When a SMALL include_document_ids set is provided (e.g. 7 inherited-
+        # authority docs), the pool selectivity already bounds the scan tightly.
+        # The k-of-n cascade's purpose — whittling the GIN bitmap before scoring
+        # — adds no value and runs 3-4× round-trips for nothing. Skip straight
+        # to OR. For LARGE pools (full payer corpus, cascade pool) the cascade
+        # still earns its keep: it filters thousands of docs to the top-scoring
+        # handful before ts_rank_cd touches them.
+        if include_document_ids and len(include_document_ids) <= 20:
             params["filter_query"] = score_ts
             if search_id:
                 _log_stage("bm25_kofn_filter", search_id,
                            k="or_only_doc_pinned", n=len(filter_tokens),
+                           pool_size=len(include_document_ids),
                            filter_query=score_ts[:120])
             result = await db.execute(_build_main_sql(tfilter), params)
             return list(result.mappings().all())
