@@ -13264,18 +13264,13 @@ async def execute_sql(
         raise HTTPException(status_code=500, detail=error_msg)
 
 
-@app.post("/admin/vacuum")
-def admin_vacuum(body: dict = Body(default={})) -> dict:
-    """Run VACUUM ANALYZE on one or more tables (requires autocommit — not possible via /admin/db/execute).
-    Body: {tables?: ["chunk_embeddings", "rag_published_embeddings"]}
-    Runs synchronously; blocks until complete."""
+_VACUUM_STATE: dict = {"running": False, "done": [], "error": None, "started_at": None, "finished_at": None}
+
+def _run_vacuum(tables: list[str]) -> None:
     import psycopg2 as _pg
-    tables = body.get("tables") or ["chunk_embeddings", "rag_published_embeddings"]
-    allowed = {"chunk_embeddings", "rag_published_embeddings", "embedding_jobs", "chunking_jobs", "policy_lines"}
-    bad = [t for t in tables if t not in allowed]
-    if bad:
-        raise HTTPException(status_code=400, detail=f"table(s) not in allowlist: {bad}")
-    results = {}
+    from datetime import datetime as _dt
+    _VACUUM_STATE.update({"running": True, "done": [], "error": None,
+                          "started_at": _dt.utcnow().isoformat(), "finished_at": None})
     conn = None
     try:
         conn = _pg.connect(_retag_inplace_dsn(), connect_timeout=15)
@@ -13283,14 +13278,36 @@ def admin_vacuum(body: dict = Body(default={})) -> dict:
         cur = conn.cursor()
         for tbl in tables:
             cur.execute(f"VACUUM ANALYZE {tbl}")
-            results[tbl] = "done"
+            _VACUUM_STATE["done"].append(tbl)
         cur.close()
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        _VACUUM_STATE["error"] = str(exc)
+        logger.error("[vacuum] failed: %s", exc)
     finally:
+        _VACUUM_STATE["running"] = False
+        _VACUUM_STATE["finished_at"] = __import__("datetime").datetime.utcnow().isoformat()
         if conn:
             conn.close()
-    return {"status": "ok", "vacuumed": results}
+
+@app.post("/admin/vacuum")
+def admin_vacuum(body: dict = Body(default={})) -> dict:
+    """Fire-and-forget VACUUM ANALYZE (autocommit; runs in background thread).
+    Body: {tables?: ["chunk_embeddings", "rag_published_embeddings"]}
+    Poll /admin/vacuum/status for completion."""
+    import threading
+    tables = body.get("tables") or ["chunk_embeddings", "rag_published_embeddings"]
+    allowed = {"chunk_embeddings", "rag_published_embeddings", "embedding_jobs", "chunking_jobs", "policy_lines"}
+    bad = [t for t in tables if t not in allowed]
+    if bad:
+        raise HTTPException(status_code=400, detail=f"table(s) not in allowlist: {bad}")
+    if _VACUUM_STATE.get("running"):
+        return {"status": "already_running", **_VACUUM_STATE}
+    threading.Thread(target=_run_vacuum, args=(tables,), daemon=True).start()
+    return {"status": "started", "tables": tables}
+
+@app.get("/admin/vacuum/status")
+def admin_vacuum_status() -> dict:
+    return dict(_VACUUM_STATE)
 
 
 @app.post("/admin/db/documents/{document_id}/delete-cascade")
