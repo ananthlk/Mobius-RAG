@@ -3763,10 +3763,24 @@ async def _corpus_search_agent_impl(
     _raw_lower = raw_query.lower()
     _is_conceptual = any(m in _raw_lower for m in _CONCEPTUAL_MARKERS)
 
-    _force_s = explicit_mode == "s"
+    # explicit_mode / _is_override are assigned at ~line 3029 in the outer wrapper
+    # (corpus_search_agent). Re-derive here so this inner function has them in local scope —
+    # Python makes any assigned name a local for the whole function, so reading before the
+    # outer-scope assignment at ~4004 would be an UnboundLocalError.
+    _explicit_mode_gate = (getattr(request, "mode", None) or "").lower().strip()
+    _is_override_gate = _explicit_mode_gate in {
+        "explore", "validate", "external",
+        "a", "b", "c", "d",
+        "s",
+        "precision", "cascade",
+        "recall", "themes", "discovery",
+        "reverse_rag", "llm_validate",
+        "google", "scrape",
+    }
+    _force_s = _explicit_mode_gate == "s"
     # Forced a/b/c/d (and other non-s overrides) must bypass the fact-store so
     # each calibration cell measures its OWN strategy, not s's answer.
-    _force_other = _is_override and not _force_s
+    _force_other = _is_override_gate and not _force_s
     if _fact_url and not _is_conceptual and not _force_other:
         try:
             import httpx as _fs_httpx
