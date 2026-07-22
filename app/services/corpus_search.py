@@ -1226,26 +1226,26 @@ async def _bm25_arm(
     async def _run_with_kofn_cascade(tfilter: str) -> list:
         """Try anchor-AND, then k-of-n from all-N down to floor, then full OR.
 
-        When include_document_ids is set the pool is already tightly bounded
-        (typically a handful of docs). Skip the cascade entirely and go straight
-        to the OR query — the doc-id filter is doing the selectivity work, and
-        multiple cascade round-trips add 3-4× latency for no quality gain.
-        """
-        # ── short-circuit: doc-id-pinned pools ────────────────────────────
-        _pool_size_sc = len(include_document_ids) if include_document_ids else 0
+        When include_document_ids is set the pool is pinned — skip the cascade
+        (and the corpus-wide GIN scan it triggers) entirely. Fetch pool chunks
+        by document_id (btree) and rank ALL of them by ts_rank_cd. Non-matching
+        chunks score 0 and fall to the bottom — top-k recall identical to the
+        @@ path for any realistic k.
 
-        if include_document_ids and _pool_size_sc <= 20:
-            # TINY pool: skip the GIN @@ scan entirely.
-            # BitmapAnd builds BOTH index bitmaps independently before
-            # intersecting — for broad payer queries ("timely"/"filing"
-            # expand to common terms), the GIN bitmap covers 518K corpus
-            # rows, taking 470ms+ regardless of the 19-doc doc-id filter
-            # (DB EXPLAIN confirmed: 470ms GIN-only vs 3ms doc-id-only on
-            # a 19-doc Sunshine pool). Fix: fetch pool chunks by document_id
-            # (btree, 3ms) and rank ALL of them by ts_rank_cd. Non-matching
-            # chunks score 0 and fall to the bottom — top-k recall identical
-            # to the @@ path for any realistic k (typically <50 matching
-            # chunks in a 19-doc pool). Measured: 315ms → <10ms stable.
+        Why: PostgreSQL's BitmapAnd builds BOTH index bitmaps independently
+        before intersecting. For broad payer queries ("timely"/"filing" expand
+        to common terms), the GIN @@ bitmap covers 668K corpus rows and costs
+        2.7s — regardless of whether the pool has 19 or 200 docs. The previous
+        doc-count branches (≤20 direct / 21-200 cascade / >200 MATERIALIZED)
+        all suffered from this: the cascade dead zone (21-200 docs, e.g. the
+        50-doc Sunshine pool) ran the full broad-OR GIN BitmapAnd even with
+        the MATERIALIZED fence, because PG still uses BitmapAnd inside the
+        candidates CTE. DB EXPLAIN (2026-07-22): direct document_id fetch on
+        the 50-doc/832-chunk Sunshine pool = 83-127ms vs 2712ms (25×).
+        """
+        # ── ALL pinned pools: skip corpus-wide GIN, rank pool chunks directly ──
+        if include_document_ids:
+            _pool_size_sc = len(include_document_ids)
             if search_id:
                 _log_stage("bm25_kofn_filter", search_id,
                            k="direct_pool_rank", n=len(filter_tokens),
@@ -1259,20 +1259,6 @@ async def _bm25_arm(
                 ORDER BY bm25_score DESC, rag_published_embeddings.id ASC
                 LIMIT :k
             """), params)
-            return list(result.mappings().all())
-
-        if include_document_ids and _pool_size_sc > 200:
-            # LARGE pool: one broad-OR pass via the MATERIALIZED-pool CTE
-            # (built into _build_main_sql when include_document_ids is set).
-            # MATERIALIZED forces the doc-id-first plan; GIN then runs as a
-            # per-row filter over pool chunks only (not corpus-wide).
-            params["filter_query"] = score_ts
-            if search_id:
-                _log_stage("bm25_kofn_filter", search_id,
-                           k="or_only_large_pool", n=len(filter_tokens),
-                           pool_size=_pool_size_sc,
-                           filter_query=score_ts[:120])
-            result = await db.execute(_build_main_sql(tfilter), params)
             return list(result.mappings().all())
 
         # ── anchor fast-path ───────────────────────────────────────────────
