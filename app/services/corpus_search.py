@@ -1222,22 +1222,45 @@ async def _bm25_arm(
         to the OR query — the doc-id filter is doing the selectivity work, and
         multiple cascade round-trips add 3-4× latency for no quality gain.
         """
-        # ── short-circuit: any doc-id-pinned pool (≤20 OR >200 docs) ───────
-        # When a SMALL pool (≤20) is provided the doc-id filter already bounds
-        # the scan tightly; the cascade adds 3-4× round-trips for nothing.
-        # When a LARGE pool (>200, e.g. inherited-authority ~2000 docs) is
-        # provided, each cascade level still scans all ~50-100k chunks in
-        # those 2000 docs per round-trip (2603ms observed on a 1962-doc AHCA
-        # pool). A single OR pass yields the same top-K from the bounded pool
-        # in one scan. The cascade earns its keep only for mid-size pools
-        # (21-200 docs) where N levels × small scan is still fast.
+        # ── short-circuit: doc-id-pinned pools ────────────────────────────
         _pool_size_sc = len(include_document_ids) if include_document_ids else 0
-        if include_document_ids and (_pool_size_sc <= 20 or _pool_size_sc > 200):
+
+        if include_document_ids and _pool_size_sc <= 20:
+            # TINY pool: skip the GIN @@ scan entirely.
+            # BitmapAnd builds BOTH index bitmaps independently before
+            # intersecting — for broad payer queries ("timely"/"filing"
+            # expand to common terms), the GIN bitmap covers 518K corpus
+            # rows, taking 470ms+ regardless of the 19-doc doc-id filter
+            # (DB EXPLAIN confirmed: 470ms GIN-only vs 3ms doc-id-only on
+            # a 19-doc Sunshine pool). Fix: fetch pool chunks by document_id
+            # (btree, 3ms) and rank ALL of them by ts_rank_cd. Non-matching
+            # chunks score 0 and fall to the bottom — top-k recall identical
+            # to the @@ path for any realistic k (typically <50 matching
+            # chunks in a 19-doc pool). Measured: 315ms → <10ms stable.
+            if search_id:
+                _log_stage("bm25_kofn_filter", search_id,
+                           k="direct_pool_rank", n=len(filter_tokens),
+                           pool_size=_pool_size_sc,
+                           note="skipped_gin_bitmapand")
+            result = await db.execute(text(f"""
+                SELECT {_BM25_COLS},
+                    ts_rank_cd(search_vec, to_tsquery('english', :query), 32) AS bm25_score
+                FROM rag_published_embeddings
+                WHERE document_id = ANY(CAST(:inc_ids AS uuid[]))
+                ORDER BY bm25_score DESC, rag_published_embeddings.id ASC
+                LIMIT :k
+            """), params)
+            return list(result.mappings().all())
+
+        if include_document_ids and _pool_size_sc > 200:
+            # LARGE pool: one broad-OR pass via the MATERIALIZED-pool CTE
+            # (built into _build_main_sql when include_document_ids is set).
+            # MATERIALIZED forces the doc-id-first plan; GIN then runs as a
+            # per-row filter over pool chunks only (not corpus-wide).
             params["filter_query"] = score_ts
             if search_id:
-                _sc_label = "or_only_small_pool" if _pool_size_sc <= 20 else "or_only_large_pool"
                 _log_stage("bm25_kofn_filter", search_id,
-                           k=_sc_label, n=len(filter_tokens),
+                           k="or_only_large_pool", n=len(filter_tokens),
                            pool_size=_pool_size_sc,
                            filter_query=score_ts[:120])
             result = await db.execute(_build_main_sql(tfilter), params)
