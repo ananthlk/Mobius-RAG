@@ -528,14 +528,15 @@ def _build_filter_clauses(
             params["f_auth"] = filters.authority_level
 
     if include_document_ids:
-        # Use ANY with a UUID-cast so Postgres doesn't reject the text array.
-        # Table-qualify ``document_id`` because the lexicon-expansion path
-        # (and the new corpus_search_agent candidate-pool path) add a
-        # LEFT JOIN to document_tags, which has its own ``document_id``
-        # column and makes an unqualified reference ambiguous. Same class
-        # of bug as the 2026-05-01 _BM25_COLS ``id`` ambiguity fix.
+        # Cast the text-array param to uuid[] so Postgres can use the btree
+        # index on document_id (uuid column). Casting the column side instead
+        # — "document_id::text = ANY(text[])" — forces a seq-scan because the
+        # expression is no longer the indexed column. With uuid[] on the param
+        # side, the planner can do a nested-loop index scan over each doc_id.
+        # Table-qualify ``document_id`` to avoid ambiguity with the LEFT JOIN
+        # to document_tags (same column name there).
         clauses.append(
-            "rag_published_embeddings.document_id::text = ANY(:inc_ids)"
+            "rag_published_embeddings.document_id = ANY(CAST(:inc_ids AS uuid[]))"
         )
         params["inc_ids"] = include_document_ids
 
@@ -2509,8 +2510,8 @@ async def _fetch_sibling_chunks_batch(
         "  ON m.document_id          = r.doc_id::uuid "
         " AND m.paragraph_index       BETWEEN r.lo  AND r.hi "
         " AND m.page_number           BETWEEN r.plo AND r.phi "
-        " AND m.id::text              <> COALESCE(NULLIF(r.exclude_id, ''), "
-        "                                          '00000000-0000-0000-0000-000000000000') "
+        " AND m.id                    <> COALESCE(NULLIF(r.exclude_id, '')::uuid, "
+        "                                          '00000000-0000-0000-0000-000000000000'::uuid) "
         "ORDER BY m.id, m.page_number, m.paragraph_index "
         "LIMIT 500"
     )

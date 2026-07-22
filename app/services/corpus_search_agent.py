@@ -4986,6 +4986,7 @@ async def _corpus_search_agent_impl(
             required_phrases=_derive_required_phrases(profile, partition),
             required_phrase_weights=_derive_required_phrase_weights(profile, partition),
             required_phrase_tag_codes=_derive_required_phrase_tag_codes(profile, partition),
+            neighbor_paragraph_window=0,  # disable neighbor expand on per-arm probes; agent does it once on final chunks
         )
         emit_progress(caller_id, "searching")  # emit 3 (each arm; no-op on repeat)
         t_strategy = time.monotonic()
@@ -5162,6 +5163,7 @@ async def _corpus_search_agent_impl(
                 required_phrases=_derive_required_phrases(profile, partition),
                 required_phrase_weights=_derive_required_phrase_weights(profile, partition),
                 required_phrase_tag_codes=_derive_required_phrase_tag_codes(profile, partition),
+                neighbor_paragraph_window=0,  # no neighbor expand on inherited-authority probe
             )
             inh_resp = await corpus_search(
                 db, inh_req,
