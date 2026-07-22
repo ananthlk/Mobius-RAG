@@ -418,7 +418,7 @@ _DTAG_ARM_MAX_POOL_DOCS = 200
 # sort → 357-2951ms cold. 300-doc pool → HNSW → 1ms. Skip embed + vector
 # arm entirely for tiny pools; BM25 via the skip-GIN path already exhausts
 # the pool by direct document_id fetch.
-_TINY_POOL_VEC_MAX = 50  # pools ≤ 50 docs skip the vector arm
+_TINY_POOL_VEC_MAX = 500  # pools ≤ 500 docs skip the vector arm (HNSW kicks in above)
 
 # Max chars in text_preview fields inside trace logs / telemetry
 _PREVIEW_LEN = 120

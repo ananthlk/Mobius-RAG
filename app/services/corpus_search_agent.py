@@ -742,7 +742,14 @@ async def _strategy_wide_themes_wide(
 
     async def _run_theme_narrow(bucket: _ThemeBucket) -> tuple[_ThemeBucket, list[CorpusChunk], dict]:
         narrow_q = f"{raw_q} {bucket.leaf_phrase}".strip()
-        if narrow_backend == "vector":
+        # For small theme buckets, PostgreSQL declines HNSW (too selective) and
+        # does exact cosine sort over all bucket chunks → 1.5s-14.5s cold.
+        # Switch to BM25 (precision mode): skip-GIN direct-fetch ranks all bucket
+        # chunks by ts_rank_cd in <10ms. Quality impact minimal — by the narrow
+        # step we know the theme (d_tag) so lexical ranking within it is precise.
+        _bucket_tiny = len(bucket.doc_ids) <= 500
+        _effective_backend = "bm25" if (narrow_backend == "vector" and _bucket_tiny) else narrow_backend
+        if _effective_backend == "vector":
             narrow_req = CorpusSearchRequest(
                 query=narrow_q,
                 k=per_theme_k,
@@ -756,7 +763,7 @@ async def _strategy_wide_themes_wide(
             narrow_req = CorpusSearchRequest(
                 query=narrow_q,
                 k=per_theme_k,
-                mode="precision",     # BM25 only
+                mode="precision",     # BM25 only (skip-GIN for tiny buckets)
                 tag_mode="none",
                 filters=request.filters,
                 include_document_ids=list(bucket.doc_ids),
