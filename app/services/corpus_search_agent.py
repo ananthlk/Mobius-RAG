@@ -2832,6 +2832,10 @@ class CorpusSearchAgentResponse(BaseModel):
     # Which strategy (a-e) actually executed. The chat planner reads this
     # to know how to render — themed map vs flat list vs refusal.
     strategy_used: str = "a"
+    # The strategy the caller forced (mode= param). Differs from strategy_used
+    # when skip_synthesis=True redirects c/d → a for calibration. Allows eval
+    # to label cells as c/d even though strategy_used='a'.
+    requested_strategy: str | None = None
     # Router's decision shape — primary + fallback + scores + qclass.
     # Bandit-ready: every response carries the priors_version and the
     # scores that produced the choice, so we can replay decisions later.
@@ -3117,6 +3121,19 @@ async def corpus_search_agent(
             "mode": request.mode if _attempt == 0 else None,
         })
         response = await _corpus_search_agent_impl(db, attempt_request, caller, caller_id)
+        # Stamp the caller's requested strategy on attempt 0 so eval can label
+        # cells correctly even when skip_synthesis redirects c/d → a internally.
+        if _attempt == 0 and request.mode and not response.requested_strategy:
+            _req_explicit = {
+                "explore": "b", "validate": "c", "external": "d",
+                "a": "a", "b": "b", "c": "c", "d": "d", "s": "s",
+                "precision": "a", "cascade": "a",
+                "recall": "b", "themes": "b", "discovery": "b",
+                "reverse_rag": "c", "llm_validate": "c",
+                "google": "d", "scrape": "d",
+            }.get(request.mode.lower().strip())
+            if _req_explicit:
+                response.requested_strategy = _req_explicit
         _routing_decision_id = _persist_routing_decision_async(attempt_request, response)
         _eval_run_id = request.eval_run_id or None
         _observe_async(
