@@ -4660,7 +4660,10 @@ async def _corpus_search_agent_impl(
         )
 
     # ── 1b. Score selectivity + partition terms ─────────────────────────
-    partition = await partition_terms(db, profile)
+    # Reuse pre-routing result when available (same profile → same output).
+    # The pre-routing section always computes partition_pre before us; reusing
+    # it saves one round-trip to the selectivity-stats table (~300-500ms).
+    partition = partition_pre if partition_pre is not None else await partition_terms(db, profile)
     logger.info(
         "[%s] [trace:partition] REQUIRED=%s | BOOSTED=%s | DROP=%s",
         agent_id,
@@ -4670,7 +4673,8 @@ async def _corpus_search_agent_impl(
     )
 
     # ── 1b'. Rewrite queries per strategy now that DROP is known ────────
-    queries = rewrite_for_strategies(profile, partition)
+    # Reuse pre-routing rewrite when available (same partition → same output).
+    queries = queries_pre if queries_pre is not None else rewrite_for_strategies(profile, partition)
     logger.info(
         "[%s] [trace:rewrite] hybrid=%r  phrase_strict=%r  vector_broad=%r",
         agent_id, queries.hybrid, queries.phrase_strict, queries.vector_broad,
@@ -4681,7 +4685,8 @@ async def _corpus_search_agent_impl(
     # For plan-scoped (L1/L2) pools: additionally UNION in the inherited
     # AHCA authority docs (59G rules, coverage policies, model contract)
     # from payor_inherited_authority so they compete on relevance+authority.
-    pool = await build_candidate_pool(db, partition)
+    # Reuse pre-routing pool when available (same partition → same cascade).
+    pool = pool_pre if pool_pre is not None else await build_candidate_pool(db, partition)
     _j_payor_tags = [t for t in profile.tag_matches if t.startswith("j:payor.")]
     # Maps j-tag codes to display names used in synthesis context injection.
     _JTAG_TO_PAYOR_DISPLAY: dict[str, str] = {
@@ -4704,9 +4709,14 @@ async def _corpus_search_agent_impl(
                 break
     # Full set of inherited doc IDs — used by the supplemental pass to force-
     # retrieve AHCA docs that BM25/vector skips (they lack the plan name in text).
+    # Reuse pre-routing result when the j-tags match (same payer → same docs).
     _all_inherited_doc_ids: list[str] = []
     if _j_payor_tags:
-        _inh_ids = await _inherited_authority_doc_ids(db, _j_payor_tags)
+        _pre_j_payor_set = set(t for t in profile.tag_matches if t.startswith("j:payor."))
+        if _inherited_doc_ids_pre and set(_j_payor_tags) == _pre_j_payor_set:
+            _inh_ids = _inherited_doc_ids_pre
+        else:
+            _inh_ids = await _inherited_authority_doc_ids(db, _j_payor_tags)
         _all_inherited_doc_ids = _inh_ids
         pool = _augment_pool_with_inheritance(pool, _inh_ids)
     elif _derived_payor_name:
