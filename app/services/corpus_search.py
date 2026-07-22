@@ -402,6 +402,15 @@ _RRF_K = 60
 # (claims.general, pool=31k). Set DTAG_ARM_IDF=1 to activate.
 _DTAG_ARM_IDF: bool = os.getenv("DTAG_ARM_IDF", "").lower() in ("1", "true", "yes")
 
+# In precision mode, the dtag arm supplements BM25 with authority-ordered
+# chunks for sparse table rows BM25 misses. Its two queries (IDF count +
+# ORDER BY authority_level scan) are cheap for small payer-scoped pools
+# (≤200 docs → ~10k chunks) but blow up to 20+ s on AHCA L3/L4 pools
+# (1000+ docs → 60k+ chunks doing a sort over the whole set). Skip the
+# arm when the pool exceeds this threshold — BM25 already covers large
+# pools adequately; the dtag arm's authority-only sort adds no signal.
+_DTAG_ARM_MAX_POOL_DOCS = 200
+
 # Max chars in text_preview fields inside trace logs / telemetry
 _PREVIEW_LEN = 120
 
@@ -3333,7 +3342,13 @@ async def corpus_search(
             for t in (bm25_expansion.get("domain_tags") or [])
             if t and t.startswith("d:")
         ]
-        if dtag_keys_precision:
+        _dtag_pool_size = len(request.include_document_ids) if request.include_document_ids else 0
+        if dtag_keys_precision and (
+            _dtag_pool_size == 0 or _dtag_pool_size <= _DTAG_ARM_MAX_POOL_DOCS
+        ):
+            # Skip dtag arm on large pools: for 1000+ doc pools (AHCA L3/L4),
+            # the IDF count + authority-sort scan costs 20+ s with negligible
+            # quality gain — BM25 already covers large pools adequately.
             dtag_chunks_corpus = await _dtag_arm(
                 db, dtag_keys_precision, k,
                 request.filters, request.include_document_ids,

@@ -4349,23 +4349,23 @@ async def _corpus_search_agent_impl(
         else:
             b_confidence = "low"
 
-        # Synthesize an LLM answer from the union of theme chunks so the
-        # downstream judge / chat planner has a single composed reply,
-        # consistent with strategies (c) and (d). Without this, (b)
-        # returns only chunks and the rubric-judge can't fairly score
-        # claims like "yes, prior auth required" which need synthesis.
         b_chunks_for_response = explore["union_chunks"][: max(request.k, 15)]
-        emit_progress(caller_id, "composing")  # emit 7 (strategy b)
-        b_llm_answer, b_synth_conf, b_synth_tel = await _synthesize_internal_answer(
-            raw_query, b_chunks_for_response,
-            stage="rag_strategy_b_synth",
-            correlation_id=caller_id,
-        )
-        # Cap confidence at the more conservative of the two readings.
-        confidence_rank = {"high": 3, "medium": 2, "low": 1}
-        b_confidence = (
-            min((b_confidence, b_synth_conf), key=lambda c: confidence_rank.get(c, 1))
-        )
+        if not request.skip_synthesis:
+            # Synthesize an LLM answer from the union of theme chunks so the
+            # downstream judge / chat planner has a single composed reply.
+            emit_progress(caller_id, "composing")  # emit 7 (strategy b)
+            b_llm_answer, b_synth_conf, b_synth_tel = await _synthesize_internal_answer(
+                raw_query, b_chunks_for_response,
+                stage="rag_strategy_b_synth",
+                correlation_id=caller_id,
+            )
+            # Cap confidence at the more conservative of the two readings.
+            confidence_rank = {"high": 3, "medium": 2, "low": 1}
+            b_confidence = (
+                min((b_confidence, b_synth_conf), key=lambda c: confidence_rank.get(c, 1))
+            )
+        else:
+            b_llm_answer, b_synth_tel = None, {}
 
         return CorpusSearchAgentResponse(
             chunks=b_chunks_for_response,
@@ -4402,6 +4402,12 @@ async def _corpus_search_agent_impl(
     # classify each into the outcome matrix. Pure LLM-prior + corpus
     # validation — no vector ANN, no BM25 retrieval. Strategy (d) on-demand
     # scrape consumes the ``needs_scrape`` / ``needs_external`` flags.
+    if strategy_id in ("c", "d") and request.skip_synthesis:
+        # c is LLM-only (no corpus retrieval path); d is external web search
+        # (no corpus retrieval, inherently 20-25s). For calibration runs
+        # (skip_synthesis=True), redirect both to strategy-a BM25 so the
+        # forced-c/d arms still return corpus chunks for scoring.
+        strategy_id = "a"
     if strategy_id == "c":
         from app.services.corpus_search_strategy_c import (
             strategy_c_llm_validate,
