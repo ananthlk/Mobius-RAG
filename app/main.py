@@ -13264,6 +13264,35 @@ async def execute_sql(
         raise HTTPException(status_code=500, detail=error_msg)
 
 
+@app.post("/admin/vacuum")
+def admin_vacuum(body: dict = Body(default={})) -> dict:
+    """Run VACUUM ANALYZE on one or more tables (requires autocommit — not possible via /admin/db/execute).
+    Body: {tables?: ["chunk_embeddings", "rag_published_embeddings"]}
+    Runs synchronously; blocks until complete."""
+    import psycopg2 as _pg
+    tables = body.get("tables") or ["chunk_embeddings", "rag_published_embeddings"]
+    allowed = {"chunk_embeddings", "rag_published_embeddings", "embedding_jobs", "chunking_jobs", "policy_lines"}
+    bad = [t for t in tables if t not in allowed]
+    if bad:
+        raise HTTPException(status_code=400, detail=f"table(s) not in allowlist: {bad}")
+    results = {}
+    conn = None
+    try:
+        conn = _pg.connect(_retag_inplace_dsn(), connect_timeout=15)
+        conn.autocommit = True
+        cur = conn.cursor()
+        for tbl in tables:
+            cur.execute(f"VACUUM ANALYZE {tbl}")
+            results[tbl] = "done"
+        cur.close()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        if conn:
+            conn.close()
+    return {"status": "ok", "vacuumed": results}
+
+
 @app.post("/admin/db/documents/{document_id}/delete-cascade")
 async def delete_document_cascade(
     document_id: str,
