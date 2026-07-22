@@ -1167,7 +1167,23 @@ async def _bm25_arm(
     anchor_tokens = [t.lower() for t in filter_tokens if _code_re_anchor.match(t.upper())]
 
     async def _run_with_kofn_cascade(tfilter: str) -> list:
-        """Try anchor-AND, then k-of-n from all-N down to floor, then full OR."""
+        """Try anchor-AND, then k-of-n from all-N down to floor, then full OR.
+
+        When include_document_ids is set the pool is already tightly bounded
+        (typically a handful of docs). Skip the cascade entirely and go straight
+        to the OR query — the doc-id filter is doing the selectivity work, and
+        multiple cascade round-trips add 3-4× latency for no quality gain.
+        """
+        # ── short-circuit: doc-id-pinned pool ─────────────────────────────
+        if include_document_ids:
+            params["filter_query"] = score_ts
+            if search_id:
+                _log_stage("bm25_kofn_filter", search_id,
+                           k="or_only_doc_pinned", n=len(filter_tokens),
+                           filter_query=score_ts[:120])
+            result = await db.execute(_build_main_sql(tfilter), params)
+            return list(result.mappings().all())
+
         # ── anchor fast-path ───────────────────────────────────────────────
         if anchor_tokens:
             anchor_and = " & ".join(anchor_tokens)
