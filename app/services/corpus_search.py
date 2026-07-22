@@ -968,6 +968,11 @@ async def _bm25_arm(
 
     params: dict[str, Any] = {"k": k, "query": score_ts, "filter_query": score_ts}
     filter_sql = _build_filter_clauses(filters, include_document_ids, params)
+    # Metadata-only filter (same as filter_sql but WITHOUT the doc-id clause).
+    # Used by the MATERIALIZED-pool CTE path to keep the pool-id join separate.
+    _meta_params: dict[str, Any] = {}
+    meta_filter_sql = _build_filter_clauses(filters, None, _meta_params)
+    params.update(_meta_params)  # keys are identical to what filter_sql already set
 
     # ── 3.5. Strategy A — Namespace filter via document_tags overlap ──
     # The lexicon emits tag codes like ``j:payor.sunshine_health``,
@@ -1148,6 +1153,40 @@ async def _bm25_arm(
         # by score (the principled set), and the secondary ``id ASC``
         # tie-breaks deterministically when scores tie. Outer SELECT
         # repeats the order so the returned rank is deterministic too.
+        #
+        # MATERIALIZED pool CTE (when include_document_ids is set):
+        # Without MATERIALIZED, PostgreSQL may choose the GIN index on
+        # search_vec first (returning a large bitmap for common payer
+        # terms like "timely"/"filing"), scan all 1.9M chunk rows, then
+        # apply the doc-id post-filter — causing 2-5s even on a 19-doc
+        # pool. MATERIALIZED is an optimization fence: pool_ids is always
+        # evaluated first (btree on document_id, fast for any pool size),
+        # so the tsquery scoring pass only touches chunks from those docs.
+        if include_document_ids:
+            return text(f"""
+                WITH pool_ids AS MATERIALIZED (
+                    SELECT id FROM rag_published_embeddings
+                    WHERE document_id = ANY(CAST(:inc_ids AS uuid[]))
+                ),
+                candidates AS (
+                    SELECT rag_published_embeddings.id,
+                           ts_rank_cd(search_vec, to_tsquery('english', :query), 32) AS _ts
+                    FROM rag_published_embeddings
+                    {tag_join_sql}
+                    WHERE rag_published_embeddings.id IN (SELECT id FROM pool_ids)
+                      AND search_vec @@ to_tsquery('english', :filter_query)
+                      {meta_filter_sql}
+                      {tfilter}
+                    ORDER BY _ts DESC, rag_published_embeddings.id ASC
+                    LIMIT :_cap
+                )
+                SELECT {_BM25_COLS},
+                    ts_rank_cd(search_vec, to_tsquery('english', :query), 32) AS bm25_score
+                FROM rag_published_embeddings
+                WHERE id IN (SELECT id FROM candidates)
+                ORDER BY bm25_score DESC, id ASC
+                LIMIT :k
+            """)
         return text(f"""
             WITH candidates AS (
                 SELECT rag_published_embeddings.id,
