@@ -3781,7 +3781,12 @@ async def _corpus_search_agent_impl(
     # Forced a/b/c/d (and other non-s overrides) must bypass the fact-store so
     # each calibration cell measures its OWN strategy, not s's answer.
     _force_other = _is_override_gate and not _force_s
-    if _fact_url and not _is_conceptual and not _force_other:
+    # Only consult the fact-store for payer-scoped queries. Without a j:payor.*
+    # tag the query is a corpus/program question (e.g. cmhc policy, FL Medicaid
+    # general reqs) — the store's d-tag blend can still match and serve a stale
+    # payer fact, hijacking queries that belong to a/b.
+    _has_payor_tag = any(t.startswith("j:payor.") for t in profile.tag_matches)
+    if _fact_url and not _is_conceptual and not _force_other and _has_payor_tag:
         try:
             import httpx as _fs_httpx
             _fs_payload = {

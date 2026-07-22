@@ -4656,54 +4656,43 @@ async def restart_extraction(
     
     # Start extraction in background task
     async def extract_task():
-        db_session = None
+        from app.database import AsyncSessionLocal
         try:
-            from app.database import AsyncSessionLocal
-            db_session = AsyncSessionLocal()
-            
-            # Re-fetch document in new session
-            doc_result = await db_session.execute(select(Document).where(Document.id == doc_uuid))
-            doc = doc_result.scalar_one_or_none()
-            if not doc:
-                return
-            
-            try:
-                # Extract text from PDF
-                pages = await extract_text_from_gcs(doc.file_path)
-                
-                # Delete existing pages
-                await db_session.execute(
-                    delete(DocumentPage).where(DocumentPage.document_id == doc_uuid)
-                )
-                
-                # Insert new pages (raw + markdown for reader)
-                from app.services.page_to_markdown import raw_page_to_markdown
-                for page_data in pages:
-                    raw_text = sanitize_text_for_db(page_data.get("text") or "") or ""
-                    page = DocumentPage(
-                        document_id=doc_uuid,
-                        page_number=page_data["page_number"],
-                        text=raw_text,
-                        text_markdown=sanitize_text_for_db(raw_page_to_markdown(raw_text) if raw_text else None),
-                        text_length=page_data.get("text_length", 0),
-                        extraction_status=page_data.get("extraction_status", "failed"),
-                        extraction_error=page_data.get("extraction_error"),
+            async with AsyncSessionLocal() as db_session:
+                # Re-fetch document in new session
+                doc_result = await db_session.execute(select(Document).where(Document.id == doc_uuid))
+                doc = doc_result.scalar_one_or_none()
+                if not doc:
+                    return
+                try:
+                    # Extract text from PDF
+                    pages = await extract_text_from_gcs(doc.file_path)
+                    # Delete existing pages
+                    await db_session.execute(
+                        delete(DocumentPage).where(DocumentPage.document_id == doc_uuid)
                     )
-                    db_session.add(page)
-                
-                # Update document status
-                doc.status = "completed"
-                await db_session.commit()
-                logger.info(f"Extraction restarted and completed for document {document_id}")
-            except Exception as e:
-                logger.error(f"Extraction error: {e}", exc_info=True)
-                doc.status = "failed"
-                await db_session.commit()
+                    from app.services.page_to_markdown import raw_page_to_markdown
+                    for page_data in pages:
+                        raw_text = sanitize_text_for_db(page_data.get("text") or "") or ""
+                        page = DocumentPage(
+                            document_id=doc_uuid,
+                            page_number=page_data["page_number"],
+                            text=raw_text,
+                            text_markdown=sanitize_text_for_db(raw_page_to_markdown(raw_text) if raw_text else None),
+                            text_length=page_data.get("text_length", 0),
+                            extraction_status=page_data.get("extraction_status", "failed"),
+                            extraction_error=page_data.get("extraction_error"),
+                        )
+                        db_session.add(page)
+                    doc.status = "completed"
+                    await db_session.commit()
+                    logger.info(f"Extraction restarted and completed for document {document_id}")
+                except Exception as e:
+                    logger.error(f"Extraction error: {e}", exc_info=True)
+                    doc.status = "failed"
+                    await db_session.commit()
         except Exception as e:
             logger.error(f"Background extraction task error: {e}", exc_info=True)
-        finally:
-            if db_session:
-                await db_session.close()
     
     # Spawn background task
     asyncio.create_task(extract_task())
@@ -10861,8 +10850,7 @@ async def stop_chunking(document_id: str):
     
     # Immediately update status in database to "stopped"
     try:
-        db_session = AsyncSessionLocal()
-        try:
+        async with AsyncSessionLocal() as db_session:
             q = await db_session.execute(select(ChunkingResult).where(ChunkingResult.document_id == doc_uuid))
             row = q.scalar_one_or_none()
             if row:
@@ -10873,8 +10861,6 @@ async def stop_chunking(document_id: str):
                 row.updated_at = datetime.utcnow()
                 await db_session.commit()
                 logger.info(f"Updated chunking status to 'stopped' for document {document_id}")
-        finally:
-            await db_session.close()
     except Exception as e:
         logger.error(f"Failed to update stop status in DB: {e}", exc_info=True)
         # Continue anyway - the cancel flag is set
@@ -11424,37 +11410,30 @@ async def restart_chunking(
     # Create background task (same as start_chunking)
     async def background_task():
         from app.database import AsyncSessionLocal
-        db_session = None
         try:
             _chunking_running.add(document_id)
             logger.info(f"Restarting background chunking task for document {document_id} with threshold {th}, critique_enabled={ce}, extraction_enabled={ee}, max_retries={mr}")
-            db_session = AsyncSessionLocal()
             try:
-                event_callback = await _create_event_buffer_callback(document_id, db_session)
-                async for _ in _run_chunking_loop(document_id, doc_uuid, pages, th, db_session, event_callback=event_callback, critique_enabled=ce, extraction_enabled=ee, max_retries=mr):
-                    pass
-            finally:
-                await db_session.close()
-        except Exception as e:
-            logger.error(f"Background chunking task error: {e}", exc_info=True)
-            # Update status to failed
-            try:
-                if db_session is None:
-                    db_session = AsyncSessionLocal()
-                q = await db_session.execute(select(ChunkingResult).where(ChunkingResult.document_id == doc_uuid))
-                row = q.scalar_one_or_none()
-                if row:
-                    meta = row.metadata_ or {}
-                    meta["status"] = "failed"
-                    meta["error"] = str(e)
-                    row.metadata_ = meta
-                    row.updated_at = datetime.utcnow()
-                    await db_session.commit()
-            except Exception as db_err:
-                logger.error(f"Failed to update error status: {db_err}")
-            finally:
-                if db_session:
-                    await db_session.close()
+                async with AsyncSessionLocal() as db_session:
+                    event_callback = await _create_event_buffer_callback(document_id, db_session)
+                    async for _ in _run_chunking_loop(document_id, doc_uuid, pages, th, db_session, event_callback=event_callback, critique_enabled=ce, extraction_enabled=ee, max_retries=mr):
+                        pass
+            except Exception as e:
+                logger.error(f"Background chunking task error: {e}", exc_info=True)
+                # Open a fresh session to record the failure — don't reuse the failed session
+                try:
+                    async with AsyncSessionLocal() as db_session:
+                        q = await db_session.execute(select(ChunkingResult).where(ChunkingResult.document_id == doc_uuid))
+                        row = q.scalar_one_or_none()
+                        if row:
+                            meta = row.metadata_ or {}
+                            meta["status"] = "failed"
+                            meta["error"] = str(e)
+                            row.metadata_ = meta
+                            row.updated_at = datetime.utcnow()
+                            await db_session.commit()
+                except Exception as db_err:
+                    logger.error(f"Failed to update error status: {db_err}")
         finally:
             _chunking_running.discard(document_id)
             # Clean up event buffer
