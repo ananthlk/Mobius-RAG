@@ -411,14 +411,13 @@ _DTAG_ARM_IDF: bool = os.getenv("DTAG_ARM_IDF", "").lower() in ("1", "true", "ye
 # pools adequately; the dtag arm's authority-only sort adds no signal.
 _DTAG_ARM_MAX_POOL_DOCS = 200
 
-# For tiny pinned pools, PostgreSQL declines the HNSW index (the doc-id
-# filter is too selective — "can't push doc-id into the graph walk") and
-# falls back to Bitmap Heap Scan + exact cosine sort over ALL pool chunks.
-# DB EXPLAIN (2026-07-22): 19-doc Sunshine pool → ~10,910 chunks → exact
-# sort → 357-2951ms cold. 300-doc pool → HNSW → 1ms. Skip embed + vector
-# arm entirely for tiny pools; BM25 via the skip-GIN path already exhausts
-# the pool by direct document_id fetch.
-_TINY_POOL_VEC_MAX = 500  # pools ≤ 500 docs skip the vector arm (HNSW kicks in above)
+# Chunk-count threshold for pinned-pool path decisions (DB EXPLAIN 2026-07-22):
+#   ≤ 2000 chunks → exact cosine sort is cheap (<130ms warm); direct-rank BM25 safe.
+#   > 2000 chunks → exact cosine sort is expensive (>200ms warm, 1-14s cold);
+#                    BM25 must use selective @@ (k-of-n) instead of rank-all.
+# DB confirmed: 2000 is slightly conservative (cold ≈1.1s at 2000, ~2s at 4000).
+# Used by both the vector arm guard and the BM25 direct-rank gate.
+_TINY_POOL_CHUNK_MAX = 2000
 
 # Max chars in text_preview fields inside trace logs / telemetry
 _PREVIEW_LEN = 120
@@ -1243,23 +1242,49 @@ async def _bm25_arm(
         candidates CTE. DB EXPLAIN (2026-07-22): direct document_id fetch on
         the 50-doc/832-chunk Sunshine pool = 83-127ms vs 2712ms (25×).
         """
-        # ── ALL pinned pools: skip corpus-wide GIN, rank pool chunks directly ──
+        _pool_chunk_count: int = 0  # set below when include_document_ids is provided
+        # ── Pinned pools: route by chunk count ──────────────────────────────
+        # For small pools (≤ _TINY_POOL_CHUNK_MAX chunks): rank ALL pool chunks
+        # by ts_rank_cd with no @@ filter — avoids corpus-wide GIN BitmapAnd and
+        # is fast when the pool is light (≤2000 chunks → O(chunks) rank ≤ 130ms warm).
+        # For large pools (> _TINY_POOL_CHUNK_MAX chunks): direct-rank reads ALL
+        # chunk tsvectors and is O(chunks) → 3-6s at 62k chunks. Fall through to
+        # the k-of-n cascade which applies a SELECTIVE @@ (e.g. 'timely & filing' =
+        # 13 corpus matches) — tiny GIN bitmap, fast even cold, already scoped to
+        # pool via document_id = ANY() in filter_sql from _build_filter_clauses.
         if include_document_ids:
             _pool_size_sc = len(include_document_ids)
+            _cc_row = await db.execute(
+                text(
+                    "SELECT count(*) FROM rag_published_embeddings "
+                    "WHERE document_id = ANY(CAST(:_cc_ids AS uuid[]))"
+                ),
+                {"_cc_ids": include_document_ids},
+            )
+            _pool_chunk_count = _cc_row.scalar() or 0
+            if _pool_chunk_count <= _TINY_POOL_CHUNK_MAX:
+                if search_id:
+                    _log_stage("bm25_kofn_filter", search_id,
+                               k="direct_pool_rank", n=len(filter_tokens),
+                               pool_size=_pool_size_sc,
+                               chunk_count=_pool_chunk_count,
+                               note="skipped_gin_bitmapand")
+                result = await db.execute(text(f"""
+                    SELECT {_BM25_COLS},
+                        ts_rank_cd(search_vec, to_tsquery('english', :query), 32) AS bm25_score
+                    FROM rag_published_embeddings
+                    WHERE document_id = ANY(CAST(:inc_ids AS uuid[]))
+                    ORDER BY bm25_score DESC, rag_published_embeddings.id ASC
+                    LIMIT :k
+                """), params)
+                return list(result.mappings().all())
+            # > _TINY_POOL_CHUNK_MAX: fall through to selective cascade below.
+            # _build_main_sql already scopes to pool via document_id = ANY() in filter_sql.
             if search_id:
                 _log_stage("bm25_kofn_filter", search_id,
-                           k="direct_pool_rank", n=len(filter_tokens),
-                           pool_size=_pool_size_sc,
-                           note="skipped_gin_bitmapand")
-            result = await db.execute(text(f"""
-                SELECT {_BM25_COLS},
-                    ts_rank_cd(search_vec, to_tsquery('english', :query), 32) AS bm25_score
-                FROM rag_published_embeddings
-                WHERE document_id = ANY(CAST(:inc_ids AS uuid[]))
-                ORDER BY bm25_score DESC, rag_published_embeddings.id ASC
-                LIMIT :k
-            """), params)
-            return list(result.mappings().all())
+                           k="cascade_large_pool", pool_size=_pool_size_sc,
+                           chunk_count=_pool_chunk_count,
+                           note="direct_rank_skipped_chunk_heavy")
 
         # ── anchor fast-path ───────────────────────────────────────────────
         if anchor_tokens:
@@ -1277,7 +1302,16 @@ async def _bm25_arm(
 
         # ── k-of-n cascade ─────────────────────────────────────────────────
         n = len(filter_tokens)
-        min_k = max(3, (n + 1) // 2)  # at least half the tokens, floor 3
+        # For chunk-heavy pinned pools (>2000 chunks), lower min_k to 1 so the
+        # all-tokens AND query (e.g. 'timely & filing', 13 corpus matches) runs
+        # before the broad-OR fallback (668K matches → slow GIN bitmap). Short
+        # queries (n=2) would otherwise skip all cascade levels (n < floor 3)
+        # and fall straight to 668K OR. For unpinned corpus, keep floor 3.
+        _pinned_heavy = (
+            include_document_ids is not None
+            and _pool_chunk_count > _TINY_POOL_CHUNK_MAX
+        )
+        min_k = max(1 if _pinned_heavy else 3, (n + 1) // 2)
         levels = list(range(n, min_k - 1, -1))
         for k_level in levels:
             kofn_ts = _build_kofn_tsquery(filter_tokens, k_level)
@@ -3417,17 +3451,31 @@ async def corpus_search(
             )
 
     else:  # recall
-        # Guard: tiny pinned pools (≤ _TINY_POOL_VEC_MAX docs) trigger exact
-        # cosine sort instead of HNSW (DB EXPLAIN 2026-07-22: 19-doc pool →
-        # Bitmap Heap Scan over ~10,910 chunks → 2-3s cold; 300-doc pool →
-        # HNSW → 1ms). Skip embed + vector arm entirely; vec_chunks stays []
-        # and strategy cascade continues without paying the exact-sort cost.
-        _tiny_pool_size = len(request.include_document_ids) if request.include_document_ids else 0
-        if request.include_document_ids and _tiny_pool_size <= _TINY_POOL_VEC_MAX:
-            if search_id:
-                _log_stage("recall_arm_skipped", search_id,
-                           reason="tiny_pinned_pool_hnsw_disabled",
-                           pool_size=_tiny_pool_size)
+        # Guard: chunk-heavy pinned pools trigger exact cosine sort instead of
+        # HNSW (DB EXPLAIN 2026-07-22: pool > ~2000 chunks → Bitmap Heap Scan
+        # → O(chunks) exact sort → 1-14s cold; HNSW only viable at ~150+ docs /
+        # low chunk density). Gate on CHUNK count (not doc count): doc count
+        # varies 17× in chunk density; 500 docs could be 832 chunks (cheap) or
+        # 62k chunks (expensive). Skip embed + vector arm when chunks > threshold;
+        # BM25 via k-of-n selective @@ already covers the pool.
+        _vec_skip = False
+        if request.include_document_ids:
+            _vc_row = await db.execute(
+                text(
+                    "SELECT count(*) FROM rag_published_embeddings "
+                    "WHERE document_id = ANY(CAST(:_vc_ids AS uuid[]))"
+                ),
+                {"_vc_ids": request.include_document_ids},
+            )
+            _vec_chunk_count = _vc_row.scalar() or 0
+            if _vec_chunk_count > _TINY_POOL_CHUNK_MAX:
+                _vec_skip = True
+                if search_id:
+                    _log_stage("recall_arm_skipped", search_id,
+                               reason="chunk_heavy_pool_hnsw_disabled",
+                               chunk_count=_vec_chunk_count)
+        if _vec_skip:
+            pass  # logging already done above; vec_chunks stays []
         else:
             query_embedding, embed_ms, _cache_hit = await _embed_with_cache(
                 request.query, search_id
