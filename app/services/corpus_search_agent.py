@@ -1907,6 +1907,12 @@ _JTAG_LEAF_TO_INHERITED_PAYOR: dict[str, str] = {
 }
 
 
+# Cache for _inherited_authority_doc_ids — materialized view is stable between
+# nightly rebuilds. Key = comma-joined sorted canonical payer names.
+_inh_authority_cache: dict[str, tuple[list[str], float]] = {}
+_INH_AUTHORITY_TTL = 300  # 5 minutes
+
+
 async def _inherited_authority_doc_ids(
     db: AsyncSession,
     j_payor_tags: list[str],
@@ -1916,6 +1922,8 @@ async def _inherited_authority_doc_ids(
     Queries ``payor_inherited_authority`` — a materialized view produced by
     payor-platform migration 004.  Returns [] when the view has no rows for
     the plan (safe to call for any payer; no-ops for non-FL-Medicaid plans).
+    Results are cached per payer for 5 minutes (the view changes only on
+    nightly rebuilds; per-query DB round-trips added ~1.8s to the pre-route).
     """
     from sqlalchemy import text as _text
     canonical_payors: list[str] = []
@@ -1929,6 +1937,11 @@ async def _inherited_authority_doc_ids(
     if not canonical_payors:
         return []
 
+    cache_key = ",".join(sorted(canonical_payors))
+    cached = _inh_authority_cache.get(cache_key)
+    if cached and (time.time() - cached[1]) < _INH_AUTHORITY_TTL:
+        return cached[0]
+
     placeholders = ",".join(f":p{i}" for i in range(len(canonical_payors)))
     params = {f"p{i}": v for i, v in enumerate(canonical_payors)}
     try:
@@ -1939,7 +1952,9 @@ async def _inherited_authority_doc_ids(
             ),
             params,
         )
-        return [str(row[0]) for row in result.fetchall()]
+        doc_ids = [str(row[0]) for row in result.fetchall()]
+        _inh_authority_cache[cache_key] = (doc_ids, time.time())
+        return doc_ids
     except Exception as exc:
         logger.warning("[inheritance_union] view query failed: %s", exc)
         return []
@@ -3980,14 +3995,18 @@ async def _corpus_search_agent_impl(
 
     if not (verdict and verdict.fail):
         try:
+            _pr_t0 = time.monotonic()
             partition_pre = await partition_terms(db, profile)
+            _pr_t1 = time.monotonic()
             pool_pre = await build_candidate_pool(db, partition_pre)
+            _pr_t2 = time.monotonic()
             # Augment plan-scoped pools with inherited AHCA authority docs.
             _pre_j_payor = [t for t in profile.tag_matches if t.startswith("j:payor.")]
             if _pre_j_payor:
                 _inh_pre = await _inherited_authority_doc_ids(db, _pre_j_payor)
                 _inherited_doc_ids_pre = _inh_pre  # expose for routing features below
                 pool_pre = _augment_pool_with_inheritance(pool_pre, _inh_pre)
+            _pr_t3 = time.monotonic()
             pool_size_pre = len(pool_pre.document_ids) if pool_pre.document_ids else 0
             queries_pre = rewrite_for_strategies(profile, partition_pre)
             logger.info(
@@ -3999,12 +4018,24 @@ async def _corpus_search_agent_impl(
                 agent_id, queries_pre.hybrid, queries_pre.phrase_strict, queries_pre.vector_broad,
             )
         except Exception as exc:
+            _pr_t0 = _pr_t1 = _pr_t2 = _pr_t3 = time.monotonic()
             logger.warning("[%s] pre-route pool build failed: %s", agent_id, exc)
 
         # Internal self-assessment for (a) and (b).
         a_recall, a_reason, _missing_token = await _estimate_internal_recall(
             db, profile, pool_size_pre,
             pool_doc_ids=list(pool_pre.document_ids) if pool_pre and pool_pre.document_ids else None,
+        )
+        _pr_t4 = time.monotonic()
+        logger.info(
+            "[%s] [trace:pre_route_timing] partition_ms=%.0f pool_ms=%.0f "
+            "inherited_ms=%.0f recall_ms=%.0f total_ms=%.0f",
+            agent_id,
+            (_pr_t1 - _pr_t0) * 1000,
+            (_pr_t2 - _pr_t1) * 1000,
+            (_pr_t3 - _pr_t2) * 1000,
+            (_pr_t4 - _pr_t3) * 1000,
+            (_pr_t4 - _pr_t0) * 1000,
         )
         # (b) is slightly more permissive — vector finds semantic matches
         # without exact tag presence. Bumps the floor a touch.

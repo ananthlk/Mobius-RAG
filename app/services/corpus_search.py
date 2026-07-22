@@ -1183,20 +1183,23 @@ async def _bm25_arm(
         to the OR query — the doc-id filter is doing the selectivity work, and
         multiple cascade round-trips add 3-4× latency for no quality gain.
         """
-        # ── short-circuit: tiny doc-id-pinned pool (≤20 docs) ────────────
-        # When a SMALL include_document_ids set is provided (e.g. 7 inherited-
-        # authority docs), the pool selectivity already bounds the scan tightly.
-        # The k-of-n cascade's purpose — whittling the GIN bitmap before scoring
-        # — adds no value and runs 3-4× round-trips for nothing. Skip straight
-        # to OR. For LARGE pools (full payer corpus, cascade pool) the cascade
-        # still earns its keep: it filters thousands of docs to the top-scoring
-        # handful before ts_rank_cd touches them.
-        if include_document_ids and len(include_document_ids) <= 20:
+        # ── short-circuit: any doc-id-pinned pool (≤20 OR >200 docs) ───────
+        # When a SMALL pool (≤20) is provided the doc-id filter already bounds
+        # the scan tightly; the cascade adds 3-4× round-trips for nothing.
+        # When a LARGE pool (>200, e.g. inherited-authority ~2000 docs) is
+        # provided, each cascade level still scans all ~50-100k chunks in
+        # those 2000 docs per round-trip (2603ms observed on a 1962-doc AHCA
+        # pool). A single OR pass yields the same top-K from the bounded pool
+        # in one scan. The cascade earns its keep only for mid-size pools
+        # (21-200 docs) where N levels × small scan is still fast.
+        _pool_size_sc = len(include_document_ids) if include_document_ids else 0
+        if include_document_ids and (_pool_size_sc <= 20 or _pool_size_sc > 200):
             params["filter_query"] = score_ts
             if search_id:
+                _sc_label = "or_only_small_pool" if _pool_size_sc <= 20 else "or_only_large_pool"
                 _log_stage("bm25_kofn_filter", search_id,
-                           k="or_only_doc_pinned", n=len(filter_tokens),
-                           pool_size=len(include_document_ids),
+                           k=_sc_label, n=len(filter_tokens),
+                           pool_size=_pool_size_sc,
                            filter_query=score_ts[:120])
             result = await db.execute(_build_main_sql(tfilter), params)
             return list(result.mappings().all())
