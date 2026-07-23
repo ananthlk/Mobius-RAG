@@ -1,0 +1,244 @@
+bank_version: gate_contours_v2
+# v2 (2026-07-22): extended per Eval's independent review of v1 — added CORPUS_GAP
+# (was 0/20, sourced from real zero-doc lexicon codes per §2), a domain-side VICINITY
+# case (v1 only had jurisdiction-side), 2 more OUT_OF_SCOPE exemplars (medical-symptom
+# and adjacent-insurance-line categories §2 named specifically), and the fake-English
+# UNCLEAR gap pinned as an explicit xfail. See docs/rag-agents/shape-gate-eval-qa-scenarios.md.
+# Contour-diversity eval bank for the SHAPE gate module (Step 1a).
+# Distinct purpose from queries_cmhc.yaml: cmhc is answer-quality-anchored and
+# structurally cannot exercise 4 of 6 contours (every query in it is deliberately
+# in-corpus). This bank exists specifically to exercise contour DIVERSITY —
+# expected_contour is the pass/fail field, run via scripts/run_gate_on_contour_bank.py.
+# Built jointly: Retriever (queries + live verification) + Eval (scenario design,
+# see docs/rag-agents/shape-gate-eval-qa-scenarios.md for full rationale).
+# Every expected_contour below was RUN LIVE against the gate on 2026-07-22, not guessed.
+queries:
+
+# --- VICINITY: domain+jurisdiction both matched, no doc covers the exact combo ---
+- id: gate001
+  query: What is the prior authorization process in Clarendon, AR?
+  expected_contour: vicinity
+  notes: >
+    Rare jurisdiction (1 doc) + broad common domain (1696 union docs) — that one
+    doc isn't also about prior auth. jurisdiction-side VICINITY case.
+
+- id: gate002
+  query: What is the prior authorization process in Stone County?
+  expected_contour: vicinity
+  notes: Same pattern as gate001, second rare-jurisdiction (J-side) example.
+
+- id: gate021
+  query: What are the drug counselor requirements for Sunshine Health?
+  expected_contour: vicinity
+  notes: >
+    DOMAIN-side VICINITY (the axis v1 was missing per Eval's review) — rare
+    domain (provider.drug_counselor, 8 docs total) + common-ish jurisdiction
+    (payor.sunshine_health, 559 docs), verified 0 overlap between them
+    directly via SQL before constructing the query. union=567, intersection=0.
+
+# --- OUT_OF_SCOPE: well-formed query, zero tags matched ---
+- id: gate003
+  query: What's the weather forecast for tomorrow?
+  expected_contour: out_of_scope
+  notes: Well-formed, real words, just not this corpus's domain.
+
+- id: gate004
+  query: Can you tell me a joke?
+  expected_contour: out_of_scope
+  notes: Second OUT_OF_SCOPE example, different phrasing shape.
+
+- id: gate022
+  query: What is the best treatment for a broken arm?
+  expected_contour: out_of_scope
+  notes: >
+    General medical-symptom/treatment question with NO payer/policy framing —
+    the exemplar category Eval's §2 named specifically (distinct from generic
+    off-topic like weather/jokes; this is medically-adjacent but still not
+    what this corpus covers, which is health POLICY, not clinical treatment).
+
+- id: gate023
+  query: Does my auto insurance cover a rental car?
+  expected_contour: out_of_scope
+  notes: >
+    Adjacent insurance line (auto, not health) — Eval's second named exemplar
+    category. Uses insurance vocabulary ("cover") that could plausibly false-
+    match health-domain tags; verified it doesn't (union=0).
+
+# --- UNCLEAR: malformed / can't parse ---
+- id: gate005
+  query: asdkfjqwoeiru
+  expected_contour: unclear
+  notes: >
+    Single garbled token — catches cleanly. KNOWN LIMITATION (documented, not
+    hidden): multi-word "fake English" like "asdkfj qwoeiru xyz" slips through
+    as OUT_OF_SCOPE instead, since telling real-off-domain-English apart from
+    fake-English needs a dictionary/LLM check the gate deliberately doesn't do.
+
+- id: gate006
+  query: ""
+  expected_contour: unclear
+  notes: Empty string, trivial malformed case.
+
+- id: gate024
+  query: asdkfj qwoeiru xyz
+  expected_contour: unclear
+  xfail: true
+  actual_contour: out_of_scope
+  notes: >
+    PINNED KNOWN GAP, not a real pass (per Eval's §2 request) — multi-word
+    "fake English" gibberish slips through _is_malformed()'s word-count check
+    (3 alphabetic-looking tokens ≥ 2) and lands OUT_OF_SCOPE instead of
+    UNCLEAR. Distinguishing "real English, wrong domain" from "fake English"
+    needs a dictionary/LLM check the gate deliberately doesn't do (documented
+    limitation in gate.py's _is_malformed docstring). This entry exists so the
+    gap is loud and tracked, not silently rediscovered — run_gate_on_contour_bank.py
+    should report xfail entries separately from real pass/fail, not count
+    them as failures.
+
+# --- CORPUS_GAP: tags matched, zero documents carry them (Eval §2: source from real zero-doc codes) ---
+- id: gate025
+  query: What is our policy on gifts and business courtesies?
+  expected_contour: corpus_gap
+  notes: >
+    d:compliance.gifts_and_business_courtesies verified zero-doc via direct SQL
+    before construction (NOT EXISTS check against document_tags). Distinctive
+    multi-word phrase ("gifts and business courtesies") chosen specifically to
+    avoid the collision problem that blocked v1 (west virginia's phrase
+    overlaps state.west_virginia/program.chip.west_virginia, both of which
+    DO have docs — this phrase has no such overlap). union=0, intersection=0.
+
+- id: gate026
+  query: What is required for CCBHC quality measure reports?
+  expected_contour: underspecified
+  notes: >
+    NOT corpus_gap despite similar construction attempt — "ccbhc quality
+    measure reports" phrase collides with 4 other related D-codes that DO
+    have docs (union=5271). Kept in the bank as a documented near-miss:
+    proves phrase-collision risk is real and specific verification (not
+    just "this code has 0 docs in isolation") is required before trusting
+    a CORPUS_GAP construction.
+
+# --- P-tag verb-variation stress (Eval §4a) ---
+- id: gate007
+  query: How do I confirm eligibility for Medicaid
+  expected_contour: exact
+  notes: >
+    "confirm" is an explicit verification.verify lexicon ALIAS (not the regex
+    path) — process_intent also fires ("how do i"), both mechanisms agree here.
+
+- id: gate008
+  query: Can I confirm eligibility for Medicaid
+  expected_contour: exact
+  notes: >
+    "confirm" alias fires even though "can i confirm" does NOT match the
+    process_intent regex (requires "how can i", not bare "can i") — proves the
+    lexicon-alias path resolves general-only-match independent of the
+    structural regex path. process_intent=False here, contour still exact.
+
+- id: gate009
+  query: What's the process to resubmit a denied claim
+  expected_contour: underspecified
+  notes: >
+    underspecified_kind=missing_jurisdiction (not explore_siblings!) — no
+    payer/state mentioned at all, so J never matched. process_intent=True
+    ("what's the process to" fires) but that only helps the general-only-D
+    branch, not a missing-J case. Good example of the two UNDERSPECIFIED
+    sub-kinds being genuinely different code paths.
+
+- id: gate010
+  query: Is eligibility required for Medicaid
+  expected_contour: exact
+  notes: >
+    NEGATIVE CONTROL (Eval's design) — "required" is a compliance_action.required
+    P-tag alias, but this is a fact lookup ("is X required"), not a genuine
+    how-do-I ask. p_codes fires (p=yes), which resolves general-only-D the
+    same way a real how-to request would. FLAG FOR ARCHITECTS: is it correct
+    that a P-alias word firing for an unrelated reason still counts as
+    disambiguation? Documents current behavior; not obviously wrong, but a
+    real design tradeoff worth a conscious sign-off, not a silent default.
+
+- id: gate011
+  query: How do I check eligibility for Medicaid
+  expected_contour: exact
+  notes: >
+    Resolved via process_intent regex ("how do i"), NOT a lexicon alias —
+    "check" is not aliased anywhere. Proves the structural heuristic works
+    independent of lexicon coverage.
+
+- id: gate012
+  query: How do I verify eligibility for Medicaid
+  expected_contour: exact
+  notes: Resolved via BOTH lexicon alias ("verify") AND process_intent regex.
+
+- id: gate013
+  query: What are the eligibility criteria for Medicaid
+  expected_contour: underspecified
+  notes: >
+    underspecified_kind=explore_siblings. "criteria" fires neither a P-tag
+    alias nor the process_intent regex — correctly stays ambiguous (which
+    facet's criteria: income? categorical? age-band?). Not a phrasing gap,
+    a genuinely different, still-ambiguous ask.
+
+- id: gate014
+  query: Eligibility for Medicaid
+  expected_contour: underspecified
+  notes: >
+    underspecified_kind=explore_siblings, 80 fanout_codes. The canonical bare
+    case — zero disambiguation signal of any kind.
+
+# --- health_care_services stress (Eval §4b — the real large umbrella, 631 siblings) ---
+- id: gate015
+  query: Behavioral health services for Medicaid
+  expected_contour: exact
+  notes: >
+    SURPRISE FINDING vs. Eval's hypothesis — this does NOT hit general-only-match.
+    "behavioral_health" is itself a specific leaf under health_care_services
+    (d:health_care_services.behavioral_health), not the bare umbrella. Eval's
+    stress case assumed this phrasing would land general-only; empirically it
+    doesn't. Kept in the bank specifically to document this — verify-before-trust
+    applies to scenario design too, not just to results.
+
+- id: gate016
+  query: How do I get behavioral health services authorized for Medicaid
+  expected_contour: exact
+  notes: Same specific-leaf match as gate015, process_intent also fires (redundant, not needed here).
+
+# --- Passive-voice process_intent regex gap (Eval §4c — documented limitation) ---
+- id: gate017
+  query: How is eligibility verified for Medicaid?
+  expected_contour: underspecified
+  notes: >
+    underspecified_kind=explore_siblings. CONFIRMED REGRESSION/GAP per Eval's
+    prediction — passive voice ("how is X verified") does not match
+    _PROCESS_INTENT_RE (requires "how do i/can i/does one/how to"), and
+    "verified" alone (not "verify") doesn't hit the lexicon alias either.
+    Pinned here as documented current behavior, not silently regressed later.
+    Candidate future fix: extend regex to catch passive "how is X <verb>ed".
+
+- id: gate018
+  query: Steps for verifying eligibility
+  expected_contour: underspecified
+  notes: >
+    underspecified_kind=missing_jurisdiction (no payer/state/program mentioned
+    at all — different root cause than gate017). ALSO confirms Eval's second
+    predicted regex gap: "steps for X-ing" doesn't match _PROCESS_INTENT_RE
+    (which requires "steps to" or "what are the steps for/to"), so
+    process_intent=False here too, though it doesn't matter for this query's
+    actual UNDERSPECIFIED reason (missing J, not general-only-D).
+
+# --- D-tag lexicon gaps (known backlog, filed to Curation, held not blocking) ---
+- id: gate019
+  query: How do I get credentialed with Sunshine Health?
+  expected_contour: underspecified
+  notes: >
+    underspecified_kind=missing_domain, fanout_codes=[] (nothing to explore —
+    no d:credentialing* tag exists at all). Filed to Curation's tag-selectivity
+    loop backlog 2026-07-22, not a gate logic issue.
+
+- id: gate020
+  query: What documentation is required to enroll a new pediatric patient with Sunshine Health?
+  expected_contour: underspecified
+  notes: >
+    underspecified_kind=missing_domain. d:eligibility.enrollment exists but
+    didn't fire — likely a phrase-coverage gap on an existing tag, not a
+    missing tag. Also filed to Curation.
