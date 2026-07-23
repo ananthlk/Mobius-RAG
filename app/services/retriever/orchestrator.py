@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.services.retriever.shape.contracts import GateResult, ReformatResult
+from app.services.retriever.shape.contracts import GateResult, ReformatPosture, ReformatResult
 from app.services.retriever.shape.gate import run_gate
 from app.services.retriever.shape.narrate import narrate as narrate_gate
 from app.services.retriever.shape.narrate import narrate_full as narrate_gate_full
@@ -48,11 +48,34 @@ class RetrieverPartialResult:
     reformat_ms: int = 0
     total_ms: int = 0
 
-    narrative: str = ""       # combined, chat-bubble-register, both stages
+    # RESOLVED by UX 2026-07-23 (see docs/rag-agents/retriever-emit-telemetry-registry.md):
+    # both narrate() outputs feed thinking_trace. shape_reformat (the structural
+    # telemetry key: posture/fanout_themes/latency_ms) is backend/Diagnostics
+    # only -- a DIFFERENT layer from the narrate() function, which is
+    # user-facing by design, same as Gate's. Composition: Gate's narrate()
+    # first (explains the contour), Reformat's narrate() second (explains the
+    # resulting action) -- but ONLY for postures where Reformat adds real
+    # information beyond Gate's own narration; see _include_reformat_narration().
+    narrative: str = ""       # thinking_trace value -- Gate always, Reformat conditionally (see composition rule)
     narrative_full: str = ""  # combined, Diagnostics-only, NEVER persist (see narrate.py PHI note)
 
     pipeline_complete: bool = False  # False until Structure/Pool/.../Timing exist
     next_step: str = "Structure (Step 1c) — not yet built"
+
+
+# Postures where Reformat's narrate() is included in thinking_trace alongside
+# Gate's -- per UX's ruling 2026-07-23. PRECISE/DECLINE/CLARIFY_REPHRASE are
+# excluded: Gate's own narration already fully explains those outcomes,
+# Reformat's narrate() for them would be redundant, not additive.
+_INCLUDE_REFORMAT_NARRATION = frozenset({
+    ReformatPosture.FAN_OUT,
+    ReformatPosture.RELY_ON_EXTERNAL,
+    ReformatPosture.CLARIFY,
+})
+
+
+def _include_reformat_narration(posture: ReformatPosture) -> bool:
+    return posture in _INCLUDE_REFORMAT_NARRATION
 
 
 async def run_retriever_partial(db: AsyncSession, query: str) -> RetrieverPartialResult:
@@ -68,7 +91,10 @@ async def run_retriever_partial(db: AsyncSession, query: str) -> RetrieverPartia
 
     total_ms = int((time.monotonic() - t0) * 1000)
 
-    narrative = f"{narrate_gate(gate_result)}\n\n{narrate_reformat(gate_result, reformat_result)}"
+    if _include_reformat_narration(reformat_result.posture):
+        narrative = f"{narrate_gate(gate_result)}\n\n{narrate_reformat(gate_result, reformat_result)}"
+    else:
+        narrative = narrate_gate(gate_result)
     narrative_full = (
         f"--- Shape: Gate ---\n{narrate_gate_full(gate_result)}\n\n"
         f"--- Shape: Reformat ---\n{narrate_reformat_full(gate_result, reformat_result)}"
