@@ -29,6 +29,7 @@ test = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
     "httpx>=0.24",
+    "aiosqlite>=0.19",
 ]
 openai = [
     "openai>=1.0",
@@ -54,6 +55,24 @@ packages = ["app"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-asyncio_default_fixture_loop_scope = "function"
-testpaths = ["tests"]
+# Session-scoped, not function-scoped (TECH's fix, 2026-07-24, proven root
+# cause): DB tests import AsyncSessionLocal's module-level connection pool,
+# which outlives a per-function event loop -- a function-scoped loop
+# closing while pooled connections are still bound to it produced "Event
+# loop is closed" on the next test to check one out (cross-test/cross-file
+# alternating failures, not a proxy issue). Session-scoped also matches
+# production (one loop per process).
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+# TECH's P3 finding, 2026-07-24: a bare `testpaths = ["tests"]` silently
+# collects zero of the in-package answer-engine tests (fillers, router,
+# observer, contract, orchestrator dispatch, synthesis -- ~285 tests) since
+# they live alongside their modules under app/services/, not under tests/.
+# A plain `pytest` run looked "all green" while never running the whole
+# new engine -- exactly the false-assurance failure mode the artifact-
+# validation standard exists to catch.
+testpaths = ["tests", "app/services/retriever", "app/services/router"]
 pythonpath = ["."]
+markers = [
+    "integration: real DB + real Vertex calls, no mocks (see test_integration_production_shapes.py) -- real wall-clock cost, deliberately included in default collection (not hidden behind a flag) per the same testpaths-gap lesson above.",
+]

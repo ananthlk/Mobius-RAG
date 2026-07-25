@@ -156,6 +156,14 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL") or (
 )
 EMBEDDING_DIMENSIONS = int(os.getenv("EMBEDDING_DIMENSIONS", "1536"))
 
+# Deliberately separate from EMBEDDING_MODEL above — that one's pinned to
+# gemini-embedding-001 (1536-dim) to match the Chroma collection chat reads
+# from. Shape-Reformat's clustering embeddings never touch that collection
+# (compared only against each other + the live query), so they're free to
+# use a batchable model instead (gemini-embedding-001 takes 1 input/call).
+# 768-dim native default, no output_dimensionality override.
+CLUSTERING_EMBEDDING_MODEL = os.getenv("CLUSTERING_EMBEDDING_MODEL", "text-embedding-004")
+
 # ── Google Drive OAuth (optional) ────────────────────────────────────
 DRIVE_API_ENABLED = os.getenv("DRIVE_API_ENABLED", "false").lower() in ("true", "1", "yes")
 GOOGLE_DRIVE_CLIENT_ID = os.getenv("GOOGLE_DRIVE_CLIENT_ID")

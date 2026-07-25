@@ -1,0 +1,593 @@
+{
+  "run_protocol": "docs/rag-agents/filler-b-vector-calibration-plan.md",
+  "bank_path": "eval/queries_cmhc.yaml",
+  "bank_version": "cmhc_v1.1_consensus_validated",
+  "n_bank_queries_note": "Bank has 22 queries (cmhc001-cmhc022) at run time -- the calibration plan doc's 'cmhc-26' language was copied from Filler a's plan template and not re-verified against the live file; correcting here.",
+  "aggregate": {
+    "n_queries": 22,
+    "n_scored": 20,
+    "n_skipped_no_slots": 2,
+    "n_errored": 0,
+    "mean_vector_contribution_rate": 0.3210572192146886,
+    "mean_junk_contamination_rate": 0.0,
+    "mean_under_filled_slots": 0.35,
+    "mean_slots_filled": 0.7,
+    "total_elapsed_s": 520.8837224169984
+  },
+  "per_query": [
+    {
+      "query_id": "cmhc001",
+      "query": "What is the timely filing deadline for Sunshine Health FL Medicaid claims?",
+      "posture": "precise",
+      "fanout_note": null,
+      "pool_total_candidates": 602,
+      "pool_vector_candidates": 191,
+      "vector_contribution_rate": 0.31727574750830567,
+      "filling_strategy": "vector_rerank",
+      "total_chunks_assigned": 0,
+      "junk_chunks_assigned": 0,
+      "junk_contamination_rate": 0.0,
+      "under_filled_slots": 1,
+      "empty_slots": 1,
+      "slots_filled": 0,
+      "per_slot": [
+        {
+          "slot_id": "direct_answer",
+          "slot_semantics": "direct_answer",
+          "capacity": 10,
+          "occupancy": 0,
+          "occupancy_rate": 0.0,
+          "under_filled": true,
+          "junk_chunks_assigned": 0
+        }
+      ],
+      "elapsed_ms": 12028
+    },
+    {
+      "query_id": "cmhc002",
+      "query": "Does Sunshine Health require prior authorization for residential substance use treatment under code H0019?",
+      "posture": "precise",
+      "fanout_note": null,
+      "pool_total_candidates": 481,
+      "pool_vector_candidates": 92,
+      "vector_contribution_rate": 0.19126819126819128,
+      "filling_strategy": "vector_rerank",
+      "total_chunks_assigned": 10,
+      "junk_chunks_assigned": 0,
+      "junk_contamination_rate": 0.0,
+      "under_filled_slots": 0,
+      "empty_slots": 0,
+      "slots_filled": 1,
+      "per_slot": [
+        {
+          "slot_id": "direct_answer",
+          "slot_semantics": "direct_answer",
+          "capacity": 10,
+          "occupancy": 10,
+          "occupancy_rate": 1.0,
+          "under_filled": false,
+          "junk_chunks_assigned": 0
+        }
+      ],
+      "elapsed_ms": 206713
+    },
+    {
+      "query_id": "cmhc003",
+      "query": "Does Aetna Better Health Florida require a referral for outpatient behavioral health therapy?",
+      "posture": "precise",
+      "fanout_note": null,
+      "pool_total_candidates": 488,
+      "pool_vector_candidates": 72,
+      "vector_contribution_rate": 0.14754098360655737,
+      "filling_strategy": "vector_rerank",
+      "total_chunks_assigned": 10,
+      "junk_chunks_assigned": 0,
+      "junk_contamination_rate": 0.0,
+      "under_filled_slots": 0,
+      "empty_slots": 0,
+      "slots_filled": 1,
+      "per_slot": [
+        {
+          "slot_id": "direct_answer",
+          "slot_semantics": "direct_answer",
+          "capacity": 10,
+          "occupancy": 10,
+          "occupancy_rate": 1.0,
+          "under_filled": false,
+          "junk_chunks_assigned": 0
+        }
+      ],
+      "elapsed_ms": 10723
+    },
+    {
+      "query_id": "cmhc004",
+      "query": "Is telehealth covered for behavioral health intake assessments under Florida Medicaid?",
+      "posture": "precise",
+      "fanout_note": null,
+      "pool_total_candidates": 359,
+      "pool_vector_candidates": 134,
+      "vector_contribution_rate": 0.3732590529247911,
+      "filling_strategy": "vector_rerank",
+      "total_chunks_assigned": 10,
+      "junk_chunks_assigned": 0,
+      "junk_contamination_rate": 0.0,
+      "under_filled_slots": 0,
+      "empty_slots": 0,
+      "slots_filled": 1,
+      "per_slot": [
+        {
+          "slot_id": "direct_answer",
+          "slot_semantics": "direct_answer",
+          "capacity": 10,
+          "occupancy": 10,
+          "occupancy_rate": 1.0,
+          "under_filled": false,
+          "junk_chunks_assigned": 0
+        }
+      ],
+      "elapsed_ms": 172371
+    },
+    {
+      "query_id": "cmhc005",
+      "query": "What modifier should I use when billing H0015 IOP services for Florida Medicaid?",
+      "posture": "precise",
+      "fanout_note": null,
+      "pool_total_candidates": 335,
+      "pool_vector_candidates": 113,
+      "vector_contribution_rate": 0.3373134328358209,
+      "filling_strategy": "vector_rerank",
+      "total_chunks_assigned": 10,
+      "junk_chunks_assigned": 0,
+      "junk_contamination_rate": 0.0,
+      "under_filled_slots": 0,
+      "empty_slots": 0,
+      "slots_filled": 1,
+      "per_slot": [
+        {
+          "slot_id": "direct_answer",
+          "slot_semantics": "direct_answer",
+          "capacity": 10,
+          "occupancy": 10,
+          "occupancy_rate": 1.0,
+          "under_filled": false,
+          "junk_chunks_assigned": 0
+        }
+      ],
+      "elapsed_ms": 15920
+    },
+    {
+      "query_id": "cmhc006",
+      "query": "What is the standard prior authorization decision timeframe for Sunshine Health Florida?",
+      "posture": "precise",
+      "fanout_note": null,
+      "pool_total_candidates": 519,
+      "pool_vector_candidates": 109,
+      "vector_contribution_rate": 0.21001926782273603,
+      "filling_strategy": "vector_rerank",
+      "total_chunks_assigned": 10,
+      "junk_chunks_assigned": 0,
+      "junk_contamination_rate": 0.0,
+      "under_filled_slots": 0,
+      "empty_slots": 0,
+      "slots_filled": 1,
+      "per_slot": [
+        {
+          "slot_id": "direct_answer",
+          "slot_semantics": "direct_answer",
+          "capacity": 10,
+          "occupancy": 10,
+          "occupancy_rate": 1.0,
+          "under_filled": false,
+          "junk_chunks_assigned": 0
+        }
+      ],
+      "elapsed_ms": 6189
+    },
+    {
+      "query_id": "cmhc007",
+      "query": "How do I submit a corrected claim to Sunshine Health Florida?",
+      "posture": "precise",
+      "fanout_note": null,
+      "pool_total_candidates": 836,
+      "pool_vector_candidates": 458,
+      "vector_contribution_rate": 0.5478468899521531,
+      "filling_strategy": "vector_rerank",
+      "total_chunks_assigned": 0,
+      "junk_chunks_assigned": 0,
+      "junk_contamination_rate": 0.0,
+      "under_filled_slots": 1,
+      "empty_slots": 1,
+      "slots_filled": 0,
+      "per_slot": [
+        {
+          "slot_id": "direct_answer",
+          "slot_semantics": "direct_answer",
+          "capacity": 10,
+          "occupancy": 0,
+          "occupancy_rate": 0.0,
+          "under_filled": true,
+          "junk_chunks_assigned": 0
+        }
+      ],
+      "elapsed_ms": 4060
+    },
+    {
+      "query_id": "cmhc008",
+      "query": "Does Sunshine Health require prior authorization for psychological testing under CPT codes 96130-96139?",
+      "posture": "precise",
+      "fanout_note": null,
+      "pool_total_candidates": 472,
+      "pool_vector_candidates": 85,
+      "vector_contribution_rate": 0.18008474576271186,
+      "filling_strategy": "vector_rerank",
+      "total_chunks_assigned": 10,
+      "junk_chunks_assigned": 0,
+      "junk_contamination_rate": 0.0,
+      "under_filled_slots": 0,
+      "empty_slots": 0,
+      "slots_filled": 1,
+      "per_slot": [
+        {
+          "slot_id": "direct_answer",
+          "slot_semantics": "direct_answer",
+          "capacity": 10,
+          "occupancy": 10,
+          "occupancy_rate": 1.0,
+          "under_filled": false,
+          "junk_chunks_assigned": 0
+        }
+      ],
+      "elapsed_ms": 7259
+    },
+    {
+      "query_id": "cmhc009",
+      "query": "What is the deadline to file a claim payment appeal with Sunshine Health Florida?",
+      "posture": "precise",
+      "fanout_note": null,
+      "pool_total_candidates": 767,
+      "pool_vector_candidates": 380,
+      "vector_contribution_rate": 0.4954367666232073,
+      "filling_strategy": "vector_rerank",
+      "total_chunks_assigned": 1,
+      "junk_chunks_assigned": 0,
+      "junk_contamination_rate": 0.0,
+      "under_filled_slots": 1,
+      "empty_slots": 0,
+      "slots_filled": 1,
+      "per_slot": [
+        {
+          "slot_id": "direct_answer",
+          "slot_semantics": "direct_answer",
+          "capacity": 10,
+          "occupancy": 1,
+          "occupancy_rate": 0.1,
+          "under_filled": true,
+          "junk_chunks_assigned": 0
+        }
+      ],
+      "elapsed_ms": 5352
+    },
+    {
+      "query_id": "cmhc010",
+      "query": "How do I verify member eligibility for a Sunshine Health Florida member?",
+      "posture": "precise",
+      "fanout_note": null,
+      "pool_total_candidates": 546,
+      "pool_vector_candidates": 141,
+      "vector_contribution_rate": 0.25824175824175827,
+      "filling_strategy": "vector_rerank",
+      "total_chunks_assigned": 10,
+      "junk_chunks_assigned": 0,
+      "junk_contamination_rate": 0.0,
+      "under_filled_slots": 0,
+      "empty_slots": 0,
+      "slots_filled": 1,
+      "per_slot": [
+        {
+          "slot_id": "direct_answer",
+          "slot_semantics": "direct_answer",
+          "capacity": 10,
+          "occupancy": 10,
+          "occupancy_rate": 1.0,
+          "under_filled": false,
+          "junk_chunks_assigned": 0
+        }
+      ],
+      "elapsed_ms": 6324
+    },
+    {
+      "query_id": "cmhc011",
+      "query": "What is Sunshine Health's prior authorization process for inpatient psychiatric admission?",
+      "posture": "precise",
+      "fanout_note": null,
+      "pool_total_candidates": 459,
+      "pool_vector_candidates": 81,
+      "vector_contribution_rate": 0.17647058823529413,
+      "filling_strategy": "vector_rerank",
+      "total_chunks_assigned": 10,
+      "junk_chunks_assigned": 0,
+      "junk_contamination_rate": 0.0,
+      "under_filled_slots": 0,
+      "empty_slots": 0,
+      "slots_filled": 1,
+      "per_slot": [
+        {
+          "slot_id": "direct_answer",
+          "slot_semantics": "direct_answer",
+          "capacity": 10,
+          "occupancy": 10,
+          "occupancy_rate": 1.0,
+          "under_filled": false,
+          "junk_chunks_assigned": 0
+        }
+      ],
+      "elapsed_ms": 6232
+    },
+    {
+      "query_id": "cmhc012",
+      "query": "What HCPCS code do I bill for Applied Behavior Analysis (ABA) therapy under FL Medicaid?",
+      "posture": "precise",
+      "fanout_note": null,
+      "pool_total_candidates": 417,
+      "pool_vector_candidates": 191,
+      "vector_contribution_rate": 0.4580335731414868,
+      "filling_strategy": "vector_rerank",
+      "total_chunks_assigned": 0,
+      "junk_chunks_assigned": 0,
+      "junk_contamination_rate": 0.0,
+      "under_filled_slots": 1,
+      "empty_slots": 1,
+      "slots_filled": 0,
+      "per_slot": [
+        {
+          "slot_id": "direct_answer",
+          "slot_semantics": "direct_answer",
+          "capacity": 10,
+          "occupancy": 0,
+          "occupancy_rate": 0.0,
+          "under_filled": true,
+          "junk_chunks_assigned": 0
+        }
+      ],
+      "elapsed_ms": 4710
+    },
+    {
+      "query_id": "cmhc013",
+      "query": "Does Sunshine Health cover dental services for adults?",
+      "posture": "precise",
+      "fanout_note": null,
+      "pool_total_candidates": 606,
+      "pool_vector_candidates": 185,
+      "vector_contribution_rate": 0.30528052805280526,
+      "filling_strategy": "vector_rerank",
+      "total_chunks_assigned": 10,
+      "junk_chunks_assigned": 0,
+      "junk_contamination_rate": 0.0,
+      "under_filled_slots": 0,
+      "empty_slots": 0,
+      "slots_filled": 1,
+      "per_slot": [
+        {
+          "slot_id": "direct_answer",
+          "slot_semantics": "direct_answer",
+          "capacity": 10,
+          "occupancy": 10,
+          "occupancy_rate": 1.0,
+          "under_filled": false,
+          "junk_chunks_assigned": 0
+        }
+      ],
+      "elapsed_ms": 11833
+    },
+    {
+      "query_id": "cmhc014",
+      "query": "Which pharmacy benefit manager processes Sunshine Health prescription claims?",
+      "posture": "precise",
+      "fanout_note": null,
+      "pool_total_candidates": 523,
+      "pool_vector_candidates": 115,
+      "vector_contribution_rate": 0.2198852772466539,
+      "filling_strategy": "vector_rerank",
+      "total_chunks_assigned": 10,
+      "junk_chunks_assigned": 0,
+      "junk_contamination_rate": 0.0,
+      "under_filled_slots": 0,
+      "empty_slots": 0,
+      "slots_filled": 1,
+      "per_slot": [
+        {
+          "slot_id": "direct_answer",
+          "slot_semantics": "direct_answer",
+          "capacity": 10,
+          "occupancy": 10,
+          "occupancy_rate": 1.0,
+          "under_filled": false,
+          "junk_chunks_assigned": 0
+        }
+      ],
+      "elapsed_ms": 6167
+    },
+    {
+      "query_id": "cmhc015",
+      "query": "What is Sunshine Health's member appeals process and how do I file a grievance?",
+      "posture": "precise",
+      "fanout_note": null,
+      "pool_total_candidates": 477,
+      "pool_vector_candidates": 80,
+      "vector_contribution_rate": 0.16771488469601678,
+      "filling_strategy": "vector_rerank",
+      "total_chunks_assigned": 10,
+      "junk_chunks_assigned": 0,
+      "junk_contamination_rate": 0.0,
+      "under_filled_slots": 0,
+      "empty_slots": 0,
+      "slots_filled": 1,
+      "per_slot": [
+        {
+          "slot_id": "direct_answer",
+          "slot_semantics": "direct_answer",
+          "capacity": 10,
+          "occupancy": 10,
+          "occupancy_rate": 1.0,
+          "under_filled": false,
+          "junk_chunks_assigned": 0
+        }
+      ],
+      "elapsed_ms": 4201
+    },
+    {
+      "query_id": "cmhc016",
+      "query": "How do I get credentialed with Sunshine Health?",
+      "posture": "clarify",
+      "skipped_reason": "no_slots (CLARIFY/DECLINE posture, nothing for Filler b to fill)",
+      "elapsed_ms": 382
+    },
+    {
+      "query_id": "cmhc017",
+      "query": "What modifier is required for telehealth services under FL Medicaid managed care?",
+      "posture": "precise",
+      "fanout_note": null,
+      "pool_total_candidates": 415,
+      "pool_vector_candidates": 191,
+      "vector_contribution_rate": 0.4602409638554217,
+      "filling_strategy": "vector_rerank",
+      "total_chunks_assigned": 0,
+      "junk_chunks_assigned": 0,
+      "junk_contamination_rate": 0.0,
+      "under_filled_slots": 1,
+      "empty_slots": 1,
+      "slots_filled": 0,
+      "per_slot": [
+        {
+          "slot_id": "direct_answer",
+          "slot_semantics": "direct_answer",
+          "capacity": 10,
+          "occupancy": 0,
+          "occupancy_rate": 0.0,
+          "under_filled": true,
+          "junk_chunks_assigned": 0
+        }
+      ],
+      "elapsed_ms": 4753
+    },
+    {
+      "query_id": "cmhc018",
+      "query": "Does Sunshine Health require prior authorization for outpatient electroconvulsive therapy (ECT)?",
+      "posture": "precise",
+      "fanout_note": null,
+      "pool_total_candidates": 497,
+      "pool_vector_candidates": 91,
+      "vector_contribution_rate": 0.18309859154929578,
+      "filling_strategy": "vector_rerank",
+      "total_chunks_assigned": 10,
+      "junk_chunks_assigned": 0,
+      "junk_contamination_rate": 0.0,
+      "under_filled_slots": 0,
+      "empty_slots": 0,
+      "slots_filled": 1,
+      "per_slot": [
+        {
+          "slot_id": "direct_answer",
+          "slot_semantics": "direct_answer",
+          "capacity": 10,
+          "occupancy": 10,
+          "occupancy_rate": 1.0,
+          "under_filled": false,
+          "junk_chunks_assigned": 0
+        }
+      ],
+      "elapsed_ms": 6109
+    },
+    {
+      "query_id": "cmhc019",
+      "query": "What is the timely filing deadline for Aetna Better Health Florida Medicaid claims?",
+      "posture": "precise",
+      "fanout_note": null,
+      "pool_total_candidates": 608,
+      "pool_vector_candidates": 191,
+      "vector_contribution_rate": 0.31414473684210525,
+      "filling_strategy": "vector_rerank",
+      "total_chunks_assigned": 0,
+      "junk_chunks_assigned": 0,
+      "junk_contamination_rate": 0.0,
+      "under_filled_slots": 1,
+      "empty_slots": 1,
+      "slots_filled": 0,
+      "per_slot": [
+        {
+          "slot_id": "direct_answer",
+          "slot_semantics": "direct_answer",
+          "capacity": 10,
+          "occupancy": 0,
+          "occupancy_rate": 0.0,
+          "under_filled": true,
+          "junk_chunks_assigned": 0
+        }
+      ],
+      "elapsed_ms": 3667
+    },
+    {
+      "query_id": "cmhc020",
+      "query": "What is Simply Healthcare Florida Medicaid's prior authorization decision timeframe?",
+      "posture": "precise",
+      "fanout_note": null,
+      "pool_total_candidates": 415,
+      "pool_vector_candidates": 191,
+      "vector_contribution_rate": 0.4602409638554217,
+      "filling_strategy": "vector_rerank",
+      "total_chunks_assigned": 0,
+      "junk_chunks_assigned": 0,
+      "junk_contamination_rate": 0.0,
+      "under_filled_slots": 1,
+      "empty_slots": 1,
+      "slots_filled": 0,
+      "per_slot": [
+        {
+          "slot_id": "direct_answer",
+          "slot_semantics": "direct_answer",
+          "capacity": 10,
+          "occupancy": 0,
+          "occupancy_rate": 0.0,
+          "under_filled": true,
+          "junk_chunks_assigned": 0
+        }
+      ],
+      "elapsed_ms": 10066
+    },
+    {
+      "query_id": "cmhc021",
+      "query": "What documentation is required to enroll a new pediatric patient with Sunshine Health?",
+      "posture": "clarify",
+      "skipped_reason": "no_slots (CLARIFY/DECLINE posture, nothing for Filler b to fill)",
+      "elapsed_ms": 407
+    },
+    {
+      "query_id": "cmhc022",
+      "query": "How are EPSDT (Early Periodic Screening Diagnostic Treatment) services billed under FL Medicaid?",
+      "posture": "precise",
+      "fanout_note": null,
+      "pool_total_candidates": 586,
+      "pool_vector_candidates": 362,
+      "vector_contribution_rate": 0.6177474402730375,
+      "filling_strategy": "vector_rerank",
+      "total_chunks_assigned": 10,
+      "junk_chunks_assigned": 0,
+      "junk_contamination_rate": 0.0,
+      "under_filled_slots": 0,
+      "empty_slots": 0,
+      "slots_filled": 1,
+      "per_slot": [
+        {
+          "slot_id": "direct_answer",
+          "slot_semantics": "direct_answer",
+          "capacity": 10,
+          "occupancy": 10,
+          "occupancy_rate": 1.0,
+          "under_filled": false,
+          "junk_chunks_assigned": 0
+        }
+      ],
+      "elapsed_ms": 15320
+    }
+  ]
+}

@@ -34,6 +34,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.corpus_search_lexicon import expand_query_via_lexicon, list_active_d_tag_codes
 
+from . import code_expand
+
 from .contracts import Contour, CorpusProbe, GateResult
 
 logger = logging.getLogger(__name__)
@@ -301,7 +303,16 @@ async def run_gate(db: AsyncSession, query: str) -> GateResult:
     t0 = time.monotonic()
     result = GateResult(query=query, normalized=" ".join((query or "").lower().split()))
 
-    expansion = await expand_query_via_lexicon(db, query)
+    # Literal-code expansion (HCPCS/ICD-10) feeds ONLY the lexicon-matching
+    # input — never GateResult.query/.normalized. A bare "H0019" carries zero
+    # lexicon signal on its own; decoding it before matching lets the existing
+    # phrase-matching pipeline do its job. ensure_loaded() is a one-time-per-
+    # process DB load (lazy, cheap no-op on every call after the first) —
+    # this does NOT reintroduce a per-query DB dependency.
+    await code_expand.ensure_loaded(db)
+    expansion_text = code_expand.expand_query(query)
+
+    expansion = await expand_query_via_lexicon(db, expansion_text)
     result.d_codes = list(expansion.domain_tags)
     result.j_codes = list(expansion.jurisdiction_tags)
     result.p_codes = list(expansion.process_tags)

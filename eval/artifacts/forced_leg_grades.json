@@ -1,0 +1,726 @@
+{
+  "cmhc001": {
+    "a": {
+      "verdict": "correct",
+      "score": 1.0,
+      "reasoning": "The response accurately provides the timely filing deadlines for initial claims, reconsiderations, and COB claims, including the calculation method, but misses the detail about not billing the member for timely filing denials.  [+3 must, +4 bonus \u2192 score=1.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "d": {
+      "verdict": "correct",
+      "score": 1.0,
+      "reasoning": "The system accurately provided the timely filing deadlines for initial claims, reconsiderations, and COB claims, including the calculation method, but missed one bonus fact.  [+3 must, +4 bonus \u2192 score=1.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "b": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    },
+    "c": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The response discusses electronic claim submission processes rather than timely filing deadlines, failing to address the question.  [-3 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 1
+    },
+    "s": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The system's response was empty, resulting in all must-facts being missed and no other facts being hit.  [-3 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 1
+    }
+  },
+  "cmhc002": {
+    "a": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The response mentions Sunshine Health but fails to state whether prior authorization is required for H0019 or any specific details related to residential substance use treatment.  [+1 must, -1 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "d": {
+      "verdict": "unable_to_verify",
+      "score": 0.5,
+      "reasoning": "judge_error: 429 Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.",
+      "model": "error",
+      "n": 10
+    },
+    "b": {
+      "verdict": "unable_to_verify",
+      "score": 0.5,
+      "reasoning": "judge_error: 429 Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.",
+      "model": "error",
+      "n": 10
+    },
+    "c": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    },
+    "s": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    }
+  },
+  "cmhc003": {
+    "a": {
+      "verdict": "wrong",
+      "score": 0.3333333333333333,
+      "reasoning": "The system correctly states that a PCP referral is not required for behavioral health services under Aetna Better Health FL but fails to mention the crucial limitation regarding in-network providers.  [+2 must, -1 miss \u2192 score=0.33]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "d": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The response correctly identifies the payer but fails to answer the core question about referral requirements for outpatient behavioral health therapy, instead implying that PCP referrals are generally needed for specialists, which contradicts the canonical answer.  [+1 must, -2 miss, -1 forbidden \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 7
+    },
+    "b": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The response identifies the payer but fails to address the core question about referral requirements for outpatient behavioral health therapy, missing key must-facts without explicitly declining to answer.  [+1 must, -2 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "c": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    },
+    "s": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    }
+  },
+  "cmhc004": {
+    "a": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The system's provided chunks mention Florida Medicaid and behavioral health assessments, and telehealth generally, but fail to confirm coverage for intake assessments via telehealth or provide any specific details like codes, modalities, or modifiers.  [-3 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "d": {
+      "verdict": "wrong",
+      "score": 0.3333333333333333,
+      "reasoning": "The system confirms general Florida Medicaid telehealth coverage and live video requirements but fails to specify coverage for behavioral health intake assessments or provide details on POS codes, audio-only restrictions, or modifier requirements.  [+2 must, -1 miss \u2192 score=0.33]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "b": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The response confirms Florida Medicaid as the payer but does not explicitly state whether telehealth is covered for behavioral health intake assessments or specify the required modality.  [+1 must, -2 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "c": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    },
+    "s": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    }
+  },
+  "cmhc005": {
+    "a": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The system provided general Florida Medicaid policy documents that do not address the specific billing code H0015 or its required modifiers, resulting in all must-facts being missed.  [-5 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "d": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The response identifies the code and payer context but completely fails to mention the specific required modifiers (HE/HF) for H0015 in Florida Medicaid, thus missing the core of the question.  [+2 must, -3 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "b": {
+      "verdict": "unable_to_verify",
+      "score": 0.5,
+      "reasoning": "judge_error: 429 Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.",
+      "model": "error",
+      "n": 10
+    },
+    "c": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    },
+    "s": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    }
+  },
+  "cmhc006": {
+    "a": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The system provided irrelevant information and did not answer the question about prior authorization timeframes for Sunshine Health.  [-3 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "d": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The response identifies Sunshine Health but fails to provide any of the requested prior authorization decision timeframes, instead offering irrelevant information about services requiring PA and claims submission.  [+1 must, -2 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "b": {
+      "verdict": "unable_to_verify",
+      "score": 0.5,
+      "reasoning": "judge_error: 429 Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.",
+      "model": "error",
+      "n": 10
+    },
+    "c": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The response mentions Sunshine Health as the payer but fails to provide any of the requested prior authorization decision timeframes, instead discussing drug coverage.  [+1 must, -2 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 1
+    },
+    "s": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    }
+  },
+  "cmhc007": {
+    "a": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The response only confirms Sunshine Health as the destination for claims but fails to provide any specific instructions for submitting *corrected* claims, missing critical details like frequency codes, reference numbers, and paper claim procedures.  [+1 must, -2 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "d": {
+      "verdict": "unable_to_verify",
+      "score": 0.5,
+      "reasoning": "judge_error: 429 Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.",
+      "model": "error",
+      "n": 10
+    },
+    "b": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    },
+    "c": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The response partially addresses electronic submission via clearinghouse to Sunshine Health but misses critical details about frequency codes, reference numbers, and all information regarding paper claims.  [+1 must, -2 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 1
+    },
+    "s": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    }
+  },
+  "cmhc008": {
+    "a": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The response mentions Sunshine Health and general authorization processes but fails to confirm whether prior authorization is required for the specified CPT codes or any associated conditions.  [+1 must, -2 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "d": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The response correctly identifies Sunshine Health as the payer but fails to confirm prior authorization for the specific CPT codes or mention the unit-based threshold.  [+1 must, -2 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "b": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The response mentions Sunshine Health but fails to address the specific CPT codes for psychological testing or their prior authorization requirements, instead listing unrelated procedure codes.  [+1 must, -2 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "c": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    },
+    "s": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    }
+  },
+  "cmhc009": {
+    "a": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The system response mentions Sunshine Health and the ability to submit reconsiderations via a portal, but it fails to provide any information about the deadline for claim payment appeals, which was the core of the question.  [+1 must, -2 miss, +1 bonus \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "d": {
+      "verdict": "correct",
+      "score": 1.0,
+      "reasoning": "The response correctly identifies the 90-day deadline for reconsiderations/disputes from the payment/denial notification, distinguishing it as the first level of appeal, and mentions submission methods.  [+3 must, +3 bonus \u2192 score=1.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "b": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The response is incomplete and fails to provide any information regarding the appeal deadline or the specific payer mentioned in the question.  [-3 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 1
+    },
+    "c": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The response discusses electronic claims submission via clearinghouses and does not address the question about claim payment appeal deadlines or any related facts.  [-3 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 1
+    },
+    "s": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    }
+  },
+  "cmhc010": {
+    "a": {
+      "verdict": "unable_to_verify",
+      "score": 0.5,
+      "reasoning": "judge_error: 503 Socket closed",
+      "model": "error",
+      "n": 10
+    },
+    "d": {
+      "verdict": "wrong",
+      "score": 0.3333333333333333,
+      "reasoning": "The response correctly states the payer and the frequency of eligibility checks but fails to provide the specific channels for verification.  [+2 must, -1 miss \u2192 score=0.33]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "b": {
+      "verdict": "correct",
+      "score": 1.0,
+      "reasoning": "The response correctly identifies the Sunshine provider portal and the need for frequent eligibility checks, and mentions the state Medicaid portal and changing MCOs, but misses the specific Sunshine Provider Services phone line.  [+3 must, +2 bonus \u2192 score=1.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "c": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    },
+    "s": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    }
+  },
+  "cmhc011": {
+    "a": {
+      "verdict": "correct",
+      "score": 1.0,
+      "reasoning": "The response correctly identifies the payer and submission methods for inpatient psychiatric services, and implies PA is required for non-emergency cases, but misses details on notification timelines, decision timeframes, and specific requirements for clinical information.  [+3 must \u2192 score=1.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "d": {
+      "verdict": "wrong",
+      "score": 0.3333333333333333,
+      "reasoning": "The response provides general information about Sunshine Health's prior authorization and submission methods but fails to specifically address the requirements for non-emergency inpatient psychiatric admissions or provide details on decision timeframes.  [+2 must, -1 miss \u2192 score=0.33]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "b": {
+      "verdict": "correct",
+      "score": 1.0,
+      "reasoning": "The response accurately identifies the payer, the requirement for prior authorization for non-emergency inpatient admissions, submission methods, standard decision timelines, and the criteria used for review, but misses details on urgent decision timelines, notification periods for emergent admissions, and the full scope of covered populations.  [+3 must, +3 bonus \u2192 score=1.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "c": {
+      "verdict": "correct",
+      "score": 1.0,
+      "reasoning": "The response correctly identifies the payer and the submission methods for prior authorization for inpatient psychiatric services but omits details about decision timelines, specific criteria, and notification requirements for urgent/emergent cases.  [+3 must \u2192 score=1.00]",
+      "model": "rubric/unknown",
+      "n": 2
+    },
+    "s": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    }
+  },
+  "cmhc012": {
+    "a": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The system failed to provide any of the requested HCPCS codes or related details for ABA therapy under FL Medicaid, instead returning irrelevant document chunks.  [-3 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "d": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The response correctly identifies Florida Medicaid and the need for prior authorization, but it fails to provide the specific descriptions for the mentioned CPT codes and misses other relevant codes and details.  [+1 must, -2 miss, +1 bonus \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "b": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    },
+    "c": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    },
+    "s": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    }
+  },
+  "cmhc013": {
+    "a": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The system's response was empty, resulting in all must-facts being missed and no hits for bonus or forbidden facts.  [-3 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "d": {
+      "verdict": "unable_to_verify",
+      "score": 0.5,
+      "reasoning": "judge_error: 429 Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.",
+      "model": "error",
+      "n": 10
+    },
+    "b": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The system provided raw chunks without synthesizing an answer, thus failing to assert any facts as part of an answer.  [-3 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "c": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The system response provides generic information about provider networks and contact details but fails to address the question about adult dental coverage or any specific dental services.  [-3 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 1
+    },
+    "s": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    }
+  },
+  "cmhc014": {
+    "a": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The response indicates Sunshine Health covers prescription drugs, implying it is the payer, but fails to identify the PBM or its claims processing role, and does not explicitly abstain.  [+1 must, -2 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "d": {
+      "verdict": "partial",
+      "score": 0.5,
+      "reasoning": "The system correctly identifies Express Scripts as the PBM and AcariaHealth as the specialty pharmacy, but introduces a forbidden fact about CVS being a previous PBM.  [+3 must, +1 bonus, -1 forbidden \u2192 score=0.50]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "b": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The response identifies Sunshine Health as the payer and mentions AcariaHealth as a specialty pharmacy, but fails to identify the PBM for prescription claims or Express Scripts.  [+1 must, -2 miss, +2 bonus \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "c": {
+      "verdict": "unable_to_verify",
+      "score": 0.5,
+      "reasoning": "judge_error: 429 Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.",
+      "model": "error",
+      "n": 1
+    },
+    "s": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    }
+  },
+  "cmhc015": {
+    "a": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The response correctly identifies Sunshine Health as the payer but misses most details about the member appeals and grievance process, including how to file and specific contact information, and provides an incorrect resolution timeframe for grievances.  [+1 must, -2 miss, -1 forbidden \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "d": {
+      "verdict": "correct",
+      "score": 1.0,
+      "reasoning": "The response correctly identifies Sunshine Health as the payer, states that appeals and grievances can be filed orally or in writing, and provides contact details for written and oral submissions, but misses specific resolution timelines and the exact P.O. Box number.  [+3 must, +2 bonus \u2192 score=1.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "b": {
+      "verdict": "partial",
+      "score": 0.5,
+      "reasoning": "The system correctly identified Sunshine Health as the payer and that members can file orally or in writing, but missed the specific department and several contact details and resolution timeframes, and provided conflicting information for grievance resolution.  [+2 must, -1 miss, +1 bonus \u2192 score=0.50]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "c": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    },
+    "s": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    }
+  },
+  "cmhc016": {
+    "a": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    },
+    "d": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    },
+    "b": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    },
+    "c": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    },
+    "s": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    }
+  },
+  "cmhc017": {
+    "a": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The response confirms the payer context but fails to provide any information about the required modifiers or place-of-service codes for telehealth services.  [+1 must, -2 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "d": {
+      "verdict": "partial",
+      "score": 0.8333333333333334,
+      "reasoning": "The response correctly identifies the primary modifiers and the payer context, and mentions audio-only modifiers and the need to check payer policies, but misses details on specific POS codes and the governing rule.  [+2 must, -1 miss, +3 bonus \u2192 score=0.83]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "b": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    },
+    "c": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    },
+    "s": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    }
+  },
+  "cmhc018": {
+    "a": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The system provided irrelevant information about early intervention services and general retrospective review policies, failing to address the specific question about prior authorization for ECT.  [+1 must, -2 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "d": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The response confirms Sunshine Health as the payer and provides general information about outpatient prior authorization forms, but it does not explicitly state that ECT requires prior authorization or include specific details about the submission process or decision timelines.  [+1 must, -2 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "b": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The system provides general information about Sunshine Health's prior authorization processes and tools but fails to address the core question of whether prior authorization is required specifically for electroconvulsive therapy (ECT).  [+1 must, -2 miss, +1 bonus \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "c": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    },
+    "s": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    }
+  },
+  "cmhc019": {
+    "a": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The response correctly identifies the payer but fails to provide any specific timely filing deadlines for initial or corrected claims, only mentioning the concept of timely filing.  [+1 must, -1 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "d": {
+      "verdict": "correct",
+      "score": 1.0,
+      "reasoning": "The system correctly identifies the payer and the primary timely filing limit for participating providers, and mentions the 2026 changes for non-participating providers, but provides contradictory information for corrected claims.  [+2 must, +3 bonus \u2192 score=1.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "b": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    },
+    "c": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    },
+    "s": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The system's response was empty and did not provide any information regarding the timely filing deadline.  [-2 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 1
+    }
+  },
+  "cmhc020": {
+    "a": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The system failed to provide any prior authorization decision timeframes for Simply Healthcare, instead offering irrelevant information about UnitedHealthcare's test result notification standards.  [-3 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "d": {
+      "verdict": "correct",
+      "score": 1.0,
+      "reasoning": "The response accurately states the federal floor for standard and expedited prior authorization timeframes, including the upcoming change in 2026, and correctly identifies Simply Healthcare as the relevant payer.  [+3 must, +1 bonus \u2192 score=1.00]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "b": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    },
+    "c": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The response identifies the payer but fails to provide any of the required prior authorization decision timeframes, and does not explicitly state it cannot answer.  [+1 must, -2 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 1
+    },
+    "s": {
+      "verdict": "wrong",
+      "score": 0.0,
+      "reasoning": "The system response is empty and does not provide any information regarding the prior authorization decision timeframe.  [-3 miss \u2192 score=0.00]",
+      "model": "rubric/unknown",
+      "n": 1
+    }
+  },
+  "cmhc021": {
+    "a": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    },
+    "d": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    },
+    "b": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    },
+    "c": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    },
+    "s": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    }
+  },
+  "cmhc022": {
+    "a": {
+      "verdict": "wrong",
+      "score": 0.3333333333333333,
+      "reasoning": "The response correctly identifies EPSDT eligibility and the payer context but fails to provide any specific billing information for EPSDT services.  [+2 must, -1 miss \u2192 score=0.33]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "d": {
+      "verdict": "unable_to_verify",
+      "score": 0.5,
+      "reasoning": "judge_error: 429 Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.",
+      "model": "error",
+      "n": 10
+    },
+    "b": {
+      "verdict": "wrong",
+      "score": 0.3333333333333333,
+      "reasoning": "The response provided general information about EPSDT eligibility and its Florida branding but failed to address any specific billing procedures, codes, forms, or reimbursement details.  [+2 must, -1 miss \u2192 score=0.33]",
+      "model": "rubric/unknown",
+      "n": 10
+    },
+    "c": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    },
+    "s": {
+      "verdict": "NO_CHUNKS",
+      "score": 0.0,
+      "n": 0
+    }
+  }
+}

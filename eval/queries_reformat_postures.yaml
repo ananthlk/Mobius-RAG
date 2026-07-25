@@ -1,0 +1,369 @@
+bank_version: reformat_postures_v1
+# v1 (2026-07-23): co-authored by EVAL + Shape-Reformat Agent
+# REVISED 2026-07-23: adopted vector-based theme clustering per Ananth's correction.
+# Purpose: exercise Reformat's 6-posture mapping (PRECISE, FAN_OUT, CLARIFY,
+# RELY_ON_EXTERNAL×2, DECLINE). Each test case pairs a Gate contour result
+# with expected Reformat behavior.
+#
+# MECHANISM CHANGE from draft: FAN_OUT no longer ranks individual fanout_codes.
+# Instead: embed fanout_codes' lexicon phrases → cluster into 3-4 *themes* by vector
+# similarity → rank themes (w_p·prevalence + w_l·lexicon_proximity) → take top-3
+# themes → one rewritten query per theme. This avoids redundant near-duplicate queries
+# (e.g., eligibility.aged + eligibility.blind both in "disability-related eligibility"
+# theme, fanned as one query, not two).
+#
+# Distinct purpose from queries_gate_contours.yaml: Gate tests CLASSIFICATION,
+# Reformat tests TRANSFORMATION. A single Gate result (e.g., EXACT, UNDERSPECIFIED,
+# VICINITY) flows through Reformat into a posture + rewritten_queries[].
+#
+# Test structure: given gate_result (contour + codes + fanout_codes), verify that
+# reformat(.) produces the expected posture and rewritten_queries have right shape/count.
+# For FAN_OUT cases: verify theme clustering + ranking is correct (score ordering at
+# theme level, not code level; top-3 themes by score; one query per theme).
+#
+# Built jointly: Shape-Reformat (queries, live verification) + Eval (test design,
+# scoring criteria, see this doc §6 for scoring guidelines).
+queries:
+
+# --- PRECISE posture: EXACT contour, pass-through ---
+- id: reformat001
+  query: How do I confirm eligibility for Medicaid
+  gate_contour: exact
+  gate_codes:
+    d_codes: [verification.confirm]
+    j_codes: [program.medicaid]
+    p_codes: [verification.verify]
+  expected_posture: precise
+  expected_rewritten_query_count: 1
+  notes: >
+    EXACT gate result → PRECISE posture → one rewritten query (normalized original).
+    No fanout, no clarification needed. Posture mapping is trivial here; test
+    verifies the pass-through is wired correctly.
+
+- id: reformat002
+  query: What's the process to resubmit a denied claim with Molina
+  gate_contour: exact
+  gate_codes:
+    d_codes: [process_action.deny_handling]
+    j_codes: [payor.molina]
+    p_codes: [process_action.remedial]
+  expected_posture: precise
+  expected_rewritten_query_count: 1
+  notes: >
+    EXACT gate result with both D and J specific. Posture stays PRECISE.
+
+# --- FAN_OUT posture: UNDERSPECIFIED/explore_siblings, bounded ranked expansion ---
+- id: reformat003
+  query: Eligibility for Medicaid
+  gate_contour: underspecified
+  underspecified_kind: explore_siblings
+  gate_codes:
+    d_codes: [eligibility]  # The bare umbrella
+    j_codes: [program.medicaid]
+    p_codes: []
+  fanout_codes: [
+    "eligibility.aged",
+    "eligibility.blind",
+    "eligibility.disability",
+    "eligibility.pregnancy",
+    "eligibility.income",
+    "eligibility.categorical",
+    "eligibility.medical_necessity",
+    "eligibility.enrollment",
+    "eligibility.verification",
+    "eligibility.waiver",
+    "eligibility.chip_related",
+    "eligibility.immigrant_status",
+    "eligibility.citizenship",
+    "eligibility.residency",
+  ]  # Real ~80 siblings from live corpus
+  expected_posture: fan_out
+  expected_rewritten_query_count: 3  # N=3 themes (hard cap at 4, target 3)
+  expected_themes: [
+    {name: "enrollment_status", member_count: 31, doc_count: 3307},
+    {name: "income_eligibility", member_count: 32, doc_count: 1487},
+    {name: "age_range", member_count: 17, doc_count: 154},
+  ]  # Live run 2026-07-23, k-means clustering (spherical, cosine similarity)
+  notes: >
+    UNDERSPECIFIED/explore_siblings gate result → FAN_OUT posture.
+    Gate provides ~80 fanout_codes from eligibility.* universe.
+    Reformat embeds fanout_codes' policy_lexicon_entries phrases, clusters by vector
+    similarity using k-means (spherical, cosine) into ~3-4 themes. Scores each *theme*
+    (not individual code) by w_p·prevalence + w_l·lexicon_proximity, ranks descending,
+    takes top-3 themes. One rewritten_queries per theme.
+
+    **LIVE RUN VERIFIED (2026-07-23):** 80 codes → 3 themes (enrollment_status, income,
+    age_range), semantically coherent. Theme members balanced (31/32/17), not a single
+    mega-cluster (unlike average-linkage's chaining failure on same-domain embeddings).
+    Proposed w_p=0.4/w_l=0.6 used as-is; no re-tuning needed yet for this case.
+
+    TEST VALIDATION: verify theme clustering produces semantically distinct angles
+    (not random code groupings); membership distribution is balanced (not 79/1 clusters);
+    top-3 by hybrid score cover the major user-intent facets for "eligibility" without
+    redundant near-duplicates.
+
+- id: reformat004
+  query: Behavioral health services for Medicaid
+  gate_contour: exact  # Note: this is EXACT, not underspecified (§4b surprise finding from Gate bank)
+  gate_codes:
+    d_codes: [health_care_services.behavioral_health]  # Specific leaf, not bare umbrella
+    j_codes: [program.medicaid]
+    p_codes: []
+  expected_posture: precise
+  expected_rewritten_query_count: 1
+  notes: >
+    Gate found this is a specific leaf (d:health_care_services.behavioral_health),
+    not the bare umbrella that would cause underspecified→explore_siblings.
+    So Reformat treats it as PRECISE. Included here to document: gate's finding
+    that phrase-specific matching can resolve even large umbrellas (631 siblings for
+    bare health_care_services, but "behavioral health" is specific enough).
+
+- id: reformat005
+  query: How do I get hospice services
+  gate_contour: underspecified
+  underspecified_kind: missing_jurisdiction
+  gate_codes:
+    d_codes: [health_care_services.hospice]  # Live Gate resolved to specific leaf, not bare umbrella
+    j_codes: []  # No payer/state specified
+    p_codes: []
+  expected_posture: clarify
+  expected_clarify_questions_count: "1+"
+  notes: >
+    **LIVE RUN CORRECTION (2026-07-23):** Bank assumed "hospice services" would match
+    the bare `health_care_services` umbrella (631+ siblings), triggering explore_siblings.
+    Live Gate instead resolves D directly to the specific leaf `health_care_services.hospice`
+    — the lexicon phrase "hospice" is specific enough to match a leaf, not the parent.
+    With D resolved (specific leaf) and J empty, the real contour is
+    `underspecified/missing_jurisdiction`, and Reformat correctly produces CLARIFY posture.
+
+    **This is not a Reformat bug — it's a bank-authoring discovery:** queries specific
+    enough to match a leaf (like "hospice services") won't hit the bare umbrella, so
+    they can't test FAN_OUT on huge fanoust. We still need a test case that hits the
+    bare umbrella (health_care_services without domain hints); candidates: "What healthcare
+    is covered?", "Which services are available?", "Tell me about Medicaid benefits"
+    (TBD, verify live before adding).
+
+# --- CLARIFY posture: UNDERSPECIFIED/missing_domain or missing_jurisdiction ---
+- id: reformat006
+  query: What's the process to resubmit a denied claim
+  gate_contour: underspecified
+  underspecified_kind: missing_jurisdiction
+  gate_codes:
+    d_codes: [process_action.deny_handling]
+    j_codes: []  # No payer/state at all
+    p_codes: [process_action.remedial]
+  expected_posture: clarify
+  expected_clarify_questions_count: "1+"
+  notes: >
+    UNDERSPECIFIED/missing_jurisdiction gate result → CLARIFY posture.
+    No payer/state tag matched. Reformat should emit clarify_questions like
+    ["Which payer (Medicaid/Molina/UnitedHealth/...)?"] based on commonly-seen
+    J-codes in the corpus or those that co-occur with d:process_action.deny_handling.
+    Not a blind "which state?" but targeted candidates from corpus patterns.
+
+- id: reformat007
+  query: What documentation is required to enroll a new pediatric patient
+  gate_contour: underspecified
+  underspecified_kind: missing_domain
+  gate_codes:
+    d_codes: []  # No D-domain tag fired
+    j_codes: [payor.sunshine_health]
+    p_codes: []
+  expected_posture: clarify
+  expected_clarify_questions_count: "1+"
+  notes: >
+    UNDERSPECIFIED/missing_domain gate result → CLARIFY posture.
+    Payer is known (Sunshine Health) but domain is vague (could be enrollment,
+    credentialing, patient-setup, benefits...). Clarify_questions should offer
+    refinements like ["Enrollment for which service line?", "Is this about member
+    enrollment or provider credentialing?"] based on corpus patterns.
+
+# --- RELY_ON_EXTERNAL posture (type 1): VICINITY contour ---
+- id: reformat008
+  query: What is the prior authorization process in Clarendon, AR
+  gate_contour: vicinity
+  gate_codes:
+    d_codes: [process_action.prior_auth]
+    j_codes: [state.arkansas, location.clarendon]  # Rare jurisdiction combo
+    p_codes: []
+  expected_posture: rely_on_external
+  expected_external_reason: "vicinity"
+  expected_rewritten_query_count: 0
+  notes: >
+    VICINITY gate result → RELY_ON_EXTERNAL posture. Domain + jurisdiction both
+    matched, but no single doc covers both (partial overlap only, not exact combo).
+    Reformat emits external_reason="vicinity" (partial coverage exists, router
+    should try c/d strategies for broader match) and does NOT force a rewritten query
+    here. Pool gets the signal: "partial match, try external evidence".
+
+- id: reformat009
+  query: What are the drug counselor requirements for Sunshine Health
+  gate_contour: vicinity
+  gate_codes:
+    d_codes: [provider_role.drug_counselor]  # Rare domain (8 docs)
+    j_codes: [payor.sunshine_health]  # Common payer (559 docs)
+    p_codes: []
+  expected_posture: rely_on_external
+  expected_external_reason: "vicinity"
+  expected_rewritten_query_count: 0
+  notes: >
+    Domain-side VICINITY case (counterpart to jurisdiction-side in reformat008).
+    No intersection between d:provider_role.drug_counselor docs and
+    j:payor.sunshine_health docs. Reformat signals external fallback, no
+    rewritten_queries forced.
+
+# --- RELY_ON_EXTERNAL posture (type 2): CORPUS_GAP contour ---
+- id: reformat010
+  query: What is our policy on gifts and business courtesies
+  gate_contour: corpus_gap
+  gate_codes:
+    d_codes: [compliance.gifts_and_business_courtesies]  # Verified 0 docs
+    j_codes: []
+    p_codes: []
+  expected_posture: rely_on_external
+  expected_external_reason: "corpus_gap"
+  expected_rewritten_query_count: 0
+  notes: >
+    CORPUS_GAP gate result → RELY_ON_EXTERNAL posture. Tag matched (d:compliance.gifts...)
+    but zero documents carry it (verified via SQL before construction). Reformat emits
+    external_reason="corpus_gap" (no internal coverage exists, router escalates to
+    external search or manual lookup). No rewritten_queries.
+
+# --- DECLINE posture: OUT_OF_SCOPE contour ---
+- id: reformat011
+  query: What's the weather forecast for tomorrow?
+  gate_contour: out_of_scope
+  gate_codes:
+    d_codes: []
+    j_codes: []
+    p_codes: []
+  expected_posture: decline
+  expected_decline_reason: "out_of_scope"
+  expected_rewritten_query_count: 0
+  notes: >
+    OUT_OF_SCOPE gate result → DECLINE posture. Well-formed query, zero tags matched.
+    Hard boundary, no fallback, no rewritten_queries.
+
+- id: reformat012
+  query: Does my auto insurance cover a rental car?
+  gate_contour: out_of_scope
+  gate_codes:
+    d_codes: []
+    j_codes: []
+    p_codes: []
+  expected_posture: decline
+  expected_decline_reason: "out_of_scope"
+  expected_rewritten_query_count: 0
+  notes: >
+    Adjacent-domain (auto insurance, not health) → OUT_OF_SCOPE → DECLINE posture.
+
+# --- CLARIFY_REPHRASE posture (tentative): UNCLEAR contour ---
+# NOTE: This section is PENDING Ananth confirmation per shape-reformat-schematic-spec.md §6.
+# If Ananth prefers a different handling (e.g., direct DECLINE, or escalation without
+# clarify_questions), these test cases will be re-scoped or removed.
+- id: reformat013
+  query: asdkfjqwoeiru
+  gate_contour: unclear
+  gate_codes:
+    d_codes: []
+    j_codes: []
+    p_codes: []
+  expected_posture: clarify_rephrase  # PENDING Ananth confirmation
+  expected_clarify_questions_count: "1+"  # Generic "can you rephrase?" prompt
+  notes: >
+    UNCLEAR gate result (single garbled token) → expected CLARIFY_REPHRASE posture
+    (TENTATIVE). Reformat could emit a generic clarify_questions prompt like
+    ["I didn't understand that. Could you rephrase?"] and escalate to user clarification.
+    Alternative (not taken unless Ananth says): treat UNCLEAR as DECLINE.
+    This test case documents the PROPOSED behavior, not yet signed off.
+
+---
+
+## §6 Scoring criteria + tuning questions (EVAL-OWNED)
+
+### Hybrid scoring function (theme-level)
+**REVISED 2026-07-23 per Ananth's clustering correction:**
+```
+score(theme) = w_p · prevalence_norm(theme) + w_l · lexicon_proximity(theme, query_tokens)
+```
+where:
+- `theme` is a cluster of similar fanout_codes (e.g., "disability-related eligibility" contains eligibility.aged + eligibility.blind + eligibility.disability)
+- `prevalence_norm(theme)` = sum of member_codes' doc counts, normalized within the fanout set
+- `lexicon_proximity(theme, query_tokens)` = representative or summed overlap of query tokens vs union of member_codes' lexicon_entries phrases
+
+**Proposed defaults (to be tuned via real eval runs):**
+- `w_p = 0.4`, `w_l = 0.6` (lexicon_proximity weighted heavier, since it's query-specific)
+- `MAX_FANOUT_THEMES = 4` (hard cap), target `N = 3` (top-3 themes typical, tunable)
+- `lexicon_proximity` = Jaccard index or weighted phrase match over theme's member lexicon_entries
+  (exact formula TBD in reformat.py, but should handle zero-overlap gracefully)
+- Clustering mechanism: k-means vs. similarity-threshold agglomeration TBD at build time (either must produce ≤4 clusters by construction)
+
+### Key tuning questions (test against real corpus, theme-level now)
+
+1. **Does theme clustering collapse near-duplicate codes correctly?**
+   - Test case reformat003 ("Eligibility for Medicaid") has ~80 individual codes
+   - Clustering should produce ~4-5 distinct themes (e.g., "age-related", "disability-related", "income-related", "enrollment", "verification")
+   - Expected behavior: codes like eligibility.aged + eligibility.blind + eligibility.disability should cluster into "disability-related eligibility" theme (one theme, one rewritten query)
+   - Empirical measure: do the 80 codes cluster into ≤4 themes? Are the themes semantically coherent (human-interpretable)?
+   - If themes are garbage (random code collections), the embedding/clustering mechanism needs work before proceeding
+   - If themes are good, proceed to question 2
+
+2. **Do top-3 themes capture the right breadth for user intents?**
+   - With proper clustering, N=3 themes should cover the major user-intent angles for "eligibility"
+   - Expected behavior: if a user query has hints (e.g., "eligibility for pregnant applicants"), that hint should boost the relevant theme's lexicon_proximity score
+   - Empirical measure: if a query like "eligibility for pregnant applicants" is queried, does the "pregnancy-related" or "health-condition-related" theme rank in top-3 by hybrid score?
+   - If prevalence dominates (generic themes like "income" always top-3, pregnancy theme never seen), raise `w_l` or lower `w_p`
+   - If top-3 themes consistently capture the query's hints, N=3 is correct
+
+3. **Does lexicon_proximity aggregate correctly across theme member_codes?**
+   - When a query token (e.g., "hospice") matches lexicon entries in multiple theme member_codes, prevalence/proximity should bubble the theme up
+   - Test case reformat005 is the main challenge: query "hospice services", fanout_codes include health_care_services.hospice + others
+   - Expected: hospice-related theme should rank high (lexicon match), not drowned by generic-service themes (high prevalence but no lexicon match)
+   - Empirical measure: run reformat005 with w_p=0.4/w_l=0.6, verify hospice theme is in top-3. If not, adjust weights
+   - Also test edge case: bare query "health_care_services" (no hints) → ranking falls back to pure prevalence → top-3 are generic/common themes. That's correct, OR it's a Gate issue (should route to CLARIFY, not FAN_OUT)
+
+4. **Is MAX_FANOUT_THEMES=4 (target N=3) still correct for huge fanout sets?**
+   - Test case reformat005 has 50+ individual codes, clustering should reduce to ≤4 themes
+   - N=3 is intentional "explore, don't explode" constraint (3× Pool latency per FAN_OUT, bounded by latency gate)
+   - But if 50+ distinct user intents exist and compress only to 4 themes, N=3 might miss the 4th theme
+   - Alternative: keep MAX=4 hard, but let N be adaptive (N=min(3, num_themes)) so small fanout sets don't pad
+   - Empirical measure (downstream UX): do users ask follow-up clarifications on FAN_OUT results, suggesting top-3 missed their intent?
+   - For now: MAX=4, target N=3 is the hypothesis; Eval owns measuring whether it holds
+
+### Verification checklist (per test case run, theme-aware)
+- [ ] Posture matches expected (PRECISE/FAN_OUT/CLARIFY/RELY_ON_EXTERNAL/DECLINE/CLARIFY_REPHRASE)
+- [ ] Rewritten_query count matches expected (0 for RELY/DECLINE, 1 for PRECISE, 3 for FAN_OUT, 1+ for CLARIFY)
+- [ ] For FAN_OUT cases:
+  - [ ] Fanout_codes cluster into ≤4 themes by vector similarity (sanity check: are themes human-interpretable?)
+  - [ ] Top-3 themes are ranked sensibly by hybrid score (lexicon hints boost theme score, not drowned by prevalence alone)
+  - [ ] Each theme_member_codes list is non-empty and coherent (codes in a theme are semantically related)
+  - [ ] One rewritten_query per theme (no duplicates, no orphaned codes outside themes)
+- [ ] For CLARIFY cases: clarify_questions include plausible options from corpus patterns (not blind prompts)
+- [ ] For RELY_ON_EXTERNAL cases: external_reason is either "vicinity" or "corpus_gap" (correct diagnosis)
+- [ ] Reformat_ms is reasonable (all postures <100ms including live DB prevalence probes for FAN_OUT + embedding lookup for theme clustering)
+
+---
+
+## §7 Open for Eval tuning phase
+
+Once reformat.py exists with theme clustering + scoring + tests pass, run these test cases against the live DB and corpus:
+
+1. **Theme clustering validation (primary):** For each FAN_OUT test case, inspect the theme clusters:
+   - Are themes semantically coherent (human-interpretable)?
+   - Do near-duplicate codes (e.g., eligibility.aged + eligibility.blind) cluster together?
+   - Are there any codes left outside themes (orphans)?
+   - If clustering looks garbage, debug embedding pipeline or similarity threshold before proceeding
+
+2. **Theme ranking validation (secondary, once clustering is good):**
+   - Run queries in test cases reformat003/reformat005 against live fanout_codes
+   - Verify top-3 themes are ranked sensibly (hybrid score, not pure prevalence)
+   - If prevalence dominates (query "pregnancy" still puts generic themes top-3), adjust w_p/w_l and re-run
+   - If lexicon matches are missing, check lexicon_proximity aggregation logic (summing across member_codes correctly?)
+
+3. **Posture verification (global):** Verify all expected_posture values match actual output (PRECISE/FAN_OUT/CLARIFY/RELY/DECLINE all routing correctly)
+
+4. **Tuning & finalization:**
+   - If theme clustering is good but ranking needs tuning, adjust (w_p, w_l) incrementally (start w_p=0.4/w_l=0.6, measure top-3 theme capture rate)
+   - If clustering is broken, this is a reformat.py build issue, not a tuning knob
+   - Once tuning is complete, update this file with measured rankings + finalized (w_p, w_l) values
+   - Post results to shape-reformat-simulation-tracker.md before TECH sign-off

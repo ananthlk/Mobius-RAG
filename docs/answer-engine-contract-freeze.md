@@ -47,7 +47,32 @@ Plus `llm_answer` (served text) — chat + eval read it; must stay.
    (both on main, pushed, reachable). SHAs are immutable → no rush to tag; will tag both @ these SHAs annotated
    with the cmhc baseline `run_id` once it lands.
 
-## Open contract decision (needs EVAL sign-off before build)
-Per-slot routing vs per-query routing in the `routing` dict + decision row. Options: (a) keep per-query
-`routing` shape, log per-slot detail in a new additive sub-field (back-compatible, bandit unchanged); (b)
-migrate the bandit to per-slot context (better long-term, breaks the current training row). Lean (a) first.
+## STEP-1 BASELINE (pinned 2026-07-21 — the working reference for the 5-step plan)
+8 nightly calibration runs, rev `00459-xzm`, cmhc bank (8e743568), judge gemini-2.5-pro, corpus AS-IS
+(424 embedded-unpublished + orphans accepted per Ananth: "work with the corpus, those things should not matter").
+`s`-contamination INCLUDED (8/22 queries hijacked by fact-store in every forced cell + natural, all judged wrong).
+
+| metric | mean ± σ (n=8) | range |
+|---|---|---|
+| oracle_recall | **0.473 ± 0.017** | 0.451–0.508 |
+| router_recall | **0.345 ± 0.007** | 0.330–0.353 |
+| best_single | 0.382 ± 0.023 | 0.348–0.410 |
+| a / b / c / d | 0.311 / 0.260 / 0.144 / 0.382 | c noisy (±0.055) |
+
+Deltas ≥ ~0.02 on router are signal (2.8σ). Plan: step-2 forced-bypass (a/b/c/d/s measured clean + union-oracle) →
+step-3 routing/s fix (router moves here) → step-4 fast-exit/clarify/reframe framework → step-5 re-baseline. Target router 0.65
+(requires union-oracle ceiling ≥~0.72 — validate at step 2).
+
+## Routing contract decision — RESOLVED: Option (a), EVAL-SIGNED 2026-07-22
+Per-slot vs per-query routing in the `routing` dict + decision row. **DECISION: Option (a).** Keep the
+per-query `routing` shape EXACTLY as-is (priors_version, feature_vector|features, leaf_key, scores, strategy);
+the bandit INSERT + both decision-row writers read ONLY these, unchanged. Per-slot detail goes in a NEW
+additive sub-field that no existing reader consumes (diagnostic-only). Hard constraints for the `router` module:
+- `leaf_key` stays PER-QUERY (current shape) — a per-slot leaf_key is a SEPARATE future telemetry migration
+  needing a fresh EVAL sign-off (that was option (b), NOT taken).
+- feature_vector + scores + priors_version non-null on every non-s response; s-rows keep NULL by design.
+- bandit reward + context derive SOLELY from the existing per-query keys → training row byte-identical PRE/POST in STRUCTURE.
+- **EDGE VERIFIED 2026-07-22:** Router input changes in shape-first sequencing (raw_query → filled_shape context); feature_vector VALUES will differ (built from rewritten_queries, not raw query). This is NOT a telemetry migration — it's an intentional semantic input change. Structure + writer + importer locked; only context VALUES shift per flag state (legacy vs shape mode). Bandit learns consistently from whichever mode is active.
+Enforced by the 3 machine-checks (one INSERT `rag_query_decisions`, one `check_facts` import, `FACT_CHECKER_VERSION`
+per row). Rationale: back-compatible structure, no migration, bandit input remains valid. Option (b) (migrate bandit to per-slot
+context) explicitly deferred — it breaks the current training row and would need a fresh sign-off.

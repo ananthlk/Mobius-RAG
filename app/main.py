@@ -12035,6 +12035,65 @@ async def query_rag(
     return QueryResponse(chunks=chunks_out)
 
 
+# ---------------------------------------------------------------------------
+# New answer engine (Retriever refactor) — served entry point.
+# ---------------------------------------------------------------------------
+# The full Shape → Pool → Router → Fillers → Synthesis → Contract pipeline
+# (app/services/retriever/*) shipped in the image but had NO served caller
+# until now (2026-07-24) — it was reachable only from tests/in-process
+# calibration harnesses. This wires it to a real endpoint so it can be:
+#   * exercised on GCP through the LLM Manager proxy (locked gemini-2.5-pro
+#     judge path — the eval==prod-scorer identity only holds when the
+#     pipeline actually runs where the proxy is reachable),
+#   * measured for REAL per-stage latency (unmeasurable locally),
+#   * hit by the data-collection throttle / forced-strategy calibration.
+# Additive: does NOT touch /api/query or the legacy corpus_search path.
+class RetrieverAnswerRequest(BaseModel):
+    query: str
+    caller_mode: Optional[str] = None            # chat.default / chat.thinking / batch / ...
+    token_budget_for_retrieval: Optional[int] = None  # Chat's real context-window budget; None → Structure's table
+    forced_strategy: Optional[str] = None        # a/b/c/d/s → single-strategy isolation (offline calibration matrix)
+
+
+@app.post("/api/retriever/answer")
+async def retriever_answer(
+    body: RetrieverAnswerRequest = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Run the new answer engine end to end and return the frozen Contract
+    envelope (12-field, module-gates.md §6) plus per-stage latency.
+
+    `forced_strategy` routes Router's isolation bypass (single-strategy
+    ladder, no shadows) — the uncontaminated path Eval's recall curves
+    grade. Omit it for a normal dispatch. `build_contract` is called here
+    (not inside orchestrator.py) to avoid the circular import
+    contract.py → RetrieverPartialResult.
+    """
+    from app.services.retriever.orchestrator import run_retriever_partial_with_retry
+    from app.services.retriever.contract import build_contract
+
+    if not (body.query and body.query.strip()):
+        raise HTTPException(status_code=400, detail="query is required")
+
+    result = await run_retriever_partial_with_retry(
+        db, body.query.strip(),
+        caller_mode=body.caller_mode,
+        token_budget_for_retrieval=body.token_budget_for_retrieval,
+        forced_strategy=body.forced_strategy,
+    )
+    envelope = build_contract(result, result.synthesis)
+    return {
+        "contract": envelope.to_dict(),
+        "latency_ms": {
+            "gate_ms": result.gate_ms, "reformat_ms": result.reformat_ms,
+            "slots_ms": result.slots_ms, "pool_ms": result.pool_ms,
+            "router_ms": result.router_ms, "fillers_ms": result.fillers_ms,
+            "synthesis_ms": result.synthesis_ms, "total_ms": result.total_ms,
+        },
+        "dispatch_path": getattr(result.router_decision, "dispatch_path", None),
+    }
+
+
 @app.get("/documents/{document_id}/chunking/stream")
 async def stream_chunking_process(
     document_id: str,

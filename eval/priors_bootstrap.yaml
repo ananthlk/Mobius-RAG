@@ -1,0 +1,246 @@
+# Bootstrap Seed Priors for Router (depth_bucket × strategy)
+# Generated 2026-07-23 from legacy qclass-based priors
+# Graduated scale: 60% at depth 0 → 95% at depth 4
+#
+# Timeline:
+#   Week 1: seed active, calibration loop ingests depth_bucket tuples
+#   Week 2-3: empirical priors derived once N≥50 samples per cell
+#   Week 3+: production-grade depth_bucket priors replace seeds, fallback to qclass optional
+#
+# SEMANTIC NOTE on strategy 's' (payor fact store), 2026-07-24 (Eval):
+#   s's accuracy_estimate here means "P(the returned certified fact is CORRECT)"
+#   — NOT "P(the query is ANSWERED)". s returns a single stored fact (payer ID,
+#   timely-filing number) when the query maps to one, and nothing usable otherwise.
+#   So .45-.5 is a high-conditional-accuracy number that does NOT make s a general
+#   direct_answer strategy; on content queries s returns a bare code, not an answer.
+#   This over-reads as general strategic value to any consumer that treats the cell
+#   as P(answered) — the reason greedy/optimizer collapsed to ['s'] at max_attempts=1
+#   (fixed structurally by Router's SUPPLEMENT_ONLY gate: s may never be the sole
+#   rung of a required content slot while anything else is viable). Do NOT "correct"
+#   these values by hand — do-not-fold stands until a real payor-weighted bank
+#   calibrates s; the gate makes the values non-load-bearing for the collapse anyway.
+#   When that bank exists, s's cell should split fact-shaped vs content-shaped queries
+#   (it currently averages two very different populations).
+
+seed_priors:
+  depth_0:  # tight corpus (high accuracy, LOW recall)
+    a:
+      accuracy_estimate: 0.165
+      accuracy_std: 0.150
+      latency_p50_ms: 500
+      recall_lift: 0.100
+      cost_per_attempt: 1
+    b:
+      accuracy_estimate: 0.225
+      accuracy_std: 0.180
+      latency_p50_ms: 1500
+      recall_lift: 0.100
+      cost_per_attempt: 1
+    c:
+      accuracy_estimate: 0.180
+      accuracy_std: 0.200
+      latency_p50_ms: 2000
+      recall_lift: 0.071
+      cost_per_attempt: 2
+    d:
+      accuracy_estimate: 0.350
+      accuracy_std: 0.250
+      latency_p50_ms: 3000
+      recall_lift: 0.150
+      cost_per_attempt: 3
+    f:
+      accuracy_estimate: 0.300
+      accuracy_std: 0.250
+      latency_p50_ms: 2500
+      recall_lift: 0.120
+      cost_per_attempt: 2
+    s:
+      accuracy_estimate: 0.400
+      accuracy_std: 0.300
+      latency_p50_ms: 100
+      recall_lift: 0.100
+      cost_per_attempt: 0
+
+  depth_1:  # fair corpus (low-medium accuracy, LOW-MED recall)
+    a:
+      accuracy_estimate: 0.263
+      accuracy_std: 0.170
+      latency_p50_ms: 500
+      recall_lift: 0.350
+      cost_per_attempt: 1
+    b:
+      accuracy_estimate: 0.206
+      accuracy_std: 0.200
+      latency_p50_ms: 1500
+      recall_lift: 0.175
+      cost_per_attempt: 1
+    c:
+      accuracy_estimate: 0.151
+      accuracy_std: 0.200
+      latency_p50_ms: 2000
+      recall_lift: 0.300
+      cost_per_attempt: 2
+    d:
+      accuracy_estimate: 0.400
+      accuracy_std: 0.280
+      latency_p50_ms: 3000
+      recall_lift: 0.330
+      cost_per_attempt: 3
+    f:
+      accuracy_estimate: 0.350
+      accuracy_std: 0.270
+      latency_p50_ms: 2500
+      recall_lift: 0.280
+      cost_per_attempt: 2
+    s:
+      accuracy_estimate: 0.450
+      accuracy_std: 0.300
+      latency_p50_ms: 100
+      recall_lift: 0.350
+      cost_per_attempt: 0
+
+  depth_2:  # medium corpus (low accuracy, MEDIUM recall)
+    # FOLD RETRACTED 2026-07-23: a Beta update from forced-filler-bank counts
+    # was applied here and rolled back same day — Eval's spot-check proved the
+    # recall==1.0 grading inflated (token-presence proxy scored absent facts
+    # as found; strict anchor regrade: a=.167 b=.125 c=0 d=.542 vs .85+).
+    # Cells restored to seed. RE-FOLD only from LLM-judge-graded counts
+    # (mechanism proven: scripts/run_router_three_way_batch.py + the
+    # counts-only merge p=(seed*8+s)/(8+n_real), n=8+n_real).
+    a:
+      accuracy_estimate: 0.500
+      accuracy_std: 0.150
+      latency_p50_ms: 500
+      recall_lift: 0.543
+      cost_per_attempt: 1
+    b:
+      accuracy_estimate: 0.225
+      accuracy_std: 0.220
+      latency_p50_ms: 1500
+      recall_lift: 0.286
+      cost_per_attempt: 1
+    c:
+      accuracy_estimate: 0.000
+      accuracy_std: 0.050
+      latency_p50_ms: 2000
+      recall_lift: 0.330
+      cost_per_attempt: 2
+    d:
+      accuracy_estimate: 0.450
+      accuracy_std: 0.300
+      latency_p50_ms: 3000
+      recall_lift: 0.450
+      cost_per_attempt: 3
+    f:
+      accuracy_estimate: 0.400
+      accuracy_std: 0.300
+      latency_p50_ms: 2500
+      recall_lift: 0.380
+      cost_per_attempt: 2
+    s:
+      accuracy_estimate: 0.500
+      accuracy_std: 0.300
+      latency_p50_ms: 100
+      recall_lift: 0.500
+      cost_per_attempt: 0
+
+  depth_3:  # broad corpus (low accuracy, HIGH recall)
+    # FOLD RETRACTED 2026-07-23 — same retraction/provenance as depth_2 above.
+    a:
+      accuracy_estimate: 0.425
+      accuracy_std: 0.140
+      latency_p50_ms: 500
+      recall_lift: 0.800
+      cost_per_attempt: 1
+    b:
+      accuracy_estimate: 0.284
+      accuracy_std: 0.240
+      latency_p50_ms: 1500
+      recall_lift: 0.480
+      cost_per_attempt: 1
+    c:
+      accuracy_estimate: 0.091
+      accuracy_std: 0.120
+      latency_p50_ms: 2000
+      recall_lift: 0.400
+      cost_per_attempt: 2
+    d:
+      accuracy_estimate: 0.500
+      accuracy_std: 0.300
+      latency_p50_ms: 3000
+      recall_lift: 0.550
+      cost_per_attempt: 3
+    f:
+      accuracy_estimate: 0.450
+      accuracy_std: 0.300
+      latency_p50_ms: 2500
+      recall_lift: 0.480
+      cost_per_attempt: 2
+    s:
+      accuracy_estimate: 0.550
+      accuracy_std: 0.300
+      latency_p50_ms: 100
+      recall_lift: 0.600
+      cost_per_attempt: 0
+
+  depth_4:  # very broad corpus (low accuracy, HIGHEST recall)
+    a:
+      accuracy_estimate: 0.313
+      accuracy_std: 0.180
+      latency_p50_ms: 500
+      recall_lift: 0.315
+      cost_per_attempt: 1
+    b:
+      accuracy_estimate: 0.450
+      accuracy_std: 0.250
+      latency_p50_ms: 1500
+      recall_lift: 0.765
+      cost_per_attempt: 1
+    c:
+      accuracy_estimate: 0.000
+      accuracy_std: 0.050
+      latency_p50_ms: 2000
+      recall_lift: 0.765
+      cost_per_attempt: 2
+    d:
+      accuracy_estimate: 0.550
+      accuracy_std: 0.300
+      latency_p50_ms: 3000
+      recall_lift: 0.700
+      cost_per_attempt: 3
+    f:
+      accuracy_estimate: 0.500
+      accuracy_std: 0.300
+      latency_p50_ms: 2500
+      recall_lift: 0.650
+      cost_per_attempt: 2
+    s:
+      accuracy_estimate: 0.600
+      accuracy_std: 0.300
+      latency_p50_ms: 100
+      recall_lift: 0.750
+      cost_per_attempt: 0
+
+# Fallback (legacy qclass-based priors for bootstrap phase)
+fallback_qclass_priors:
+  a:
+    literal_anchor: 0.329
+    tight_pool: 0.500
+    wide_pool: 0.667
+    conceptual: 0.405
+    exploratory: 0.550
+    vague: 0.000
+  b:
+    literal_anchor: 0.474
+    tight_pool: 0.334
+    wide_pool: 0.300
+    conceptual: 0.317
+    exploratory: 0.750
+    vague: 0.000
+  c:
+    literal_anchor: 0.000
+    tight_pool: 0.107
+    wide_pool: 0.000
+    conceptual: 0.233
+    exploratory: 0.600
+    vague: 0.000
