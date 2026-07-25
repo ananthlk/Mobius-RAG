@@ -270,6 +270,7 @@ async def check_facts(
     forbidden_facts: Sequence[str] | None = None,
     correlation_id: str | None = None,
     max_tokens: int = 4096,
+    stage: str | None = None,
 ) -> FactCheckResult:
     """Honesty-weighted grounding score for a (query, chunks, answer) turn.
 
@@ -310,7 +311,13 @@ async def check_facts(
         try:
             raw, meta = await llm_manager_client.generate(
                 system=system, user=user,
-                stage=_FACT_CHECK_STAGE, max_tokens=max_tokens, correlation_id=correlation_id,
+                # stage override (2026-07-24): default rag_fact_check keeps
+                # PROD fact-checking unchanged; the CALIBRATION grader passes
+                # stage="rag_eval_adjudicate" so grading routes through the
+                # LOCKED gemini-2.5-pro path (rag_fact_check is NOT locked --
+                # it bandit-routes pro/flash, which was silently grading
+                # calibration on a mixed ruler; caught live 2026-07-24).
+                stage=stage or _FACT_CHECK_STAGE, max_tokens=max_tokens, correlation_id=correlation_id,
             )
             break
         except Exception as exc:  # noqa: BLE001

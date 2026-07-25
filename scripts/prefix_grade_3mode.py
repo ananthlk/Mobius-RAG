@@ -69,7 +69,11 @@ async def synthesize(query, chunks):
     body = "\n\n".join(f"[{i+1}] {c.get('text','')}" for i, c in enumerate(chunks[:12]))
     raw, meta = await llm_manager_client.generate(
         system=SYNTH_SYSTEM, user=f"Question: {query}\n\nPassages:\n{body}\n\nAnswer:",
-        stage="rag_eval_adjudicate", max_tokens=1024)
+        # 3000 not 1024: 1024 truncated answers mid-sentence (verified live —
+        # cut off before stating all must_facts), systematically depressing
+        # mode-b answer-completeness. Payer answers need room for multiple
+        # day-counts/codes. (Eval, 2026-07-24, Retriever finding 2.)
+        stage="rag_eval_adjudicate", max_tokens=3000)
     JUDGE_MODELS_SEEN.add((meta or {}).get("model") or "unknown")
     return raw.strip()
 
@@ -77,7 +81,12 @@ async def synthesize(query, chunks):
 async def _cf(query, must_facts, chunks, answer):
     for attempt in range(4):
         try:
-            r = await check_facts(query=query, must_facts=must_facts, chunks=chunks, answer=answer)
+            # Route grading through the LOCKED adjudicate stage (pro-only), NOT
+            # check_facts's default rag_fact_check stage (bandit-routes pro/flash).
+            # Same model (pro) + same check_facts prompt = identical grade; the
+            # stage is just the routing key. (Eval, 2026-07-24, Retriever finding 1.)
+            r = await check_facts(query=query, must_facts=must_facts, chunks=chunks,
+                                  answer=answer, stage="rag_eval_adjudicate")
             JUDGE_MODELS_SEEN.add(r.model or "unknown")
             if r.error and not r.error_transient:
                 return None
