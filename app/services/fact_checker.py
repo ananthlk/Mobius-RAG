@@ -41,7 +41,16 @@ from app.services import llm_manager_client
 logger = logging.getLogger(__name__)
 
 _FACT_CHECK_STAGE = "rag_fact_check"
-FACT_CHECKER_VERSION = "fact_check_v1.2026-07-15"  # EVAL-owned; bump via EVAL agent only
+FACT_CHECKER_VERSION = "fact_check_v1.2026-07-31"  # EVAL-owned; bump via EVAL agent only
+# Bumped 2026-07-31: _PASSAGE_CHAR_CAP raised 700->3000 (see its definition
+# below) -- the 700-char cap was silently hiding evidence past that point in
+# every passage shown to the judge, scoring real retrieval hits as misses
+# (confirmed on cmhc003/014/022: fact text found at chars 1289-2306, past the
+# old cutoff). This is a real grader-behavior change, not a tuning tweak --
+# every row graded under fact_check_v1.2026-07-15 or earlier is INCOMPARABLE
+# to rows graded under this version; re-run for authoritative levels rather
+# than diffing across the boundary.
+#
 # Measured per-query variance of THIS grader version (the judge-LLM noise band).
 # Cross-strategy grade deltas smaller than this are noise, not signal. It is a
 # property OF the version — re-measure and bump it together with FACT_CHECKER_VERSION
@@ -55,7 +64,15 @@ _HALLUCINATION_PENALTY = 1.0  # each hallucinated/forbidden claim cancels one gr
 _FC_RETRIES = 4
 _FC_BACKOFF_S = (2.0, 5.0, 12.0, 25.0)
 _FC_TRANSIENT = ("429", "resource exhausted", "rate limit", "ratelimit",
-                 "503", "unavailable", "timeout", "deadline", "500")
+                 "503", "unavailable", "timeout", "timed out", "deadline", "500")
+# NOTE (2026-07-26, live-calibration finding): "timeout" alone does NOT match
+# Python's actual socket/urllib read-timeout message ("The read operation
+# timed out" -- two words, space-separated -- vs the literal substring
+# "timeout"). Every genuine network read-timeout was silently classified
+# non-transient (permanent, no retry) since this list was written -- the
+# exact case the comment above warns about for 429s was ALSO happening for
+# timeouts, just never noticed because a timeout looks like "the judge
+# failed on this cell" rather than "the judge never even got asked."
 
 
 @dataclass
@@ -198,12 +215,22 @@ _SYSTEM_GROUNDING = (
 )
 
 
+# 2026-07-30: was 700 -- real corpus chunks routinely run 2000-3500+ chars,
+# and evidence is often NOT front-loaded (e.g. a "Pharmacy Benefit Manager"
+# subsection 1800 chars into a chunk). The 700-char cap was silently hiding
+# correctly-retrieved evidence from the judge and scoring real retrieval
+# hits as misses -- confirmed on cmhc003/014/022 where the fact text was
+# found in the chunk at chars 1289-2306, past the old cutoff. Raised to
+# cover the corpus's real chunk-length distribution with margin.
+_PASSAGE_CHAR_CAP = 3000
+
+
 def _build_grounding_prompt(query, answer, chunks) -> str:
     parts = [f"QUESTION:\n{query}", "", "RETRIEVED PASSAGES:"]
     if not chunks:
         parts.append("  (no passages retrieved)")
     for i, c in enumerate(chunks, start=1):
-        text = (c.get("text") or "")[:700]
+        text = (c.get("text") or "")[:_PASSAGE_CHAR_CAP]
         doc = c.get("document_name") or c.get("document_display_name") or "?"
         parts.append(f"  [{i}] {doc} p.{c.get('page_number')}: {text}")
     parts += ["", "SYSTEM ANSWER (enumerate and check EACH claim it asserts):",
@@ -216,7 +243,7 @@ def _build_chunk_prompt(query, must_facts, chunks) -> str:
     if not chunks:
         parts.append("  (no passages retrieved)")
     for i, c in enumerate(chunks, start=1):
-        text = (c.get("text") or "")[:700]
+        text = (c.get("text") or "")[:_PASSAGE_CHAR_CAP]
         doc = c.get("document_name") or c.get("document_display_name") or "?"
         parts.append(f"  [{i}] {doc} p.{c.get('page_number')}: {text}")
     parts += ["", "FACTS TO LOCATE IN THE PASSAGES:"]
@@ -230,7 +257,7 @@ def _build_prompt(query, answer, must_facts, forbidden_facts, chunks) -> str:
     if not chunks:
         parts.append("  (no passages retrieved)")
     for i, c in enumerate(chunks, start=1):
-        text = (c.get("text") or "")[:700]
+        text = (c.get("text") or "")[:_PASSAGE_CHAR_CAP]
         doc = c.get("document_name") or c.get("document_display_name") or "?"
         parts.append(f"  [{i}] {doc} p.{c.get('page_number')}: {text}")
     parts += ["", "SYSTEM ANSWER:", (answer or "(empty / no answer)")[:1800]]
@@ -339,6 +366,22 @@ async def check_facts(
     elapsed = int((time.monotonic() - t0) * 1000)
     model = (meta or {}).get("model") or (meta or {}).get("provider") or "unknown"
     parsed = _parse(raw)
+
+    # PARSE-FAILURE GUARD (Eval, 2026-07-24): the judge returned a NON-empty
+    # response but it did not yield JSON (truncated mid-object, or off-format —
+    # e.g. a claim-rich answer whose grounding response overran max_tokens, or
+    # markdown that confused the emitter). _parse returns {} in that case, and
+    # WITHOUT this guard grounding_only would score it 0.0 with zero verdicts —
+    # INDISTINGUISHABLE from a legitimately ungrounded answer, silently
+    # under-reporting mode-c across the bank (and mis-scoring the prod critic).
+    # Treat it as unable_to_verify (error) so callers EXCLUDE it, never as a 0.
+    # NB: an explicit `{"results": []}` parses to a truthy dict and is NOT
+    # caught here — only a genuinely empty/failed parse is.
+    if (raw or "").strip() and not parsed:
+        return FactCheckResult(
+            model=f"factcheck/{model}", elapsed_ms=elapsed, error=True, error_transient=False,
+            reasoning="parse_failure: non-empty judge response did not yield JSON "
+                      "(likely truncation/off-format) — excluded, not scored 0.")
 
     if grounding_only:
         # Answer-driven: each result is a claim the answer asserted, judged vs chunks.
