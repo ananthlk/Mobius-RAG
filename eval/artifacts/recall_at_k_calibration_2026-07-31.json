@@ -1,0 +1,1227 @@
+{
+  "run_label": "calibration_2026-07-31_recall_at_k",
+  "bank_path": "eval/queries_cmhc.yaml",
+  "judge_fix_note": "post fact_checker.py 700->3000 char passage-truncation fix (2026-07-30)",
+  "source_job_ids": {
+    "a": "542a28901f43",
+    "b": "2ada3a18bb2e"
+  },
+  "methodology": "recall@K computed from check_facts verdict.passage (rank of citing chunk in final rank order) vs support; recall@K = mean(support if passage<=K else 0). Approximation, not independently re-graded per K.",
+  "k_values": [
+    1,
+    3,
+    5,
+    10
+  ],
+  "summary_avg_recall_at_k": {
+    "a": {
+      "1": 0.2553,
+      "3": 0.4901,
+      "5": 0.6189,
+      "10": 0.6341
+    },
+    "b": {
+      "1": 0.2061,
+      "3": 0.4333,
+      "5": 0.5697,
+      "10": 0.6909
+    }
+  },
+  "per_query": {
+    "a": {
+      "cmhc001": {
+        "coverage_full": 1.0,
+        "n_chunks_available": 8,
+        "facts": [
+          {
+            "fact": "180 days for participating providers (initial claims)",
+            "support": 1.0,
+            "passage": 2
+          },
+          {
+            "fact": "365 days for non-participating providers (initial claims)",
+            "support": 1.0,
+            "passage": 2
+          },
+          {
+            "fact": "Sunshine Health is the payer in question",
+            "support": 1.0,
+            "passage": 1
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.3333,
+          "3": 1.0,
+          "5": 1.0,
+          "10": 1.0
+        }
+      },
+      "cmhc002": {
+        "coverage_full": 0.75,
+        "n_chunks_available": 5,
+        "facts": [
+          {
+            "fact": "Yes, prior authorization is required for H0019",
+            "support": 0.5,
+            "passage": 1
+          },
+          {
+            "fact": "Sunshine Health is the payer being asked about",
+            "support": 1.0,
+            "passage": 1
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.75,
+          "3": 0.75,
+          "5": 0.75,
+          "10": 0.75
+        }
+      },
+      "cmhc003": {
+        "coverage_full": 0.333,
+        "n_chunks_available": 4,
+        "facts": [
+          {
+            "fact": "No PCP referral is required for outpatient behavioral health therapy",
+            "support": 0.0,
+            "passage": null
+          },
+          {
+            "fact": "Aetna Better Health FL is the payer",
+            "support": 1.0,
+            "passage": 1
+          },
+          {
+            "fact": "Self-referral applies ONLY to in-network providers",
+            "support": 0.0,
+            "passage": null
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.3333,
+          "3": 0.3333,
+          "5": 0.3333,
+          "10": 0.3333
+        }
+      },
+      "cmhc004": {
+        "coverage_full": 0.833,
+        "n_chunks_available": 4,
+        "facts": [
+          {
+            "fact": "Yes, telehealth is covered for behavioral health intake (90791)",
+            "support": 1.0,
+            "passage": 4
+          },
+          {
+            "fact": "Florida Medicaid is the payer",
+            "support": 1.0,
+            "passage": 2
+          },
+          {
+            "fact": "Synchronous audio-video required",
+            "support": 0.5,
+            "passage": 1
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.1667,
+          "3": 0.5,
+          "5": 0.8333,
+          "10": 0.8333
+        }
+      },
+      "cmhc005": {
+        "coverage_full": 0.2,
+        "n_chunks_available": 4,
+        "facts": [
+          {
+            "fact": "H0015 is the IOP code under discussion",
+            "support": 0.0,
+            "passage": null
+          },
+          {
+            "fact": "Florida Medicaid is the payer context",
+            "support": 1.0,
+            "passage": 1
+          },
+          {
+            "fact": "A level-of-care modifier (HE or HF) is REQUIRED on H0015 \u2014 not optional",
+            "support": 0.0,
+            "passage": null
+          },
+          {
+            "fact": "HF modifier is used for substance use disorder services",
+            "support": 0.0,
+            "passage": null
+          },
+          {
+            "fact": "HE modifier is used for mental health services",
+            "support": 0.0,
+            "passage": null
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.2,
+          "3": 0.2,
+          "5": 0.2,
+          "10": 0.2
+        }
+      },
+      "cmhc006": {
+        "coverage_full": 0.333,
+        "n_chunks_available": 6,
+        "facts": [
+          {
+            "fact": "7 calendar days for standard / non-urgent prior authorization decisions",
+            "support": 0.0,
+            "passage": null
+          },
+          {
+            "fact": "Sunshine Health is the payer",
+            "support": 1.0,
+            "passage": 5
+          },
+          {
+            "fact": "48 hours for urgent / expedited requests",
+            "support": 0.0,
+            "passage": null
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.0,
+          "3": 0.0,
+          "5": 0.3333,
+          "10": 0.3333
+        }
+      },
+      "cmhc007": {
+        "coverage_full": 0.5,
+        "n_chunks_available": 6,
+        "facts": [
+          {
+            "fact": "Submit electronically via clearinghouse with bill type frequency code 7",
+            "support": 0.5,
+            "passage": 1
+          },
+          {
+            "fact": "Reference the original claim's ICN / DCN in Loop 2300, REF*F8 segment",
+            "support": 0.0,
+            "passage": null
+          },
+          {
+            "fact": "Sunshine Health Florida is the destination",
+            "support": 1.0,
+            "passage": 1
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.5,
+          "3": 0.5,
+          "5": 0.5,
+          "10": 0.5
+        }
+      },
+      "cmhc008": {
+        "coverage_full": 0.333,
+        "n_chunks_available": 5,
+        "facts": [
+          {
+            "fact": "Yes, prior authorization is required for psychological testing 96130-96139",
+            "support": 0.0,
+            "passage": null
+          },
+          {
+            "fact": "Sunshine Health is the payer",
+            "support": 1.0,
+            "passage": 2
+          },
+          {
+            "fact": "The threshold is 4 units per episode (unit-based / time-based, not flat)",
+            "support": 0.0,
+            "passage": null
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.0,
+          "3": 0.3333,
+          "5": 0.3333,
+          "10": 0.3333
+        }
+      },
+      "cmhc009": {
+        "coverage_full": 0.833,
+        "n_chunks_available": 7,
+        "facts": [
+          {
+            "fact": "90 days from the date on the original Remittance Advice",
+            "support": 1.0,
+            "passage": 4
+          },
+          {
+            "fact": "Sunshine Health Florida is the payer",
+            "support": 1.0,
+            "passage": 7
+          },
+          {
+            "fact": "The 90-day window applies to the first step of the dispute (Reconsideration)",
+            "support": 0.5,
+            "passage": 4
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.0,
+          "3": 0.0,
+          "5": 0.5,
+          "10": 0.8333
+        }
+      },
+      "cmhc010": {
+        "coverage_full": 1.0,
+        "n_chunks_available": 8,
+        "facts": [
+          {
+            "fact": "Sunshine provider portal supports real-time eligibility lookup",
+            "support": 1.0,
+            "passage": 2
+          },
+          {
+            "fact": "Eligibility should be checked at every visit",
+            "support": 1.0,
+            "passage": 2
+          },
+          {
+            "fact": "Sunshine Health is the payer being verified",
+            "support": 1.0,
+            "passage": 2
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.0,
+          "3": 1.0,
+          "5": 1.0,
+          "10": 1.0
+        }
+      },
+      "cmhc011": {
+        "coverage_full": 1.0,
+        "n_chunks_available": 7,
+        "facts": [
+          {
+            "fact": "Prior authorization is required for non-emergency inpatient psychiatric admissions",
+            "support": 1.0,
+            "passage": 1
+          },
+          {
+            "fact": "Sunshine Health is the payer",
+            "support": 1.0,
+            "passage": 2
+          },
+          {
+            "fact": "Submission via Secure Provider Portal (fax/phone alternate)",
+            "support": 1.0,
+            "passage": 1
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.6667,
+          "3": 1.0,
+          "5": 1.0,
+          "10": 1.0
+        }
+      },
+      "cmhc012": {
+        "coverage_full": 0.667,
+        "n_chunks_available": 4,
+        "facts": [
+          {
+            "fact": "97153 is the technician-delivered ABA treatment code",
+            "support": 0.5,
+            "passage": 2
+          },
+          {
+            "fact": "97151 is the assessment / treatment-plan-development code",
+            "support": 0.5,
+            "passage": 2
+          },
+          {
+            "fact": "FL Medicaid is the payer context",
+            "support": 1.0,
+            "passage": 2
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.0,
+          "3": 0.6667,
+          "5": 0.6667,
+          "10": 0.6667
+        }
+      },
+      "cmhc013": {
+        "coverage_full": 0.333,
+        "n_chunks_available": 5,
+        "facts": [
+          {
+            "fact": "Yes, Sunshine Health covers adult dental services",
+            "support": 1.0,
+            "passage": 5
+          },
+          {
+            "fact": "Sunshine Health is the payer",
+            "support": 0.0,
+            "passage": null
+          },
+          {
+            "fact": "Coverage includes preventive services (cleanings, exams, X-rays)",
+            "support": 0.0,
+            "passage": null
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.0,
+          "3": 0.0,
+          "5": 0.3333,
+          "10": 0.3333
+        }
+      },
+      "cmhc014": {
+        "coverage_full": 1.0,
+        "n_chunks_available": 6,
+        "facts": [
+          {
+            "fact": "Express Scripts is the PBM",
+            "support": 1.0,
+            "passage": 1
+          },
+          {
+            "fact": "Sunshine Health is the payer",
+            "support": 1.0,
+            "passage": 1
+          },
+          {
+            "fact": "Express Scripts processes prescription claims",
+            "support": 1.0,
+            "passage": 1
+          }
+        ],
+        "recall_at_k": {
+          "1": 1.0,
+          "3": 1.0,
+          "5": 1.0,
+          "10": 1.0
+        }
+      },
+      "cmhc015": {
+        "coverage_full": 1.0,
+        "n_chunks_available": 5,
+        "facts": [
+          {
+            "fact": "Sunshine Health is the payer",
+            "support": 1.0,
+            "passage": 2
+          },
+          {
+            "fact": "Members can file appeals and grievances orally or in writing",
+            "support": 1.0,
+            "passage": 4
+          },
+          {
+            "fact": "Sunshine Grievance & Appeals department handles both",
+            "support": 1.0,
+            "passage": 4
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.0,
+          "3": 0.3333,
+          "5": 1.0,
+          "10": 1.0
+        }
+      },
+      "cmhc016": {
+        "coverage_full": 0.833,
+        "n_chunks_available": 6,
+        "facts": [
+          {
+            "fact": "Provider must complete a credentialing application (CAQH or Sunshine packet)",
+            "support": 0.5,
+            "passage": 1
+          },
+          {
+            "fact": "Sunshine Health is the payer",
+            "support": 1.0,
+            "passage": 2
+          },
+          {
+            "fact": "Primary-source verification per NCQA standards",
+            "support": 1.0,
+            "passage": 1
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.5,
+          "3": 0.8333,
+          "5": 0.8333,
+          "10": 0.8333
+        }
+      },
+      "cmhc017": {
+        "coverage_full": 0.333,
+        "n_chunks_available": 4,
+        "facts": [
+          {
+            "fact": "GT or 95 modifier is required for telehealth on CPT-based services",
+            "support": 0.0,
+            "passage": null
+          },
+          {
+            "fact": "FL Medicaid is the payer context",
+            "support": 1.0,
+            "passage": 1
+          },
+          {
+            "fact": "Place-of-service code 02 or 10 is required for telehealth",
+            "support": 0.0,
+            "passage": null
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.3333,
+          "3": 0.3333,
+          "5": 0.3333,
+          "10": 0.3333
+        }
+      },
+      "cmhc018": {
+        "coverage_full": 0.5,
+        "n_chunks_available": 5,
+        "facts": [
+          {
+            "fact": "Yes, prior authorization is required for ECT (outpatient or inpatient)",
+            "support": 0.0,
+            "passage": null
+          },
+          {
+            "fact": "Sunshine Health is the payer",
+            "support": 1.0,
+            "passage": 2
+          },
+          {
+            "fact": "Submission via Secure Provider Portal with clinical documentation",
+            "support": 0.5,
+            "passage": 1
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.1667,
+          "3": 0.5,
+          "5": 0.5,
+          "10": 0.5
+        }
+      },
+      "cmhc019": {
+        "coverage_full": 1.0,
+        "n_chunks_available": 4,
+        "facts": [
+          {
+            "fact": "Aetna Better Health of Florida is the payer",
+            "support": 1.0,
+            "passage": 2
+          },
+          {
+            "fact": "Participating providers: 180 calendar days from DOS",
+            "support": 1.0,
+            "passage": 4
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.0,
+          "3": 0.5,
+          "5": 1.0,
+          "10": 1.0
+        }
+      },
+      "cmhc020": {
+        "coverage_full": 0.333,
+        "n_chunks_available": 4,
+        "facts": [
+          {
+            "fact": "14 calendar days for standard non-urgent (federal floor; 7 days post-Jan 2026)",
+            "support": 0.0,
+            "passage": null
+          },
+          {
+            "fact": "Simply Healthcare is the payer",
+            "support": 1.0,
+            "passage": 1
+          },
+          {
+            "fact": "72 hours for urgent / expedited requests",
+            "support": 0.0,
+            "passage": null
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.3333,
+          "3": 0.3333,
+          "5": 0.3333,
+          "10": 0.3333
+        }
+      },
+      "cmhc021": {
+        "coverage_full": 0.167,
+        "n_chunks_available": 5,
+        "facts": [
+          {
+            "fact": "Child must be enrolled in Florida Medicaid first (via AHCA / DCF ACCESS)",
+            "support": 0.0,
+            "passage": null
+          },
+          {
+            "fact": "Sunshine Health is the payer",
+            "support": 0.5,
+            "passage": 4
+          },
+          {
+            "fact": "Provider verifies eligibility via Sunshine member portal",
+            "support": 0.0,
+            "passage": null
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.0,
+          "3": 0.0,
+          "5": 0.1667,
+          "10": 0.1667
+        }
+      },
+      "cmhc022": {
+        "coverage_full": 0.667,
+        "n_chunks_available": 3,
+        "facts": [
+          {
+            "fact": "EPSDT (Florida CHCUP) is for Medicaid recipients under 21",
+            "support": 1.0,
+            "passage": 1
+          },
+          {
+            "fact": "Bill on Professional 837P / CMS-1500",
+            "support": 0.0,
+            "passage": null
+          },
+          {
+            "fact": "FL Medicaid is the payer context",
+            "support": 1.0,
+            "passage": 2
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.3333,
+          "3": 0.6667,
+          "5": 0.6667,
+          "10": 0.6667
+        }
+      }
+    },
+    "b": {
+      "cmhc001": {
+        "coverage_full": 1.0,
+        "n_chunks_available": 9,
+        "facts": [
+          {
+            "fact": "180 days for participating providers (initial claims)",
+            "support": 1.0,
+            "passage": 3
+          },
+          {
+            "fact": "365 days for non-participating providers (initial claims)",
+            "support": 1.0,
+            "passage": 3
+          },
+          {
+            "fact": "Sunshine Health is the payer in question",
+            "support": 1.0,
+            "passage": 8
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.0,
+          "3": 0.6667,
+          "5": 0.6667,
+          "10": 1.0
+        }
+      },
+      "cmhc002": {
+        "coverage_full": 0.5,
+        "n_chunks_available": 14,
+        "facts": [
+          {
+            "fact": "Yes, prior authorization is required for H0019",
+            "support": 0.0,
+            "passage": 6
+          },
+          {
+            "fact": "Sunshine Health is the payer being asked about",
+            "support": 1.0,
+            "passage": 1
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.5,
+          "3": 0.5,
+          "5": 0.5,
+          "10": 0.5
+        }
+      },
+      "cmhc003": {
+        "coverage_full": 0.833,
+        "n_chunks_available": 4,
+        "facts": [
+          {
+            "fact": "No PCP referral is required for outpatient behavioral health therapy",
+            "support": 1.0,
+            "passage": 1
+          },
+          {
+            "fact": "Aetna Better Health FL is the payer",
+            "support": 1.0,
+            "passage": 1
+          },
+          {
+            "fact": "Self-referral applies ONLY to in-network providers",
+            "support": 0.5,
+            "passage": 2
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.6667,
+          "3": 0.8333,
+          "5": 0.8333,
+          "10": 0.8333
+        }
+      },
+      "cmhc004": {
+        "coverage_full": 0.833,
+        "n_chunks_available": 4,
+        "facts": [
+          {
+            "fact": "Yes, telehealth is covered for behavioral health intake (90791)",
+            "support": 0.5,
+            "passage": 1
+          },
+          {
+            "fact": "Florida Medicaid is the payer",
+            "support": 1.0,
+            "passage": 3
+          },
+          {
+            "fact": "Synchronous audio-video required",
+            "support": 1.0,
+            "passage": 2
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.1667,
+          "3": 0.8333,
+          "5": 0.8333,
+          "10": 0.8333
+        }
+      },
+      "cmhc005": {
+        "coverage_full": 0.2,
+        "n_chunks_available": 5,
+        "facts": [
+          {
+            "fact": "H0015 is the IOP code under discussion",
+            "support": 0.0,
+            "passage": null
+          },
+          {
+            "fact": "Florida Medicaid is the payer context",
+            "support": 1.0,
+            "passage": 1
+          },
+          {
+            "fact": "A level-of-care modifier (HE or HF) is REQUIRED on H0015 \u2014 not optional",
+            "support": 0.0,
+            "passage": null
+          },
+          {
+            "fact": "HF modifier is used for substance use disorder services",
+            "support": 0.0,
+            "passage": null
+          },
+          {
+            "fact": "HE modifier is used for mental health services",
+            "support": 0.0,
+            "passage": null
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.2,
+          "3": 0.2,
+          "5": 0.2,
+          "10": 0.2
+        }
+      },
+      "cmhc006": {
+        "coverage_full": 0.667,
+        "n_chunks_available": 12,
+        "facts": [
+          {
+            "fact": "7 calendar days for standard / non-urgent prior authorization decisions",
+            "support": 1.0,
+            "passage": 3
+          },
+          {
+            "fact": "Sunshine Health is the payer",
+            "support": 1.0,
+            "passage": 1
+          },
+          {
+            "fact": "48 hours for urgent / expedited requests",
+            "support": 0.0,
+            "passage": null
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.3333,
+          "3": 0.6667,
+          "5": 0.6667,
+          "10": 0.6667
+        }
+      },
+      "cmhc007": {
+        "coverage_full": 0.833,
+        "n_chunks_available": 9,
+        "facts": [
+          {
+            "fact": "Submit electronically via clearinghouse with bill type frequency code 7",
+            "support": 1.0,
+            "passage": 5
+          },
+          {
+            "fact": "Reference the original claim's ICN / DCN in Loop 2300, REF*F8 segment",
+            "support": 0.5,
+            "passage": 5
+          },
+          {
+            "fact": "Sunshine Health Florida is the destination",
+            "support": 1.0,
+            "passage": 1
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.3333,
+          "3": 0.3333,
+          "5": 0.8333,
+          "10": 0.8333
+        }
+      },
+      "cmhc008": {
+        "coverage_full": 0.333,
+        "n_chunks_available": 6,
+        "facts": [
+          {
+            "fact": "Yes, prior authorization is required for psychological testing 96130-96139",
+            "support": 0.0,
+            "passage": null
+          },
+          {
+            "fact": "Sunshine Health is the payer",
+            "support": 1.0,
+            "passage": 4
+          },
+          {
+            "fact": "The threshold is 4 units per episode (unit-based / time-based, not flat)",
+            "support": 0.0,
+            "passage": null
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.0,
+          "3": 0.0,
+          "5": 0.3333,
+          "10": 0.3333
+        }
+      },
+      "cmhc009": {
+        "coverage_full": 1.0,
+        "n_chunks_available": 11,
+        "facts": [
+          {
+            "fact": "90 days from the date on the original Remittance Advice",
+            "support": 1.0,
+            "passage": 6
+          },
+          {
+            "fact": "Sunshine Health Florida is the payer",
+            "support": 1.0,
+            "passage": 1
+          },
+          {
+            "fact": "The 90-day window applies to the first step of the dispute (Reconsideration)",
+            "support": 1.0,
+            "passage": 6
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.3333,
+          "3": 0.3333,
+          "5": 0.3333,
+          "10": 1.0
+        }
+      },
+      "cmhc010": {
+        "coverage_full": 1.0,
+        "n_chunks_available": 9,
+        "facts": [
+          {
+            "fact": "Sunshine provider portal supports real-time eligibility lookup",
+            "support": 1.0,
+            "passage": 7
+          },
+          {
+            "fact": "Eligibility should be checked at every visit",
+            "support": 1.0,
+            "passage": 2
+          },
+          {
+            "fact": "Sunshine Health is the payer being verified",
+            "support": 1.0,
+            "passage": 2
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.0,
+          "3": 0.6667,
+          "5": 0.6667,
+          "10": 1.0
+        }
+      },
+      "cmhc011": {
+        "coverage_full": 1.0,
+        "n_chunks_available": 16,
+        "facts": [
+          {
+            "fact": "Prior authorization is required for non-emergency inpatient psychiatric admissions",
+            "support": 1.0,
+            "passage": 2
+          },
+          {
+            "fact": "Sunshine Health is the payer",
+            "support": 1.0,
+            "passage": 7
+          },
+          {
+            "fact": "Submission via Secure Provider Portal (fax/phone alternate)",
+            "support": 1.0,
+            "passage": 4
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.0,
+          "3": 0.3333,
+          "5": 0.6667,
+          "10": 1.0
+        }
+      },
+      "cmhc012": {
+        "coverage_full": 0.667,
+        "n_chunks_available": 25,
+        "facts": [
+          {
+            "fact": "97153 is the technician-delivered ABA treatment code",
+            "support": 0.5,
+            "passage": 5
+          },
+          {
+            "fact": "97151 is the assessment / treatment-plan-development code",
+            "support": 0.5,
+            "passage": 5
+          },
+          {
+            "fact": "FL Medicaid is the payer context",
+            "support": 1.0,
+            "passage": 5
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.0,
+          "3": 0.0,
+          "5": 0.6667,
+          "10": 0.6667
+        }
+      },
+      "cmhc013": {
+        "coverage_full": 0.333,
+        "n_chunks_available": 8,
+        "facts": [
+          {
+            "fact": "Yes, Sunshine Health covers adult dental services",
+            "support": 0.0,
+            "passage": null
+          },
+          {
+            "fact": "Sunshine Health is the payer",
+            "support": 1.0,
+            "passage": 8
+          },
+          {
+            "fact": "Coverage includes preventive services (cleanings, exams, X-rays)",
+            "support": 0.0,
+            "passage": null
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.0,
+          "3": 0.0,
+          "5": 0.0,
+          "10": 0.3333
+        }
+      },
+      "cmhc014": {
+        "coverage_full": 1.0,
+        "n_chunks_available": 8,
+        "facts": [
+          {
+            "fact": "Express Scripts is the PBM",
+            "support": 1.0,
+            "passage": 1
+          },
+          {
+            "fact": "Sunshine Health is the payer",
+            "support": 1.0,
+            "passage": 1
+          },
+          {
+            "fact": "Express Scripts processes prescription claims",
+            "support": 1.0,
+            "passage": 1
+          }
+        ],
+        "recall_at_k": {
+          "1": 1.0,
+          "3": 1.0,
+          "5": 1.0,
+          "10": 1.0
+        }
+      },
+      "cmhc015": {
+        "coverage_full": 1.0,
+        "n_chunks_available": 8,
+        "facts": [
+          {
+            "fact": "Sunshine Health is the payer",
+            "support": 1.0,
+            "passage": 3
+          },
+          {
+            "fact": "Members can file appeals and grievances orally or in writing",
+            "support": 1.0,
+            "passage": 4
+          },
+          {
+            "fact": "Sunshine Grievance & Appeals department handles both",
+            "support": 1.0,
+            "passage": 4
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.0,
+          "3": 0.3333,
+          "5": 1.0,
+          "10": 1.0
+        }
+      },
+      "cmhc016": {
+        "coverage_full": 0.833,
+        "n_chunks_available": 7,
+        "facts": [
+          {
+            "fact": "Provider must complete a credentialing application (CAQH or Sunshine packet)",
+            "support": 0.5,
+            "passage": 3
+          },
+          {
+            "fact": "Sunshine Health is the payer",
+            "support": 1.0,
+            "passage": 7
+          },
+          {
+            "fact": "Primary-source verification per NCQA standards",
+            "support": 1.0,
+            "passage": 2
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.0,
+          "3": 0.5,
+          "5": 0.5,
+          "10": 0.8333
+        }
+      },
+      "cmhc017": {
+        "coverage_full": 0.5,
+        "n_chunks_available": 5,
+        "facts": [
+          {
+            "fact": "GT or 95 modifier is required for telehealth on CPT-based services",
+            "support": 0.5,
+            "passage": 4
+          },
+          {
+            "fact": "FL Medicaid is the payer context",
+            "support": 1.0,
+            "passage": 2
+          },
+          {
+            "fact": "Place-of-service code 02 or 10 is required for telehealth",
+            "support": 0.0,
+            "passage": null
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.0,
+          "3": 0.3333,
+          "5": 0.5,
+          "10": 0.5
+        }
+      },
+      "cmhc018": {
+        "coverage_full": 1.0,
+        "n_chunks_available": 11,
+        "facts": [
+          {
+            "fact": "Yes, prior authorization is required for ECT (outpatient or inpatient)",
+            "support": 1.0,
+            "passage": 6
+          },
+          {
+            "fact": "Sunshine Health is the payer",
+            "support": 1.0,
+            "passage": 11
+          },
+          {
+            "fact": "Submission via Secure Provider Portal with clinical documentation",
+            "support": 1.0,
+            "passage": 4
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.0,
+          "3": 0.0,
+          "5": 0.3333,
+          "10": 0.6667
+        }
+      },
+      "cmhc019": {
+        "coverage_full": 1.0,
+        "n_chunks_available": 4,
+        "facts": [
+          {
+            "fact": "Aetna Better Health of Florida is the payer",
+            "support": 1.0,
+            "passage": 1
+          },
+          {
+            "fact": "Participating providers: 180 calendar days from DOS",
+            "support": 1.0,
+            "passage": 1
+          }
+        ],
+        "recall_at_k": {
+          "1": 1.0,
+          "3": 1.0,
+          "5": 1.0,
+          "10": 1.0
+        }
+      },
+      "cmhc020": {
+        "coverage_full": 0.0,
+        "n_chunks_available": 4,
+        "facts": [
+          {
+            "fact": "14 calendar days for standard non-urgent (federal floor; 7 days post-Jan 2026)",
+            "support": 0.0,
+            "passage": null
+          },
+          {
+            "fact": "Simply Healthcare is the payer",
+            "support": 0.0,
+            "passage": null
+          },
+          {
+            "fact": "72 hours for urgent / expedited requests",
+            "support": 0.0,
+            "passage": null
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.0,
+          "3": 0.0,
+          "5": 0.0,
+          "10": 0.0
+        }
+      },
+      "cmhc021": {
+        "coverage_full": 0.333,
+        "n_chunks_available": 6,
+        "facts": [
+          {
+            "fact": "Child must be enrolled in Florida Medicaid first (via AHCA / DCF ACCESS)",
+            "support": 0.0,
+            "passage": null
+          },
+          {
+            "fact": "Sunshine Health is the payer",
+            "support": 1.0,
+            "passage": 2
+          },
+          {
+            "fact": "Provider verifies eligibility via Sunshine member portal",
+            "support": 0.0,
+            "passage": null
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.0,
+          "3": 0.3333,
+          "5": 0.3333,
+          "10": 0.3333
+        }
+      },
+      "cmhc022": {
+        "coverage_full": 0.667,
+        "n_chunks_available": 3,
+        "facts": [
+          {
+            "fact": "EPSDT (Florida CHCUP) is for Medicaid recipients under 21",
+            "support": 1.0,
+            "passage": 2
+          },
+          {
+            "fact": "Bill on Professional 837P / CMS-1500",
+            "support": 0.0,
+            "passage": null
+          },
+          {
+            "fact": "FL Medicaid is the payer context",
+            "support": 1.0,
+            "passage": 2
+          }
+        ],
+        "recall_at_k": {
+          "1": 0.0,
+          "3": 0.6667,
+          "5": 0.6667,
+          "10": 0.6667
+        }
+      }
+    }
+  },
+  "status": "PROVISIONAL_LOWER_BOUND \u2014 NOT the authoritative K-curve",
+  "eval_ruling": "Eval - RAG session ruling 2026-07-31: passage-based recall@K is a lower-bound approximation, not ground truth. The judge is not instructed to cite the EARLIEST supporting passage when a fact appears in multiple chunks -- a fact present at rank-2 AND rank-7 may be attributed to passage=7, scoring recall@5 as missed when it was actually in the top-5. This biases the curve toward looking STEEPER / more depth-dependent than reality. Store as a free, no-new-LLM-calls first look only. Authoritative K-curve must come from scripts/prefix_grade_3mode.py, which independently re-grades each top-K prefix via check_facts rather than reusing passage attribution.",
+  "fact_checker_version": "fact_check_v1.2026-07-31"
+}

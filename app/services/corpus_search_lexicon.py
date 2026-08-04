@@ -111,6 +111,153 @@ _cache_lock = asyncio.Lock()
 _cache_payload: list[dict[str, Any]] | None = None
 _cache_loaded_at: float = 0.0
 
+# Stemming fallback (2026-07-30, Ananth's ask): _match_entry's exact
+# word-boundary substring match misses genuine morphological variants
+# ("credentialed" never matches the stored phrase "credentialing";
+# "enroll" never matches "enrollment") -- a real, confirmed cause of Gate
+# returning zero d_codes and falling to UNDERSPECIFIED/CLARIFY (cmhc016,
+# cmhc021). Fixed with Postgres's own English stemmer (to_tsvector) --
+# already trusted in this codebase for BM25 -- rather than a hand-rolled
+# regex/suffix-stripper, which was tested first and rejected: it fixed the
+# target case but was WRONG on common words (care/cared -> car/care
+# mismatch, English's silent-e rule) and missed enroll/enrollment
+# entirely. Scoped conservatively to SINGLE-WORD phrases only, same
+# principle _SINGLE_WORD_STOPLIST already uses -- multi-word phrase
+# matching is unchanged.
+#
+# Verified corpus-wide before shipping (per this session's established
+# discipline: heuristics that look safe on a couple of cases have
+# repeatedly hidden false-positive classes at scale today): of 1,714
+# unique single-word phrases across the whole lexicon, 18 stems collide
+# across DIFFERENT tag codes. ~8 are benign general/specific-leaf overlap
+# within the same domain (benefit/benefits, claim/claims). ~9 are genuine,
+# concerning collisions -- almost all domain-specific ACRONYMS that
+# Postgres's generic English stemmer doesn't understand as abbreviations:
+#   aid/aids       -- home-health aide (a person) vs AIDS the disease
+#   sar/sars       -- an annual-return-report abbreviation vs SARS the disease
+#   chap/chaps     -- CHAP (regulatory body) vs CAHPS (quality survey)
+#   recon/recons   -- disputes/appeal reconsideration vs plastic reconstructive surgery
+#   em/ems         -- Evaluation-and-Management billing codes vs Emergency care
+#   pec/pecs       -- PECS (communication system) vs PPEC (pediatric extended care)
+#   aspir(e)       -- "Aspire Health" (a company name) vs medical aspiration procedure
+#   type/typing    -- HLA genetic typing vs provider network type (high blast radius, common word)
+#   resid          -- medical residency training vs residents (people living somewhere)
+# _compute_stem_safety_exclusions() recomputes this exact collision set
+# from the live lexicon (not a hardcoded list, so it stays correct as the
+# lexicon changes) and any colliding stem is permanently blocked from
+# ever triggering a stem-based match -- exact substring matching on those
+# phrases is unaffected, only the NEW fallback path is restricted.
+_stem_cache_lock = asyncio.Lock()
+_phrase_stem_cache: dict[str, str] | None = None
+_stem_safety_exclusions_cache: frozenset[str] | None = None
+_stem_cache_loaded_at: float = 0.0
+
+
+async def _compute_phrase_stems(db: AsyncSession, phrases: list[str]) -> dict[str, str]:
+    """Bulk-stem a list of single-word phrases in ONE query (not one per
+    phrase) via Postgres's English tsvector stemmer. Returns
+    {phrase: stem}; a phrase that stems to nothing (pure stopword/empty)
+    is omitted."""
+    if not phrases:
+        return {}
+    rows = (await db.execute(
+        text(
+            "SELECT phrase, tsvector_to_array(to_tsvector('english', phrase)) AS stems "
+            "FROM unnest(CAST(:phrases AS text[])) AS phrase"
+        ),
+        {"phrases": phrases},
+    )).fetchall()
+    out: dict[str, str] = {}
+    for r in rows:
+        if r.stems:
+            out[r.phrase] = r.stems[0]
+    return out
+
+
+async def _load_stem_index(
+    db: AsyncSession, snapshot: list[dict[str, Any]]
+) -> tuple[dict[str, str], frozenset[str]]:
+    """Returns (phrase_to_stem, unsafe_stems) for the stemming fallback,
+    cached alongside the lexicon snapshot's own 5-minute TTL (stems for a
+    fixed phrase set never change between refreshes). unsafe_stems is the
+    EXCLUSION set -- any stem shared by phrases belonging to DIFFERENT
+    lexicon codes (see module-level comment above for the concrete
+    collision list found verifying this live). Callers must SKIP a stem
+    match when the stem is IN this set, not the other way round."""
+    global _phrase_stem_cache, _stem_safety_exclusions_cache, _stem_cache_loaded_at
+
+    now = time.monotonic()
+    if (
+        _phrase_stem_cache is not None
+        and (now - _stem_cache_loaded_at) < _CACHE_TTL_SECONDS
+    ):
+        return _phrase_stem_cache, _stem_safety_exclusions_cache or frozenset()
+
+    async with _stem_cache_lock:
+        now = time.monotonic()
+        if (
+            _phrase_stem_cache is not None
+            and (now - _stem_cache_loaded_at) < _CACHE_TTL_SECONDS
+        ):
+            return _phrase_stem_cache, _stem_safety_exclusions_cache or frozenset()
+
+        phrase_to_codes: dict[str, set[str]] = {}
+        for entry in snapshot:
+            for p in entry["phrases"]:
+                p_norm = (p or "").strip().lower()
+                if p_norm and len(p_norm.split()) == 1 and p_norm.isalpha():
+                    phrase_to_codes.setdefault(p_norm, set()).add(entry["full_code"])
+
+        try:
+            phrase_to_stem = await _compute_phrase_stems(db, list(phrase_to_codes))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "corpus_search_lexicon: stem computation failed, stemming "
+                "fallback disabled this cycle: %s", exc,
+            )
+            _phrase_stem_cache = {}
+            _stem_safety_exclusions_cache = frozenset()
+            _stem_cache_loaded_at = now
+            return {}, frozenset()
+
+        # Real bug caught live (2026-07-30, before this ever shipped): the
+        # FIRST version of this check flagged a stem as unsafe whenever
+        # multiple CODES shared it, even when it was the SAME literal
+        # phrase attached to more than one code (e.g. "credentialing" on
+        # both d:credentialing and d:credentialing.general -- an
+        # intentional general/specific-leaf pairing, already handled by
+        # EXACT substring matching regardless of stemming, not a stemming
+        # risk at all). That wrongly blocked the credentialed/credentialing
+        # target case this whole fallback was built for. The real risk is
+        # DISTINCT phrases/words sharing a stem across different codes
+        # (aide vs aids, recon vs reconstructive) -- so collect the set of
+        # distinct WORDS per stem first, and only flag it unsafe if 2+
+        # distinct words map to codes that aren't all the same.
+        stem_to_words: dict[str, set[str]] = {}
+        for phrase, stem in phrase_to_stem.items():
+            stem_to_words.setdefault(stem, set()).add(phrase)
+
+        unsafe_stems_set: set[str] = set()
+        for stem, words in stem_to_words.items():
+            if len(words) < 2:
+                continue
+            codes: set[str] = set()
+            for w in words:
+                codes |= phrase_to_codes[w]
+            if len(codes) > 1:
+                unsafe_stems_set.add(stem)
+        unsafe_stems = frozenset(unsafe_stems_set)
+
+        _phrase_stem_cache = phrase_to_stem
+        _stem_safety_exclusions_cache = unsafe_stems
+        _stem_cache_loaded_at = now
+        logger.info(
+            "corpus_search_lexicon: stem index refreshed  phrases=%d  "
+            "excluded_collision_stems=%d",
+            len(phrase_to_stem), len(unsafe_stems),
+        )
+        return phrase_to_stem, unsafe_stems
+
 
 def _normalize_phrase(p: Any) -> str:
     if not isinstance(p, str):
@@ -307,7 +454,13 @@ async def list_active_d_tag_codes(db: AsyncSession) -> list[str]:
 # Match logic
 # ---------------------------------------------------------------------------
 
-def _match_entry(query_lower: str, phrases: list[str]) -> str | None:
+def _match_entry(
+    query_lower: str,
+    phrases: list[str],
+    query_stems: frozenset[str] | None = None,
+    phrase_stem_lookup: dict[str, str] | None = None,
+    unsafe_stems: frozenset[str] | None = None,
+) -> str | None:
     """Return the first phrase in *phrases* that appears in *query_lower*
     with word-aligned boundaries (already lowercase).  None if no match.
 
@@ -356,6 +509,23 @@ def _match_entry(query_lower: str, phrases: list[str]) -> str | None:
                 continue
         if f" {p_norm} " in padded_q:
             return p
+
+    # Stemming fallback (2026-07-30) -- only reached when no phrase matched
+    # by exact substring above. Scoped to single-word phrases whose stem
+    # isn't in the collision-exclusion set (see module docstring on
+    # _load_stem_index for the concrete risky-stem list this blocks).
+    if query_stems and phrase_stem_lookup:
+        for p in phrases:
+            if not p:
+                continue
+            p_norm = _re.sub(r"[^a-z0-9]+", " ", p.lower()).strip()
+            if not p_norm or len(p_norm.split()) != 1:
+                continue
+            stem = phrase_stem_lookup.get(p_norm)
+            if not stem or (unsafe_stems is not None and stem in unsafe_stems):
+                continue
+            if stem in query_stems:
+                return p
     return None
 
 
@@ -382,6 +552,27 @@ async def expand_query_via_lexicon(
     if not snapshot:
         return expansion
 
+    # Stemming fallback inputs (2026-07-30) -- see _load_stem_index's
+    # docstring for the collision-safety design. Best-effort: any failure
+    # here (e.g. a transient DB blip) degrades to exact-match-only
+    # behavior, never blocks the whole expansion.
+    query_stems: frozenset[str] = frozenset()
+    phrase_stem_lookup: dict[str, str] = {}
+    unsafe_stems: frozenset[str] = frozenset()
+    try:
+        phrase_stem_lookup, unsafe_stems = await _load_stem_index(db, snapshot)
+        if phrase_stem_lookup:
+            row = (await db.execute(
+                text("SELECT tsvector_to_array(to_tsvector('english', :q)) AS stems"),
+                {"q": query_lower},
+            )).fetchone()
+            query_stems = frozenset(row.stems or []) if row else frozenset()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "corpus_search_lexicon: query stem computation failed, "
+            "stemming fallback skipped this query: %s", exc,
+        )
+
     # Optional precision-filtered expansion. Empty dict = behaviour unchanged.
     approved_per_tag = _load_approved_phrases_from_csv()
     use_precision_filter = bool(approved_per_tag)
@@ -393,7 +584,7 @@ async def expand_query_via_lexicon(
     for entry in snapshot:
         if len(expansion.matched_codes) >= _MAX_ENTRIES_PER_QUERY:
             break
-        hit = _match_entry(query_lower, entry["phrases"])
+        hit = _match_entry(query_lower, entry["phrases"], query_stems, phrase_stem_lookup, unsafe_stems)
         if not hit:
             continue
 

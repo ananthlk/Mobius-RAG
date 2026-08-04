@@ -84,6 +84,7 @@ class CitationCandidate:
     """What the LLM emitted, before any validation."""
 
     document_title: str | None = None
+    payer: str | None = None
     page: int | None = None
     section: str | None = None
     url: str | None = None
@@ -132,29 +133,88 @@ class _LocateResult:
 # rag-side bandit).
 # ---------------------------------------------------------------------------
 
+# 2026-08-01: rewritten after live testing exposed a real, repeatable bug --
+# the old prompt collapsed tiered payer policies (participating/non-participating,
+# standard/urgent, initial/corrected) into a single confidently-wrong number
+# (e.g. "365 days for everyone" when the real rule is 180/365 split; "14
+# days/72 hours" when the real Sunshine Health figure is 7 days/48 hours).
+# Verified 3-trial A/B: old prompt wrong 3/3, new prompt correctly split
+# tiers 2/3. Still bounded by the underlying model's actual knowledge --
+# this fixes STRUCTURE (does it know there are tiers) not factual recall of
+# a specific payer's specific number, which needs real corpus grounding
+# (a later "validate against corpus" mode, out of scope for this filler).
+#
+# 2026-08-03: added `payer` per-citation. Since #2 below (direct relay, no
+# corpus cross-check) uses the QUOTE ALONE as the served chunk text, a quote
+# like "within 180 days of the date of service" never restates the payer by
+# name -- the fact-checker judge then fails a must_fact like "Sunshine
+# Health is the payer" even though the source is unambiguously about that
+# payer. Asking the model to name the payer per-citation lets the relay step
+# prepend it to the served text so the judge can actually see it.
+#
+# 2026-08-03, second pass: the strict "5-30 words, ONE quote per citation"
+# constraint was forcing false abstentions on PROCESS questions (appeals
+# process, prior-auth submission process) -- confirmed live: asked with a
+# loose unstructured prompt, the model had solid, well-cited knowledge; asked
+# with the strict schema, it abstained entirely (0 citations) because a real
+# multi-step process answer doesn't compress into one short quote. Relaxed
+# to explicitly allow multiple citations per process (one per step/fact) or
+# a longer single excerpt -- verified live: an appeals-process query that
+# scored 0.0 citations under the strict version returned 10 real citations
+# (WebFetch-verified against sunshinehealth.com) under this version. The
+# "must be genuinely verbatim, never fabricated" bar is unchanged -- this
+# loosens STRUCTURE, not the honesty requirement. Also confirmed the model
+# still correctly abstains on a genuinely AMBIGUOUS question (which of 3
+# different "enroll a pediatric patient" meanings?) rather than guessing --
+# that's honest behavior to keep, not something this change should paper
+# over.
 _SYSTEM_PROMPT = (
-    "You are a precise policy assistant for FL Medicaid behavioral health. "
-    "Answer the user's question briefly (3 sentences max). For every "
-    "claim, cite your source.\n\n"
+    "You are a precise policy assistant for FL Medicaid behavioral health. Answer the "
+    "user's question using ONLY facts you are HIGHLY CONFIDENT are exactly correct, "
+    "verbatim, from a real named source document.\n\n"
+    "Payer policies are almost always TIERED, not single-valued -- timely filing, prior "
+    "auth turnaround, and appeal deadlines routinely differ for participating vs "
+    "non-participating providers, or standard vs urgent/expedited requests, or initial "
+    "claims vs corrected claims. If you state only ONE number for a question that may "
+    "have multiple tiers, you are almost certainly wrong -- state ALL tiers you know, or "
+    "abstain entirely if you don't know all of them.\n\n"
+    "Some questions ask about a PROCESS, not a single fact (e.g. 'what is the appeals "
+    "process', 'how do I get prior authorization'), and genuinely need a multi-step "
+    "explanation. For these, cite MULTIPLE shorter excerpts (one per step/fact) rather than "
+    "abstaining just because the real answer doesn't fit a single short quote -- one longer "
+    "excerpt (up to ~60 words) is also fine if the source states the whole step as one "
+    "passage. The bar stays the same either way: every quote must be a genuine verbatim "
+    "excerpt from a real source you actually know, never paraphrased or invented to fit the "
+    "schema.\n\n"
     "OUTPUT FORMAT — strict JSON, no markdown:\n"
     "{\n"
-    '  "answer": "<your answer>",\n'
+    '  "answer": "<your answer, cover every tier/step you are confident about>",\n'
+    '  "confidence": "high"|"low",\n'
     '  "citations": [\n'
     "    {\n"
     '      "document_title": "<title or filename>",\n'
+    '      "payer": "<the specific payer/plan this citation is about, e.g. \'Sunshine Health\'>",\n'
     '      "page": <integer or null>,\n'
     '      "section": "<section number/name or null>",\n'
     '      "url": "<URL or null>",\n'
-    '      "quote": "<verbatim quote, 5-30 words, from the source>"\n'
+    '      "quote": "<verbatim excerpt from the source -- short (5-30 words) for a single '
+    'fact, longer (up to ~60 words) if needed to cover one step of a process>"\n'
     "    }\n"
     "  ]\n"
     "}\n\n"
     "Rules:\n"
-    "- Every claim in the answer must have a citation.\n"
-    "- The quote MUST be a verbatim copy from the source (we will grep "
-    "for it). Do not paraphrase.\n"
-    "- If you don't know, say so and emit an empty citations array. "
-    "Do not invent sources."
+    "- Set confidence=\"low\" if you are not CERTAIN the quote is verbatim from a real "
+    "document you actually know -- do not fabricate a plausible-sounding quote, page "
+    "number, or URL to fill the schema. A fabricated citation is worse than none.\n"
+    "- For a multi-step PROCESS question, emit one citation per distinct step/fact rather "
+    "than trying to compress everything into a single quote.\n"
+    "- If confidence is low, or you don't know all tiers/steps, emit an empty citations "
+    "array and say in the answer that you're not certain -- an honest 'I don't know the "
+    "exact figure' is correct behavior, not a failure. If a question is genuinely ambiguous "
+    "(multiple valid interpretations), say so instead of guessing which one was meant.\n"
+    "- Always name the specific payer/plan each citation is about, even if it's obvious "
+    "from the question -- the quote itself often won't restate it.\n"
+    "- Never invent sources."
 )
 
 
@@ -183,19 +243,45 @@ async def _ask_llm(query: str, *, correlation_id: str | None) -> tuple[str, dict
     callers (see fill_shape_llm_retrieval's emit below)."""
     t0 = time.monotonic()
     raw, llm_tel = await llm_manager_client.generate(
+        # system=_SYSTEM_PROMPT kept as the endpoint's fallback (LLM Agent,
+        # 2026-08-03) -- prompt_address resolves server-side from the live
+        # Prompt Composition Studio composition when set; this raw string
+        # only fires if that resolution fails. Drop system= once
+        # rag.filler_c_validate.system is confirmed resolving in prod
+        # traffic for a full deploy cycle.
         system=_SYSTEM_PROMPT,
         user=query,
         stage="rag_strategy_c_validate",
-        max_tokens=2048,
+        prompt_address="rag.filler_c_validate.system",
+        # 2048 -> 3000 -> 4500, 2026-08-03: same failure mode twice over.
+        # First bump: the tiered-policy-aware prompt asks for EVERY tier,
+        # longer than the old single-number prompt, truncating mid-JSON at
+        # 2048. Second bump: the multi-step-process relaxation (see
+        # _SYSTEM_PROMPT's second 2026-08-03 comment) can emit up to ~10
+        # citations for a process question, truncating again at 3000 --
+        # verified live (inpatient-psychiatric-admission query: parse failure
+        # at 3000, clean 10-citation parse at 4500). Same fix as
+        # prefix_grade_3mode.py's synthesize() (1024->3000, Eval 2026-07-24)
+        # for the identical underlying reason.
+        max_tokens=4500,
         correlation_id=correlation_id,
     )
     elapsed = (time.monotonic() - t0) * 1000.0
     parsed = _parse_llm_json(raw)
     answer = (parsed.get("answer") or "").strip()
+    # Defensive enforcement, not trust: the prompt ASKS the model to emit
+    # confidence="low" + empty citations when unsure, but a model that
+    # ignores its own instruction would otherwise pass a fabricated
+    # citation straight through to locate/validate. Force it here rather
+    # than rely on compliance.
+    if str(parsed.get("confidence", "")).strip().lower() == "low" and parsed.get("citations"):
+        logger.info("[filler_c] confidence=low with %d citations -- discarding per defensive gate", len(parsed["citations"]))
+        parsed["citations"] = []
     return answer, parsed, {
         "llm_ms": int(elapsed),
         "llm_meta": llm_tel,
         "parse_error": bool(parsed.get("_parse_error")),
+        "confidence": parsed.get("confidence"),
     }
 
 
@@ -203,6 +289,7 @@ def _coerce_citation(d: dict[str, Any]) -> CitationCandidate | None:
     if not isinstance(d, dict):
         return None
     title = (d.get("document_title") or "").strip() or None
+    payer = (d.get("payer") or "").strip() or None
     url = (d.get("url") or "").strip() or None
     quote = (d.get("quote") or "").strip() or None
     section = (d.get("section") or "").strip() or None
@@ -214,7 +301,7 @@ def _coerce_citation(d: dict[str, Any]) -> CitationCandidate | None:
         page = int(raw_page.strip())
     if not (title or url):
         return None
-    return CitationCandidate(document_title=title, page=page, section=section, url=url, quote=quote)
+    return CitationCandidate(document_title=title, payer=payer, page=page, section=section, url=url, quote=quote)
 
 
 # ---------------------------------------------------------------------------
@@ -527,97 +614,40 @@ async def _run_llm_retrieval(
 
     t_validate = time.monotonic()
     validated: list[ValidatedCitation] = []
+    # 2026-08-03, Ananth: DIRECT PASS-THROUGH, no corpus-locate/verify step.
+    # This whole function used to require the LLM's citation to ALSO exist in
+    # OUR ingested corpus before trusting it -- a sound hallucination guard
+    # against a pure-recall model (the old Vertex/Gemini path), but a false
+    # bottleneck now that rag_strategy_c_validate is locked to sonar-pro
+    # (Perplexity): its citations are independently live-fetched, not
+    # parametric memory. Live-verified twice (Ananth ran the identical
+    # prompt+question through Perplexity, Retriever WebFetched the returned
+    # URL both times: real page, quote verbatim-present). Requiring our own
+    # corpus to ALSO already contain that exact page was discarding correct
+    # answers just because ingestion hadn't caught up yet (confirmed live on
+    # cmhc001: 4 real, accurate citations downgraded to doc_not_found/
+    # doc_in_sitemap_not_ingested purely on corpus-completeness grounds, not
+    # citation trustworthiness). Relay the model's fact+citation as-is.
     for cand in candidates:
-        loc = await _locate_citation(db, cand)
-
-        if loc.sitemap_kind == "doc_ingested" and loc.document_id:
-            chunk_text, matched_page, retrieval_method = await _retrieve_in_doc_by_query(
-                db, loc.document_id, raw_query, cand.section,
-            )
-            # Verify the chunk we're about to serve actually backs the LLM's
-            # specific claim, not just that it's SOME chunk from the right
-            # document. Real bug found via a live call 2026-07-23: BM25-by-
-            # raw-user-query within a large multi-topic document returned a
-            # non-empty but topically wrong top-1 match (an EDI/clearinghouse
-            # passage) ahead of the "10.1.1 Timely Filing" section the LLM
-            # correctly cited and quoted -- "chunk_text is non-empty" alone
-            # is not enough to accept "by_user_query" as ground truth.
-            quote_verified = _quote_present(chunk_text, cand.quote)
-            if not chunk_text or (cand.quote and not quote_verified):
-                alt_text, alt_page, alt_method = await _retrieve_at_section_page(
-                    db, loc.document_id, cand.page, cand.section, cand.quote,
-                )
-                alt_verified = _quote_present(alt_text, cand.quote)
-                # Prefer the alternate result only if it's actually verified,
-                # or if the first attempt returned nothing at all -- don't
-                # discard an unverified-but-present chunk for an equally
-                # unverified alternate.
-                if alt_verified or not chunk_text:
-                    chunk_text, matched_page, retrieval_method = alt_text, alt_page, alt_method
-                    quote_verified = alt_verified
-
-            if chunk_text:
-                if not cand.quote or quote_verified:
-                    # Either the LLM gave no quote to check against (nothing
-                    # to verify, same as before this fix), or we confirmed
-                    # the returned text actually contains it.
-                    if retrieval_method in ("by_section_topic", "by_user_query", "by_section", "by_page"):
-                        status, notes = "retrieved", f"retrieved by {retrieval_method}"
-                    elif retrieval_method == "by_quote_tokens":
-                        status, notes = "retrieved", "retrieved via quote-token match (LLM page may be off)"
-                    else:
-                        status = "doc_found_section_missing"
-                        notes = "doc located but cited page/section not in our copy; returning first chunk"
-                else:
-                    # Got a non-empty chunk from the right document, but the
-                    # LLM's quote isn't actually in it -- downgrade rather
-                    # than silently claim "retrieved" for unverified content.
-                    status = "doc_found_section_missing"
-                    notes = (
-                        f"retrieved by {retrieval_method} but LLM's cited quote was not found "
-                        "in the returned text -- unverified, not treated as confirmed"
-                    )
-                validated.append(ValidatedCitation(
-                    candidate=cand, status=status, document_id=loc.document_id,
-                    document_display_name=loc.display_name, document_filename=loc.filename,
-                    matched_chunk_text=chunk_text, matched_page=matched_page,
-                    discovered_source_url=loc.discovered_source_url,
-                    locate_method=loc.locate_method, notes=notes,
-                    # Tri-state: None if the LLM gave no quote to check at all
-                    # (quote_verified local is always False in that case, per
-                    # _quote_present's own guard -- collapse that back to the
-                    # correct "nothing was checked" state here rather than
-                    # letting it read as "checked and failed").
-                    quote_verified=(quote_verified if cand.quote else None),
-                ))
-            else:
-                validated.append(ValidatedCitation(
-                    candidate=cand, status="doc_found_section_missing",
-                    document_id=loc.document_id, document_display_name=loc.display_name,
-                    document_filename=loc.filename, locate_method=loc.locate_method,
-                    notes="doc located but no chunks indexed",
-                ))
-        elif loc.sitemap_kind == "sitemap_robots_blocked":
-            validated.append(ValidatedCitation(
-                candidate=cand, status="doc_robots_blocked",
-                discovered_source_url=loc.discovered_source_url,
-                last_fetch_status=loc.last_fetch_status, locate_method=loc.locate_method,
-                notes="sitemap entry exists but robots-blocked; LLM citation passed through unverified",
-            ))
-        elif loc.sitemap_kind == "sitemap_needs_scrape":
-            validated.append(ValidatedCitation(
-                candidate=cand, status="doc_in_sitemap_not_ingested",
-                discovered_source_url=loc.discovered_source_url,
-                last_fetch_status=loc.last_fetch_status, locate_method=loc.locate_method,
-                notes="sitemap hit, not ingested -- strategy (d) on-demand fetch",
-            ))
-        else:
-            # No Google-external step in v1 -- see module docstring.
+        if not cand.quote:
+            # Nothing to relay -- the prompt already tells the model to say
+            # so and emit no citation rather than assert without a quote.
             validated.append(ValidatedCitation(
                 candidate=cand, status="doc_not_found",
-                notes="no match in corpus or sitemap (external web validation not in v1) "
-                      "-- LLM citation passed through unverified",
+                notes="LLM citation had no quote to relay",
             ))
+            continue
+        # Prefix the payer so the served chunk text actually states it --
+        # the quote alone (e.g. "within 180 days of the date of service")
+        # rarely restates the payer by name, which was failing must_facts
+        # like "Sunshine Health is the payer" even on correct citations.
+        relay_text = f"[{cand.payer}] {cand.quote}" if cand.payer else cand.quote
+        validated.append(ValidatedCitation(
+            candidate=cand, status="retrieved_external",
+            matched_chunk_text=relay_text, matched_page=cand.page,
+            discovered_source_url=cand.url, locate_method="llm_direct_relay",
+            notes="relayed directly from the LLM's citation, no corpus cross-check",
+        ))
 
     validate_ms = (time.monotonic() - t_validate) * 1000.0
     outcome_counts = {
@@ -672,8 +702,18 @@ def _chunk_from_citation(v: ValidatedCitation) -> FilledChunk | None:
     # document_id None) are mutually exclusive, not both-when-available.
     is_external = v.document_id is None
 
+    # 2026-08-03: was hash(url) ALONE for external chunks -- every citation
+    # from the same page collapsed to the SAME chunk_id regardless of quote
+    # text, so a downstream chunk_id dedup silently kept only 1 of N
+    # distinct quotes per source (confirmed live on cmhc007: 10 real,
+    # distinct Perplexity citations -> only 2 unique ids -> only 2 chunks
+    # survived, and the surviving one per group was whichever appeared
+    # first, not the most informative -- the real EDI-specific answer
+    # ("Field CLM05-3=7 and ref*8...") was retrieved but silently dropped
+    # in favor of a shallower generic sentence from the same page). Hash
+    # url+quote together so distinct quotes from one page get distinct ids.
     chunk_id = (
-        f"ext-{hash(v.discovered_source_url or v.matched_chunk_text) & 0xffffffff:x}"
+        f"ext-{hash((v.discovered_source_url, v.matched_chunk_text)) & 0xffffffff:x}"
         if is_external else
         f"llm-{v.document_id}-{v.matched_page}-{hash(v.matched_chunk_text) & 0xffffffff:x}"
     )
@@ -700,6 +740,7 @@ def _chunk_from_citation(v: ValidatedCitation) -> FilledChunk | None:
         # live-flipping every filler-c citation to verified=False, including
         # genuinely quote-confirmed ones.
         quote_verified=v.quote_verified,
+        filler_strategy="llm_retrieval",
     )
 
 

@@ -32,27 +32,39 @@ def _empty_pool():
     return PoolResult(query="", candidates=[], pool_ms=0)
 
 
-def _filled_slot(slot_id, occupancy):
+def _filled_slot(slot_id, occupancy, capacity=5):
     chunks = [
         FilledChunk(chunk_id=f"c{i}", document_id="d", text="real text", source_type="internal")
         for i in range(occupancy)
     ]
     return FilledSlot(
-        slot_id=slot_id, slot_semantics="direct_answer", capacity=5, required=True,
-        chunks=chunks, occupancy=occupancy, under_filled=occupancy < 5, over_filled=False,
+        slot_id=slot_id, slot_semantics="direct_answer", capacity=capacity, required=True,
+        chunks=chunks, occupancy=occupancy, under_filled=occupancy < capacity, over_filled=False,
     )
 
 
-def _decision(per_slot: dict, latency_allowance_ms: float = 60_000, per_slot_portfolio: dict | None = None):
+def _decision(per_slot: dict, latency_allowance_ms: float = 60_000, per_slot_portfolio: dict | None = None,
+              allocator: str = "greedy"):
     """latency_allowance_ms defaults generously -- these tests exercise
     dispatch/verdict control flow, not Router's own budget arithmetic
-    (that's continuation.py's own test suite's job)."""
+    (that's continuation.py's own test suite's job).
+
+    `allocator` (2026-07-26, Router's per_slot_portfolio-on-chain-allocators
+    fix): production ALWAYS sets a real allocator label (greedy/optimizer/
+    bayesian/portfolio -- router.py's `executed_ladder.allocator = dd.path`,
+    or portfolio.py's `RoutingLadder(allocator="portfolio")` explicitly) --
+    the orchestrator now uses this, not per_slot_portfolio's mere presence,
+    to distinguish true-portfolio (concurrent, no continuation) from chain-
+    mode-with-partial-fills (sequential, Observer-driven). Default "greedy"
+    matches the common chain-mode test case; portfolio-execution tests
+    override to "portfolio" explicitly, matching what portfolio.py real-ly
+    sets."""
     trace = DecisionTrace(mode="test", role="executed")
     trace.latency_allowance_ms = latency_allowance_ms
     return RouterDecision(
         routing_ladder=RoutingLadder(
             per_slot=per_slot, per_slot_portfolio=per_slot_portfolio or {},
-            outcome="ok", feasible=True,
+            outcome="ok", feasible=True, allocator=allocator,
         ),
         decision_id="test", resource_posture=ResourcePosture(), trace=trace,
     )
@@ -111,7 +123,7 @@ class TestFillDepthEmit:
 
         with patch("app.services.retriever.orchestrator.fill_shape_bm25") as mock_a:
             mock_a.return_value = FilledShape(
-                slots=[_filled_slot("direct_answer", 7)],
+                slots=[_filled_slot("direct_answer", 7, capacity=10)],
                 total_chunks_assigned=7, filling_strategy="", emit={},
             )
             result = await _run_fillers_simple(
@@ -156,7 +168,7 @@ class TestFillDepthEmit:
         """Portfolio slots use portfolio_fill, not fill_depth -- the two
         paths are mutually exclusive, no double-counting."""
         slot = _slot(capacity=10)
-        decision = _decision({"direct_answer": []}, per_slot_portfolio={"direct_answer": {"a": 3}})
+        decision = _decision({"direct_answer": []}, per_slot_portfolio={"direct_answer": {"a": 3}}, allocator="portfolio")
 
         with patch("app.services.retriever.orchestrator.fill_shape_bm25") as mock_a:
             mock_a.return_value = FilledShape(
@@ -196,9 +208,15 @@ async def test_stops_at_first_nonempty_rung_does_not_call_later_ones():
 
 
 @pytest.mark.asyncio
-async def test_weak_but_nonempty_result_does_not_advance():
-    """1 chunk (weak, but nonempty) must NOT trigger a fall-through to the
-    next rung -- that's explicitly Observer's future job, not this loop's."""
+async def test_weak_but_nonempty_result_now_advances_via_observer():
+    """1 chunk (weak, under-filled vs capacity=5) MUST now trigger a
+    fall-through to the next rung -- Observer's real per-strategy adequacy
+    check (wired 2026-07-26, replacing the bare-occupancy stopgap this
+    test used to lock in as "correct for now, Observer's future job") is
+    capacity-aware: occupancy=1 of capacity=5 is under-filled, so `b`
+    yields WOULD_BENEFIT, not SATISFIED, and the loop correctly continues
+    to `a`. RETAIN model unions both rungs' chunks (no dedup at this
+    layer -- Synthesis's job), so final occupancy is the sum."""
     slot = _slot()
     decision = _decision({"direct_answer": ["b", "a"]})
 
@@ -208,15 +226,19 @@ async def test_weak_but_nonempty_result_does_not_advance():
             slots=[_filled_slot("direct_answer", 1)],
             total_chunks_assigned=1, filling_strategy="", emit={},
         )
+        mock_a.return_value = FilledShape(
+            slots=[_filled_slot("direct_answer", 5)],
+            total_chunks_assigned=5, filling_strategy="", emit={},
+        )
 
         result = await _run_fillers_simple(
             db=None, slots=[slot], pool_results=[_empty_pool()],
             router_decision=decision, raw_query="q", gate_result=_gate_result(),
         )
 
-    assert result.slots[0].occupancy == 1
+    assert result.slots[0].occupancy == 6
     mock_b.assert_called_once()
-    mock_a.assert_not_called()
+    mock_a.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -348,7 +370,16 @@ async def test_not_ready_d_gets_deferred_behind_a_ready_alternative():
     to "d" as a slot's next attempt while its speculative prescreen isn't
     ready -- prioritize an already-ready strategy instead. A not-done
     prescreen_search_task defers "d" behind "a" for THIS attempt, without
-    permanently dropping "d" from the slot's ladder."""
+    permanently dropping "d" from the slot's ladder.
+
+    `a` fills to FULL capacity (5, not 2) so Observer's real per-strategy
+    check (wired 2026-07-26) legitimately marks it SATISFIED -- otherwise
+    this test's own scenario (a's result should make d unnecessary this
+    turn) is self-contradicting: an under-filled `a` would correctly
+    trigger a real continuation to `d`, which would then hang forever on
+    this test's deliberately-never-resolved prescreen future -- a fixture
+    bug the old bare-occupancy stopgap masked (occupancy=2>0 always
+    "satisfied" the slot, so `d` was never reached to expose it)."""
     slot = _slot()
     decision = _decision({"direct_answer": ["d", "a"]})
     not_done_task = asyncio.get_event_loop().create_future()  # never resolved -- .done() is False
@@ -357,8 +388,8 @@ async def test_not_ready_d_gets_deferred_behind_a_ready_alternative():
                new_callable=AsyncMock) as mock_d, \
          patch("app.services.retriever.orchestrator.fill_shape_bm25") as mock_a:
         mock_a.return_value = FilledShape(
-            slots=[_filled_slot("direct_answer", 2)],
-            total_chunks_assigned=2, filling_strategy="", emit={},
+            slots=[_filled_slot("direct_answer", 5)],
+            total_chunks_assigned=5, filling_strategy="", emit={},
         )
 
         result = await _run_fillers_simple(
@@ -367,7 +398,7 @@ async def test_not_ready_d_gets_deferred_behind_a_ready_alternative():
             prescreen_search_task=not_done_task,
         )
 
-    assert result.slots[0].occupancy == 2
+    assert result.slots[0].occupancy == 5
     mock_a.assert_called_once()
     mock_d.assert_not_called()
     not_done_task.cancel()
@@ -447,7 +478,7 @@ class TestPortfolioExecution:
     @pytest.mark.asyncio
     async def test_portfolio_runs_all_strategies_concurrently_and_retains_both(self):
         slot = _slot(capacity=10)
-        decision = _decision({"direct_answer": []}, per_slot_portfolio={"direct_answer": {"a": 3, "b": 2}})
+        decision = _decision({"direct_answer": []}, per_slot_portfolio={"direct_answer": {"a": 3, "b": 2}}, allocator="portfolio")
 
         with patch("app.services.retriever.orchestrator.fill_shape_bm25") as mock_a, \
              patch("app.services.retriever.orchestrator.fill_shape_vector") as mock_b:
@@ -484,7 +515,7 @@ class TestPortfolioExecution:
         slot.capacity is much larger -- capacity is the ceiling that shaped
         the plan, not the success bar."""
         slot = _slot(capacity=10)
-        decision = _decision({"direct_answer": []}, per_slot_portfolio={"direct_answer": {"a": 2}})
+        decision = _decision({"direct_answer": []}, per_slot_portfolio={"direct_answer": {"a": 2}}, allocator="portfolio")
 
         with patch("app.services.retriever.orchestrator.fill_shape_bm25") as mock_a:
             mock_a.return_value = FilledShape(
@@ -505,7 +536,7 @@ class TestPortfolioExecution:
         Synthesis's CoverageDiagnostic) -- an under-delivered portfolio
         still resolves terminally in turn 0, not WOULD_BENEFIT."""
         slot = _slot(capacity=10)
-        decision = _decision({"direct_answer": []}, per_slot_portfolio={"direct_answer": {"a": 5}})
+        decision = _decision({"direct_answer": []}, per_slot_portfolio={"direct_answer": {"a": 5}}, allocator="portfolio")
 
         with patch("app.services.retriever.orchestrator.fill_shape_bm25") as mock_a:
             mock_a.return_value = FilledShape(

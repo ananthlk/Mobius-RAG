@@ -96,6 +96,8 @@ def generate_sync(
     correlation_id: str | None = None,
     thread_id: str | None = None,
     mode: str | None = None,
+    prompt_address: str | None = None,
+    template_vars: dict[str, Any] | None = None,
     timeout_s: int = _DEFAULT_TIMEOUT_S,
 ) -> tuple[str, dict[str, Any]]:
     """Synchronous ``generate`` via chat's LLM manager.
@@ -104,6 +106,17 @@ def generate_sync(
     chat's router attached (model id, tokens, latency, cost, etc.) —
     callers typically attach this to their ``ExtractedFact`` /
     ``HierarchicalChunk`` rows for provenance.
+
+    ``prompt_address``: optional Prompt Composition Studio lookup key
+    (e.g. ``"rag.filler_c_validate.system"``). When set, chat's
+    ``/internal/skill-llm`` resolves ``system`` server-side from the
+    live composition instead of trusting the caller's raw string --
+    prompt edits then happen in the DB, no rag redeploy. ``system`` is
+    still sent as a fallback the endpoint uses if resolution fails
+    (LLM Agent, 2026-08-03) -- never omit it just because
+    ``prompt_address`` is set. Dev fallback CANNOT resolve an address
+    (no chat endpoint in the loop), so it always uses ``system``
+    as-is regardless of ``prompt_address``.
 
     Raises ``LLMManagerError`` on non-2xx from the proxy. Dev
     fallback path is called only when ``CHAT_INTERNAL_LLM_URL`` is
@@ -134,6 +147,8 @@ def generate_sync(
         "correlation_id": correlation_id,
         "thread_id": thread_id,
         "mode": mode,
+        "prompt_address": prompt_address,
+        "template_vars": template_vars,
     }).encode("utf-8")
 
     req = urllib.request.Request(
@@ -217,6 +232,8 @@ async def generate(
     correlation_id: str | None = None,
     thread_id: str | None = None,
     mode: str | None = None,
+    prompt_address: str | None = None,
+    template_vars: dict[str, Any] | None = None,
     timeout_s: int = _DEFAULT_TIMEOUT_S,
 ) -> tuple[str, dict[str, Any]]:
     """Async wrapper for ``generate_sync``. Runs the sync HTTP call
@@ -229,6 +246,7 @@ async def generate(
         lambda: generate_sync(
             system=system, user=user, stage=stage, max_tokens=max_tokens,
             correlation_id=correlation_id, thread_id=thread_id, mode=mode,
+            prompt_address=prompt_address, template_vars=template_vars,
             timeout_s=timeout_s,
         ),
     )

@@ -64,6 +64,30 @@ class PoolCandidate:
     # Authority level for reranking (Filler a reranking signal). Values:
     # "contract_source_of_truth" (1.0), "operational" (0.5), "fyi" (0.2), None (0.0)
     authority_level: str | None = None
+    # REAL STRUCTURAL BUG found+fixed 2026-07-23 (Retriever's live-trace
+    # report): dedup_candidates() is "first-arm-wins" on chunk_id collision
+    # (union order tag_select -> vector -> inherited) -- if a chunk is found
+    # by BOTH tag_select and vector_search, the surviving entry keeps
+    # tag_select's provenance/score, and Filler b (which filters to
+    # source_arm=="vector" before ranking anything) never sees it at all,
+    # even when vector_search independently found the SAME chunk with a
+    # strong similarity score. Confirmed live on a real query where the
+    # correct answer chunk was in the pool tagged source_arm=tag_select while
+    # a direct, standalone vector_search() call found the identical chunk at
+    # rank 165/1000, similarity 0.823 -- a real, silent recall loss, not a
+    # one-off. Fix: compute vector_similarity for EVERY final candidate
+    # regardless of which arm's provenance survived dedup -- same pattern
+    # bm25_score already established (computed for every match candidate,
+    # not just one arm's own results). Unlike bm25_score (which is None for
+    # neighbors -- no term-match reason to be in the pool), vector similarity
+    # is a meaningful signal for ANY chunk with an embedding regardless of
+    # why it's in the pool, so this is populated for neighbors too, not just
+    # matches. `score` stays arm-overloaded (tag_select's raw coverage count,
+    # vector's cosine similarity, inherited's None) -- DO NOT read `score` as
+    # a similarity value for a non-vector-arm candidate; use this field
+    # instead when a genuine, comparable similarity number is needed
+    # regardless of provenance.
+    vector_similarity: float | None = None
 
 
 @dataclass
@@ -90,6 +114,24 @@ class PoolResult:
     # falls back to its own bounded call in that case, always correct
     # either way, this is purely an optimization.
     query_embedding: list[float] | None = None
+    # Added 2026-07-23 (Ananth's finding, verified against legacy + Filler A's
+    # actual meta_boost code): Gate's expansion_phrases (lexicon-derived
+    # terms) never carried selectivity weighting downstream -- generic terms
+    # ("claims", "medicaid") diluted equally with highly-discriminating ones
+    # ("timely filing", "sunshine health"). Reconstructed here from gate's
+    # matched d/j/p codes + already-computed selectivity_for_tag() (no Gate
+    # contract change needed -- the code<->phrase link exists at lexicon-
+    # match time, just gets flattened away in GateResult). Query-level, not
+    # per-candidate -- checking phrase presence in a candidate's text/tags is
+    # cheap in-memory work that belongs in the consuming filler's own rerank
+    # pass (confirmed against Filler A's actual filler_a.py:
+    # _compute_meta_boost_score(text, tags, required_phrases, boosted_phrases),
+    # which reads these as list[tuple[str, float]] via getattr(pool_result,
+    # 'required_phrases', None) -- verified shape match, not just relayed).
+    # DROP-bucket phrases (selectivity < 0.40) are excluded entirely, not
+    # included at low weight.
+    required_phrases: list[tuple[str, float]] = field(default_factory=list)
+    boosted_phrases: list[tuple[str, float]] = field(default_factory=list)
 
 
 class SourceAdapter(ABC):
@@ -110,16 +152,23 @@ class SourceAdapter(ABC):
 
     @abstractmethod
     async def tag_select(
-        self, query: str, d_codes: list[str], j_codes: list[str], p_codes: list[str], width: int
+        self, query: str, expansion_phrases: list[str], d_codes: list[str], j_codes: list[str], p_codes: list[str], width: int
     ) -> tuple[list[PoolCandidate], dict]:
         """Takes RAW matched tag codes (unclassified) -- required/boosted/drop
         bucketing happens INSIDE the adapter, not the orchestrator, because
         tag selectivity is corpus-specific (computed against each adapter's
         own backing tag table, e.g. public's document_tags). Same ownership
         line as "each adapter owns bm25+vector+inheritance+neighbors for
-        its section" (retriever-meet-old-plan.md). ``query`` is needed only
-        for the additive `bm25_score` field (Filler a, 2026-07-23), not for
-        the tag-coverage selection logic itself.
+        its section" (retriever-meet-old-plan.md). ``query``/``expansion_phrases``
+        are needed only for the additive `bm25_score` field (Filler a,
+        2026-07-23), not for the tag-coverage selection logic itself.
+        ``expansion_phrases`` (Gate's lexicon-derived phrases, e.g. "timely
+        filing"/"filing limit") get OR-folded into the bm25 tsquery alongside
+        the raw query tokens -- restores a legacy signal (corpus_search.py's
+        `_build_or_tsquery(*raw_tokens, *expansion.expansion_phrases)`) that
+        never survived into GateResult's consumers (real gap found
+        2026-07-23: expansion_phrases was computed by Gate, stored, and read
+        by NOTHING downstream until now).
 
         Returns (candidates, segment_ms) -- segment_ms carries doc_narrow_ms
         + tag_select_ms as two distinct buckets (TECH's 2026-07-23 split)."""
@@ -127,23 +176,67 @@ class SourceAdapter(ABC):
 
     @abstractmethod
     async def vector_search(
-        self, query: str, width: int
+        self, query: str, expansion_phrases: list[str], j_codes: list[str], width: int
     ) -> tuple[list[PoolCandidate], dict, list[float] | None]:
         """Returns (candidates, segment_ms, query_embedding) -- segment_ms
         carries embed_ms + vector_ms. query_embedding is the raw embedding
         computed for this query (None if the embed call itself failed),
         surfaced so Pool can populate PoolResult.query_embedding for reuse
-        by downstream Fillers with matching embedding-space needs."""
+        by downstream Fillers with matching embedding-space needs.
+        ``expansion_phrases`` needed only for the additive `bm25_score`
+        field, same as `tag_select`/`inherited`. ``j_codes`` needed for
+        cross-payer exclusion (2026-07-23 correctness fix): when the query
+        names a specific payer, chunks tagged with a DIFFERENT payer are
+        excluded from vector's candidate set -- unlike `tag_select`, this is
+        a negative exclusion, not a positive scope filter, so vector search
+        keeps its wide semantic-discovery character for non-payer-specific
+        content."""
         ...
 
     @abstractmethod
-    async def inherited(self, query: str, payor_codes: list[str], width: int) -> tuple[list[PoolCandidate], dict]:
+    async def inherited(
+        self, query: str, expansion_phrases: list[str], payor_codes: list[str], width: int
+    ) -> tuple[list[PoolCandidate], dict]:
         """Returns (candidates, segment_ms) -- segment_ms carries inherited_ms.
         No-ops ([], {}) for adapters/queries with no inheritance concept.
-        ``query`` is needed only for the additive `bm25_score` field."""
+        ``query``/``expansion_phrases`` are needed only for the additive
+        `bm25_score` field, same as `tag_select`."""
         ...
 
     @abstractmethod
     async def neighbors(self, candidates: list[PoolCandidate]) -> tuple[list[PoolCandidate], dict]:
         """Returns (matches + neighbors, segment_ms) -- segment_ms carries neighbor_ms."""
+        ...
+
+    @abstractmethod
+    async def phrase_buckets(
+        self, d_codes: list[str], j_codes: list[str], p_codes: list[str], expansion_phrases: list[str]
+    ) -> tuple[list[tuple[str, float]], list[tuple[str, float]]]:
+        """Returns (required_phrases, boosted_phrases) -- each a list of
+        (phrase, selectivity) pairs, for PoolResult's same-named fields
+        (added 2026-07-23, Filler A's meta_boost consumer -- verified shape
+        match against their actual filler_a.py, not just relayed). Adapter-
+        owned because selectivity is corpus-specific (computed against each
+        adapter's own backing tag table) -- same reasoning as `tag_select`'s
+        REQUIRED/BOOSTED/DROP bucketing. DROP-bucket phrases are excluded
+        from both lists entirely, not included at low weight."""
+        ...
+
+    @abstractmethod
+    async def attach_vector_similarity(
+        self, candidates: list[PoolCandidate], query_embedding: list[float] | None
+    ) -> tuple[list[PoolCandidate], dict]:
+        """Returns (candidates-with-vector_similarity-populated, segment_ms).
+
+        Fixes a real structural bug (2026-07-23, Retriever's live-trace
+        report): dedup is first-arm-wins on chunk_id collision, so a chunk
+        found by BOTH tag_select and vector_search only keeps tag_select's
+        provenance -- any filler that filters to source_arm=="vector" never
+        sees it, even when vector_search independently found the identical
+        chunk with a strong similarity score. Computes similarity for EVERY
+        candidate (matches AND neighbors -- unlike bm25_score, similarity is
+        meaningful regardless of why a chunk is in the pool) via one batch
+        query against the deduped candidate ids, reusing the query embedding
+        Pool already computed once. No-ops (candidates unchanged, {}) when
+        query_embedding is None (embed failed or vector arm never ran)."""
         ...

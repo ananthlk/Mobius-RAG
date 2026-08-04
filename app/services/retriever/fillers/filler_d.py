@@ -702,7 +702,23 @@ async def _score_bm25(
         return {}
 
 
-def _chunk_from_passage(p: _Passage, bm25_score: float | None) -> FilledChunk:
+def _domain_matches_payer(url: str, payer_domain: str | None) -> bool:
+    """A web result is only authoritative if it actually came from the
+    payer's OWN domain (Ananth, 2026-07-27) — general web search finding
+    something ABOUT a payer on a third-party site is not the same claim as
+    the payer's own published policy. Normalizes both sides (strip a
+    leading "www.", lowercase) since the registry's site_domain and a
+    fetched URL's netloc don't always agree on the www- prefix."""
+    if not payer_domain:
+        return False
+    host = (urllib.parse.urlparse(url).netloc or "").lower()
+    host = host[4:] if host.startswith("www.") else host
+    domain = payer_domain.lower()
+    domain = domain[4:] if domain.startswith("www.") else domain
+    return bool(host) and host == domain
+
+
+def _chunk_from_passage(p: _Passage, bm25_score: float | None, payer_domain: str | None = None) -> FilledChunk:
     """RESOLVED 2026-07-23 — DB landed `FilledChunk.url`. External chunks
     now follow the documented convention (`contracts.py`'s `FilledChunk`
     docstring): `url` populated, `document_id` **None** (no real doc row
@@ -711,6 +727,16 @@ def _chunk_from_passage(p: _Passage, bm25_score: float | None) -> FilledChunk:
     id pretending to be a real one). Previously this stashed a synthetic id
     in `document_id` and omitted `url` entirely as a workaround — no longer
     needed, removed.
+
+    `authority_level` (2026-07-27, Ananth): "payer_domain_match" when this
+    passage's URL is on the payer's own site_domain (PayerContext, resolved
+    upstream by the orchestrator — see module docstring), else left None
+    (falls through to Synthesis's source_type-based "external" default —
+    general web results are NOT authoritative just because they mention the
+    payer). Distinct value from the DB's internal taxonomy
+    (contract_source_of_truth/payer_policy/...) since this is a web-fetch
+    signal, not a curated-corpus one — Synthesis's `_infer_authority` maps
+    both into the same "authoritative" tier.
     """
     return FilledChunk(
         chunk_id=_stable_chunk_id(p.url),
@@ -718,6 +744,7 @@ def _chunk_from_passage(p: _Passage, bm25_score: float | None) -> FilledChunk:
         text=p.text,
         url=p.url,
         source_type="external",
+        authority_level=("payer_domain_match" if _domain_matches_payer(p.url, payer_domain) else None),
         document_status=None,
         content_sha=None,
         page_number=None,
@@ -732,6 +759,7 @@ def _chunk_from_passage(p: _Passage, bm25_score: float | None) -> FilledChunk:
         # rather than silently going unranked.
         original_score=bm25_score if bm25_score is not None else 1.0,
         assignment_reason="external_fetch",
+        filler_strategy="web_search",
     )
 
 
@@ -1000,8 +1028,9 @@ async def fill_shape_external(
         agent_id, len(bm25_scores), bm25_ms, {p.url: bm25_scores.get(p.url) for p in usable_passages},
     )
 
+    _payer_domain = payer_context.site_domain if payer_context else None
     usable_chunks = [
-        _chunk_from_passage(p, bm25_scores.get(p.url)) for p in usable_passages
+        _chunk_from_passage(p, bm25_scores.get(p.url), _payer_domain) for p in usable_passages
     ]
 
     filled_slots: list[FilledSlot] = []

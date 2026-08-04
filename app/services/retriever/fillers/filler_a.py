@@ -17,6 +17,7 @@ See docs/rag-agents/fillers-schematic-spec.md.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 
 from app.services.retriever.pool.contracts import PoolCandidate, PoolResult
@@ -78,17 +79,98 @@ def _compute_length_score(text: str) -> float:
         return 1.0
 
 
-def _compute_rerank_score(candidate: PoolCandidate, query: str = "") -> float:
+def _compute_meta_boost_score(
+    text: str,
+    tags: dict,
+    required_phrases: list[tuple[str, float]] | None = None,
+    boosted_phrases: list[tuple[str, float]] | None = None,
+) -> float:
+    """Compute meta_boost as selectivity-weighted fraction of Gate's phrases present.
+
+    Matches phrases against chunk text and tags (not doc-level metadata — that's
+    a future enhancement). REQUIRED phrases (selectivity ≥0.65) count full weight;
+    BOOSTED phrases (0.40-0.65) count half weight. Result is normalized fraction [0, 1].
+
+    Args:
+        text: Chunk body text.
+        tags: Chunk tags dict (keys are tag codes like "d:claims.timely_filing").
+        required_phrases: [(phrase, selectivity_weight), ...] from Gate's REQUIRED bucket.
+        boosted_phrases: [(phrase, selectivity_weight), ...] from Gate's BOOSTED bucket.
+
+    Returns:
+        Float [0, 1]: fraction of total possible phrase weight present in chunk.
+    """
+    required_phrases = required_phrases or []
+    boosted_phrases = boosted_phrases or []
+
+    if not required_phrases and not boosted_phrases:
+        return 0.0
+
+    text_lower = text.lower()
+    # Normalize tag keys: convert underscores/dots to spaces so "claims.timely_filing" becomes
+    # "claims timely filing" and can match the phrase "timely filing" via substring search.
+    tags_str = " ".join(
+        re.sub(r'[._]', ' ', str(k).lower()) + " " + str(v).lower()
+        for k, v in (tags or {}).items()
+    )
+
+    # Compute present weight (REQUIRED full, BOOSTED half)
+    present_weight = 0.0
+    for phrase, selectivity in required_phrases:
+        if phrase.lower() in text_lower or phrase.lower() in tags_str:
+            present_weight += selectivity
+
+    for phrase, selectivity in boosted_phrases:
+        if phrase.lower() in text_lower or phrase.lower() in tags_str:
+            present_weight += selectivity * 0.5  # Boosted phrases worth half
+
+    # Total possible weight
+    total_weight = (
+        sum(s for _, s in required_phrases) +
+        sum(s * 0.5 for _, s in boosted_phrases)
+    )
+
+    return min(1.0, present_weight / total_weight) if total_weight > 0 else 0.0
+
+
+def _compute_rerank_score(
+    candidate: PoolCandidate,
+    query: str = "",
+    required_phrases: list[tuple[str, float]] | None = None,
+    boosted_phrases: list[tuple[str, float]] | None = None,
+) -> float:
     """
     Compose multiple signals into a unified rerank score [0, 1].
 
-    Weights (Filler a v0.2 — Retriever's reranking principle):
-      bm25 (0.65) + authority (0.10) + tag_coverage (0.10) + length (0.10) + misc (0.05)
+    Weights (Filler a v0.4 — 2026-07-29, Ananth's live-trace diagnosis):
+      bm25 (0.40) + authority (0.10) + tag_coverage (0.20) + length (0.05)
+      + meta_boost (0.20) + misc (0.05)
 
-    BM25 is primary (0.65 weight) because Pool pre-scores candidates by arm.
-    Secondary signals (authority, coverage, length) provide tie-breaking and
-    quality lift when BM25 scores are close, but don't override BM25 when it
-    diverges significantly.
+    Previous weights (bm25 0.55/0.65 history, cov/meta at 0.10/0.15) actually
+    summed to 1.05, not 1.00 -- an unnoticed drift from the meta_boost bump
+    that was never offset elsewhere. Fixed here as part of the rebalance.
+
+    Root cause this rebalances (confirmed live on cmhc003, Payor Policy's
+    trace-explorer investigation): ts_rank_cd (Pool's bm25_score) is a
+    cover-density ranker, not a relevance judge -- a chunk that repeats a
+    required phrase (e.g. the payer name) many times in OFF-TOPIC content
+    can out-score a chunk that states the actual answer once, clearly.
+    Verified directly: a correct "members may self-refer without a PCP
+    referral for...behavioral health" chunk scored LOWER (0.730) than an
+    unrelated "community program referrals" chunk (0.865) that just
+    repeated "Aetna Better Health of Florida" 8 times -- confirmed via raw
+    SQL that stripping payer/state terms from the query entirely did NOT
+    fix the ranking (ts_rank_cd's cover-density formula, not phrase
+    composition, is the actual mechanism). Tag-based signals got the
+    correct answer's relevance right in the same case (tag_coverage from
+    Pool's own count favored it 4-vs-3) but were too lightly weighted to
+    win. Known limitation NOT fixed here (found live, same investigation):
+    _compute_tag_coverage_score and _compute_meta_boost_score can both
+    saturate/tie between a genuinely on-topic chunk and an off-topic one
+    that merely shares surface tags/phrases -- rebalancing weights can't
+    help when the secondary signals don't discriminate at all between two
+    candidates; that's a separate, deeper fix to those two functions'
+    scoring logic, not a weights problem.
 
     CRITICAL: This is Filler a's PRIMARY signal composition. Pool provides
     candidates pre-scored by arm (bm25_score, vector score, etc.) but does
@@ -99,13 +181,15 @@ def _compute_rerank_score(candidate: PoolCandidate, query: str = "") -> float:
     auth_sig = _compute_authority_score(candidate.authority_level)
     cov_sig = _compute_tag_coverage_score(candidate.tags)
     len_sig = _compute_length_score(candidate.text)
+    meta_sig = _compute_meta_boost_score(candidate.text, candidate.tags, required_phrases, boosted_phrases)
 
-    # Weighted sum (already normalized [0, 1])
+    # Weighted sum (already normalized [0, 1]), sums to 1.00.
     composite = (
-        0.65 * bm25_sig +
+        0.40 * bm25_sig +
         0.10 * auth_sig +
-        0.10 * cov_sig +
-        0.10 * len_sig +
+        0.20 * cov_sig +
+        0.05 * len_sig +
+        0.20 * meta_sig +
         0.05 * 0.5  # Misc (neutral baseline)
     )
     return composite
@@ -125,25 +209,30 @@ def fill_shape_bm25(
     routing_ladders: list[RoutingLadder] | None = None,
 ) -> FilledShape:
     """
-    Fill pre-built slots by ranking Pool's candidates via BM25 score.
+    Fill pre-built slots by ranking Pool's candidates via multi-signal BM25 composition.
 
     Algorithm (Phase 2 of fillers spec):
-    1. Sort candidates by PoolCandidate.bm25_score (Pool's ts_rank_cd via plainto_tsquery) descending.
-    2. For each slot in priority order:
+    1. Compose multi-signal score per candidate: bm25 (0.55) + authority (0.10)
+       + tag_coverage (0.10) + length (0.10) + meta_boost (0.10) + misc (0.05).
+    2. Sort candidates by composite score descending.
+    3. For each slot in priority order:
        - Filter candidates if needed (by slot semantics / source_type).
        - Take top-N where N = slot.capacity (non-overlapping).
        - Assign to slot, remove from pool.
-    3. Track occupancy, under_fill, over_fill.
+    4. Track occupancy, under_fill, over_fill.
 
-    BM25 scoring details:
-    - Pool computes PoolCandidate.bm25_score: ts_rank_cd(search_vec, plainto_tsquery('english', :query), 32)
-      where plainto_tsquery handles punctuation safely (production-proven in corpus_search).
-    - Score range: [0, 1] due to flag 32 (log normalization).
-    - Neighbors get bm25_score=None (positional adjacency, no search-term match).
-    - CRITICAL: Read PoolCandidate.bm25_score, NOT PoolCandidate.score (which holds arm-specific signals).
+    Signal composition (v0.3):
+    - BM25 (0.55): Pool's ts_rank_cd OR-joined tsquery on search_vec [0, 1].
+    - Authority (0.10): Document authority level (contract_source_of_truth > ... > none).
+    - Tag coverage (0.10): Normalized by tag count (higher = more document relevance).
+    - Length (0.10): Text quality signal (penalize <50 chars, reward 100-500).
+    - Meta_boost (0.10): Selectivity-weighted fraction of Gate's required/boosted phrases
+      present in chunk text or tags (REQUIRED full weight, BOOSTED half weight).
+    - Misc (0.05): Neutral baseline for unscored candidates.
 
     Args:
-        pool_result: Output from Pool (Step 2).
+        pool_result: Output from Pool (Step 2). May include required_phrases and
+            boosted_phrases (Gate's selectivity-weighted phrase lists) for meta_boost.
         shape_result: Output from Shape (Step 1).
         routing_ladders: Optional per-slot strategy sequences (unused v1).
 
@@ -152,16 +241,27 @@ def fill_shape_bm25(
     """
 
     # Compose multi-signal rerank score and sort descending.
-    # Primary: bm25_score (Pool's BM25 ranking). Secondary: authority, tag_coverage, length.
+    # Primary: bm25_score (Pool's BM25 ranking).
+    # Secondary: authority, tag_coverage, length, meta_boost (Gate phrase selectivity).
     # Neighbors (positional adjacency only) get bm25_score=None and are filtered out.
     scored_candidates = [c for c in pool_result.candidates if c.bm25_score is not None]
+
+    # Extract Gate's phrase lists from pool_result (may be None in v0.x until Pool ships)
+    required_phrases = getattr(pool_result, 'required_phrases', None) or []
+    boosted_phrases = getattr(pool_result, 'boosted_phrases', None) or []
+
     # Compute composite rerank score per candidate
     scored_candidates = [
-        (c, _compute_rerank_score(c, pool_result.query))
+        (c, _compute_rerank_score(c, pool_result.query, required_phrases, boosted_phrases))
         for c in scored_candidates
     ]
     # Sort by composite score descending
     scored_candidates.sort(key=lambda pair: pair[1], reverse=True)
+    # Keep the composite alongside chunk_id -- FilledChunk.rerank_score needs
+    # it below (Synthesis's own rerank/trim steps otherwise fall back to
+    # original_score/raw bm25 alone, silently discarding everything this
+    # composite adds; see contracts.py's rerank_score docstring).
+    composite_by_chunk_id = {c.chunk_id: score for c, score in scored_candidates}
     # Unwrap candidates (keep only PoolCandidate, discard score tuple)
     scored_candidates = [c for c, _ in scored_candidates]
 
@@ -197,7 +297,10 @@ def fill_shape_bm25(
                     tags=candidate.tags or {},
                     is_neighbor=candidate.is_neighbor,
                     original_score=candidate.bm25_score,
+                    rerank_score=composite_by_chunk_id.get(candidate.chunk_id),
                     assignment_reason="score_rank",
+                    authority_level=candidate.authority_level,
+                    filler_strategy="bm25",
                 )
             )
             chunk_ids_assigned.add(candidate.chunk_id)

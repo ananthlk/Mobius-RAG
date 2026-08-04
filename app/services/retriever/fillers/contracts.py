@@ -58,7 +58,38 @@ class FilledChunk:
     tags: dict = field(default_factory=dict)
     is_neighbor: bool = False
     original_score: float | None = None
+    # The filler's own FINAL composite ranking score (post signal-fusion --
+    # e.g. filler_a's bm25+authority+tag_coverage+length+meta_boost), NOT
+    # just the raw primary-strategy signal `original_score` carries. Added
+    # 2026-07-29 after a real bug: synthesis.py's _rerank_slot_chunks and
+    # _trim_to_token_budget both re-sort/trim by `original_score` alone,
+    # which silently discarded every non-bm25 signal a filler used to
+    # decide its own ranking -- a filler could correctly promote a chunk
+    # via authority/meta_boost/etc., only for Synthesis to demote it right
+    # back down because its RAW bm25 component was lower. None for chunks
+    # from fillers that don't compute a separate composite (their real
+    # ranking IS original_score) -- synthesis.py falls back to
+    # original_score in that case, so this is additive/optional, not a
+    # breaking change for b/c/d/s.
+    rerank_score: float | None = None
     assignment_reason: str = ""  # e.g., "score_rank", "semantic_match", "fallback"
+    # Which filler's OWN scoring formula produced this chunk's ranking --
+    # e.g. "bm25" (filler_a), "vector_rerank" (filler_b), "llm_retrieval"
+    # (filler_c), "web_search" (filler_d), "fact_store" (filler_s). Added
+    # 2026-07-30 after a real trace-tool bug: the production multi-rung
+    # RETAIN model (orchestrator.py's _run_fillers_simple) merges chunks
+    # retained from MULTIPLE filler rungs into one FilledShape, whose own
+    # top-level `filling_strategy` is the generic
+    # "multi_turn_continuation_retain_model" label -- it does NOT tell you
+    # which filler scored any given chunk. `assignment_reason` doesn't
+    # substitute either: filler_a and filler_baseline both use the same
+    # "score_rank" value, and (per the pre-existing note this field's
+    # sibling `rerank_score` was added to fix) neither assignment_reason
+    # nor rerank_score reliably survived to the final CompiledCitation/
+    # contract chunk dicts before this field existed. This is the
+    # authoritative per-chunk answer; matches FilledShape.filling_strategy
+    # 1:1 for a single-filler (non-retain-model) run.
+    filler_strategy: str | None = None
 
 
 @dataclass

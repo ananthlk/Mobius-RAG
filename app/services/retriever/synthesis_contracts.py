@@ -56,6 +56,21 @@ class CompiledCitation:
     verified: bool = True  # False iff filler c's citation quote did not verify or was never given (chunk.quote_verified is not True)
     is_neighbor: bool = False
     original_score: float | None = None
+    # The filler's own final composite ranking score when it computed one
+    # (see fillers/contracts.py's FilledChunk.rerank_score) -- threaded
+    # through so Synthesis's own trim/rerank steps can respect the
+    # filler's real ranking instead of falling back to raw original_score
+    # alone (2026-07-29 fix: that fallback was unconditional before, which
+    # silently discarded every non-bm25 signal a filler used to rank a
+    # chunk). None for chunks from fillers that don't compute a composite.
+    rerank_score: float | None = None
+    # Which filler's scoring formula produced this chunk's ranking (see
+    # fillers/contracts.py's FilledChunk.filler_strategy for the full
+    # rationale) -- threaded through so downstream consumers (trace tooling,
+    # telemetry) can tell WHICH formula scored a chunk even when the
+    # production multi-rung RETAIN model merges chunks from several
+    # fillers into one shape.
+    filler_strategy: str | None = None
     slot_id: str = ""
     slot_semantics: str = ""
 
@@ -144,6 +159,16 @@ class SynthesisTelemetry:
     # actually went.
     fusion_dropped_redundant: int = 0  # rejected by MMR as truly redundant (see fusion.py's MmrSelection.merged_away)
     fusion_dropped_budget: int = 0  # never evaluated by MMR -- that slot's own sub-budget ran out first (see MmrSelection.budget_cutoff_remaining)
+    # rrf_fuse's OWN content-identity merge (chunk_identity.py's content_keys()
+    # -- body-text-prefix/content_sha), distinct from both counters above: this
+    # happens even WITHIN a single strategy group, folding chunks from two
+    # separate document copies that repeat the same paragraph into one
+    # canonical FusedChunk, before mmr_select or _dedup_cross_slot ever run.
+    # Correct fusion behavior (don't show the LLM the same fact twice), but a
+    # real drop the reconciliation guard's identity must subtract or it
+    # false-positives on any corpus with duplicate-content document copies
+    # (found live, 2026-07-29, Sunshine Health timely-filing query).
+    fusion_content_merged: int = 0
     # Data-collection posture (Ananth, 2026-07-24): single-strategy-per-slot
     # calibration bypasses MMR's real drop entirely (see synthesis.py's
     # per-slot fusion step) so a forced strategy's true top-X reaches Chat/

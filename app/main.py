@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Optional, List, Any
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Body, Query, Request, Header
@@ -12053,6 +12054,26 @@ class RetrieverAnswerRequest(BaseModel):
     caller_mode: Optional[str] = None            # chat.default / chat.thinking / batch / ...
     token_budget_for_retrieval: Optional[int] = None  # Chat's real context-window budget; None → Structure's table
     forced_strategy: Optional[str] = None        # a/b/c/d/s → single-strategy isolation (offline calibration matrix)
+    mode_override: Optional[str] = None          # greedy/optimizer/bayesian → pin the executed router allocator (throttle comparison)
+
+
+# Hard wall-clock ceiling on the WHOLE request (2026-07-26, live-calibration
+# incident: cmhc002/cmhc004 observed running 40-150s and occasionally hard
+# connection-reset -- traced to genuinely-hard queries whose router chain
+# never clears the confidence bar, PLUS this dev instance sharing its single
+# Cloud Run container/DB with a ~90s-interval /admin/integrity/report poller,
+# so retriever requests can stall behind unrelated DB contention with nothing
+# to log (they're just waiting for the event loop / DB, not doing their own
+# work). `latency_allowance_ms` (allocation.py) is a PLANNING-time heuristic
+# only -- nothing previously enforced a runtime ceiling, so a stalled request
+# ran unbounded until Cloud Run's own proxy eventually reset the connection
+# (the "crash" symptom), instead of returning a fast, honest degraded result.
+# 45s is well above the normal 2-17s path but well below the observed 100-150s
+# stalls -- generous enough not to false-positive on legitimately slow-but-
+# fine queries, tight enough that Chat/a user is never left hanging for
+# minutes. Does NOT fix the underlying contention/hard-query cost (tracked
+# separately) -- it bounds the FAILURE MODE so it degrades instead of resets.
+_RETRIEVER_HARD_TIMEOUT_S = 45.0
 
 
 @app.post("/api/retriever/answer")
@@ -12068,20 +12089,69 @@ async def retriever_answer(
     grade. Omit it for a normal dispatch. `build_contract` is called here
     (not inside orchestrator.py) to avoid the circular import
     contract.py → RetrieverPartialResult.
+
+    Hard-timeout-bounded (see _RETRIEVER_HARD_TIMEOUT_S) -- on timeout,
+    returns a clean status="timeout" envelope (still the same 12 keys, all
+    empty/None) instead of leaving the connection open to be reset upstream.
     """
-    from app.services.retriever.orchestrator import run_retriever_partial_with_retry
+    from app.services.retriever.orchestrator import (
+        RetrieverPartialResult,
+        run_retriever_partial_with_retry,
+    )
     from app.services.retriever.contract import build_contract
 
     if not (body.query and body.query.strip()):
         raise HTTPException(status_code=400, detail="query is required")
 
-    result = await run_retriever_partial_with_retry(
-        db, body.query.strip(),
-        caller_mode=body.caller_mode,
-        token_budget_for_retrieval=body.token_budget_for_retrieval,
-        forced_strategy=body.forced_strategy,
-    )
+    t_req_start = time.monotonic()
+    try:
+        result = await asyncio.wait_for(
+            run_retriever_partial_with_retry(
+                db, body.query.strip(),
+                caller_mode=body.caller_mode,
+                token_budget_for_retrieval=body.token_budget_for_retrieval,
+                forced_strategy=body.forced_strategy,
+                mode_override=body.mode_override,
+            ),
+            timeout=_RETRIEVER_HARD_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        elapsed_ms = int((time.monotonic() - t_req_start) * 1000)
+        logging.getLogger("app.main").warning(
+            "retriever_answer: HARD TIMEOUT after %dms (ceiling=%.0fs) query_len=%d "
+            "mode_override=%s -- returning degraded status=timeout envelope",
+            elapsed_ms, _RETRIEVER_HARD_TIMEOUT_S, len(body.query), body.mode_override,
+        )
+        # Tech Health wrapper-landing condition (2026-07-26): one emitter,
+        # no parallel dict-building -- a genuine timeout has no real
+        # RetrieverPartialResult (the pipeline was still running when the
+        # clock ran out), so construct a minimal one (every other field
+        # defaults cleanly) and thread it through build_contract() same as
+        # every other path, with status_override carrying "timeout".
+        timeout_result = RetrieverPartialResult(
+            query=body.query.strip(), total_ms=elapsed_ms,
+        )
+        envelope = build_contract(timeout_result, status_override="timeout")
+        return {
+            "contract": envelope.to_dict(),
+            "latency_ms": {"total_ms": elapsed_ms},
+            "dispatch_path": None,
+            "mode_override": body.mode_override,
+            "strategies_per_slot": [],
+        }
     envelope = build_contract(result, result.synthesis)
+    # Defensive summary of which strategies the executed ladder chose per slot —
+    # lets the throttle comparison see what greedy/optimizer/bayesian each picked.
+    strategies_per_slot = []
+    try:
+        ladder = getattr(result.router_decision, "routing_ladder", None)
+        for slot in (getattr(ladder, "slots", None) or []):
+            seq = (getattr(slot, "strategy_sequence", None)
+                   or getattr(slot, "strategies", None) or [])
+            strategies_per_slot.append(
+                [getattr(s, "strategy_id", getattr(s, "id", str(s))) for s in seq])
+    except Exception:  # noqa: BLE001
+        strategies_per_slot = []
     return {
         "contract": envelope.to_dict(),
         "latency_ms": {
@@ -12091,7 +12161,640 @@ async def retriever_answer(
             "synthesis_ms": result.synthesis_ms, "total_ms": result.total_ms,
         },
         "dispatch_path": getattr(result.router_decision, "dispatch_path", None),
+        "mode_override": body.mode_override,
+        "strategies_per_slot": strategies_per_slot,
     }
+
+
+# ---------------------------------------------------------------------------
+# Trace Explorer (2026-07-29) -- self-serve debug UI so an operator can run
+# any query through the real answer engine (same run_retriever_partial_with_retry
+# + build_contract the production /api/retriever/answer endpoint calls -- not
+# a re-implementation), force a single strategy, and inspect the result at
+# 3 levels without needing a script run + report handed back:
+#   emits          -- the actual Chat-facing contract (status/chunks/routing_verdict)
+#   telemetry      -- diagnostic counters (per-stage ms, gate probe, pool
+#                      candidate counts, SynthesisTelemetry, coverage_diagnostics)
+#   detailed_trace -- every stage's full intermediate state, including the
+#                      complete pool candidate list (RetrieverPartialResult
+#                      already carries all of this; nothing is re-derived).
+# Strictly additive read-only admin surface -- gated by the same /admin/*
+# auth middleware as every other admin route; does not touch the production
+# path or any routing/allocator logic.
+# ---------------------------------------------------------------------------
+import dataclasses as _dc
+from enum import Enum as _Enum
+
+
+def _trace_serialize(obj, _depth: int = 0):
+    if _depth > 14:
+        return str(obj)
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+    if isinstance(obj, _Enum):
+        return obj.value
+    if _dc.is_dataclass(obj) and not isinstance(obj, type):
+        return {f.name: _trace_serialize(getattr(obj, f.name), _depth + 1) for f in _dc.fields(obj)}
+    if isinstance(obj, dict):
+        return {str(k): _trace_serialize(v, _depth + 1) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_trace_serialize(v, _depth + 1) for v in obj]
+    return str(obj)
+
+
+def _rerank_breakdown_for(cand, query, required_phrases, boosted_phrases):
+    """Trace-only transparency into Filler a's ACTUAL composite score.
+
+    Calls filler_a's real `_compute_rerank_score`/`_compute_meta_boost_score`
+    directly -- does NOT hardcode the weights/formula here. That formula has
+    already changed once this session (bm25 0.65->0.55, meta_boost 0.10
+    added, once required_phrases/boosted_phrases landed on PoolResult) --
+    reimplementing it here would have silently gone stale exactly like that,
+    which is the whole reason to call the real function instead of mirroring
+    its math.
+    """
+    from app.services.retriever.fillers.filler_a import (
+        _compute_authority_score, _compute_tag_coverage_score, _compute_length_score,
+        _compute_meta_boost_score, _compute_rerank_score,
+    )
+    bm25_sig = cand.bm25_score or 0.0
+    auth_sig = _compute_authority_score(cand.authority_level)
+    cov_sig = _compute_tag_coverage_score(cand.tags)
+    len_sig = _compute_length_score(cand.text)
+    meta_sig = _compute_meta_boost_score(cand.text, cand.tags, required_phrases, boosted_phrases)
+    composite = _compute_rerank_score(cand, query, required_phrases, boosted_phrases)
+    return {
+        "bm25_sig": round(bm25_sig, 4),
+        "authority_level": cand.authority_level,
+        "authority_sig": round(auth_sig, 4),
+        "tag_coverage_sig": round(cov_sig, 4),
+        "length_sig": round(len_sig, 4),
+        "meta_boost_sig": round(meta_sig, 4),
+        "composite_score": round(composite, 4),
+    }
+
+
+def _rerank_breakdown_for_filler_b(cand, query):
+    """Trace-only transparency into Filler b's ACTUAL composite score.
+
+    Same principle as _rerank_breakdown_for above: calls filler_b's real
+    `_rerank_vector_candidates` (single-item list) instead of hand-mirroring
+    its sim/authority/length/jpd weighted-sum formula, so this can't
+    silently drift stale the way the sibling bug did.
+
+    REAL BUG this function exists to fix (2026-07-30, Ananth's live-trace
+    catch): the shared _attach_rerank_breakdown_to_chunks() was calling
+    Filler a's _rerank_breakdown_for() UNCONDITIONALLY for every chunk,
+    including ones filled by strategy b (vector). Its guard
+    (`cand.bm25_score is None: continue`) looked like it excluded non-a
+    strategies, but Pool computes bm25_score for EVERY candidate regardless
+    of source_arm/filling_strategy (public_adapter.py's own comment: "Pool
+    computes this once per match candidate regardless of which arm surfaced
+    it") -- so the guard never actually filtered anything, and a path-b
+    trace showed Filler a's bm25-based formula/weights on vector-ranked
+    chunks. Fixed by dispatching on `filling_strategy` instead of an
+    always-true field-presence check."""
+    from app.services.corpus_search import _authority_score, _classify_jpd, _jpd_signal, _length_score
+    from app.services.retriever.fillers.filler_b import _rerank_vector_candidates
+
+    query_cats = _classify_jpd(query) if query else {}
+    has_jpd = bool(query_cats)
+    sim_sig = cand.score or 0.0
+    auth_sig = _authority_score(cand.authority_level)
+    len_sig = _length_score(cand.text)
+    jpd_sig, jpd_tags = _jpd_signal(query_cats, cand.text) if has_jpd else (0.0, [])
+    reranked, _stats = _rerank_vector_candidates([cand], query)
+    composite = reranked[0][1] if reranked else 0.0
+    return {
+        "sim_sig": round(sim_sig, 4),
+        "authority_level": cand.authority_level,
+        "authority_sig": round(auth_sig, 4),
+        "length_sig": round(len_sig, 4),
+        "jpd_sig": round(jpd_sig, 4),
+        "jpd_tags": jpd_tags,
+        "composite_score": round(composite, 4),
+    }
+
+
+def _build_candidate_context(pool_results):
+    """chunk_id -> (PoolCandidate, originating query, required_phrases,
+    boosted_phrases) -- the per-pool context _rerank_breakdown_for needs,
+    since required_phrases/boosted_phrases live on PoolResult (per
+    rewritten-query), not on the candidate itself."""
+    ctx = {}
+    for p in pool_results or []:
+        for c in p.candidates:
+            ctx[c.chunk_id] = (c, p.query, getattr(p, "required_phrases", None), getattr(p, "boosted_phrases", None))
+    return ctx
+
+
+def _attach_rerank_breakdown_to_chunks(chunks, candidate_context, filling_strategy=None):
+    """Attach `rerank_breakdown` to every dict in `chunks` whose chunk_id
+    matches a real PoolCandidate, using the formula that ACTUALLY produced
+    THIS chunk's ranking -- dispatched per-chunk on `chunk["filler_strategy"]`
+    (FilledChunk.filler_strategy, threaded through to CompiledCitation
+    2026-07-30) when present, falling back to the shape-level
+    `filling_strategy` only for older/partial trace data that predates that
+    field. Per-chunk dispatch matters because production's multi-rung
+    RETAIN model (orchestrator.py's _run_fillers_simple) merges chunks from
+    MULTIPLE filler rungs into one shape whose own top-level
+    filling_strategy is just "multi_turn_continuation_retain_model" --
+    that label alone can't tell you which filler scored any given chunk
+    (see FilledChunk.filler_strategy's docstring for the full history,
+    including the always-true field-presence guard this replaced). No-op
+    for other strategies (llm_retrieval/web_search/fact_store/uniform_topn)
+    -- their scoring formula is theirs to expose, not this one's."""
+    for chunk in chunks or []:
+        entry = candidate_context.get(chunk.get("chunk_id"))
+        if entry is None:
+            continue
+        cand, query, required_phrases, boosted_phrases = entry
+        strategy = chunk.get("filler_strategy") or filling_strategy
+        if strategy == "bm25":
+            if cand.bm25_score is None:
+                continue
+            chunk["rerank_breakdown"] = _rerank_breakdown_for(cand, query, required_phrases, boosted_phrases)
+        elif strategy == "vector_rerank":
+            if cand.score is None:
+                continue
+            chunk["rerank_breakdown"] = _rerank_breakdown_for_filler_b(cand, query)
+
+
+def _attach_rerank_breakdown(filled_shape_dict, candidate_context, filling_strategy=None):
+    """Attach rerank_breakdown to every chunk across all of filled_shape's
+    slots, matched back to its source PoolCandidate by chunk_id."""
+    if not filled_shape_dict or not filled_shape_dict.get("slots"):
+        return
+    for slot in filled_shape_dict["slots"]:
+        _attach_rerank_breakdown_to_chunks(slot.get("chunks", []), candidate_context, filling_strategy)
+
+
+class TraceExplorerRequest(BaseModel):
+    query: str
+    forced_strategy: Optional[str] = None       # a/b/c/d/s, None = normal router dispatch
+    caller_mode: Optional[str] = "chat.default"
+    must_facts: Optional[list[str]] = None
+    run_eval: bool = False
+    # DEBUG override (2026-07-29): manually decompose `query` into these
+    # targeted sub-queries and force Reformat's posture to FAN_OUT,
+    # bypassing whatever Gate/Reformat actually decided -- see
+    # orchestrator.py's run_retriever_partial docstring for why this
+    # exists. None (default) is a complete no-op.
+    force_fanout_queries: Optional[list[str]] = None
+
+
+async def _run_trace_for_query(
+    db: AsyncSession, query: str, forced_strategy: str | None, caller_mode: str | None,
+    must_facts: list[str] | None, run_eval: bool,
+    force_fanout_queries: list[str] | None = None,
+) -> dict:
+    """Core of the Trace Explorer: run one query through the real pipeline,
+    return {query, forced_strategy, emits, telemetry, detailed_trace, eval}.
+    Shared by the single-query endpoint and the bank runner below so both
+    stay byte-identical in what they compute -- no parallel implementation
+    to drift out of sync."""
+    from app.services.retriever.orchestrator import run_retriever_partial_with_retry
+    from app.services.retriever.contract import build_contract
+
+    t0 = time.monotonic()
+    result = await run_retriever_partial_with_retry(
+        db, query, caller_mode=caller_mode, forced_strategy=forced_strategy,
+        force_fanout_queries=force_fanout_queries,
+    )
+    wall_ms = int((time.monotonic() - t0) * 1000)
+    envelope = build_contract(result, result.synthesis)
+    contract_dict = envelope.to_dict()
+    candidate_context = _build_candidate_context(result.pool)
+    filling_strategy = getattr(result.filled_shape, "filling_strategy", None) if result.filled_shape else None
+
+    emits_chunks = contract_dict.get("chunks")
+    _attach_rerank_breakdown_to_chunks(emits_chunks, candidate_context, filling_strategy)
+
+    # Router has its OWN narrate() (app/services/router/router_narrate.py),
+    # completely separate from Gate/Reformat's -- explicitly documented as
+    # "user-facing by design, same as Gate's" (RouterDecision's own
+    # docstring) but never composed into result.narrative/narrative_full by
+    # run_retriever_partial (orchestrator.py only combines Gate+Reformat).
+    # A real, distinct emit surface that was simply never wired anywhere,
+    # not just missing from this trace tool -- surfacing it here rather
+    # than silently matching that gap.
+    router_narrative = None
+    trace_obj = getattr(result.router_decision, "trace", None) if result.router_decision else None
+    if trace_obj is not None:
+        from app.services.router.router_narrate import narrate as _narrate_router
+        try:
+            router_narrative = _narrate_router(trace_obj)
+        except Exception as exc:  # noqa: BLE001
+            router_narrative = f"(router narrate() failed: {exc})"
+
+    emits = {
+        "status": contract_dict.get("status"),
+        "chosen_slot": contract_dict.get("chosen_slot"),
+        "score": contract_dict.get("score"),
+        "chunks": emits_chunks,
+        "attempt_count": contract_dict.get("attempt_count"),
+        "routing_verdict": (contract_dict.get("routing_keys") or {}).get("routing_verdict"),
+        # The REAL thinking/emit surfaces RAG produces toward Chat -- THREE
+        # distinct narrate() functions exist (Gate, Reformat, Router), only
+        # the first two are composed by run_retriever_partial into
+        # narrative/narrative_full (orchestrator.py:1126-1131). RAG
+        # genuinely doesn't author a final answer (see synthesis.py's
+        # scope-correction docstring) so there is no "final answer" for
+        # this endpoint to show -- these narratives ARE the real emits,
+        # not a stand-in for one.
+        "narrative": result.narrative,
+        "narrative_full": result.narrative_full,
+        "router_narrative": router_narrative,
+    }
+
+    telemetry = {
+        "latency_ms": {
+            "gate_ms": result.gate_ms, "reformat_ms": result.reformat_ms,
+            "slots_ms": result.slots_ms, "pool_ms": result.pool_ms,
+            "router_ms": result.router_ms, "fillers_ms": result.fillers_ms,
+            "synthesis_ms": result.synthesis_ms, "total_ms": result.total_ms,
+            "wall_ms": wall_ms,
+        },
+        "gate_probe": _trace_serialize(result.gate.probe) if result.gate else None,
+        "gate_contour": result.gate.contour.value if (result.gate and result.gate.contour) else None,
+        "pool_candidate_counts": [len(p.candidates) for p in result.pool],
+        "synthesis_telemetry": _trace_serialize(result.synthesis.telemetry) if result.synthesis else None,
+        "coverage_diagnostics": _trace_serialize(result.synthesis.coverage_diagnostics) if result.synthesis else None,
+        "routing_keys": contract_dict.get("routing_keys"),
+    }
+
+    filled_shape_dict = _trace_serialize(result.filled_shape)
+    _attach_rerank_breakdown(filled_shape_dict, candidate_context, filling_strategy)
+
+    synthesis_dict = _trace_serialize(result.synthesis)
+    if synthesis_dict:
+        _attach_rerank_breakdown_to_chunks(synthesis_dict.get("citations"), candidate_context, filling_strategy)
+
+    detailed_trace = {
+        "gate": _trace_serialize(result.gate),
+        "reformat": _trace_serialize(result.reformat),
+        "structure": _trace_serialize(result.structure),
+        "slots": _trace_serialize(result.slots),
+        "pool": [_trace_serialize(p) for p in result.pool],
+        "router": _trace_serialize(result.router_decision),
+        "filled_shape": filled_shape_dict,
+        "synthesis": synthesis_dict,
+    }
+
+    eval_result = None
+    if run_eval and must_facts:
+        from app.services.fact_checker import check_facts
+        chunks = [
+            {"chunk_id": c.get("chunk_id"), "text": c.get("text")}
+            for c in (contract_dict.get("chunks") or [])
+        ]
+        verdict = await check_facts(
+            query=query, must_facts=must_facts, chunks=chunks,
+            answer=None, stage="rag_eval_adjudicate",
+        )
+        eval_result = {
+            "coverage": getattr(verdict, "coverage", None),
+            "facts": [
+                {"fact": getattr(v, "fact", "?"), "support": v.support, "in_chunk": v.support >= 0.5}
+                for v in (getattr(verdict, "verdicts", None) or [])
+            ],
+            "note": ("recall-only: must_facts vs retrieved chunks. No synthesized answer "
+                     "text exists outside Chat, so answer-coverage/groundedness can't be "
+                     "graded from this endpoint."),
+        }
+
+    return {
+        "query": query,
+        "forced_strategy": forced_strategy,
+        "emits": emits,
+        "telemetry": telemetry,
+        "detailed_trace": detailed_trace,
+        "eval": eval_result,
+    }
+
+
+@app.post("/admin/trace-explorer/run")
+async def trace_explorer_run(
+    body: TraceExplorerRequest = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Run one query through the real pipeline and return emits/telemetry/
+    detailed_trace. See module comment above for the 3-tier contract."""
+    if not (body.query and body.query.strip()):
+        raise HTTPException(status_code=400, detail="query is required")
+    return await _run_trace_for_query(
+        db, body.query.strip(), body.forced_strategy, body.caller_mode,
+        body.must_facts, body.run_eval, body.force_fanout_queries,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bank runner (2026-07-29) -- run every query in an eval bank (default
+# eval/queries_cmhc.yaml, 22 queries) through the Trace Explorer's real
+# pipeline call, one forced strategy at a time, so Ananth can go question by
+# question and see the SAME 3-tier trace as a single manual run, without
+# hand-running 22 separate requests. In-process asyncio background job +
+# polling, same shape as /admin/nightly/run's start/status pattern elsewhere
+# in this file, just simpler (no thread, no on-disk run history -- this is
+# throwaway per-session comparison data, not a persisted pipeline run).
+# ---------------------------------------------------------------------------
+_BANK_JOBS: dict[str, dict] = {}
+_BANK_PATH_DEFAULT = "eval/queries_cmhc.yaml"
+
+
+class BankRunRequest(BaseModel):
+    forced_strategy: Optional[str] = None
+    caller_mode: Optional[str] = "chat.default"
+    bank_path: Optional[str] = None
+    # DEBUG experiment (2026-07-29): auto-decompose each query into one
+    # sub-query per must_fact (deterministic template, no extra LLM call)
+    # and force FAN_OUT with them -- tests whether decomposition recovers
+    # facts a single compound query misses, across the whole bank at once.
+    # Cheats by reading must_facts (not available to real Chat callers) --
+    # an upper-bound experiment only, NOT what should actually ship.
+    auto_fanout_from_facts: bool = False
+    # The REAL, production-viable decomposition mechanism (2026-07-29):
+    # one LLM call sees ONLY the query (no must_facts, no answer key) and
+    # decides for itself whether the question needs decomposing into
+    # multiple targeted sub-questions -- see _decompose_query_llm below.
+    auto_fanout_llm: bool = False
+    # Corpus-grounded decomposition (2026-07-29, Ananth's preferred
+    # direction over the LLM version): no LLM call at all -- finds tags
+    # that actually co-occur with Gate's matched codes on real chunks,
+    # weighted by each tag's own corpus-wide selectivity so rare/relevant
+    # co-occurring tags win over common background-noise ones. See
+    # _decompose_query_corpus below.
+    auto_fanout_corpus: bool = False
+
+
+_DECOMPOSE_SYSTEM_PROMPT = (
+    "You are analyzing a payor-policy/healthcare billing question to identify what a "
+    "COMPLETE, expert-level answer would need to address. Do NOT answer the question "
+    "and do NOT judge whether the question 'looks compound' from its phrasing -- "
+    "instead, think like a domain expert: what are the distinct DIMENSIONS (facets/"
+    "categories of information) a thorough, correct answer would need to cover? For "
+    "payor-policy/billing questions these often include things like: coverage status, "
+    "the specific procedure/billing code involved, delivery modality or format "
+    "requirements, place-of-service or submission requirements, applicable timeframes "
+    "(which frequently differ by network/participation status), and which payer/plan "
+    "applies. A seemingly simple one-sentence question can still have multiple real "
+    "dimensions -- decide based on domain substance, not sentence structure. If the "
+    "question genuinely has only one dimension (a simple atomic lookup, e.g. 'who is "
+    "the payer'), that's fine too -- don't force multiple dimensions where none exist. "
+    "For each dimension you identify, write one line in this exact format:\n"
+    "<dimension label> :: <a standalone, fully-specified search query targeting "
+    "exactly that dimension -- repeat any needed context like the payer name, since "
+    "each query will be searched independently with no shared context>\n"
+    "Output ONLY these lines, no numbering, no explanation, no other text."
+)
+
+
+async def _decompose_query_llm(query: str) -> list[str]:
+    """The real, production-viable decomposition mechanism: ONE LLM call sees
+    only the query itself (no must_facts, no answer key) and identifies the
+    DIMENSIONS a complete expert answer would need (not "is this compound" --
+    that framing failed live: the model judged surface phrasing and refused
+    to decompose even queries we independently confirmed need it, e.g. a
+    telehealth coverage question that reads as simple but actually needs
+    CPT-code + modality + network-status facts). Asking for dimensions
+    instead leans on the model's own domain knowledge rather than its
+    linguistic judgment of the question's surface form.
+    Returns [query] unchanged (a no-op) if the model doesn't decompose it,
+    on any parse ambiguity, or if the call fails -- decomposition is
+    strictly additive, never a reason to fail the whole request.
+    Reuses the 'rag_lexicon_triage' stage (registered, currently unused by
+    any other caller in this repo -- confirmed via grep) rather than
+    inventing a new stage name, which would need registering on mobius-
+    chat's _SKILL_LLM_ALLOWED_STAGES too (a separate repo) before any call
+    here could succeed."""
+    from app.services.llm_manager_client import generate, LLMManagerError
+    try:
+        text, _usage = await generate(
+            system=_DECOMPOSE_SYSTEM_PROMPT, user=query,
+            stage="rag_lexicon_triage", max_tokens=500,
+        )
+    except LLMManagerError as exc:
+        logging.getLogger("app.main").warning("query decomposition failed, using original query: %s", exc)
+        return [query]
+    sub_queries = []
+    for line in text.strip().splitlines():
+        line = line.strip(" -•\t")
+        if not line:
+            continue
+        # "<dimension label> :: <search query>" -- take the query half; a
+        # line with no "::" (model didn't follow the format) is used as-is.
+        sub_queries.append(line.split("::", 1)[1].strip() if "::" in line else line)
+    sub_queries = [q for q in sub_queries if q][:4]
+    return sub_queries if sub_queries else [query]
+
+
+async def _decompose_query_corpus(db: AsyncSession, gate, query: str, top_n: int = 3) -> list[str]:
+    """Debug-tool wrapper around the REAL production function
+    (`app.services.retriever.shape.reformat._decompose_query_corpus`, now
+    live in the EXACT-contour dispatch path as of 2026-07-29) -- kept here
+    only to preserve this tool's existing `list[str]` call shape for the
+    bank runner. Does not reimplement the logic; the real function is the
+    single source of truth for both production and this trace tool."""
+    from app.services.retriever.shape.reformat import (
+        _decompose_query_corpus as _real_decompose,
+    )
+    result = await _real_decompose(db, gate)
+    if result is None:
+        return [query]
+    sub_queries, _themes = result
+    return sub_queries
+
+
+def _bank_run_json_path(job_id: str) -> str:
+    return _os_path_join_root(f"eval/artifacts/trace_explorer_bank_{job_id}.json")
+
+
+def _persist_bank_state(job_id: str, state: dict):
+    """Write the run's full state (summaries + per-question results) to
+    eval/artifacts/ -- same convention as this repo's other forced-bank
+    scripts (forced_filler_bank_run.json etc). Written after EVERY query,
+    not just at the end, so a mid-run redeploy/restart (this session's own
+    in-memory _BANK_JOBS is otherwise wiped by exactly that) doesn't lose
+    whatever already completed. Best-effort: a write failure is logged,
+    never raised -- the in-memory job must keep running regardless."""
+    import json as _json
+    try:
+        path = _bank_run_json_path(job_id)
+        payload = {
+            "job_id": job_id, "forced_strategy": state["forced_strategy"],
+            "status": state["status"], "total": state["total"], "done": state["done"],
+            "started_at": state["started_at"], "summaries": state["summaries"],
+            "results": state["results"],
+        }
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            _json.dump(payload, f, indent=1, default=str)
+        import os as _os
+        _os.replace(tmp_path, path)
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger("app.main").warning("bank run %s: failed to persist json: %s", job_id, exc)
+
+
+async def _run_bank_job(
+    job_id: str, forced_strategy: str | None, caller_mode: str | None, bank_path: str,
+    auto_fanout_from_facts: bool = False, auto_fanout_llm: bool = False,
+    auto_fanout_corpus: bool = False,
+):
+    import yaml as _yaml
+    from app.database import AsyncSessionLocal
+    from app.services.retriever.shape.gate import run_gate
+    state = _BANK_JOBS[job_id]
+    try:
+        bank_file = _os_path_join_root(bank_path)
+        with open(bank_file, encoding="utf-8") as f:
+            bank = _yaml.safe_load(f)
+        queries = bank.get("queries", [])
+        state["total"] = len(queries)
+        async with AsyncSessionLocal() as db:
+            for q in queries:
+                qid = q.get("id", "?")
+                t0 = time.monotonic()
+                try:
+                    force_fanout_queries = None
+                    if auto_fanout_from_facts and q.get("must_facts"):
+                        force_fanout_queries = [
+                            f"{q['query']} (focus specifically on: {fact})"
+                            for fact in q["must_facts"]
+                        ]
+                    elif auto_fanout_llm:
+                        decomposed = await _decompose_query_llm(q["query"])
+                        if len(decomposed) > 1:
+                            force_fanout_queries = decomposed
+                    elif auto_fanout_corpus:
+                        gate = await run_gate(db, q["query"])
+                        decomposed = await _decompose_query_corpus(db, gate, q["query"])
+                        if len(decomposed) > 1:
+                            force_fanout_queries = decomposed
+                    result = await _run_trace_for_query(
+                        db, q["query"], forced_strategy, caller_mode,
+                        q.get("must_facts"), run_eval=True,
+                        force_fanout_queries=force_fanout_queries,
+                    )
+                    state["results"][qid] = result
+                    ev = result.get("eval") or {}
+                    state["summaries"].append({
+                        "id": qid, "query": q["query"],
+                        "persona": q.get("persona"), "expected_strategy": (q.get("expected") or {}).get("strategy"),
+                        "must_facts": q.get("must_facts"),
+                        "status": "ok",
+                        "recall": ev.get("coverage"),
+                        "n_facts_hit": sum(1 for f in (ev.get("facts") or []) if f.get("in_chunk")),
+                        "n_facts_total": len(ev.get("facts") or []),
+                        "chunks_out": len((result.get("emits") or {}).get("chunks") or []),
+                        "wall_ms": int((time.monotonic() - t0) * 1000),
+                        "decomposed_into": force_fanout_queries,
+                    })
+                except Exception as exc:  # noqa: BLE001 -- one bad query must not kill the bank run
+                    logging.getLogger("app.main").warning("bank run: query %s failed: %s", qid, exc)
+                    state["summaries"].append({
+                        "id": qid, "query": q["query"], "status": "error", "error": str(exc)[:300],
+                        "wall_ms": int((time.monotonic() - t0) * 1000),
+                    })
+                    # A transient DB blip (dropped connection, etc.) leaves this
+                    # shared session's transaction in a failed state -- every
+                    # subsequent query in the loop then fails immediately with
+                    # "Can't reconnect until invalid transaction is rolled back",
+                    # cascading one hiccup into a wall of unrelated errors for
+                    # the rest of the bank (confirmed live 2026-07-29: cmhc013's
+                    # real ConnectionDoesNotExistError masked as 10 identical
+                    # downstream failures). Roll back so the session recovers.
+                    try:
+                        await db.rollback()
+                    except Exception:  # noqa: BLE001 -- best-effort recovery
+                        pass
+                state["done"] += 1
+                _persist_bank_state(job_id, state)
+        state["status"] = "done"
+    except Exception as exc:  # noqa: BLE001
+        state["status"] = "error"
+        state["error"] = str(exc)[:500]
+    finally:
+        _persist_bank_state(job_id, state)
+
+
+def _os_path_join_root(rel_path: str) -> str:
+    import os as _os
+    root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    return _os.path.join(root, rel_path)
+
+
+@app.post("/admin/trace-explorer/run-bank")
+async def trace_explorer_run_bank(body: BankRunRequest = Body(...)):
+    """Kick off a full eval-bank run in the background; poll with
+    GET /admin/trace-explorer/run-bank/status?job_id=..."""
+    import uuid
+    job_id = uuid.uuid4().hex[:12]
+    _BANK_JOBS[job_id] = {
+        "status": "running", "total": 0, "done": 0, "summaries": [], "results": {},
+        "forced_strategy": body.forced_strategy, "started_at": time.monotonic(),
+    }
+    asyncio.create_task(_run_bank_job(
+        job_id, body.forced_strategy, body.caller_mode, body.bank_path or _BANK_PATH_DEFAULT,
+        auto_fanout_from_facts=body.auto_fanout_from_facts, auto_fanout_llm=body.auto_fanout_llm,
+        auto_fanout_corpus=body.auto_fanout_corpus,
+    ))
+    return {"job_id": job_id}
+
+
+def _load_bank_state_from_disk(job_id: str) -> dict | None:
+    """Fallback for a job_id whose in-memory _BANK_JOBS entry is gone --
+    real gap found live (2026-07-29, Ananth's catch): _BANK_JOBS is a
+    plain process-local dict, wiped by every server restart, even though
+    _persist_bank_state() already writes the full state (summaries +
+    per-query results) to disk after EVERY query specifically so a job
+    survives a restart. The status/result endpoints just never read it
+    back. Without this, "watch a job from before the last restart" (the
+    self-serve point of this whole tool) silently 404s."""
+    import json as _json
+    import os as _os
+    path = _bank_run_json_path(job_id)
+    if not _os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        return _json.load(f)
+
+
+@app.get("/admin/trace-explorer/run-bank/status")
+async def trace_explorer_run_bank_status(job_id: str):
+    state = _BANK_JOBS.get(job_id) or _load_bank_state_from_disk(job_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="unknown job_id")
+    return {
+        "status": state["status"], "total": state["total"], "done": state["done"],
+        "summaries": state["summaries"], "forced_strategy": state["forced_strategy"],
+        "error": state.get("error"),
+    }
+
+
+@app.get("/admin/trace-explorer/run-bank/result")
+async def trace_explorer_run_bank_result(job_id: str, qid: str):
+    state = _BANK_JOBS.get(job_id) or _load_bank_state_from_disk(job_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="unknown job_id")
+    result = state["results"].get(qid)
+    if result is None:
+        raise HTTPException(status_code=404, detail="unknown qid or not finished yet")
+    return result
+
+
+@app.get("/trace-explorer", response_class=HTMLResponse)
+async def trace_explorer_page():
+    """Serves the self-contained Trace Explorer UI (static file, no build
+    step). Deliberately NOT under /admin/ -- same precedent as /dev/mint-token
+    above: the page shell itself reveals no data, so it's safe to be
+    reachable without a token. The page's own JS prompts for the admin key
+    and attaches it as X-Admin-Key on its fetch() calls to the actual
+    data-returning endpoint (POST /admin/trace-explorer/run), which IS
+    gated by the normal /admin/* auth middleware."""
+    import os as _os
+    path = _os.path.join(_os.path.dirname(__file__), "static_admin", "trace_explorer.html")
+    with open(path, encoding="utf-8") as f:
+        return HTMLResponse(content=f.read())
 
 
 @app.get("/documents/{document_id}/chunking/stream")

@@ -75,6 +75,7 @@ def fill_shape_uniform_topn(
                     is_neighbor=candidate.is_neighbor,
                     original_score=candidate.bm25_score,
                     assignment_reason="score_rank",
+                    filler_strategy="uniform_topn",
                 )
             )
             chunk_ids_assigned.add(candidate.chunk_id)

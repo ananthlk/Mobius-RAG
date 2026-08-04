@@ -15,7 +15,6 @@ from app.services.retriever.fillers import filler_c
 from app.services.retriever.fillers.filler_c import (
     CitationCandidate,
     ValidatedCitation,
-    _LocateResult,
     _chunk_from_citation,
     _coerce_citation,
     _overlap_coefficient,
@@ -260,132 +259,111 @@ class _FakeDB:
 
 
 # ---------------------------------------------------------------------------
-# Regression test: quote-verification gate (real bug found via a live call
-# 2026-07-23 -- by_user_query BM25 within doc returned a non-empty but
-# topically wrong chunk; ANOTHER real live call after the fix confirmed the
-# fallback correctly finds the right one instead. See filler_c.py's
-# _run_llm_retrieval / _quote_present for the fix itself; this reproduces
-# the exact shape deterministically without needing a live DB/LLM per test run.
+# Direct-relay design (2026-08-03): _run_llm_retrieval no longer locates or
+# verifies a citation against our own corpus at all -- rag_strategy_c_validate
+# is locked to Perplexity (sonar-pro), whose citations are independently
+# live-fetched, not parametric LLM memory. Requiring them to ALSO exist in
+# our own (necessarily incomplete) ingested corpus was discarding correct,
+# WebFetch-verified answers just because our ingestion hadn't caught up
+# (confirmed live on cmhc001). The old locate/verify pipeline
+# (_locate_citation/_retrieve_in_doc_by_query/_retrieve_at_section_page/
+# _quote_present) still exists but is no longer called from here.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_run_llm_retrieval_rejects_topically_wrong_user_query_match(monkeypatch):
-    wrong_topic_text = (
-        "To send claims electronically, all EDI claims must first be forwarded to a clearinghouse."
-    )
-    correct_text = "Claims must be received within 365 calendar days from the date of service."
-    quote = correct_text  # LLM's cited quote matches the correct chunk verbatim
+async def test_run_llm_retrieval_relays_citation_with_quote_directly(monkeypatch):
+    quote = "Claims must be received within 365 calendar days from the date of service."
 
     async def fake_ask_llm(query, *, correlation_id):
         return (
             "Sunshine Health claims must be received within 365 calendar days.",
             {"citations": [{
                 "document_title": "Sunshine Health Provider Manual",
+                "payer": "Sunshine Health",
                 "page": 122, "section": "10.1.1 Timely Filing",
-                "url": None, "quote": quote,
+                "url": "https://example.com/manual.pdf", "quote": quote,
             }]},
             {"llm_ms": 1, "llm_meta": {"model": "test"}, "parse_error": False},
         )
 
-    async def fake_locate_citation(db, cand):
-        return _LocateResult(
-            document_id="doc-1", display_name="Sunshine Health Provider Manual",
-            sitemap_kind="doc_ingested", locate_method="title_strict(overlap=1.00)",
-        )
-
-    async def fake_retrieve_in_doc_by_query(db, document_id, user_query, section):
-        # Simulates the real observed failure: BM25-by-raw-query returns a
-        # non-empty but WRONG chunk (never tries section_topic because this
-        # already returned something, matching the real function's own
-        # early-return-on-first-hit behavior).
-        return wrong_topic_text, 122, "by_user_query"
-
-    async def fake_retrieve_at_section_page(db, document_id, page, section, quote_arg):
-        # The section/quote-anchored fallback chain finds the RIGHT chunk.
-        return correct_text, 122, "by_quote_tokens"
-
     monkeypatch.setattr(filler_c, "_ask_llm", fake_ask_llm)
-    monkeypatch.setattr(filler_c, "_locate_citation", fake_locate_citation)
-    monkeypatch.setattr(filler_c, "_retrieve_in_doc_by_query", fake_retrieve_in_doc_by_query)
-    monkeypatch.setattr(filler_c, "_retrieve_at_section_page", fake_retrieve_at_section_page)
 
     answer, citations, telemetry = await _run_llm_retrieval(_FakeDB(), "what is the timely filing deadline", agent_id="test")
 
     assert len(citations) == 1
     v = citations[0]
-    # Must have fallen through to the verified chunk, NOT accepted the
-    # topically-wrong non-empty result from by_user_query.
-    assert v.matched_chunk_text == correct_text
-    assert v.status == "retrieved"
-    assert v.quote_verified is True  # per Eval's tri-state ruling, synthesis-module-spec.md §9.1
+    # Relayed as-is (payer-prefixed, see the dedicated payer-prefix test
+    # below) -- no corpus locate/verify step, no document_id (external).
+    assert v.status == "retrieved_external"
+    assert v.matched_chunk_text == f"[Sunshine Health] {quote}"
+    assert v.discovered_source_url == "https://example.com/manual.pdf"
+    assert v.document_id is None
+    assert v.locate_method == "llm_direct_relay"
 
 
 @pytest.mark.asyncio
-async def test_run_llm_retrieval_downgrades_status_when_nothing_verifies(monkeypatch):
-    quote = "a very specific claim the LLM cited"
+async def test_run_llm_retrieval_no_quote_given_is_not_relayed(monkeypatch):
+    """A citation with no quote at all has nothing to relay -- must be
+    dropped (doc_not_found), not served as an empty/fabricated chunk."""
 
     async def fake_ask_llm(query, *, correlation_id):
         return "answer", {"citations": [{
-            "document_title": "Some Manual", "page": 1, "section": "1.1",
-            "url": None, "quote": quote,
+            "document_title": "Some Manual", "payer": "Sunshine Health",
+            "page": 1, "section": None, "url": None, "quote": None,
         }]}, {"llm_ms": 1, "llm_meta": {}, "parse_error": False}
 
-    async def fake_locate_citation(db, cand):
-        return _LocateResult(document_id="doc-1", sitemap_kind="doc_ingested", locate_method="title_strict(overlap=1.00)")
-
-    async def fake_retrieve_in_doc_by_query(db, document_id, user_query, section):
-        return "completely unrelated content", 1, "by_user_query"
-
-    async def fake_retrieve_at_section_page(db, document_id, page, section, quote_arg):
-        return "still completely unrelated content", 1, "by_section"
-
     monkeypatch.setattr(filler_c, "_ask_llm", fake_ask_llm)
-    monkeypatch.setattr(filler_c, "_locate_citation", fake_locate_citation)
-    monkeypatch.setattr(filler_c, "_retrieve_in_doc_by_query", fake_retrieve_in_doc_by_query)
-    monkeypatch.setattr(filler_c, "_retrieve_at_section_page", fake_retrieve_at_section_page)
 
     answer, citations, telemetry = await _run_llm_retrieval(_FakeDB(), "some query", agent_id="test")
 
     v = citations[0]
-    # Neither attempt contained the quote -- must NOT silently claim
-    # "retrieved" for unverified content.
-    assert v.status == "doc_found_section_missing"
-    assert "not found" in v.notes.lower()
-    assert v.quote_verified is False  # given-but-not-matched, distinct from no-quote-given
+    assert v.status == "doc_not_found"
+    assert _chunk_from_citation(v) is None  # no usable chunk text
 
 
 @pytest.mark.asyncio
-async def test_run_llm_retrieval_no_quote_given_yields_none_not_false(monkeypatch):
-    """The tri-state's whole point: a citation with no quote at all must read
-    as quote_verified=None ("nothing was checked"), NOT False ("checked and
-    failed") -- collapsing these was exactly the gap Eval's ruling caught."""
+async def test_run_llm_retrieval_prefixes_payer_onto_relayed_text(monkeypatch):
+    """The relayed chunk text is just the isolated quote, which rarely
+    restates the payer by name -- must be prefixed so must_facts like
+    'Sunshine Health is the payer' can be graded from the chunk alone."""
 
     async def fake_ask_llm(query, *, correlation_id):
         return "answer", {"citations": [{
-            "document_title": "Some Manual", "page": 1, "section": None,
-            "url": None, "quote": None,  # no quote supplied at all
+            "document_title": "Manual", "payer": "Sunshine Health",
+            "page": 1, "section": None, "url": "https://example.com/x",
+            "quote": "within 180 days of the date of service",
         }]}, {"llm_ms": 1, "llm_meta": {}, "parse_error": False}
 
-    async def fake_locate_citation(db, cand):
-        return _LocateResult(document_id="doc-1", sitemap_kind="doc_ingested", locate_method="title_strict(overlap=1.00)")
-
-    async def fake_retrieve_in_doc_by_query(db, document_id, user_query, section):
-        return "whatever chunk text was found", 1, "by_user_query"
-
-    async def fake_retrieve_at_section_page(db, document_id, page, section, quote_arg):
-        return None, None, ""
-
     monkeypatch.setattr(filler_c, "_ask_llm", fake_ask_llm)
-    monkeypatch.setattr(filler_c, "_locate_citation", fake_locate_citation)
-    monkeypatch.setattr(filler_c, "_retrieve_in_doc_by_query", fake_retrieve_in_doc_by_query)
-    monkeypatch.setattr(filler_c, "_retrieve_at_section_page", fake_retrieve_at_section_page)
 
     answer, citations, telemetry = await _run_llm_retrieval(_FakeDB(), "some query", agent_id="test")
 
-    v = citations[0]
-    assert v.status == "retrieved"  # unchanged behavior -- nothing to verify against
-    assert v.quote_verified is None  # NOT False -- this is the distinction Synthesis needs
+    assert citations[0].matched_chunk_text == "[Sunshine Health] within 180 days of the date of service"
+
+
+@pytest.mark.asyncio
+async def test_chunk_from_citation_hashes_url_and_quote_together(monkeypatch):
+    """Real bug fixed 2026-08-03: chunk_id was hash(url) ALONE, so every
+    citation from the same page collapsed to the SAME id and a downstream
+    dedup silently kept only 1 of N distinct quotes per source (confirmed
+    live: 10 real citations -> only 2 survived). Must be hash(url, quote)."""
+
+    async def fake_ask_llm(query, *, correlation_id):
+        return "answer", {"citations": [
+            {"document_title": "Manual", "payer": "Sunshine Health", "url": "https://example.com/x",
+             "quote": "First distinct fact from the same page."},
+            {"document_title": "Manual", "payer": "Sunshine Health", "url": "https://example.com/x",
+             "quote": "Second, completely different fact from the same page."},
+        ]}, {"llm_ms": 1, "llm_meta": {}, "parse_error": False}
+
+    monkeypatch.setattr(filler_c, "_ask_llm", fake_ask_llm)
+
+    answer, citations, telemetry = await _run_llm_retrieval(_FakeDB(), "some query", agent_id="test")
+    chunks = [_chunk_from_citation(v) for v in citations]
+
+    assert len(citations) == 2
+    assert chunks[0].chunk_id != chunks[1].chunk_id
 
 
 @pytest.mark.asyncio

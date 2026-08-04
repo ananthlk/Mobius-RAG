@@ -115,7 +115,18 @@ logger = logging.getLogger(__name__)
 # neighbor-completion eligibility (_complete_neighbors) below -- same
 # treatment as external chunks (no real corpus row to expand from or look a
 # name up against), NOT folded into either bucket.
-_NON_CORPUS_SOURCE_TYPES = {"fact_store"}
+#
+# "llm_hinted_retrieval" added 2026-08-03 (Retriever, live crash caught
+# during filler_c prompt work): SAME bug class as fact_store above --
+# filler_c._chunk_from_citation sets a real document_id (v.document_id, a
+# genuine documents.id) but a SYNTHETIC chunk_id
+# (f"llm-{document_id}-{page}-{hash}", never a rag_published_embeddings
+# row) for its "retrieved"/"doc_found_section_missing" statuses. The old
+# "document_id truthy, url falsy => internal" check let these through into
+# the CAST(:ids AS uuid[]) lookup, crashing with
+# InvalidTextRepresentationError and poisoning the DB transaction for the
+# rest of that request.
+_NON_CORPUS_SOURCE_TYPES = {"fact_store", "llm_hinted_retrieval"}
 
 # Source types that count as "authoritative" for Chat's grounding badge
 # (_infer_authority). fact_store hits are a certified, pre-verified fact
@@ -126,6 +137,22 @@ _NON_CORPUS_SOURCE_TYPES = {"fact_store"}
 # external" -- fail-closed for any future source_type this module hasn't
 # seen yet, consistent with `verified`'s and `document_status`'s posture.
 _AUTHORITATIVE_SOURCE_TYPES = {"internal", "fact_store"}
+
+# authority_level values that count as "authoritative" once we DO consume the
+# precise signal (2026-07-27 fix, see _infer_authority below). Includes the
+# DB's internal taxonomy (contract_source_of_truth/payer_policy/payer_manual
+# = official payer policy text; fee_schedule/operational_suggested = still
+# curated internal corpus content, treated authoritative here — a judgment
+# call, not load-bearing calibration, flag to Eval if this tier split ever
+# needs to be finer) plus filler_d's "payer_domain_match" (a web result is
+# only authoritative if it's actually on the payer's own site — Ananth,
+# 2026-07-27 — general web search finding something ABOUT a payer elsewhere
+# is a different, weaker claim). "fyi_not_citable" and "" are deliberately
+# excluded — not authoritative.
+_AUTHORITATIVE_AUTHORITY_LEVELS = {
+    "contract_source_of_truth", "payer_policy", "payer_manual",
+    "fee_schedule", "operational_suggested", "payer_domain_match",
+}
 
 # assignment_reason values that mean "this chunk came from filler c's LLM
 # retrieval" -- the ONLY chunks where `quote_verified` carries meaning.
@@ -175,6 +202,22 @@ def _derive_strategy(chunk: FilledChunk) -> str:
     return _STRATEGY_BY_ASSIGNMENT_REASON.get(chunk.assignment_reason, _UNKNOWN_STRATEGY)
 
 
+def _chunk_priority_score(c: FilledChunk) -> float:
+    """The filler's real final ranking signal for this chunk: its own
+    composite `rerank_score` when the filler computed one (e.g. filler_a's
+    bm25+authority+tag_coverage+length+meta_boost fusion), falling back to
+    `original_score` (raw primary-strategy signal) for fillers that don't
+    fuse multiple signals -- their ranking IS original_score, so there's
+    nothing to lose by falling back. Using original_score unconditionally
+    here was a real bug (2026-07-29): it silently discarded every
+    non-bm25 signal a filler used to rank/select a chunk, so a chunk a
+    filler correctly promoted via authority/meta_boost/etc. could still
+    get demoted or trimmed away downstream based on its raw bm25 alone."""
+    if c.rerank_score is not None:
+        return c.rerank_score
+    return c.original_score if c.original_score is not None else 0.0
+
+
 def _rerank_slot_chunks(chunks: list[FilledChunk]) -> list[FilledChunk]:
     """Final per-slot ordering: primary matches first (by score, best
     first), their neighbor context after. Slots are semantically distinct
@@ -186,7 +229,7 @@ def _rerank_slot_chunks(chunks: list[FilledChunk]) -> list[FilledChunk]:
     """
     return sorted(
         chunks,
-        key=lambda c: (c.is_neighbor, -(c.original_score if c.original_score is not None else 0.0)),
+        key=lambda c: (c.is_neighbor, -_chunk_priority_score(c)),
     )
 
 
@@ -302,23 +345,33 @@ def _humanize_url_path(url: str) -> str | None:
 
 def _infer_authority(chunk: FilledChunk, source_type: str) -> str:
     """Chat's SourceRef.authority (registry.py:60) -- the grounding badge
-    computes "grounded" when every source is authoritative, and nothing
-    upstream carries this forward for chunks that pass through Synthesis
-    (Chat's sign-off gap, 2026-07-24). Planned content is never
-    authoritative regardless of source_type -- it isn't live policy yet,
-    same reasoning as the reality-gating rule itself. Coarser than Pool's
-    own per-candidate `authority_level` (a genuinely more precise signal
-    that exists upstream but is dropped before FilledChunk -- flagged to
-    Retriever as a separate, deeper gap, not fixed here).
+    computes "grounded" when every source is authoritative.
 
-    fact_store included in `_AUTHORITATIVE_SOURCE_TYPES` -- a certified,
-    pre-verified Payor Platform fact, not a lower-confidence web result;
-    the earlier `source_type == "internal"` check would have mislabeled it
-    "external" (Retriever's finding, 2026-07-24, same root cause as the
-    name-lookup/neighbor-completion crash below).
+    FIXED 2026-07-27 (Ananth): this used to be coarser than Pool's own
+    per-candidate `authority_level` -- a genuinely more precise signal that
+    was computed upstream (a/b from the DB's document_authority_level, d
+    from payer-domain-match, s always "contract_source_of_truth") and
+    threaded onto FilledChunk, but silently dropped here in favor of a bare
+    source_type check (flagged 2026-07-24, not fixed until now). Precedence:
+    `authority_level` when present is the precise signal and wins outright;
+    only falls back to the coarser source_type allowlist when it's None/''
+    (c today; a/b/d chunks that genuinely have no DB authority row).
+
+    Planned content is never authoritative regardless of either signal --
+    it isn't live policy yet, same reasoning as the reality-gating rule
+    itself; checked first so it can't be overridden by a stale
+    authority_level on a since-unpublished document.
+
+    fact_store included in `_AUTHORITATIVE_SOURCE_TYPES` (the fallback path)
+    -- a certified, pre-verified Payor Platform fact, not a lower-confidence
+    web result; the earlier `source_type == "internal"` check would have
+    mislabeled it "external" (Retriever's finding, 2026-07-24, same root
+    cause as the name-lookup/neighbor-completion crash below).
     """
     if chunk.document_status == "planned":
         return "planned"
+    if chunk.authority_level:
+        return "authoritative" if chunk.authority_level in _AUTHORITATIVE_AUTHORITY_LEVELS else "external"
     return "authoritative" if source_type in _AUTHORITATIVE_SOURCE_TYPES else "external"
 
 
@@ -462,24 +515,30 @@ def _trim_to_token_budget(
     a live incident (a ~473K-char prompt exhausting Vertex's per-minute
     token quota). Drops lowest-priority citations (neighbors first, since
     they're supplementary context, not primary matches; then lowest
-    original_score) from the END until the total estimated token count
-    fits. Mutates `citations` and each CompiledSlot's citation list in
-    place; re-indexes the survivors so `index` stays contiguous (Chat
-    cites by index). Returns the number of citations dropped.
+    priority score, see _chunk_priority_score) from the END until the
+    total estimated token count fits. Mutates `citations` and each
+    CompiledSlot's citation list in place; re-indexes the survivors so
+    `index` stays contiguous (Chat cites by index). Returns the number of
+    citations dropped.
     """
     total = sum(_estimate_tokens(c.text) for c in citations)
     if total <= token_budget:
         return 0
 
-    # Trim order: neighbors first (is_neighbor=True), then lowest
-    # original_score among remaining -- primary matches with a real score
-    # are the last thing to go. Ascending sort, NOT reversed: neighbors
-    # get key-first-element 0 (< non-neighbors' 1), and within a group
-    # ascending original_score puts the weakest evidence first -- both
+    # Trim order: neighbors first (is_neighbor=True), then lowest priority
+    # score among remaining -- primary matches with real evidence are the
+    # last thing to go. Ascending sort, NOT reversed: neighbors get
+    # key-first-element 0 (< non-neighbors' 1), and within a group
+    # ascending priority score puts the weakest evidence first -- both
     # exactly the "drop this first" order the loop below walks in.
+    # Uses rerank_score (the filler's own composite ranking) when present,
+    # not original_score alone -- see _chunk_priority_score's docstring for
+    # the real bug this fixes (2026-07-29): trimming by raw bm25 could
+    # discard exactly the chunks a filler had correctly promoted via
+    # authority/meta_boost/etc.
     trimmable_order = sorted(
         citations,
-        key=lambda c: (0 if c.is_neighbor else 1, c.original_score if c.original_score is not None else 0.0),
+        key=lambda c: (0 if c.is_neighbor else 1, _chunk_priority_score(c)),
     )
     to_drop: set[int] = set()
     for c in trimmable_order:
@@ -604,6 +663,7 @@ async def compile_synthesis(
     fusion_dropped_redundant = 0
     fusion_dropped_budget = 0
     fusion_redundant_detected_not_dropped = 0
+    fusion_content_merged = 0
     for slot in filled_shape.slots:
         # No special-casing for an empty slot -- rrf_fuse({}), mmr_select([]),
         # and derive_coverage_diagnostic all handle empty input correctly
@@ -619,6 +679,17 @@ async def compile_synthesis(
             strategy_chunks[:] = _rerank_slot_chunks(strategy_chunks)
 
         fused = rrf_fuse(grouped_by_strategy)
+        # rrf_fuse folds chunks sharing a content-identity key (content_keys()
+        # in chunk_identity.py -- body-text-prefix/content_sha) into one
+        # canonical FusedChunk, even within a single strategy group (e.g. two
+        # ingested copies of the same document repeating a paragraph). This is
+        # correct fusion behavior, not a bug -- but it's a drop the
+        # reconciliation guard below didn't know about, distinct from
+        # duplicates_removed (_dedup_cross_slot, a later mechanism) and from
+        # fusion_dropped_redundant/fusion_dropped_budget (mmr_select's
+        # redundancy/budget drops, also later); count it here so the guard's
+        # identity stays honest.
+        fusion_content_merged += sum(len(v) for v in grouped_by_strategy.values()) - len(fused)
 
         if token_budget is not None and per_slot_payload_tokens and total_payload_tokens > 0:
             # Router's ruling (blend-model-design.md): per_slot_payload_tokens
@@ -850,6 +921,8 @@ async def compile_synthesis(
             verified=verified,
             is_neighbor=chunk.is_neighbor,
             original_score=chunk.original_score,
+            rerank_score=chunk.rerank_score,
+            filler_strategy=chunk.filler_strategy,
             slot_id=slot.slot_id,
             slot_semantics=slot.slot_semantics,
         )
@@ -868,7 +941,11 @@ async def compile_synthesis(
     # 2026-07-24 (blend model, retention landing) -- fusion now legitimately
     # drops chunks BEFORE neighbor completion/dedup ever run, so the
     # identity must account for that or this guard would false-positive on
-    # every query. This is a logged signal, not a raised exception --
+    # every query. `fusion_content_merged` added 2026-07-29 (Ananth, live
+    # dev root-cause on the Sunshine Health timely-filing query): rrf_fuse
+    # also silently folds content-identical chunks from separate document
+    # copies within a single strategy group -- a real, legitimate drop this
+    # guard didn't know about until now. This is a logged signal, not a raised exception --
     # telemetry must never break the user's request (established fleet
     # convention) -- but a violation here means a chunk was silently
     # dropped or double-counted somewhere in compilation, exactly the
@@ -876,17 +953,17 @@ async def compile_synthesis(
     # "counter X is the leak."
     expected_chunks_out = (
         chunks_in - fusion_dropped_redundant - fusion_dropped_budget
-        - duplicates_removed + neighbors_added
+        - fusion_content_merged - duplicates_removed + neighbors_added
     )
     if len(citations) != expected_chunks_out:
         logger.error(
             "synthesis: chunk-count reconciliation failed -- chunks_in=%d "
             "fusion_dropped_redundant=%d fusion_dropped_budget=%d "
-            "duplicates_removed=%d neighbors_added=%d expected_chunks_out=%d "
-            "actual_chunks_out=%d -- a chunk was silently dropped or "
-            "double-counted somewhere in compilation",
+            "fusion_content_merged=%d duplicates_removed=%d neighbors_added=%d "
+            "expected_chunks_out=%d actual_chunks_out=%d -- a chunk was "
+            "silently dropped or double-counted somewhere in compilation",
             chunks_in, fusion_dropped_redundant, fusion_dropped_budget,
-            duplicates_removed, neighbors_added,
+            fusion_content_merged, duplicates_removed, neighbors_added,
             expected_chunks_out, len(citations),
         )
 
@@ -918,6 +995,7 @@ async def compile_synthesis(
         citations_trimmed_for_budget=citations_trimmed,
         fusion_dropped_redundant=fusion_dropped_redundant,
         fusion_dropped_budget=fusion_dropped_budget,
+        fusion_content_merged=fusion_content_merged,
         fusion_redundant_detected_not_dropped=fusion_redundant_detected_not_dropped,
         per_slot_verdict={sid: compiled_slots[sid].verdict for sid in slot_order},
         per_slot_ride_along={sid: compiled_slots[sid].ride_along for sid in slot_order},

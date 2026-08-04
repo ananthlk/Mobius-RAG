@@ -660,6 +660,60 @@ class TestFusionIntegration:
             result.telemetry.chunks_in
             - result.telemetry.fusion_dropped_redundant
             - result.telemetry.fusion_dropped_budget
+            - result.telemetry.fusion_content_merged
+            - result.telemetry.duplicates_removed
+            + result.telemetry.neighbors_added
+        )
+        assert result.telemetry.chunks_out == expected
+
+    @pytest.mark.asyncio
+    async def test_same_strategy_content_identical_chunks_from_two_documents_get_merged_and_counted(self, monkeypatch):
+        """Root-caused live 2026-07-29 (Sunshine Health timely-filing query,
+        dev DB): rrf_fuse's own content-identity merge (chunk_identity.py's
+        content_keys(), body-text match) folds two chunks into one canonical
+        FusedChunk even WITHIN a single strategy group -- e.g. two separately-
+        ingested copies of the same document repeating an identical
+        paragraph. Before this fix, that merge was invisible to every
+        telemetry counter, so the reconciliation guard's identity (which
+        assumed every input chunk became a real neighbor-completion seed)
+        false-alarmed on every run of this query. `fusion_content_merged`
+        must count it and the identity must hold."""
+        async def fake_resolve(db, chunk_ids):
+            return {}
+
+        async def fake_neighbors(db, slot_items):
+            return slot_items, 0, 0
+
+        monkeypatch.setattr(synthesis, "_resolve_document_names", fake_resolve)
+        monkeypatch.setattr(synthesis, "_complete_neighbors", fake_neighbors)
+
+        shared_text = (
+            "To send claims electronically to Sunshine Health, all EDI "
+            "claims must first be forwarded to the clearinghouse"
+        )
+        a_chunk = _chunk(
+            "bf6efa88-b68f-43a6-87d4-14018ba5bbe9", document_id="d9721756-d1b1-4cf4-845b-f44652c5fcf9",
+            text=shared_text, assignment_reason="score_rank",
+        )
+        b_chunk = _chunk(
+            "38d60941-5d11-470a-b5ed-2b84b9063c02", document_id="8fba1cb5-2203-49ca-b381-58ea32c4d86c",
+            text=shared_text, assignment_reason="score_rank",
+        )
+        slot = _slot("s1", [a_chunk, b_chunk])
+        shape = FilledShape(slots=[slot])
+
+        result = await synthesis.compile_synthesis("query", shape, db=None)
+
+        assert result.telemetry.fusion_content_merged == 1
+        assert result.telemetry.duplicates_removed == 0
+        assert result.telemetry.fusion_dropped_redundant == 0
+        assert len(result.citations) == 1
+
+        expected = (
+            result.telemetry.chunks_in
+            - result.telemetry.fusion_dropped_redundant
+            - result.telemetry.fusion_dropped_budget
+            - result.telemetry.fusion_content_merged
             - result.telemetry.duplicates_removed
             + result.telemetry.neighbors_added
         )

@@ -109,6 +109,27 @@ async def run_reformat(db: AsyncSession, gate: GateResult) -> ReformatResult:
 
 async def _dispatch(db: AsyncSession, gate: GateResult) -> ReformatResult:
     if gate.contour == Contour.EXACT:
+        # REVERTED 2026-07-29 (Ananth's direct call, live-trace evidence):
+        # auto-firing _decompose_query_corpus() on every EXACT-contour query
+        # (2026-07-29 earlier today) surfaced too much noise once tested
+        # broadly across the 22-query bank, not just the hand-picked cases
+        # that motivated it -- e.g. cmhc003 ("does Aetna require a referral
+        # for OUTPATIENT behavioral health therapy") decomposed into
+        # "hospital admission" (inpatient -- the OPPOSITE facet), "prior
+        # auth", and "manual updates", none of which are real sub-facts of
+        # the question. The co-occurrence signal finds tags that share a
+        # document with the base topic, which is not the same as finding
+        # genuine compound sub-facts -- confirmed unreliable at broad scale.
+        # _decompose_query_corpus() and its FanoutTheme/Pool-threading
+        # plumbing are left in place (still reachable via the
+        # force_fanout_queries debug override in orchestrator.py, and the
+        # trace-explorer bank runner's auto_fanout_corpus flag) for
+        # continued manual testing, just no longer auto-invoked here.
+        # Real lever going forward per this same investigation: BM25's
+        # cover-density ranking (ts_rank_cd) rewarding repeated matches of
+        # non-discriminating required terms (e.g. payer name) over a single
+        # clear match of the real answer -- see filler_a.py's rerank weight
+        # rebalance (2026-07-29) for the fix in progress on that front.
         return ReformatResult(
             query=gate.query,
             posture=ReformatPosture.PRECISE,
@@ -287,6 +308,189 @@ async def _fetch_lexicon_phrases(db: AsyncSession, codes: list[str]) -> dict[str
         if text_blob:
             out[row["code"]] = text_blob
     return out
+
+
+async def _fetch_lexicon_short_labels(db: AsyncSession, codes: list[str]) -> dict[str, str]:
+    """Short, literal query-friendly label per d-code -- deliberately NOT
+    `_fetch_lexicon_phrases` above, which concatenates the FULL description +
+    every strong_phrase into one paragraph-sized blob meant for
+    embedding-based clustering (that's fine for _fan_out's vector similarity
+    use, wrong for a literal BM25 sub-query string). Confirmed live
+    (2026-07-29): dumping the whole blob into a sub-query diluted BM25 enough
+    that recall stayed flat despite the right themes being selected.
+
+    Two label-quality bugs found + fixed live after that (2026-07-29,
+    Ananth's catch on cmhc022): the ORIGINAL "shortest strong_phrase" rule
+    picked whatever string was fewest characters with zero regard for
+    whether it read as English -- health_care_services.dental's shortest
+    phrase is literally "gum" (from its ['dental', ..., 'gum', 'toothpaste']
+    list), behavioral_health's is the acronym "bh". The underlying CODE
+    selection (selectivity-weighted co-occurrence) was correct -- dental /
+    behavioral health / healthy_start are genuinely EPSDT-adjacent Florida
+    Medicaid child-health domains -- only the label rendering made it look
+    like nonsense. Fixed by preferring the shortest MULTI-WORD phrase (reads
+    as real English, e.g. "dental care" / "mental health") and only falling
+    back to a single word if no multi-word phrase exists for that code.
+    Second bug: a code with NO strong_phrases at all (e.g. d:disputes) fell
+    back to `description.split('.')[0]` -- for a run-on description with no
+    early period, that grabbed the ENTIRE description verbatim as a
+    "label" (confirmed live on cmhc007). Capped at 60 chars now."""
+    if not codes:
+        return {}
+    rows = (
+        await db.execute(
+            text("SELECT code, spec FROM policy_lexicon_entries WHERE kind='d' AND code = ANY(:codes)"),
+            {"codes": codes},
+        )
+    ).mappings()
+    out: dict[str, str] = {}
+    for row in rows:
+        raw_spec = row["spec"]
+        spec = json.loads(raw_spec) if isinstance(raw_spec, str) else (raw_spec or {})
+        phrases = [p for p in (spec.get("strong_phrases") or []) if p]
+        multiword = [p for p in phrases if " " in p.strip()]
+        if multiword:
+            out[row["code"]] = min(multiword, key=len)
+        elif phrases:
+            out[row["code"]] = min(phrases, key=len)
+        else:
+            desc = (spec.get("description") or "").split(".")[0].strip()
+            if desc:
+                out[row["code"]] = desc[:60].rsplit(" ", 1)[0] if len(desc) > 60 else desc
+    return out
+
+
+_DECOMPOSE_TOP_N = 3
+
+
+async def _decompose_query_corpus(
+    db: AsyncSession, gate: GateResult,
+) -> tuple[list[str], list["FanoutTheme"]] | None:
+    """Corpus-grounded compound-fact decomposition for EXACT-contour queries
+    (2026-07-29, Ananth's alternative to an LLM-dimension-guessing approach):
+    instead of asking an LLM what facets matter, find tags that ACTUALLY
+    CO-OCCUR with Gate's matched codes on the same real chunks --
+    deterministic, one DB round trip, no LLM call, grounded in what's
+    actually in the corpus.
+
+    Motivating case: "What is the timely filing deadline for Sunshine
+    Health FL Medicaid claims?" -- EXACT contour passes this through
+    unchanged, but the golden answer's bonus facts (appeals/reconsideration,
+    EOB, coordination of benefits) live on DIFFERENT chunks than the base
+    timely-filing chunks, so a single PRECISE query never retrieves them.
+
+    Two real bugs found and fixed live before this worked (kept here so the
+    fix isn't silently re-broken):
+    1. ANDing ALL of Gate's matched d/j codes together to find the
+       intersection returns ZERO chunks in practice (confirmed: 6 codes
+       simultaneously required -> 0 rows) -- not every code Gate matched is
+       co-tagged on the very same chunk, even when the whole DOCUMENT is
+       clearly about all of them. Fixed by using only the single most
+       SELECTIVE d-code and j-code (via the same selectivity_for_tag()
+       Pool already uses for phrase_buckets) as the intersection.
+    2. Ranking co-occurring tags by raw count surfaces corpus-wide noise --
+       confirmed live: "provider.general"/"health_care_services.dental"
+       dominated raw counts purely because they're common EVERYWHERE
+       (2.5-3.3% of the whole 1.9M-chunk corpus). Fixed by weighting
+       (co-occurrence fraction within the intersection) * (the tag's own
+       corpus-wide selectivity), not raw count alone.
+    3. `_fetch_lexicon_phrases`'s full description+strong_phrases blob,
+       reused naively for sub-query text, diluted BM25 enough to keep
+       recall flat despite selecting the right themes. Fixed by
+       `_fetch_lexicon_short_labels` above (shortest strong_phrase only).
+
+    Validated 2026-07-29 against the full 22-query eval bank via the
+    debug force_fanout_queries override: avg recall 0.407 -> 0.441,
+    ZERO per-query regressions (4 improved, 18 flat). Known limitation,
+    NOT fixed here (separate lexicon-tagging gap, flagged out of scope):
+    a fact that's ONLY body-text with no corresponding tag at all (e.g.
+    participating/non-participating provider status) won't surface this
+    way regardless of decomposition quality.
+
+    Returns None (caller keeps plain PRECISE) if there are too few
+    co-tagged chunks to trust the signal, or no co-occurring tags found.
+    """
+    from collections import Counter
+    import asyncio
+    from app.services.corpus_search_agent import selectivity_for_tag
+
+    if not gate.d_codes:
+        return None
+
+    # Latency fix (2026-07-29, Ananth's catch): these were sequential await
+    # loops -- each selectivity_for_tag() is up to 2 DB round trips when
+    # uncached, so a cold cache turned "look up ~20 codes' selectivity"
+    # into ~20-40 serialized round trips, measured live contributing
+    # multiple seconds to reformat_ms alone. Gathered concurrently instead
+    # -- independent lookups, no shared state.
+    d_codes_list = list(gate.d_codes)
+    j_codes_list = list(gate.j_codes or [])
+    d_sel_vals, j_sel_vals = await asyncio.gather(
+        asyncio.gather(*[selectivity_for_tag(db, c) for c in d_codes_list]),
+        asyncio.gather(*[selectivity_for_tag(db, c) for c in j_codes_list]),
+    )
+    d_sel = dict(zip(d_codes_list, d_sel_vals))
+    j_sel = dict(zip(j_codes_list, j_sel_vals))
+    best_d = max(d_sel, key=d_sel.get).split(":", 1)[1]
+    best_j = max(j_sel, key=j_sel.get).split(":", 1)[1] if j_sel else None
+
+    params = {"d": best_d}
+    where = "chunk_d_tags ? :d"
+    if best_j:
+        where += " AND chunk_j_tags ? :j"
+        params["j"] = best_j
+    rows = (await db.execute(
+        text(f"SELECT chunk_d_tags FROM rag_published_embeddings WHERE {where}"), params,
+    )).fetchall()
+    if len(rows) < 3:
+        return None
+
+    co = Counter()
+    for r in rows:
+        for k in (r.chunk_d_tags or {}).keys():
+            if k != best_d:
+                co[k] += 1
+    if not co:
+        return None
+
+    candidate_tags = [t for t, _n in co.most_common(15)]  # cap the selectivity-lookup fanout
+    candidate_sels = await asyncio.gather(*[
+        selectivity_for_tag(db, f"d:{tag}") for tag in candidate_tags
+    ])
+    weighted = [
+        (tag, (co[tag] / len(rows)) * sel)
+        for tag, sel in zip(candidate_tags, candidate_sels)
+    ]
+    weighted.sort(key=lambda pair: pair[1], reverse=True)
+    top_tags = [tag for tag, score in weighted[:_DECOMPOSE_TOP_N] if score > 0]
+    if not top_tags:
+        return None
+
+    score_by_tag = dict(weighted)
+    label_by_code = await _fetch_lexicon_short_labels(db, top_tags)
+    base_query = gate.normalized or gate.query
+    sub_queries = [
+        f"{base_query} — specifically regarding {label_by_code.get(tag, tag.replace('.', ' ').replace('_', ' '))}"
+        for tag in top_tags
+    ]
+    themes = [
+        FanoutTheme(
+            theme_label=label_by_code.get(tag, tag),
+            # UNION with the base topic's own d_codes, not a bare
+            # replacement -- Pool.run_pool_fanout uses member_codes to
+            # override d_codes per-slot (2026-07-29 fix), and this
+            # mechanism's sub-queries are explicitly "the base topic, AND
+            # also this co-occurring theme" (e.g. timely filing + appeals),
+            # not a wholly different topic the way explore_siblings' theme
+            # codes are. Losing the base d_codes here would let this slot's
+            # tag_select/inherited/phrase_buckets arms drift entirely off
+            # the base topic.
+            member_codes=[*gate.d_codes, f"d:{tag}"],
+            score=score_by_tag.get(tag, 0.0),
+        )
+        for tag in top_tags
+    ]
+    return sub_queries, themes
 
 
 async def _prevalence_doc_ids_by_code(db: AsyncSession, codes: list[str]) -> dict[str, set]:

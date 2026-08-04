@@ -375,6 +375,7 @@ class TestFillerAEdgeCases:
             text="Test text",
             score=0.7,  # Generic score
             bm25_score=0.9,  # BM25 score (what should be preserved in original_score)
+            authority_level="contract_source_of_truth",  # Should be threaded through to FilledChunk
             source_arm="vector",
             is_neighbor=False,
             source_type="document",
@@ -396,6 +397,7 @@ class TestFillerAEdgeCases:
         assert chunk.document_status == "live"
         assert chunk.content_sha == "sha123"
         assert chunk.tags == {"d:domain": 1, "p:process": 2}
+        assert chunk.authority_level == "contract_source_of_truth"  # Verify authority_level is threaded through
 
     def test_multi_signal_reranking(self):
         """Verify Filler a composes BM25 + authority + tag_coverage + length signals."""
@@ -467,3 +469,84 @@ class TestFillerAEdgeCases:
 
         # C should rank higher on secondary signals when BM25 is equal
         assert score_c > score_d, f"C ({score_c}) should > D ({score_d}) when BM25 is equal but C has better authority/coverage"
+
+    def test_meta_boost_signal(self):
+        """Verify meta_boost signal lifts chunks containing Gate's required/boosted phrases."""
+        from app.services.retriever.fillers.filler_a import _compute_meta_boost_score
+
+        # Candidate with required phrases present
+        candidate_with_phrase = PoolCandidate(
+            chunk_id="with_phrase",
+            document_id="doc1",
+            text="Timely filing deadline for claims is 180 days from service date.",
+            bm25_score=0.5,
+            tags={"d:claims": 1},
+            source_arm="tag_select",
+            is_neighbor=False,
+            score=0.5,
+        )
+
+        # Candidate without required phrases
+        candidate_without_phrase = PoolCandidate(
+            chunk_id="without_phrase",
+            document_id="doc2",
+            text="Provider must submit clean claims.",
+            bm25_score=0.5,
+            tags={"d:claims": 1},
+            source_arm="tag_select",
+            is_neighbor=False,
+            score=0.5,
+        )
+
+        # Gate's phrases
+        required_phrases = [("timely filing", 0.93), ("180 days", 0.85)]
+        boosted_phrases = [("claims", 0.55)]
+
+        score_with = _compute_meta_boost_score(
+            candidate_with_phrase.text, candidate_with_phrase.tags,
+            required_phrases, boosted_phrases
+        )
+        score_without = _compute_meta_boost_score(
+            candidate_without_phrase.text, candidate_without_phrase.tags,
+            required_phrases, boosted_phrases
+        )
+
+        # Chunk with required phrases should score higher
+        assert score_with > score_without, f"Chunk with phrases ({score_with}) should > without ({score_without})"
+        assert score_with > 0.0, "Chunk with phrases should score nonzero"
+        assert 0.0 <= score_with <= 1.0, "Meta boost should be normalized [0, 1]"
+
+    def test_meta_boost_tag_matching_with_underscores_dots(self):
+        """Regression: ensure tag keys with underscores/dots match phrases correctly.
+
+        Bug found 2026-07-23: tag key 'claims.timely_filing' should match phrase
+        'timely filing' via normalized substring matching (convert dots/underscores to spaces).
+        """
+        from app.services.retriever.fillers.filler_a import _compute_meta_boost_score
+
+        # Chunk with tag "claims.timely_filing" (dots/underscores)
+        candidate_with_tag = PoolCandidate(
+            chunk_id="with_timely_tag",
+            document_id="doc1",
+            text="General information about claims.",
+            bm25_score=0.5,
+            tags={"d:claims.timely_filing": 1, "d:claims.general": 1},
+            source_arm="tag_select",
+            is_neighbor=False,
+            score=0.5,
+        )
+
+        # Gate's required phrases (should match the tag even though key has dots/underscores)
+        required_phrases = [("timely filing", 0.93), ("filing deadline", 0.88)]
+        boosted_phrases = []
+
+        score = _compute_meta_boost_score(
+            candidate_with_tag.text, candidate_with_tag.tags,
+            required_phrases, boosted_phrases
+        )
+
+        # Should match "timely filing" in tag key "claims.timely_filing" after normalization
+        assert score > 0.0, f"Should match normalized tag (got {score})"
+        # The phrase "timely filing" (0.93 weight) should contribute; "filing deadline" (0.88) won't match
+        # So score should be approximately 0.93 / (0.93 + 0.88) ≈ 0.514
+        assert 0.5 < score < 0.6, f"Score should be ~0.51 for one-of-two phrases (got {score})"

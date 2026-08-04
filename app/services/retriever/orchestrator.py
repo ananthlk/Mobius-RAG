@@ -11,10 +11,13 @@ STATUS 2026-07-24: wires Shape → Pool → Router → Fillers → Synthesis, li
 Contract/Timing exist (contract.py, attempt_spans emit) but Contract's
 build_contract() is called by whoever calls run_retriever_partial(), not
 from inside this file (avoids a circular import -- contract.py imports
-RetrieverPartialResult). Fillers still run the stopgap verdict function
-(bare occupancy), not Observer's real evaluate() -- that swap is gated on
-Eval's calibration run (Contract/Synthesis/Timing have no such gate; they're
-live now).
+RetrieverPartialResult).
+
+STATUS 2026-07-26: Fillers now call Observer's real per-strategy evaluate()
+(_observer_verdict, replacing the old bare-occupancy _stopgap_verdict) --
+Eval's calibration run this session (22-query forced bank + live router
+baseline) is what this swap was gated on; Ananth directed the wire-in
+directly.
 
 CORRECTION 2026-07-23: this file previously stopped after Structure even
 after Pool was built and closed — Pool's PoolResult.segment_ms had no live
@@ -33,6 +36,7 @@ from dataclasses import dataclass, field, replace
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.retriever.shape.contracts import (
+    FanoutTheme,
     GateResult,
     ReformatPosture,
     ReformatResult,
@@ -61,6 +65,8 @@ from app.services.router.decision import (
     RouterDecision,
     RoutingContext,
 )
+from app.services.router.allocation import SUPPLEMENT_ONLY_STRATEGIES
+from app.services.retriever import observer
 from app.services.retriever.fillers.contracts import FilledShape, FilledSlot
 from app.services.retriever.fillers.filler_a import fill_shape_bm25
 from app.services.retriever.fillers.filler_b import fill_shape_vector
@@ -285,6 +291,8 @@ async def _run_router(
     attempt: int = 0,
     retry_of_decision_id: str | None = None,
     forced_strategy: str | None = None,
+    mode_override: str | None = None,
+    reformat_result: ReformatResult | None = None,
 ) -> RouterDecision:
     pool_metadata = _build_pool_metadata(slots, pool_results)
     # attempt>0 marks a whole-loop technical-failure retry (2026-07-24,
@@ -325,9 +333,21 @@ async def _run_router(
         # uncontaminated path Eval's recall curves need. None = normal
         # dispatch (greedy/optimizer/bayesian or the throttle's own draw).
         forced_strategy=forced_strategy,
-        upstream_diagnostics=(
-            {"retry_of_decision": retry_of_decision_id} if retry_of_decision_id else {}
-        ),
+        # Caller-pinned executed allocator (greedy/optimizer/bayesian) for the
+        # throttle comparison — dispatch precedence: calibration > forced >
+        # mode_override > throttle draw. None = normal production dispatch.
+        mode_override=mode_override,
+        upstream_diagnostics={
+            **({"retry_of_decision": retry_of_decision_id} if retry_of_decision_id else {}),
+            **(
+                {
+                    "reformat_posture": reformat_result.posture.value,
+                    "reformat_fanout_n": len(reformat_result.fanout_themes),
+                }
+                if reformat_result is not None
+                else {}
+            ),
+        },
     )
     return await router_route(AsyncSessionLocal, ctx)
 
@@ -340,23 +360,39 @@ async def _run_router(
 _MAX_OBSERVER_TURNS = 5
 
 
-def _stopgap_verdict(occupancy: int, error: str | None, has_remaining_rungs: bool) -> tuple[str, str]:
-    """Provisional per-slot "would this benefit from another turn" verdict --
-    bare occupancy check, standing in until Observer (session "Observer 4e",
-    kicked off 2026-07-23) ships real per-strategy criteria (each filler
-    defines its own "good enough" independently -- no shared confidence
-    scale, per Ananth's explicit call). Swap this function out for a real
-    call into Observer's module once it exists; nothing else in the loop
-    below needs to change, since it only depends on getting a
-    (verdict, reason) pair back.
+def _observer_verdict(
+    filled_slot: FilledSlot, error: str | None, strategy: str,
+    attempt_number: int, max_attempts: int,
+) -> tuple[str, str]:
+    """Per-slot "would this benefit from another turn" verdict -- delegates
+    to Observer's real per-strategy adequacy check (observer.py), each
+    filler judged on its OWN bar (capacity-aware fill for a/b/s, decay-floor
+    score check for d), not a shared bare-occupancy proxy.
+
+    Supersedes the bare-occupancy `_stopgap_verdict` this function replaced
+    (2026-07-26, Ananth's direct instruction to wire Observer in and verify
+    against live queries). This module's own header said the swap was
+    "gated on Eval's calibration run" -- that's now happened (22-query
+    forced bank + live router calibration, this session), and Observer's
+    own module header confirms a/b/c/s were already SIGNED OFF, not
+    speculative.
+
+    The only thing Observer's evaluate() doesn't itself judge is a filler
+    raising an exception -- that's an orchestrator/infra concern (VERDICT_
+    ERROR), not a per-strategy adequacy question, so it's handled here
+    before ever calling into Observer. `has_remaining_rungs` is NOT passed
+    through: Observer's EXHAUSTED_ATTEMPTS is purely budget-based
+    (attempt_number>=max_attempts), by design (see observer.py's module
+    docstring) -- whether the ladder has more rungs left is Router's
+    decide_continuation() concern (SlotTurnInput.remaining_rungs), a
+    separate layer that already receives this independently.
     """
     if error is not None:
         return VERDICT_ERROR, f"filler raised: {error}"
-    if occupancy > 0:
-        return VERDICT_SATISFIED, "occupancy>0 (stopgap verdict, pending Observer)"
-    if has_remaining_rungs:
-        return VERDICT_WOULD_BENEFIT, "occupancy=0, rungs remain (stopgap verdict, pending Observer)"
-    return VERDICT_EXHAUSTED_ATTEMPTS, "occupancy=0, chain exhausted"
+    return observer.evaluate(
+        strategy, filled_slot,
+        attempt_number=attempt_number, max_attempts=max_attempts,
+    )
 
 
 def _portfolio_stopgap_verdict(
@@ -396,8 +432,8 @@ async def _run_fillers_simple(
     (app/services/router/continuation.py, built + acked 2026-07-23): each
     slot runs its ladder's rungs one at a time; after every rung, this loop
     computes a per-slot (verdict, reason) -- via Observer's real per-filler
-    criteria once it exists, via _stopgap_verdict() (bare occupancy) until
-    then -- and hands ALL slots' verdicts + the elapsed/remaining time
+    criteria (_observer_verdict, wired 2026-07-26) -- and hands ALL slots'
+    verdicts + the elapsed/remaining time
     budget to Router's aggregation, which decides ONE query-level "another
     turn, or done" call. This is the real seam Observer's design landed on:
     per-slot verdicts are this module's/Observer's concern, cross-slot
@@ -499,14 +535,26 @@ async def _run_fillers_simple(
     for slot in slots:
         sequence = router_decision.routing_ladder.per_slot.get(slot.slot_id, [])
         chain = [s for s in sequence if s in _IMPLEMENTED_FILLERS]
-        # Blend model (2026-07-24, blend-model-design.md, Router-approved
-        # seam): non-empty for portfolio-allocated slots ({strategy: k_i}),
-        # empty for chain allocators -- exactly RoutingLadder's own
-        # documented compat contract. A slot with a portfolio runs ALL its
-        # strategies concurrently in turn 0 (see below); chain-mode slots
-        # (empty dict, today's default until Eval shifts allocator_weights)
-        # fall through to the existing single-rung-per-turn loop unchanged.
-        portfolio = dict(router_decision.routing_ladder.per_slot_portfolio.get(slot.slot_id, {}))
+        # Blend model (2026-07-24, blend-model-design.md) vs chain-mode
+        # partial-fill (2026-07-26, Router's assign_chain_fills): the OLD
+        # compat contract was "per_slot_portfolio non-empty == portfolio
+        # mode" -- that broke the moment Router fixed the all-or-nothing
+        # payload gate that was starving `d` (allocation.py/optimizer.py
+        # now populate per_slot_portfolio for CHAIN allocators too, with
+        # each rung's budget-scoped fill count). per_slot_portfolio's mere
+        # presence can no longer discriminate "run everything concurrently,
+        # no continuation" (true portfolio/blend) from "sequential chain,
+        # but cap each rung's capacity by its assigned fill." The reliable
+        # discriminator is the LADDER's own allocator label -- portfolio.py
+        # explicitly sets ladder.allocator="portfolio"; greedy/optimizer/
+        # bayesian never do -- a query-level property, not something to
+        # infer per-slot. Verified live 2026-07-26 before this fix landed:
+        # without it, every chain-mode query would have silently misrouted
+        # through _run_portfolio_slot (bypassing Observer/continuation
+        # entirely) on the next deploy after Router's change reached here.
+        is_true_portfolio = router_decision.routing_ladder.allocator == "portfolio"
+        fills = dict(router_decision.routing_ladder.per_slot_portfolio.get(slot.slot_id, {}))
+        portfolio = fills if is_true_portfolio else {}
         state[slot.slot_id] = {
             "slot": slot, "remaining": chain,
             "filled_slot": None, "verdict": None, "reason": "", "ride_along": False,
@@ -525,6 +573,15 @@ async def _run_fillers_simple(
             # requirement, not absolute time.
             "attempt_spans": [],
             "portfolio": portfolio,
+            # Chain-mode partial-fill assignment (Router, 2026-07-26): per-
+            # strategy fill count from assign_chain_fills, used to cap each
+            # rung's slot copy the same way portfolio execution already
+            # does (replace(slot, capacity=fills[sid])) -- empty when the
+            # allocator didn't compute one (e.g. forced/calibration paths),
+            # in which case the rung runs at the slot's own full capacity,
+            # unchanged from today's behavior. Empty for true-portfolio
+            # slots too (that path uses `portfolio` above instead).
+            "fills": {} if is_true_portfolio else fills,
             # Router's emit ask (2026-07-24): {strategy: {k_planned,
             # k_delivered}} -- the per-strategy fill-success signal Eval's
             # blend-era calibration needs, distinct from chain-era per-rung
@@ -588,6 +645,18 @@ async def _run_fillers_simple(
         strategy = visible[0]
         state_entry["remaining"].remove(strategy)
         return strategy
+
+    def _capped_slot(slot, state_entry: dict, strategy: str):
+        """Chain-mode partial-fill (Router, 2026-07-26): if the allocator
+        assigned this strategy a specific fill count (assign_chain_fills'
+        budget-scoped assignment, e.g. `d` capped to 1 chunk instead of its
+        full requested capacity), cap this rung's slot copy to that fill --
+        same seam pattern portfolio execution already uses (replace(slot,
+        capacity=k_i)). Falls back to the slot's own full capacity,
+        unchanged, when no fill was assigned (forced/calibration paths,
+        or an allocator that hasn't computed one)."""
+        fill = state_entry["fills"].get(strategy)
+        return replace(slot, capacity=fill) if fill is not None else slot
 
     async def _run_portfolio_slot(slot_id: str, st: dict) -> None:
         """Blend model (2026-07-24, Router-approved seam): execute EVERY
@@ -664,7 +733,7 @@ async def _run_fillers_simple(
             continue
         strategy = _pick_and_consume(st)
         t_attempt_start = int((time.monotonic() - t0) * 1000)
-        filled_slot, error = await _try_strategy(strategy, slot, pr)
+        filled_slot, error = await _try_strategy(strategy, _capped_slot(slot, st, strategy), pr)
         t_attempt_end = int((time.monotonic() - t0) * 1000)
         st["attempt_spans"].append({
             "strategy": strategy, "attempt_number": 1,
@@ -674,10 +743,18 @@ async def _run_fillers_simple(
         st["filled_slot"] = filled_slot
         st["retained_chunks"].extend(filled_slot.chunks)
         st["fill_depth"].append({
-            "strategy": strategy, "capacity": slot.capacity, "occupancy": filled_slot.occupancy,
+            # Router's k0 requirement (2026-07-26): capacity reflects what
+            # was ACTUALLY requested of this rung -- filled_slot.capacity,
+            # not the slot's blanket capacity -- so a capped chain-mode
+            # fill (e.g. `d` scoped to 1 via assign_chain_fills) reports
+            # its real scoped occupancy@capacity, exactly like the
+            # portfolio path's portfolio_fill already does.
+            "strategy": strategy, "capacity": filled_slot.capacity, "occupancy": filled_slot.occupancy,
         })
-        st["verdict"], st["reason"] = _stopgap_verdict(
-            filled_slot.occupancy, error, bool(st["remaining"]),
+        st["verdict"], st["reason"] = _observer_verdict(
+            filled_slot, error, strategy,
+            attempt_number=len(st["executed"]),
+            max_attempts=router_decision.resource_posture.max_attempts_per_slot,
         )
 
     # Multi-turn loop: ask Router's aggregation whether another turn is
@@ -705,7 +782,7 @@ async def _run_fillers_simple(
             slot = st["slot"]
             pr = pool_by_query.get(slot.rewritten_query) or default_pool
             t_attempt_start = int((time.monotonic() - t0) * 1000)
-            filled_slot, error = await _try_strategy(strategy, slot, pr)
+            filled_slot, error = await _try_strategy(strategy, _capped_slot(slot, st, strategy), pr)
             t_attempt_end = int((time.monotonic() - t0) * 1000)
             st["attempt_spans"].append({
                 "strategy": strategy, "attempt_number": len(st["attempt_spans"]) + 1,
@@ -718,8 +795,10 @@ async def _run_fillers_simple(
             st["fill_depth"].append({
                 "strategy": strategy, "capacity": slot.capacity, "occupancy": filled_slot.occupancy,
             })
-            st["verdict"], st["reason"] = _stopgap_verdict(
-                filled_slot.occupancy, error, bool(st["remaining"]),
+            st["verdict"], st["reason"] = _observer_verdict(
+                filled_slot, error, strategy,
+                attempt_number=len(st["executed"]),
+                max_attempts=router_decision.resource_posture.max_attempts_per_slot,
             )
             if slot_id in decision.ride_along:
                 st["ride_along"] = True
@@ -825,7 +904,8 @@ async def _run_fillers_simple(
 async def run_retriever_partial(
     db: AsyncSession, query: str, caller_mode: str | None = None, attempt: int = 0,
     retry_of_decision_id: str | None = None, token_budget_for_retrieval: int | None = None,
-    forced_strategy: str | None = None,
+    forced_strategy: str | None = None, mode_override: str | None = None,
+    force_fanout_queries: list[str] | None = None,
 ) -> RetrieverPartialResult:
     """Sequence Gate → Reformat → Structure → Slots → Pool. Stops there —
     Router onward doesn't exist yet. This function's own scope will shrink
@@ -852,11 +932,48 @@ async def run_retriever_partial(
     distinguishable per attempt. This function itself has no retry logic;
     it's a single real pass, same as always. The retry loop lives one
     level up, wrapping this whole function.
+
+    `force_fanout_queries` (2026-07-29, debug/calibration override, same
+    class as `forced_strategy`): when set, overrides Reformat's own
+    posture/rewritten_queries decision with FAN_OUT + these exact queries,
+    regardless of what Gate's contour actually was. Exists to test whether
+    manually decomposing a compound question into targeted sub-queries
+    (each aimed at one specific fact) recovers what a single EXACT-contour
+    passthrough query misses -- EXACT's "pass through unchanged" behavior
+    has no notion of "this question needs multiple distinct facts,"
+    confirmed live on a real compound billing question. Reuses Pool's
+    existing FAN_OUT dispatch (run_pool_fanout) unchanged -- that multi-
+    query machinery already exists and works; this override just feeds it
+    from a different (manual, not lexicon-cluster) source. None (default)
+    is a complete no-op, byte-identical to today's behavior.
     """
     t0 = time.monotonic()
 
     gate_result = await run_gate(db, query)
     reformat_result = await run_reformat(db, gate_result)
+    if force_fanout_queries:
+        # run_slots' FAN_OUT branch is entirely driven by fanout_themes (one
+        # theme per rewritten_query, same order -- see slots.py's
+        # theme_to_query zip) -- an empty list there means "no fanout_themes
+        # provided (unexpected)", zero slots built, breadth=0, no_retrieval
+        # downstream even though Pool itself gets real candidates for every
+        # forced query (confirmed live: pool_candidate_counts=[517,517,517]
+        # yet 0 final chunks). One flat-score placeholder theme per query.
+        fake_themes = [
+            FanoutTheme(theme_label=f"debug override {i + 1}", score=1.0)
+            for i in range(len(force_fanout_queries))
+        ]
+        reformat_result = ReformatResult(
+            query=reformat_result.query,
+            posture=ReformatPosture.FAN_OUT,
+            rewritten_queries=list(force_fanout_queries),
+            fanout_themes=fake_themes,
+            reason=(
+                f"DEBUG override: forced FAN_OUT with {len(force_fanout_queries)} "
+                f"explicit queries (was {reformat_result.posture.value}: {reformat_result.reason!r})"
+            ),
+            reformat_ms=reformat_result.reformat_ms,
+        )
     structure_result = run_structure(
         reformat_result, caller_mode=caller_mode, token_budget_for_retrieval=token_budget_for_retrieval,
     )
@@ -911,6 +1028,7 @@ async def run_retriever_partial(
             pool_results = await run_pool_fanout(
                 db, structure_result.rewritten_queries, gate_result,
                 structure_result.resource_posture, adapter,
+                fanout_themes=structure_result.fanout_themes,
             )
         else:
             rq = structure_result.rewritten_queries[0] if structure_result.rewritten_queries else query
@@ -942,7 +1060,8 @@ async def run_retriever_partial(
         router_decision = await _run_router(
             query, slots_result.slots, pool_results,
             structure_result.resource_posture, gate_result, payer_context, caller_mode,
-            attempt, retry_of_decision_id, forced_strategy,
+            attempt, retry_of_decision_id, forced_strategy, mode_override,
+            reformat_result=reformat_result,
         )
         router_ms = int((time.monotonic() - t_router) * 1000)
 
@@ -1088,8 +1207,8 @@ async def run_retriever_partial(
             "Contract/Timing built (see contract.py) but not yet called from"
             " here -- build_contract() lives outside orchestrator.py to avoid"
             " a circular import (contract.py imports RetrieverPartialResult)."
-            " Fillers still use the stopgap verdict function, not Observer's"
-            " real evaluate() -- that swap is gated on Eval's calibration run."
+            " Fillers now use Observer's real per-strategy evaluate()"
+            " (_observer_verdict, wired 2026-07-26)."
             if synthesis_result is not None
             else "Router/Fillers/Synthesis — no slots or no pool result for this posture"
         ),
@@ -1099,6 +1218,7 @@ async def run_retriever_partial(
 async def run_retriever_partial_with_retry(
     db: AsyncSession, query: str, caller_mode: str | None = None, max_retries: int = 1,
     token_budget_for_retrieval: int | None = None, forced_strategy: str | None = None,
+    mode_override: str | None = None, force_fanout_queries: list[str] | None = None,
 ) -> RetrieverPartialResult:
     """Whole-loop retry on TECHNICAL failure (Ananth, 2026-07-24): "ask
     once, we try our best to get first-pass resolution." If ANY unhandled
@@ -1143,7 +1263,8 @@ async def run_retriever_partial_with_retry(
                 db, query, caller_mode=caller_mode, attempt=attempt,
                 retry_of_decision_id=retry_of_decision_id,
                 token_budget_for_retrieval=token_budget_for_retrieval,
-                forced_strategy=forced_strategy,
+                forced_strategy=forced_strategy, mode_override=mode_override,
+                force_fanout_queries=force_fanout_queries,
             )
         except Exception as exc:
             last_exc = exc

@@ -127,7 +127,14 @@ def _pick_chosen_slot(synthesis_result: SynthesisResult | None) -> tuple[str | N
 def _derive_status(partial_result: RetrieverPartialResult, synthesis_result: SynthesisResult | None) -> str:
     """Overall outcome, one word, for the envelope's `status` field.
     Deliberately coarse -- per-slot nuance (verdict/reason) lives in
-    `routing_keys`/`traces`, not flattened into this single field."""
+    `routing_keys`/`traces`, not flattened into this single field.
+
+    Full vocabulary (closed enum): {no_retrieval, filled_no_synthesis, empty,
+    partial, ok, timeout}. `timeout` is never derived here -- it's only ever
+    set via `build_contract(status_override="timeout")` from the API layer's
+    hard wall-clock ceiling (main.py, 2026-07-26), since a genuine timeout
+    has no RetrieverPartialResult to derive a status FROM (the pipeline was
+    still running when the clock ran out)."""
     if partial_result.filled_shape is None:
         # No-retrieval posture (CLARIFY/DECLINE) or no slots -- not an
         # error, a real terminal outcome Gate/Reformat already decided.
@@ -149,6 +156,7 @@ def build_contract(
     *,
     answer_text: str | None = None,
     thinking: str | None = None,
+    status_override: str | None = None,
 ) -> ContractEnvelope:
     """The one emitter. Every code path threads through this -- do not
     build a response dict anywhere else in the pipeline.
@@ -158,6 +166,16 @@ def build_contract(
     Observer) -- this function degrades honestly (chunks=[], grounding
     empty) rather than crash, same convention every module in this chain
     uses for "the thing upstream of me isn't real yet."
+
+    `status_override` (Tech Health, 2026-07-26 wrapper-landing condition):
+    the ONLY sanctioned way to stamp a status this function can't derive
+    on its own -- today that's just "timeout" from the API layer's hard
+    wall-clock ceiling, where there's no real RetrieverPartialResult to
+    derive a status from (construct a minimal one -- `RetrieverPartialResult
+    (query=...)`, everything else defaults -- and pass it here with
+    status_override="timeout" rather than hand-building a response dict at
+    the call site). Skips `_derive_status()` entirely when set; every other
+    field still computes normally off whatever partial_result carries.
     """
     chosen_slot, score = _pick_chosen_slot(synthesis_result)
 
@@ -171,6 +189,11 @@ def build_contract(
                 "document_status": c.document_status, "authority": c.authority,
                 "verified": c.verified,
                 "is_neighbor": c.is_neighbor, "original_score": c.original_score,
+                # Both were added to CompiledCitation (2026-07-29/30) but
+                # never threaded into this hand-picked dict, so they silently
+                # never reached emits.chunks/the trace tool despite existing
+                # on the citation object the whole time.
+                "rerank_score": c.rerank_score, "filler_strategy": c.filler_strategy,
                 "slot_id": c.slot_id, "slot_semantics": c.slot_semantics,
             }
             for c in synthesis_result.citations
@@ -239,6 +262,72 @@ def build_contract(
             partial_result.filled_shape.emit.get("executed_order", {})
             if partial_result.filled_shape else {}
         ),
+        # Observer's LIVE per-slot outcome (2026-07-26, closing a real
+        # labeling gap found via live-query verification): `routing_verdict`
+        # below is a STATIC, PRE-EXECUTION projection -- the allocator's own
+        # LB/confidence estimate for the FULL planned chain, computed once
+        # from priors before a single rung runs. It can legitimately read
+        # UNDER_CONFIDENT/partial_infeasible even when execution correctly
+        # stopped early because Observer judged an earlier rung genuinely
+        # adequate (e.g. `a` filled to capacity) -- these are two different,
+        # independently-designed signals (decide_continuation never reads
+        # routing_verdict; Observer never reads it either -- confirmed by
+        # reading continuation.py directly), not one overriding the other.
+        # Surfacing Observer's actual final verdict/reason here (data that
+        # already existed in filled_shape.emit, just never exposed) lets a
+        # consumer tell "the plan was never projected to be fully confident"
+        # apart from "the execution's own outcome was inadequate" -- they
+        # are not the same claim and conflating them reads as a phantom bug.
+        "observer_final_verdicts": (
+            partial_result.filled_shape.emit.get("final_verdicts", {})
+            if partial_result.filled_shape else {}
+        ),
+        "observer_final_reasons": (
+            partial_result.filled_shape.emit.get("final_reasons", {})
+            if partial_result.filled_shape else {}
+        ),
+        # Full-trace visibility (2026-07-27, Ananth's forced-strategy test
+        # pass): these already existed in filled_shape.emit, computed every
+        # call, just never exposed through the contract -- same class of gap
+        # as observer_final_verdicts above. attempt_spans = per-rung timing;
+        # fill_depth = {strategy, capacity, occupancy} per executed rung (the
+        # chain-mode analog of portfolio_fill, now populated for both chain
+        # and portfolio paths per Router's assign_chain_fills work);
+        # portfolio_fill = {strategy: {k_planned, k_delivered}}; the deferred
+        # list flags when `d` was pushed behind a not-yet-ready alternative
+        # (readiness noise, not a performance verdict -- must stay a distinct
+        # signal, not folded into final_verdicts/EXHAUSTED_ATTEMPTS).
+        "attempt_spans": (
+            partial_result.filled_shape.emit.get("attempt_spans", {})
+            if partial_result.filled_shape else {}
+        ),
+        "fill_depth": (
+            partial_result.filled_shape.emit.get("fill_depth", {})
+            if partial_result.filled_shape else {}
+        ),
+        "portfolio_fill": (
+            partial_result.filled_shape.emit.get("portfolio_fill", {})
+            if partial_result.filled_shape else {}
+        ),
+        "prescreen_not_ready_deferred_slots": (
+            partial_result.filled_shape.emit.get("prescreen_not_ready_deferred_slots", [])
+            if partial_result.filled_shape else []
+        ),
+        # Completing full-emit surfacing (2026-07-27, Ananth: "the dashboard
+        # should show the emits... the full trace") -- the last 3 keys that
+        # existed in filled_shape.emit but weren't yet exposed anywhere.
+        "slots_filled": (
+            partial_result.filled_shape.emit.get("slots_filled")
+            if partial_result.filled_shape else None
+        ),
+        "under_filled_count": (
+            partial_result.filled_shape.emit.get("under_filled")
+            if partial_result.filled_shape else None
+        ),
+        "ride_along_slots": (
+            partial_result.filled_shape.emit.get("ride_along_slots", [])
+            if partial_result.filled_shape else []
+        ),
         # --- Chat's forward requirements (2026-07-24), folded into this
         # existing dict field rather than added as new top-level dataclass
         # fields -- the envelope's 12-field COUNT is frozen (byte-compat
@@ -291,7 +380,7 @@ def build_contract(
         "narrative": partial_result.narrative,
     }
 
-    status = _derive_status(partial_result, synthesis_result)
+    status = status_override if status_override is not None else _derive_status(partial_result, synthesis_result)
 
     return ContractEnvelope(
         query=partial_result.query,

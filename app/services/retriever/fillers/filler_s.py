@@ -130,6 +130,14 @@ def _chunk_from_hit(served: dict, telemetry_id: str | None, tag_matches: list[st
         document_status=None,
         content_sha=None,
         source_type="fact_store",
+        # authority_level (2026-07-27, Ananth): "s always authoritative" —
+        # a certified Payor Platform fact, the highest-confidence source in
+        # the fleet, same top tier as the DB's own contract_source_of_truth
+        # documents. Explicit rather than relying solely on synthesis.py's
+        # _AUTHORITATIVE_SOURCE_TYPES fallback (source_type="fact_store" is
+        # already in that set) so s participates consistently in the same
+        # authority_level-first precedence as a/b/d.
+        authority_level="contract_source_of_truth",
         tags={
             "d_tags": [t for t in tag_matches if t.startswith("d:")],
             "p_tags": [t for t in tag_matches if t.startswith("p:")],
@@ -138,6 +146,7 @@ def _chunk_from_hit(served: dict, telemetry_id: str | None, tag_matches: list[st
         is_neighbor=False,
         original_score=served.get("score"),
         assignment_reason="fact_store_hit",
+        filler_strategy="fact_store",
         # `url` intentionally omitted -- FilledChunk has no such field yet
         # (shared, pending-DB-landing gap with Filler c/d).
     )

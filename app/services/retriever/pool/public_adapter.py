@@ -10,6 +10,7 @@ today).
 
 from __future__ import annotations
 
+import dataclasses
 import time
 
 from sqlalchemy import text as sql_text
@@ -25,6 +26,7 @@ from app.services.corpus_search_agent import (
     TermAssignment,
     TermPartition,
 )
+from app.services.corpus_search_lexicon import _load_lexicon_snapshot
 from app.services.retriever.pool.contracts import PoolCandidate, ScopeContext, SourceAdapter
 
 _CHUNK_COLS = """
@@ -40,7 +42,71 @@ _CHUNK_COLS = """
 # strict parser that throws on real user text (!, &, |, (, ), :, *, ' are
 # all special); plainto_tsquery is what legacy's actual production BM25
 # path uses for exactly this reason (corpus_search.py).
-_BM25_SCORE_EXPR = "ts_rank_cd(search_vec, plainto_tsquery('english', :query), 32) AS bm25_score"
+#
+# REAL BUG found+fixed 2026-07-23 (Payor-Policy's live-trace report): a bare
+# plainto_tsquery('english', :query) AND-joins EVERY content word in the raw
+# question (verified: an 8-content-word query produced 'time' & 'file' &
+# 'deadlin' & 'sunshin' & 'health' & 'fl' & 'medicaid' & 'claim') -- legacy's
+# own production use of plainto_tsquery is as a WHERE-clause FILTER on an
+# already-narrowed BM25 candidate set (only chunks matching ALL terms are
+# selected in the first place), where an AND-query is exactly right. Pool's
+# use is different: ranking an ARBITRARY candidate set (chosen by tag/vector/
+# inheritance, never filtered by full-text match at all), where an AND-query
+# is nearly always false -- confirmed live: 0/581 real candidates scored
+# nonzero across a real query. Fix: convert plainto_tsquery's AND-tsquery
+# into an OR-tsquery (reuses Postgres's own stemming/stopword handling via
+# plainto_tsquery, just swaps the boolean operator) -- verified live this
+# produces real graduated scores (e.g. 0.444 on a chunk that previously read
+# a flat 0.0).
+#
+# EXPANSION-PHRASE REGRESSION found+fixed 2026-07-23 (Ananth, verified against
+# legacy): corpus_search.py's real production BM25 (~line 943) OR-joined the
+# raw query tokens with Gate's lexicon-derived expansion_phrases:
+# `_build_or_tsquery(*raw_tokens, *expansion.expansion_phrases)` -- each
+# phrase becomes its own AND-group (multi-word phrase coherence preserved),
+# groups OR'd together. GateResult.expansion_phrases (shape/gate.py:319) is
+# computed and stored but was read by NOTHING downstream -- confirmed via
+# grep, zero hits in reformat.py/pool.py/any filler. Restored here: each
+# phrase is turned into its own plainto_tsquery (correct per-phrase stemming,
+# naturally an AND-group since plainto_tsquery ANDs a short phrase's words),
+# OR-joined via string_agg, then OR-joined again with the raw-query part.
+# Postgres's own tsquery operator precedence (& binds tighter than |) means
+# no explicit parens are needed for this to parse correctly -- verified live
+# against a real 33-phrase expansion set including OCR-noise entries (e.g.
+# "cafi orida") with no SQL errors.
+_BM25_SCORE_EXPR = (
+    "ts_rank_cd(search_vec, "
+    "to_tsquery('english', "
+    "  replace(plainto_tsquery('english', :query)::text, ' & ', ' | ')"
+    "  || CASE WHEN cardinality(CAST(:expansion_phrases AS text[])) > 0 THEN"
+    "       ' | ' || (SELECT string_agg(plainto_tsquery('english', p)::text, ' | ')"
+    "                 FROM unnest(CAST(:expansion_phrases AS text[])) AS p"
+    "                 WHERE plainto_tsquery('english', p)::text != '')"
+    "     ELSE '' END"
+    "), 32) AS bm25_score"
+)
+
+# TRIED AND REJECTED 2026-07-30 (Ananth's own verification standard applied
+# to my own proposal, not just others'): "exclude chunks with no d-tag AND
+# no p-tag" from vector_search, on the theory that junk always lacks both.
+# Tag-emptiness alone is NOT a safe junk proxy once you're past the length
+# floor -- verified live: of the ~101k chunks that are untagged AND >=50
+# chars (i.e. NOT already caught by filler_b's existing length floor),
+# roughly a third sampled were genuinely substantive prose that simply
+# never got tagged (a real Affinity-program comparison paragraph, a real
+# "Direct Ownership Interest" regulatory definition, real grant-guidance
+# text) -- not junk, just a Lexicon coverage gap of the same shape found
+# repeatedly elsewhere this session. The corpus-wide count backs this up:
+# ~1,006,244 rows (>50% of the corpus!) would have been excluded, of which
+# 90% were already short/junk (<50 chars, redundant with the length floor)
+# but ~101k were not. Shipping the naive tag-emptiness filter would have
+# silently cut real content on a false premise. Left here as a documented
+# dead end so nobody re-tries the same naive version -- the real fix (per
+# Filler b's own second, independent signal) needs corpus-wide EXACT-TEXT
+# DUPLICATE FREQUENCY (junk repeats verbatim across dozens-to-hundreds of
+# thousands of unrelated documents; real prose essentially never does),
+# which requires a precomputed/indexed frequency signal, not a per-query
+# WHERE clause -- a Curation/DB-side task, not solved here.
 
 
 def _row_to_candidate(row, *, source_arm: str, score: float | None, is_neighbor: bool = False) -> PoolCandidate:
@@ -108,7 +174,7 @@ class PublicSourceAdapter(SourceAdapter):
         return TermPartition(required=required, boosted=boosted, dropped=dropped)
 
     async def tag_select(
-        self, query: str, d_codes_in: list[str], j_codes_in: list[str], p_codes_in: list[str], width: int
+        self, query: str, expansion_phrases: list[str], d_codes_in: list[str], j_codes_in: list[str], p_codes_in: list[str], width: int
     ) -> tuple[list[PoolCandidate], dict]:
         segment_ms: dict = {}
         partition = await self._partition_tags_only(d_codes_in, j_codes_in, p_codes_in)
@@ -162,6 +228,7 @@ class PublicSourceAdapter(SourceAdapter):
                 "j_codes": j_bare,
                 "width": width,
                 "query": query,
+                "expansion_phrases": expansion_phrases,
             },
         )).all()
         segment_ms["tag_select_ms"] = int((time.monotonic() - t1) * 1000)
@@ -173,7 +240,7 @@ class PublicSourceAdapter(SourceAdapter):
         return candidates, segment_ms
 
     async def vector_search(
-        self, query: str, width: int
+        self, query: str, expansion_phrases: list[str], j_codes: list[str], width: int
     ) -> tuple[list[PoolCandidate], dict, list[float] | None]:
         segment_ms: dict = {}
         embedding, embed_ms, _cache_hit = await _embed_with_cache(query)
@@ -184,6 +251,45 @@ class PublicSourceAdapter(SourceAdapter):
 
         query_vec = "[" + ",".join(repr(float(x)) for x in embedding) + "]"
         t0 = time.monotonic()
+        # REAL BUG found+fixed 2026-07-23 (Filler b's live-trace report):
+        # app/database.py sets hnsw.ef_search=100 as a connection-level
+        # default (tuned for legacy's k=80 wide-phase search). Pool's own
+        # width can run up to breadth*100 (=1000 for a typical breadth=10)
+        # -- 10x what ef_search=100 explores during HNSW graph traversal.
+        # Verified live on the cmhc001 repro: the TRUE best match
+        # (sim=0.8892, the actual answer chunk) was completely ABSENT from
+        # the top-1000 results at ef_search=100 -- HNSW doesn't just return
+        # fewer good matches when under-provisioned for a wide LIMIT, it
+        # backfills with genuinely worse ones while silently missing true
+        # nearest neighbors it never explored far enough to find. Raising
+        # ef_search to 500/1000 surfaced that same chunk at rank 4/3.
+        # SET LOCAL doesn't accept bind parameters (Postgres syntax
+        # restriction, confirmed live) -- safe to interpolate directly since
+        # `width` is an internally-computed int, never user text. Capped at
+        # 1000 as a defensive ceiling on query cost, not because Postgres
+        # itself rejects higher values (it doesn't, confirmed live).
+        ef_search = min(max(width, 100), 1000)
+        await self.db.execute(sql_text(f"SET LOCAL hnsw.ef_search = {ef_search}"))
+        # REAL CORRECTNESS BUG found+fixed 2026-07-23 (Payor-Policy's
+        # live-trace report, verified directly): vector_search() had ZERO
+        # payer/jurisdiction filtering -- a bare similarity search over the
+        # entire 1.94M-row corpus, unlike tag_select which scopes via
+        # build_candidate_pool(). Confirmed live: a Sunshine-Health-specific
+        # query ("How do I submit a corrected claim to Sunshine Health
+        # Florida?", gate correctly matches j:payor.sunshine_health) surfaced
+        # 10 candidates in the top-1000 tagged ONLY with payor.aetna or
+        # payor.molina_healthcare (no Sunshine/Centene co-tag), scoring
+        # 0.77-0.81 similarity -- genuinely different payers' policies shown
+        # as if relevant to a payer-specific question. This is a correctness
+        # issue (wrong-payer content as fact), not just a recall/precision
+        # one, so it gets a NEGATIVE exclusion rather than a positive
+        # AND-filter: chunks with NO payor tag at all (generic/AHCA-authority
+        # content) still pass through untouched -- vector's wide-net
+        # semantic-discovery purpose is preserved -- but chunks tagged with
+        # a DIFFERENT, non-matched payor.* code are excluded outright. Only
+        # activates when the query actually names a specific payer
+        # (j_payors non-empty); a query with no payer tag gets no exclusion.
+        j_payors = [c.split(":", 1)[1] for c in j_codes if c.startswith("j:payor.")]
         rows = (await self.db.execute(
             sql_text(f"""
                 SELECT {_CHUNK_COLS},
@@ -191,10 +297,20 @@ class PublicSourceAdapter(SourceAdapter):
                     {_BM25_SCORE_EXPR}
                 FROM rag_published_embeddings
                 WHERE embedding_vec IS NOT NULL
+                    AND (
+                        CAST(:j_payors AS text[]) = '{{}}'
+                        OR NOT EXISTS (
+                            SELECT 1 FROM jsonb_object_keys(COALESCE(NULLIF(chunk_j_tags, 'null'::jsonb), '{{}}'::jsonb)) k
+                            WHERE k LIKE 'payor.%' AND k != ALL(CAST(:j_payors AS text[]))
+                        )
+                    )
                 ORDER BY embedding_vec <=> CAST(:query_vec AS vector)
                 LIMIT :width
             """),
-            {"query_vec": query_vec, "width": width, "query": query},
+            {
+                "query_vec": query_vec, "width": width, "query": query,
+                "expansion_phrases": expansion_phrases, "j_payors": j_payors,
+            },
         )).all()
         segment_ms["vector_ms"] = int((time.monotonic() - t0) * 1000)
 
@@ -204,7 +320,9 @@ class PublicSourceAdapter(SourceAdapter):
         ]
         return candidates, segment_ms, embedding
 
-    async def inherited(self, query: str, payor_codes: list[str], width: int) -> tuple[list[PoolCandidate], dict]:
+    async def inherited(
+        self, query: str, expansion_phrases: list[str], payor_codes: list[str], width: int
+    ) -> tuple[list[PoolCandidate], dict]:
         """AHCA-authority augmentation -- fires only on an actual j:payor.*
         match (S1 correction: the "no payor tag -> AHCA" behavior is
         already handled by tag_select's own cascade substituting L3_AHCA_D/
@@ -223,14 +341,26 @@ class PublicSourceAdapter(SourceAdapter):
             segment_ms["inherited_ms"] = int((time.monotonic() - t0) * 1000)
             return [], segment_ms
 
+        # ORDER BY bm25_score, added 2026-07-23 (Payor-Policy's live-trace
+        # report): previously no ORDER BY at all -- an arbitrary DB-scan-order
+        # slice of up to `width` chunks across every AHCA-inherited document
+        # for the payor, regardless of topical fit to the actual query (real
+        # example: a Sunshine-Health timely-filing query pulling "Early
+        # Intervention Services Coverage Policy" chunks just because that
+        # inherited doc happened to be scanned early). bm25_score was already
+        # computed here but unused for ordering -- now that it's a real,
+        # meaningful signal (see _BM25_SCORE_EXPR fix above), prioritizing by
+        # it means the AHCA-inherited chunks that actually relate to the
+        # query surface first when `width` truncates the set.
         rows = (await self.db.execute(
             sql_text(f"""
                 SELECT {_CHUNK_COLS}, {_BM25_SCORE_EXPR}
                 FROM rag_published_embeddings
                 WHERE document_id = ANY(:doc_ids)
+                ORDER BY bm25_score DESC
                 LIMIT :width
             """),
-            {"doc_ids": doc_ids, "width": width, "query": query},
+            {"doc_ids": doc_ids, "width": width, "query": query, "expansion_phrases": expansion_phrases},
         )).all()
         segment_ms["inherited_ms"] = int((time.monotonic() - t0) * 1000)
 
@@ -273,3 +403,73 @@ class PublicSourceAdapter(SourceAdapter):
                 paragraph_index=d.get("paragraph_index"),
             ))
         return out, {"neighbor_ms": neighbor_ms}
+
+    async def phrase_buckets(
+        self, d_codes: list[str], j_codes: list[str], p_codes: list[str], expansion_phrases: list[str]
+    ) -> tuple[list[tuple[str, float]], list[tuple[str, float]]]:
+        """Reconstructs Gate's expansion_phrases -> REQUIRED/BOOSTED
+        selectivity buckets. The phrase<->code link exists at lexicon-match
+        time (expand_query_via_lexicon appends a matched entry's own phrases
+        alongside its full_code) but is flattened away by the time it lands
+        on GateResult.expansion_phrases -- rebuilt here via the same lexicon
+        snapshot Gate reads (_load_lexicon_snapshot, cached, public table),
+        paired with each matched code's already-computed selectivity_for_tag()
+        score. Verified live 2026-07-23 against a real query: reproduces the
+        exact REQUIRED (timely_filing/sunshine_health, sel>=0.65) vs DROP
+        (claims/medicaid, sel<0.40) split that was diluting bm25 ranking.
+        """
+        snapshot = await _load_lexicon_snapshot(self.db)
+        phrases_by_code = {e["full_code"]: e["phrases"] for e in snapshot}
+        expansion_set = set(expansion_phrases)
+
+        required: dict[str, float] = {}
+        boosted: dict[str, float] = {}
+        for code in [*d_codes, *j_codes, *p_codes]:
+            sel = await selectivity_for_tag(self.db, code)
+            code_phrases = [p for p in phrases_by_code.get(code, []) if p in expansion_set]
+            if not code_phrases:
+                continue
+            if sel >= _SELECTIVITY_REQUIRED:
+                for p in code_phrases:
+                    required[p] = max(required.get(p, 0.0), sel)
+            elif sel >= _SELECTIVITY_BOOST:
+                for p in code_phrases:
+                    boosted[p] = max(boosted.get(p, 0.0), sel)
+            # sel < _SELECTIVITY_BOOST (DROP): excluded entirely, not kept at low weight.
+        return list(required.items()), list(boosted.items())
+
+    async def attach_vector_similarity(
+        self, candidates: list[PoolCandidate], query_embedding: list[float] | None
+    ) -> tuple[list[PoolCandidate], dict]:
+        """Real structural bug fix (2026-07-23, Retriever's live-trace report):
+        dedup's first-arm-wins on chunk_id collision means a chunk found by
+        BOTH tag_select and vector_search only keeps tag_select's provenance
+        -- Filler b (which filters to source_arm=="vector") never sees it.
+        Computes similarity for EVERY candidate here (matches AND neighbors),
+        one batch query against the deduped id set, reusing the query
+        embedding Pool already computed -- same pattern bm25_score already
+        established for making a signal available regardless of which arm's
+        provenance survived the union."""
+        if not query_embedding or not candidates:
+            return candidates, {"vector_similarity_ms": 0}
+
+        query_vec = "[" + ",".join(repr(float(x)) for x in query_embedding) + "]"
+        ids = [c.chunk_id for c in candidates]
+        t0 = time.monotonic()
+        rows = (await self.db.execute(
+            sql_text("""
+                SELECT id, 1 - (embedding_vec <=> CAST(:query_vec AS vector)) AS similarity
+                FROM rag_published_embeddings
+                WHERE id = ANY(CAST(:ids AS uuid[])) AND embedding_vec IS NOT NULL
+            """),
+            {"query_vec": query_vec, "ids": ids},
+        )).all()
+        segment_ms = {"vector_similarity_ms": int((time.monotonic() - t0) * 1000)}
+
+        similarity_by_id = {str(r._mapping["id"]): float(r._mapping["similarity"]) for r in rows}
+        updated = [
+            dataclasses.replace(c, vector_similarity=similarity_by_id[c.chunk_id])
+            if c.chunk_id in similarity_by_id else c
+            for c in candidates
+        ]
+        return updated, segment_ms
