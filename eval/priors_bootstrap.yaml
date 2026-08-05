@@ -7,6 +7,17 @@
 #   Week 2-3: empirical priors derived once N≥50 samples per cell
 #   Week 3+: production-grade depth_bucket priors replace seeds, fallback to qclass optional
 #
+# cost_per_attempt = 0 across ALL strategies (Ananth, 2026-07-26): confirmed
+# these cost values were never derived from real calibration -- same seed-data
+# status as accuracy_estimate/recall_lift below. Zeroing removes an
+# unvalidated tie-breaker from the LB-maximizer's argmax (allocation.py/
+# optimizer.py: required slots break ties on (lb, confidence, -cost, -latency)
+# -- cost no longer participates while it's fabricated). Re-derivation of
+# accuracy_estimate/recall_lift from REAL forced-arm conditional recall (only
+# cells where a strategy actually deployed, not the marginal/empty-counts-as-0
+# basis) is in progress -- see docs/rag-agents/d-starvation-causes.md and the
+# 2026-07-26 forced-arm K-curve re-run.
+#
 # SEMANTIC NOTE on strategy 's' (payor fact store), 2026-07-24 (Eval):
 #   s's accuracy_estimate here means "P(the returned certified fact is CORRECT)"
 #   — NOT "P(the query is ANSWERED)". s returns a single stored fact (payer ID,
@@ -21,6 +32,21 @@
 #   calibrates s; the gate makes the values non-load-bearing for the collapse anyway.
 #   When that bank exists, s's cell should split fact-shaped vs content-shaped queries
 #   (it currently averages two very different populations).
+#
+# SEMANTIC NOTE on strategy 'd' (web search), 2026-07-26 (Eval):
+#   d's cell population is "P(success) over ALL queries d runs on" — NO
+#   crawlability conditioning. The crawl gate was DISABLED 2026-07-24
+#   (CRAWL_GATED_STRATEGIES=frozenset() in allocation.py): d is general web
+#   search that surfaces third-party sources regardless of whether a payor's
+#   OWN site is crawlable, so payer_crawlable no longer excludes d. Any future
+#   d calibration must NOT inherit the old "P(success | not affirmatively
+#   non-crawlable)" conditioning — d now executes on crawlable=False queries
+#   too, a broader population. Also: historical crawlable=False labels were
+#   partly a mobius-payor/robots.py cache-poisoning artifact (one transient
+#   failure froze crawlable=False process-lifetime, no TTL — Sitemap
+#   root-caused, fixed separately), so pre-fix crawlability-conditioned d data
+#   is doubly untrustworthy. latency_p50_ms=4000 is WARM marginal (see cell
+#   comment); do-not-fold on values stands.
 
 seed_priors:
   depth_0:  # tight corpus (high accuracy, LOW recall)
@@ -29,31 +55,35 @@ seed_priors:
       accuracy_std: 0.150
       latency_p50_ms: 500
       recall_lift: 0.100
-      cost_per_attempt: 1
+      cost_per_attempt: 0
+      authority: 0.955
     b:
       accuracy_estimate: 0.225
       accuracy_std: 0.180
       latency_p50_ms: 1500
       recall_lift: 0.100
-      cost_per_attempt: 1
+      cost_per_attempt: 0
+      authority: 0.98
     c:
       accuracy_estimate: 0.180
       accuracy_std: 0.200
       latency_p50_ms: 2000
       recall_lift: 0.071
-      cost_per_attempt: 2
+      cost_per_attempt: 0
+      authority: 0.5
     d:
       accuracy_estimate: 0.350
       accuracy_std: 0.250
-      latency_p50_ms: 3000
+      latency_p50_ms: 9732   # d MARGINAL attempt_ms p50 (concurrency-credited wall-clock d's OWN turn adds) — correct quantity for the allocator's per-strategy budget sum, consistent with other cells' marginal costs. n=22 forced=d, job c95626d27706 (chat.thinking): p50=9732, mean=9244, p90=15795, range 2048-19750. (Earlier 13000 was retrieval_ms=WHOLE-PIPELINE shared overhead — wrong quantity; 9244 was the mean — p50 is 9732.) ⚠️ HIGH-VARIANCE CAVEAT: d's attempt_ms spans 9.6× (2048-19750), so this single p50 scalar MISCHARACTERIZES d for interactive — 5/22 (23%) of queries have attempt_ms ≤ 5000 (interactive-viable), but a flat p50=9732 excludes d from ALL interactive. d is "viable for ~23%, excluded for ~77%" under interactive, NOT universally excluded. A static scalar can't capture that; recovering the fast-d minority needs per-query latency estimation or a percentile-policy on the include-decision (v2, Router's call). Still fits background/none universally.
       recall_lift: 0.150
-      cost_per_attempt: 3
+      cost_per_attempt: 0
+      authority: 0.15
     f:
       accuracy_estimate: 0.300
       accuracy_std: 0.250
       latency_p50_ms: 2500
       recall_lift: 0.120
-      cost_per_attempt: 2
+      cost_per_attempt: 0
     s:
       accuracy_estimate: 0.400
       accuracy_std: 0.300
@@ -67,31 +97,35 @@ seed_priors:
       accuracy_std: 0.170
       latency_p50_ms: 500
       recall_lift: 0.350
-      cost_per_attempt: 1
+      cost_per_attempt: 0
+      authority: 0.955
     b:
       accuracy_estimate: 0.206
       accuracy_std: 0.200
       latency_p50_ms: 1500
       recall_lift: 0.175
-      cost_per_attempt: 1
+      cost_per_attempt: 0
+      authority: 0.98
     c:
       accuracy_estimate: 0.151
       accuracy_std: 0.200
       latency_p50_ms: 2000
       recall_lift: 0.300
-      cost_per_attempt: 2
+      cost_per_attempt: 0
+      authority: 0.5
     d:
       accuracy_estimate: 0.400
       accuracy_std: 0.280
-      latency_p50_ms: 3000
+      latency_p50_ms: 9732   # d MARGINAL attempt_ms p50 (concurrency-credited wall-clock d's OWN turn adds) — correct quantity for the allocator's per-strategy budget sum, consistent with other cells' marginal costs. n=22 forced=d, job c95626d27706 (chat.thinking): p50=9732, mean=9244, p90=15795, range 2048-19750. (Earlier 13000 was retrieval_ms=WHOLE-PIPELINE shared overhead — wrong quantity; 9244 was the mean — p50 is 9732.) ⚠️ HIGH-VARIANCE CAVEAT: d's attempt_ms spans 9.6× (2048-19750), so this single p50 scalar MISCHARACTERIZES d for interactive — 5/22 (23%) of queries have attempt_ms ≤ 5000 (interactive-viable), but a flat p50=9732 excludes d from ALL interactive. d is "viable for ~23%, excluded for ~77%" under interactive, NOT universally excluded. A static scalar can't capture that; recovering the fast-d minority needs per-query latency estimation or a percentile-policy on the include-decision (v2, Router's call). Still fits background/none universally.
       recall_lift: 0.330
-      cost_per_attempt: 3
+      cost_per_attempt: 0
+      authority: 0.15
     f:
       accuracy_estimate: 0.350
       accuracy_std: 0.270
       latency_p50_ms: 2500
       recall_lift: 0.280
-      cost_per_attempt: 2
+      cost_per_attempt: 0
     s:
       accuracy_estimate: 0.450
       accuracy_std: 0.300
@@ -112,31 +146,35 @@ seed_priors:
       accuracy_std: 0.150
       latency_p50_ms: 500
       recall_lift: 0.543
-      cost_per_attempt: 1
+      cost_per_attempt: 0
+      authority: 0.955
     b:
       accuracy_estimate: 0.225
       accuracy_std: 0.220
       latency_p50_ms: 1500
       recall_lift: 0.286
-      cost_per_attempt: 1
+      cost_per_attempt: 0
+      authority: 0.98
     c:
       accuracy_estimate: 0.000
       accuracy_std: 0.050
       latency_p50_ms: 2000
       recall_lift: 0.330
-      cost_per_attempt: 2
+      cost_per_attempt: 0
+      authority: 0.5
     d:
       accuracy_estimate: 0.450
       accuracy_std: 0.300
-      latency_p50_ms: 3000
+      latency_p50_ms: 9732   # d MARGINAL attempt_ms p50 (concurrency-credited wall-clock d's OWN turn adds) — correct quantity for the allocator's per-strategy budget sum, consistent with other cells' marginal costs. n=22 forced=d, job c95626d27706 (chat.thinking): p50=9732, mean=9244, p90=15795, range 2048-19750. (Earlier 13000 was retrieval_ms=WHOLE-PIPELINE shared overhead — wrong quantity; 9244 was the mean — p50 is 9732.) ⚠️ HIGH-VARIANCE CAVEAT: d's attempt_ms spans 9.6× (2048-19750), so this single p50 scalar MISCHARACTERIZES d for interactive — 5/22 (23%) of queries have attempt_ms ≤ 5000 (interactive-viable), but a flat p50=9732 excludes d from ALL interactive. d is "viable for ~23%, excluded for ~77%" under interactive, NOT universally excluded. A static scalar can't capture that; recovering the fast-d minority needs per-query latency estimation or a percentile-policy on the include-decision (v2, Router's call). Still fits background/none universally.
       recall_lift: 0.450
-      cost_per_attempt: 3
+      cost_per_attempt: 0
+      authority: 0.15
     f:
       accuracy_estimate: 0.400
       accuracy_std: 0.300
       latency_p50_ms: 2500
       recall_lift: 0.380
-      cost_per_attempt: 2
+      cost_per_attempt: 0
     s:
       accuracy_estimate: 0.500
       accuracy_std: 0.300
@@ -144,38 +182,74 @@ seed_priors:
       recall_lift: 0.500
       cost_per_attempt: 0
 
-  depth_3:  # broad corpus (low accuracy, HIGH recall)
-    # FOLD RETRACTED 2026-07-23 — same retraction/provenance as depth_2 above.
+  depth_3:  # broad corpus (HIGH recall). REAL FOLD 2026-08-05 (Eval).
+    # LOCKED-RULER FOLD (factcheck/gemini-2.5-pro), n=65 = 22 CMHC queries × 3
+    # caller_modes, forced matrix (every strategy × every query×mode). This is
+    # the ONLY populated bucket: all CMHC pools cluster pool_size 536-1355 ≥500,
+    # so compute_depth_bucket's cutoffs put every real query in bucket 3 (the
+    # 50/200/500/5000 cutoffs are miscalibrated for this corpus — buckets 0-2
+    # structurally unreachable; recut post-ship, Router's compute_depth_bucket).
+    # recall_lift = mean chunk-recall over all 65 (failures counted as 0).
+    # accuracy_estimate = mean(answer_recall)/mean(chunk_recall) = CONDITIONAL
+    # efficiency P(accurate|retrieved); allocation.py:397 multiplies it by
+    # recall_lift so the product reconstructs mean answer_recall. Computed over
+    # the SAME 65-attempt population as recall_lift (failures as answer_recall=0)
+    # — NOT the answering-only subset, else the product overstates. k0=9 =
+    # n-weighted mean served capacity (22 copilot@7 + 44 default/thinking@10)/66;
+    # pooled approximation, doesn't affect ranking (k0 only enters P(satisfied|k),
+    # cap-mix uniform across strategies). authority from Eval-architect's write.
     a:
-      accuracy_estimate: 0.425
+      accuracy_estimate: 0.4236
       accuracy_std: 0.140
       latency_p50_ms: 500
-      recall_lift: 0.800
-      cost_per_attempt: 1
+      recall_lift: 0.6489
+      cost_per_attempt: 0
+      authority: 0.9543
+      n: 65
+      k0: 9
     b:
-      accuracy_estimate: 0.284
+      accuracy_estimate: 0.5789
       accuracy_std: 0.240
       latency_p50_ms: 1500
-      recall_lift: 0.480
-      cost_per_attempt: 1
+      recall_lift: 0.7185
+      cost_per_attempt: 0
+      authority: 0.9804
+      n: 65
+      k0: 9
     c:
-      accuracy_estimate: 0.091
+      # accuracy_estimate CORRECTED to n=65 basis: c has 9/65 zero-output rows
+      # (recall_answer=None). Over answering-only (n=56) acc_est=0.9326, but that
+      # OVERSTATES when multiplied by recall_lift(n=65) — conditions away c's
+      # failures. Over all 65 (failures as answer_recall=0): 0.8035, so
+      # recall_lift×acc_est = .659×.8035 = .5295 = true E[answer_recall/65]. ✓
+      # (n=65 clean = pool_size≥500; excludes cmhc013×copilot which is bucket-2.)
+      # authority=0.5096 is n=56 (gate-conditional: authority of retrieved
+      # content; not multiplied so population-consistency not required; 0.51<0.6
+      # excludes c under citable_required either way). c = the accuracy_n
+      # regression case (single shared n most wrong here).
+      accuracy_estimate: 0.8035
       accuracy_std: 0.120
       latency_p50_ms: 2000
-      recall_lift: 0.400
-      cost_per_attempt: 2
+      recall_lift: 0.6590
+      cost_per_attempt: 0
+      authority: 0.5096
+      n: 65
+      k0: 9
     d:
-      accuracy_estimate: 0.500
+      accuracy_estimate: 0.6664
       accuracy_std: 0.300
-      latency_p50_ms: 3000
-      recall_lift: 0.550
-      cost_per_attempt: 3
+      latency_p50_ms: 9732   # d MARGINAL attempt_ms p50 (concurrency-credited wall-clock d's OWN turn adds) — correct quantity for the allocator's per-strategy budget sum, consistent with other cells' marginal costs. n=22 forced=d, job c95626d27706 (chat.thinking): p50=9732, mean=9244, p90=15795, range 2048-19750. (Earlier 13000 was retrieval_ms=WHOLE-PIPELINE shared overhead — wrong quantity; 9244 was the mean — p50 is 9732.) ⚠️ HIGH-VARIANCE CAVEAT: d's attempt_ms spans 9.6× (2048-19750), so this single p50 scalar MISCHARACTERIZES d for interactive — 5/22 (23%) of queries have attempt_ms ≤ 5000 (interactive-viable), but a flat p50=9732 excludes d from ALL interactive. d is "viable for ~23%, excluded for ~77%" under interactive, NOT universally excluded. A static scalar can't capture that; recovering the fast-d minority needs per-query latency estimation or a percentile-policy on the include-decision (v2, Router's call). Still fits background/none universally.
+      recall_lift: 0.7300
+      cost_per_attempt: 0
+      authority: 0.1644
+      n: 65
+      k0: 9
     f:
       accuracy_estimate: 0.450
       accuracy_std: 0.300
       latency_p50_ms: 2500
       recall_lift: 0.480
-      cost_per_attempt: 2
+      cost_per_attempt: 0
     s:
       accuracy_estimate: 0.550
       accuracy_std: 0.300
@@ -189,31 +263,35 @@ seed_priors:
       accuracy_std: 0.180
       latency_p50_ms: 500
       recall_lift: 0.315
-      cost_per_attempt: 1
+      cost_per_attempt: 0
+      authority: 0.955
     b:
       accuracy_estimate: 0.450
       accuracy_std: 0.250
       latency_p50_ms: 1500
       recall_lift: 0.765
-      cost_per_attempt: 1
+      cost_per_attempt: 0
+      authority: 0.98
     c:
       accuracy_estimate: 0.000
       accuracy_std: 0.050
       latency_p50_ms: 2000
       recall_lift: 0.765
-      cost_per_attempt: 2
+      cost_per_attempt: 0
+      authority: 0.5
     d:
       accuracy_estimate: 0.550
       accuracy_std: 0.300
-      latency_p50_ms: 3000
+      latency_p50_ms: 9732   # d MARGINAL attempt_ms p50 (concurrency-credited wall-clock d's OWN turn adds) — correct quantity for the allocator's per-strategy budget sum, consistent with other cells' marginal costs. n=22 forced=d, job c95626d27706 (chat.thinking): p50=9732, mean=9244, p90=15795, range 2048-19750. (Earlier 13000 was retrieval_ms=WHOLE-PIPELINE shared overhead — wrong quantity; 9244 was the mean — p50 is 9732.) ⚠️ HIGH-VARIANCE CAVEAT: d's attempt_ms spans 9.6× (2048-19750), so this single p50 scalar MISCHARACTERIZES d for interactive — 5/22 (23%) of queries have attempt_ms ≤ 5000 (interactive-viable), but a flat p50=9732 excludes d from ALL interactive. d is "viable for ~23%, excluded for ~77%" under interactive, NOT universally excluded. A static scalar can't capture that; recovering the fast-d minority needs per-query latency estimation or a percentile-policy on the include-decision (v2, Router's call). Still fits background/none universally.
       recall_lift: 0.700
-      cost_per_attempt: 3
+      cost_per_attempt: 0
+      authority: 0.15
     f:
       accuracy_estimate: 0.500
       accuracy_std: 0.300
       latency_p50_ms: 2500
       recall_lift: 0.650
-      cost_per_attempt: 2
+      cost_per_attempt: 0
     s:
       accuracy_estimate: 0.600
       accuracy_std: 0.300
