@@ -1,0 +1,355 @@
+{
+    "contract": {
+        "query": "What is the timely filing deadline for Sunshine Health FL Medicaid claims?",
+        "chosen_slot": "direct_answer",
+        "score": 0.5820004478546631,
+        "chunks": [
+            {
+                "index": 1,
+                "chunk_id": "083d75d5-41e1-4066-96b9-98e69d24ed45",
+                "text": "Electronic Claim Submission Overview \nProviders are encouraged to participate in Sunshine Health\u2019s electronic claims/encounter filing \nprogram. Sunshine Health can receive ANSI XS12N 837 professional, institutional or encounter \ntransactions. In addition, Sunshine Health can generate an ANSI X12N 835 electronic remittance \nadvice known as an explanation of payment (EOP). \nFor more information on electronic filing, contact Sunshine Health\u2019s Electronic Transactions \n(EDI) department by calling 1-800-225-2573, ext. 8025525, or send an email to \nEDIBA@sunshinehealth.com. \nProviders who bill electronically are responsible for filing claims within the same filing deadlines as \nproviders filing paper claims. Providers who bill electronically must monitor their error reports and \nevidence of payments to ensure all submitted claims and encounters appear on the reports. \nProviders are responsible for correcting any errors and resubmitting the affiliated claims and \nencounters. \nSunshine Health can receive coordination of benefits (COB) or secondary claims electronically. \nSunshine Health follows the 5010 X12 HIPAA companion guides for requirements on submission of \nCOB data. A list of applicable clearinghouses is available on our website.",
+                "document_name": "Sunshine Provider Manual",
+                "source_type": "internal",
+                "document_id": "d9721756-d1b1-4cf4-845b-f44652c5fcf9",
+                "url": null,
+                "page_number": null,
+                "paragraph_index": null,
+                "document_status": "completed",
+                "authority": "authoritative",
+                "verified": true,
+                "is_neighbor": false,
+                "original_score": 0.5820004478546631,
+                "rerank_score": null,
+                "filler_strategy": "vector_rerank",
+                "slot_id": "direct_answer",
+                "slot_semantics": "direct_answer"
+            },
+            {
+                "index": 2,
+                "chunk_id": "2a7459df-9885-4d9e-9cb5-a7dcfbcd7d63",
+                "text": "A clean claim means a claim for payment of healthcare expenses that is submitted on a CMS 1500 \nor a UB-04 claim form in a format required by the Health Insurance Portability and Accountability \nAct of 1996 (HIPAA) with all required fields completed in accordance with Sunshine Health\u2019s \npublished claim filing requirements. \nUnclean claims are submitted claims that require further investigation or development beyond the \ninformation contained therein. Errors or omissions in claims will result in the request for \nadditional information from the provider or other external sources to resolve or correct data \nomitted from the bill; review of additional medical records; or the need for other information \nnecessary to resolve discrepancies. In addition, unclean claims may involve issues regarding \nmedical necessity and include claims not submitted within the filing deadlines. \nTo obtain clean claim submission protocols and standards, including instructions and all \ninformation required for a clean or complete claim, visit the Sunshine Health PaySpan \u2014 \nEFT/ERA web page.",
+                "document_name": "Provider_Manual.pdf",
+                "source_type": "internal",
+                "document_id": "8fba1cb5-2203-49ca-b381-58ea32c4d86c",
+                "url": null,
+                "page_number": null,
+                "paragraph_index": null,
+                "document_status": "completed",
+                "authority": "authoritative",
+                "verified": true,
+                "is_neighbor": false,
+                "original_score": 0.5783784118147911,
+                "rerank_score": null,
+                "filler_strategy": "vector_rerank",
+                "slot_id": "direct_answer",
+                "slot_semantics": "direct_answer"
+            },
+            {
+                "index": 3,
+                "chunk_id": "150d331a-209f-44e4-936a-256ad2468c81",
+                "text": "Participating Non-Participating Participating Non-Participating Participating Non-Participating \n180 days \n365 days \n90 days \n180 days \n90 days \n90 days \n*In an initial claim, days are calculated from the date of service to the date received by Sunshine \nHealth. \n** In a reconsideration or claim dispute, days are calculated from the date of the explanation of \npayment/correspondence issued by Sunshine Health to the date the reconsideration is received by \nSunshine Health. \n*** For coordination of benefits, days are calculated from the date of explanation of payment \nfrom the primary payer to the date received by Sunshine Health. \nThe filing limit for Medicare claims crossing over to Medicaid is the greater of 36 months from the \ndate of service or 12 months from Medicare\u2019s adjudication date.",
+                "document_name": "Sunshine Provider Manual",
+                "source_type": "internal",
+                "document_id": "d9721756-d1b1-4cf4-845b-f44652c5fcf9",
+                "url": null,
+                "page_number": null,
+                "paragraph_index": null,
+                "document_status": "completed",
+                "authority": "authoritative",
+                "verified": true,
+                "is_neighbor": false,
+                "original_score": 0.5709381455605317,
+                "rerank_score": null,
+                "filler_strategy": "vector_rerank",
+                "slot_id": "direct_answer",
+                "slot_semantics": "direct_answer"
+            },
+            {
+                "index": 4,
+                "chunk_id": "8e26db4e-12c3-4d3e-9df1-50e3324c01a8",
+                "text": "\u2022  Any UB-04 forms received that do not meet the CMS printing requirements \nwill be rejected and sent back to the provider or facility upon receipt. \n\u2022  In addition to submitting corrected claims on a standard red and white \nform, the previous claim number should be referenced in field 64 of the \nUB-04 as outlined in the NUCC guidelines.  The appropriate frequency \ncode/resubmission code should also be billed in field 4 of the UB-04. \n\u2022  Omission of these data elements may cause inappropriate denials, and/or \ndelays in processing and payment. \nTimely Filing Guidelines: \n\u2022  Clean Claims must be submitted within 180 days from the service date. \n\u2022  Corrected Claims must be submitted within 90 days of the date of the \nExplanation of Payment (EOP) (Original claim paid/denied date). \n\u2022  Claims reconsiderations/appeals and disputes must be submitted within \n90 days of the date of the Explanation of Payment (EOP) (Original paid/ \ndenied date). \n\u2020 \u2021 \n Medicaid\n payment\n polic\ny update \nWe are updating our \nMedicaid payment \npolicies regarding \ninpatient professional \nclaims. Effective \nFeb. 1, 2019, inpatient \nprofessional claims will \nbe denied for members \nwhose stays were \ndeemed not medically \nnecessary. \nTo ensure your \ninpatient professional \nclaims are paid, please \nverify that the services \nrendered meet the \nrequirements for \nmedical necessity. \n\u25b2 \nAMBETTER, ALLWELL \nReadmission Policy Changes \nEffective March 1, 2019 \nAs a part of the Affordable Care Act (ACA), Congress mandated that CMS reduce hospital readmissions through \ncertain payment incentives. \nSunshine Health is implementing a 30-Day Readmission Payment Policy, CC.PP.501, for our Ambetter \n(Marketplace) and Allwell (Medicare) members to improve quality of care, promote more clinically effective and \ncost efficient healthcare, and encourage safe hospital discharge. \nThe policy will be effective with respect to initial admissions occurring on and after March 1, 2019, and \nsubsequent readmissions that are related to the initial admissions. \nFor more information call Provider Services at 1-844-477-8313, or reference the policy on SunshineHealth.com. \nClick \u201cFor Providers,\u201d then under the \u201cProvider Resources\u201d tab on the left, open the \u201cClinical & Payment Policies\u201d \npage. \nSunshineHealth.com  \nQ4 2018  / 5",
+                "document_name": "508-Q4-Provider-Newsletter.pdf",
+                "source_type": "internal",
+                "document_id": "982eb70c-5f6f-4753-8ef5-30091e726b8a",
+                "url": null,
+                "page_number": null,
+                "paragraph_index": null,
+                "document_status": "completed",
+                "authority": "external",
+                "verified": true,
+                "is_neighbor": false,
+                "original_score": 0.5416064151719784,
+                "rerank_score": null,
+                "filler_strategy": "vector_rerank",
+                "slot_id": "direct_answer",
+                "slot_semantics": "direct_answer"
+            },
+            {
+                "index": 5,
+                "chunk_id": "4563bc72-feb9-4c2a-abfe-e40ad2ffb40b",
+                "text": "Sunshine Health allows providers and their office staff to register for the Secure Provider Portal \nvia SunshineHealth.com/login. On the secure site, providers can use tools that make obtaining \nand sharing information seamless. Through the secure site, providers can: \n\u2022 \nContact Sunshine Health securely and confidentially \n\u2022 \nSubmit claims and check claim status \n\u2022 \nSubmit claim reconsiderations \n\u2022 \nSubmit demographic changes through Manage Practice tab (User must have Account Manager \naccess) \n\u2022 \nResubmit claim adjustment and reconsideration for payments online \n\u2022 \nSubmit prior authorization requests \n\u2022 \nSubmit attachments for claims and resubmitted claims for payment reconsiderations and \nprimary payer information for secondary payment \n\u2022 \nUpdate certain provider information such as phone number and address \n\u2022 \nView and print enrollee eligibility \n\u2022 \nView patient list \n\u2022 \nSubmit referrals to case management \n\u2022 Complete the provider notification of pregnancy \n\u2022 View disease management and case management indicators \n\u2022 View eligibility history for all products \n\u2022 \nView member\u2019s historical PCP assignment \n\u2022 \nView provider analytics and pay-for-performance reports \nMember Benefits \nSunshine Health provides an extensive menu of benefits and expanded benefits, which vary \nfrom product to product. Expanded benefits are extra goods or services we provide at no cost to \nmembers. In addition, some covered services require prior authorization. To see a list of \nbenefits and expanded benefits as well as those services requiring prior authorization, go to \nSunshineHealth.com.",
+                "document_name": "Sunshine Provider Manual",
+                "source_type": "internal",
+                "document_id": "d9721756-d1b1-4cf4-845b-f44652c5fcf9",
+                "url": null,
+                "page_number": null,
+                "paragraph_index": null,
+                "document_status": "completed",
+                "authority": "authoritative",
+                "verified": true,
+                "is_neighbor": false,
+                "original_score": 0.5290437215873881,
+                "rerank_score": null,
+                "filler_strategy": "vector_rerank",
+                "slot_id": "direct_answer",
+                "slot_semantics": "direct_answer"
+            },
+            {
+                "index": 6,
+                "chunk_id": "530ec943-65fc-4f69-8e40-d48e17f204b2",
+                "text": "\u2022 \nA catastrophic event that substantially interferes with normal business operation of the provider \nor damage or destruction of the provider\u2019s business office or records by a natural disaster \n\u2022 \nProvider documentation showing member refused or was unable to provide member \nidentification card and provider was unaware the member was eligible for services at the time \nservices were rendered \nClaim Payment Disputes \n(Related to untimely filing, incidental procedure, unlisted procedure code) \nBefore Oct. 1, 2021 \nOn or after Oct. 1, 2021 \nWellCare Health Plans \nClaim Payment Disputes \nP.O. Box 31370 \nTampa, FL 33631-3370 \nSunshine Health \nAttn: Adjustments/Reconsiderations/Disputes \nP.O. Box 3070 \nFarmington, MO 63640-3823",
+                "document_name": "Ancillary-Provider-QRG.pdf",
+                "source_type": "internal",
+                "document_id": "606e369c-8dee-4a70-9169-68b969cd7b6e",
+                "url": null,
+                "page_number": null,
+                "paragraph_index": null,
+                "document_status": "completed",
+                "authority": "authoritative",
+                "verified": true,
+                "is_neighbor": false,
+                "original_score": 0.526825169525686,
+                "rerank_score": null,
+                "filler_strategy": "vector_rerank",
+                "slot_id": "direct_answer",
+                "slot_semantics": "direct_answer"
+            },
+            {
+                "index": 7,
+                "chunk_id": "33ba4a92-f7a4-4465-999c-11aa5d8559d1",
+                "text": "o Physicians/dentists \u2014 $500 \no Rural hospitals \u2014 None \no Other providers \u2014 None \nIneligible Claims \nThe following types of claims are ineligible for the claim dispute resolution program: \n\u2022 Claims for less than minimum amounts listed above for each type of service \n\u2022 Claim disputes that are the basis for an action pending in state/federal court \n\u2022 Claim disputes that are subject to an internal binding managed care \norganization\u2019s resolution process for contracts entered before Oct. 1, 2000 \n\u2022 Claims solely related to late payment and/or late processing \n\u2022 Interest payment disputes \n\u2022 Medicare claim disputes that are part of Medicare managed care internal grievance or \nthat qualify for a Medicare reconsideration appeal \n\u2022 Medicaid claim disputes that are part of a Medicaid fair hearing \n\u2022 Claims related to health plans not regulated by the state of Florida \n\u2022 Claims filed more than 12 months after final determination by Sunshine Health or the \nprovider",
+                "document_name": "Sunshine Provider Manual",
+                "source_type": "internal",
+                "document_id": "d9721756-d1b1-4cf4-845b-f44652c5fcf9",
+                "url": null,
+                "page_number": null,
+                "paragraph_index": null,
+                "document_status": "completed",
+                "authority": "authoritative",
+                "verified": true,
+                "is_neighbor": false,
+                "original_score": 0.5254222601545624,
+                "rerank_score": null,
+                "filler_strategy": "vector_rerank",
+                "slot_id": "direct_answer",
+                "slot_semantics": "direct_answer"
+            },
+            {
+                "index": 8,
+                "chunk_id": "f5f30604-f305-442c-a835-3c287589f7ce",
+                "text": "Test Run ID: 563b27494c0c\nSECTION 1: TIMELY FILING REQUIREMENTS\nRun: 563b27494c0c\nProviders must submit all behavioral health claims within 180 days\nof the date of service. This is a hard deadline enforced by Sunshine\nHealth per Florida Medicaid policy.\nFor corrected claims, the deadline is 365 days from the original date\nof service. Claims denied with CO-29 (timely filing) cannot be appealed\nif submitted after the deadline.\nSECTION 2: BEHAVIORAL HEALTH COVERED SERVICES\nCPT 90832 - Psychotherapy 30 minutes\nCPT 90834 - Psychotherapy 45 minutes\nCPT 90837 - Psychotherapy 60 minutes\nCPT 90853 - Group psychotherapy\nCPT 90791 - Psychiatric diagnostic evaluation\nCPT 90792 - Psychiatric evaluation with medical services\nCPT 90839 - Psychotherapy for crisis (first 60 min)\nSECTION 3: PRIOR AUTHORIZATION\nStandard PA decision: 3 business days from submission\nUrgent PA decision: 72 hours from submission\nEmergency retroactive authorization: 14 days from date of service\nContact: Sunshine Health Behavioral Health line 1-866-796-0530",
+                "document_name": "sunshine_claims_563b27494c0c.pdf",
+                "source_type": "internal",
+                "document_id": "509ebef7-741b-458a-8659-3b78c35913a9",
+                "url": null,
+                "page_number": null,
+                "paragraph_index": null,
+                "document_status": "completed",
+                "authority": "authoritative",
+                "verified": true,
+                "is_neighbor": false,
+                "original_score": 0.5228642246911988,
+                "rerank_score": null,
+                "filler_strategy": "vector_rerank",
+                "slot_id": "direct_answer",
+                "slot_semantics": "direct_answer"
+            },
+            {
+                "index": 9,
+                "chunk_id": "347db4e0-0419-44f4-bcc4-0fa96fe840c5",
+                "text": "Sunshine Health requests notification \u2014 but will not deny claims payment based solely on lack of \nnotification \u2014 for the following: \n\u2022 \nObstetrical admissions exceeding 48 hours for vaginal delivery and 96 hours for caesarean \nsections \n\u2022 \nObstetrical care with a non-participating provider \n\u2022 \nTransplants \nSunshine Health does not make retrospective review determinations for services already \nrendered. Medical providers may submit the claim for processing, which will be denied as \n\u201cservices not authorized,\u201d and may initiate the provider dispute (first level) resolution process after \nreceiving the denied claim notice. \nIn situations in which a service does not meet medical necessity and the claim has been denied \nwith an EXEB code, providers may submit a redetermination (second level) request to Sunshine \nHealth for a review of the denial along with supporting documentation to prove medical necessity. \nInstructions for submitting the request are included in the information sent with the rejected \nclaim. \nReconsiderations should be submitted by completing the Provider Claim Adjustment Request \nForm (PDF). All formal requests for reconsideration/dispute must include the appropriate form. \nReconsideration/disputes received with a missing or incomplete form will not be processed \nand returned to sender. \nA Sunshine Health Medical Director reviews the case and makes an approval or denial \ndetermination based on Medical Necessity.",
+                "document_name": "Sunshine Provider Manual",
+                "source_type": "internal",
+                "document_id": "d9721756-d1b1-4cf4-845b-f44652c5fcf9",
+                "url": null,
+                "page_number": null,
+                "paragraph_index": null,
+                "document_status": "completed",
+                "authority": "authoritative",
+                "verified": true,
+                "is_neighbor": false,
+                "original_score": 0.5203538403141447,
+                "rerank_score": null,
+                "filler_strategy": "vector_rerank",
+                "slot_id": "direct_answer",
+                "slot_semantics": "direct_answer"
+            },
+            {
+                "index": 10,
+                "chunk_id": "0351b133-2797-420e-a557-757e22212d01",
+                "text": "109\nSH_9807 \n\u00a9 2025 Sunshine Health \nSunshine Health \nProvider Manual",
+                "document_name": "Sunshine Provider Manual",
+                "source_type": "internal",
+                "document_id": "d9721756-d1b1-4cf4-845b-f44652c5fcf9",
+                "url": null,
+                "page_number": 107,
+                "paragraph_index": 0,
+                "document_status": "completed",
+                "authority": "authoritative",
+                "verified": true,
+                "is_neighbor": true,
+                "original_score": 0.29100022392733155,
+                "rerank_score": null,
+                "filler_strategy": null,
+                "slot_id": "direct_answer",
+                "slot_semantics": "direct_answer"
+            }
+        ],
+        "answer_text": null,
+        "thinking": null,
+        "traces": {
+            "gate_contour": "exact",
+            "gate_reason": "D+J matched (p=yes), 2730 docs cover the combination",
+            "reformat_posture": "precise",
+            "narrative": "I found you are asking about **claims, timely filing**, for **florida, medicaid, sunshine health**, regarding **submit**. Checked, and I have exact material for this \u2014 2730 document(s) cover it directly. I expect to have a solid answer for you."
+        },
+        "routing_keys": {
+            "decision_id": "645deb9e-40d3-491c-bda0-7aaf90bbf53c",
+            "dispatch_path": "greedy",
+            "routing_ladder_per_slot": {
+                "direct_answer": [
+                    "b",
+                    "a"
+                ]
+            },
+            "executed_order": {
+                "direct_answer": [
+                    "b"
+                ]
+            },
+            "observer_final_verdicts": {
+                "direct_answer": "SATISFIED"
+            },
+            "observer_final_reasons": {
+                "direct_answer": "vector_filled_to_capacity"
+            },
+            "attempt_spans": {
+                "direct_answer": [
+                    {
+                        "strategy": "b",
+                        "attempt_number": 1,
+                        "t_attempt_start_ms": 0,
+                        "t_attempt_end_ms": 119,
+                        "filler_emit": {
+                            "fillers_decision": "vector_rerank_assign",
+                            "slots_filled": 1,
+                            "empty_slots": 0,
+                            "under_filled": 0,
+                            "total_chunks_assigned": 10,
+                            "length_filtered": 900,
+                            "dedup_collapsed": 35,
+                            "decay_dropped": 45,
+                            "per_slot_details": [
+                                {
+                                    "slot_id": "direct_answer",
+                                    "slot_semantics": "direct_answer",
+                                    "occupancy": 10,
+                                    "capacity": 10
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            "fill_depth": {
+                "direct_answer": [
+                    {
+                        "strategy": "b",
+                        "capacity": 10,
+                        "occupancy": 10
+                    }
+                ]
+            },
+            "portfolio_fill": {
+                "direct_answer": {}
+            },
+            "prescreen_not_ready_deferred_slots": [],
+            "slots_filled": 1,
+            "under_filled_count": 0,
+            "ride_along_slots": [],
+            "terminal_action": null,
+            "routing_verdict": {
+                "outcome": "all_slots_cleared",
+                "terminal_action": null,
+                "helpers": [],
+                "confidence_bar": 0.85,
+                "adjusted_bar": 0.7224999999999999,
+                "slots": {
+                    "direct_answer": {
+                        "status": "CLEARED",
+                        "lb": 0.82774090927721,
+                        "terminal": null,
+                        "required": true,
+                        "helpers": []
+                    }
+                }
+            },
+            "authority_requirement": "citable_required",
+            "model_trace": [],
+            "feature_context": {
+                "priors_version": "file:priors_bootstrap.yaml@1785946396000000000",
+                "priors_source": "file",
+                "confidence_estimate": 0.90116535,
+                "feasible": true,
+                "dispatch_path": "greedy",
+                "shadow_allocators": [
+                    "optimizer",
+                    "bayesian",
+                    "portfolio"
+                ],
+                "per_slot_depth_buckets": {
+                    "direct_answer": 3
+                },
+                "per_slot_pool_metadata": {
+                    "direct_answer": {
+                        "top_score_percentile": 0.8891524072874721,
+                        "pool_size": 1328,
+                        "distinct_content_topk": 8
+                    }
+                }
+            }
+        },
+        "grounding_markers": {
+            "unverified_citations": 0,
+            "planned_status_citations": 0,
+            "document_name_resolved": 50,
+            "document_name_fallback": 0
+        },
+        "latency_ms": {
+            "gate_ms": 995,
+            "reformat_ms": 0,
+            "slots_ms": 0,
+            "pool_ms": 1186,
+            "router_ms": 169,
+            "fillers_ms": 119,
+            "synthesis_ms": 64,
+            "total_ms": 2536
+        },
+        "attempt_count": 1,
+        "status": "ok"
+    },
+    "latency_ms": {
+        "gate_ms": 995,
+        "reformat_ms": 0,
+        "slots_ms": 0,
+        "pool_ms": 1186,
+        "router_ms": 169,
+        "fillers_ms": 119,
+        "synthesis_ms": 64,
+        "total_ms": 2536
+    },
+    "dispatch_path": "greedy",
+    "allocator_override": null,
+    "authority_requirement": "citable_required",
+    "strategies_per_slot": []
+}

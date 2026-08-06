@@ -128,6 +128,18 @@ logger = logging.getLogger(__name__)
 # rest of that request.
 _NON_CORPUS_SOURCE_TYPES = {"fact_store", "llm_hinted_retrieval"}
 
+# Every source_type value a filler DELIBERATELY sets to mean something
+# (as opposed to leaking a raw upstream value) -- s: "fact_store", d:
+# "external", c: "llm_hinted_retrieval"/"external_validated" (filler_c.py's
+# _CHUNK_SHAPE_BY_STATUS), plus "internal"/"external" for whichever fillers
+# already emit the normalized value directly. NOT in this set: a/b's raw
+# `candidate.source_type`, which is the corpus DB's own ingestion/chunking
+# taxonomy (e.g. "hierarchical") -- a completely different namespace from
+# this module's semantic enum, never meant to reach Chat as-is.
+_KNOWN_SEMANTIC_SOURCE_TYPES = {
+    "internal", "external", "fact_store", "llm_hinted_retrieval", "external_validated",
+}
+
 # Source types that count as "authoritative" for Chat's grounding badge
 # (_infer_authority). fact_store hits are a certified, pre-verified fact
 # store (Payor Platform), not a lower-confidence web result -- defaulting
@@ -903,7 +915,25 @@ async def compile_synthesis(
         if chunk.document_status == "planned":
             planned_count += 1
 
-        source_type = chunk.source_type or ("internal" if chunk.document_id else "external")
+        # BUG FIX (2026-08-06, found writing Chat's contract-schema doc,
+        # live-traced: a real b-served chunk showed source_type="hierarchical"
+        # in the response Chat receives): the old `chunk.source_type or
+        # (...)` only fell back to internal/external when source_type was
+        # FALSY. a/b's candidate.source_type is always truthy (the corpus
+        # DB's own chunking-taxonomy column, e.g. "hierarchical"/"flat") so
+        # the fallback never fired for them -- raw DB taxonomy was leaking
+        # straight into Chat's contract instead of the documented internal/
+        # external/fact_store enum. (Did NOT silently corrupt `authority`
+        # for these chunks -- _infer_authority already prefers the precise
+        # authority_level signal over this source_type allowlist, so that
+        # field was unaffected; this bug only affected the raw exposed
+        # source_type value itself.) Now normalize by known-value MEMBERSHIP
+        # (only trust chunk.source_type when a filler deliberately set a
+        # value from the real semantic enum), not truthiness.
+        source_type = (
+            chunk.source_type if chunk.source_type in _KNOWN_SEMANTIC_SOURCE_TYPES
+            else ("internal" if chunk.document_id else "external")
+        )
         index = len(citations) + 1
         citation = CompiledCitation(
             index=index,
