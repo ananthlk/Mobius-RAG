@@ -400,6 +400,19 @@ def build_contract(
         "gate_reason": getattr(partial_result.gate, "reason", None),
         "reformat_posture": getattr(partial_result.reformat, "posture", None),
         "narrative": partial_result.narrative,
+        # Diagnostics-only expanded trace (2026-08-06, Chat FE's ask for the
+        # diagnostics panel) -- was built (orchestrator.py) but never
+        # threaded to this contract. PHI CONSTRAINT (narrate.py's own
+        # docstring, TECH's 2026-07-22 review, fail-closed policy):
+        # narrative_full echoes the raw query verbatim in its first line --
+        # MUST NEVER be written to rag_query_traces or any other persisted
+        # storage. Compute-on-demand / live-view-only, all the way through
+        # to whatever renders it. This contract response itself is not
+        # persisted by RAG (build_contract's caller returns it straight to
+        # the HTTP response, no DB write here) -- the constraint is now the
+        # CALLER's (Chat) to uphold: this field must be discarded after
+        # rendering, never logged/stored on their side either.
+        "narrative_full": partial_result.narrative_full,
     }
 
     status = status_override if status_override is not None else _derive_status(partial_result, synthesis_result)
