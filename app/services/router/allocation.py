@@ -564,10 +564,10 @@ def resolve_constraints(resource_posture: dict[str, Any]) -> dict[str, Any]:
     tolerance_pct = resolve_tolerance_pct(resource_posture)
     speed_budget_ms = _speed_budget_to_ms(resource_posture.get("speed_budget", "interactive"))
     confidence_bar = float(resource_posture.get("confidence_bar", 0.85))
-    mode_override_ms = CALLER_MODE_LATENCY_ALLOWANCE_OVERRIDE_MS.get(
+    allocator_override_ms = CALLER_MODE_LATENCY_ALLOWANCE_OVERRIDE_MS.get(
         resource_posture.get("caller_mode"))
     latency_allowance_ms = (
-        float(mode_override_ms) if mode_override_ms is not None
+        float(allocator_override_ms) if allocator_override_ms is not None
         else speed_budget_ms * (1.0 + tolerance_pct))
     return {
         "tolerance_pct": tolerance_pct,

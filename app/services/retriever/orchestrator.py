@@ -330,7 +330,7 @@ async def _run_router(
     attempt: int = 0,
     retry_of_decision_id: str | None = None,
     forced_strategy: str | None = None,
-    mode_override: str | None = None,
+    allocator_override: str | None = None,
     reformat_result: ReformatResult | None = None,
 ) -> RouterDecision:
     pool_metadata = _build_pool_metadata(slots, pool_results)
@@ -374,8 +374,8 @@ async def _run_router(
         forced_strategy=forced_strategy,
         # Caller-pinned executed allocator (greedy/optimizer/bayesian) for the
         # throttle comparison — dispatch precedence: calibration > forced >
-        # mode_override > throttle draw. None = normal production dispatch.
-        mode_override=mode_override,
+        # allocator_override > throttle draw. None = normal production dispatch.
+        allocator_override=allocator_override,
         upstream_diagnostics={
             **({"retry_of_decision": retry_of_decision_id} if retry_of_decision_id else {}),
             **(
@@ -960,7 +960,7 @@ async def _run_fillers_simple(
 async def run_retriever_partial(
     db: AsyncSession, query: str, caller_mode: str | None = None, attempt: int = 0,
     retry_of_decision_id: str | None = None, token_budget_for_retrieval: int | None = None,
-    forced_strategy: str | None = None, mode_override: str | None = None,
+    forced_strategy: str | None = None, allocator_override: str | None = None,
     force_fanout_queries: list[str] | None = None,
     emit_progress: "Callable[[str, str], Awaitable[None]] | None" = None,
     authority_requirement: str | None = None,
@@ -1133,7 +1133,7 @@ async def run_retriever_partial(
         router_decision = await _run_router(
             query, slots_result.slots, pool_results,
             structure_result.resource_posture, gate_result, payer_context, caller_mode,
-            attempt, retry_of_decision_id, forced_strategy, mode_override,
+            attempt, retry_of_decision_id, forced_strategy, allocator_override,
             reformat_result=reformat_result,
         )
         router_ms = int((time.monotonic() - t_router) * 1000)
@@ -1298,7 +1298,7 @@ async def run_retriever_partial(
 async def run_retriever_partial_with_retry(
     db: AsyncSession, query: str, caller_mode: str | None = None, max_retries: int = 1,
     token_budget_for_retrieval: int | None = None, forced_strategy: str | None = None,
-    mode_override: str | None = None, force_fanout_queries: list[str] | None = None,
+    allocator_override: str | None = None, force_fanout_queries: list[str] | None = None,
     emit_progress: "Callable[[str, str], Awaitable[None]] | None" = None,
     authority_requirement: str | None = None,
 ) -> RetrieverPartialResult:
@@ -1345,7 +1345,7 @@ async def run_retriever_partial_with_retry(
                 db, query, caller_mode=caller_mode, attempt=attempt,
                 retry_of_decision_id=retry_of_decision_id,
                 token_budget_for_retrieval=token_budget_for_retrieval,
-                forced_strategy=forced_strategy, mode_override=mode_override,
+                forced_strategy=forced_strategy, allocator_override=allocator_override,
                 force_fanout_queries=force_fanout_queries,
                 emit_progress=emit_progress, authority_requirement=authority_requirement,
             )

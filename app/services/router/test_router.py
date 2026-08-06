@@ -105,11 +105,11 @@ class TestDispatchThreeWay:
                      allocator_weights={"bayesian": 1.0}, query_key="q")
         assert d.path == "forced"
 
-    def test_mode_override_pins_executed_allocator(self):
+    def test_allocator_override_pins_executed_allocator(self):
         for name in ("greedy", "optimizer", "bayesian"):
             d = dispatch(is_calibration=False, forced_strategy=None,
                          allocator_weights={"greedy": 1.0}, query_key="q",
-                         mode_override=name)
+                         allocator_override=name)
             assert d.path == name
             assert set(d.shadow_allocators) == ({"greedy", "optimizer", "bayesian", "portfolio"} - {name})
 
@@ -291,11 +291,11 @@ class TestOneWriter:
                        "priority": 0, "query_class": "tight_pool"}}
 
         greedy = asyncio.run(route(FakeSessionFactory(), RoutingContext(
-            query="q", agent_id="router-4c", mode_override="greedy",
+            query="q", agent_id="router-4c", allocator_override="greedy",
             resource_posture=ResourcePosture(), pool_metadata=pool,
         )))
         opt = asyncio.run(route(FakeSessionFactory(), RoutingContext(
-            query="q", agent_id="router-4c", mode_override="optimizer",
+            query="q", agent_id="router-4c", allocator_override="optimizer",
             resource_posture=ResourcePosture(), pool_metadata=pool,
         )))
         forced = asyncio.run(route(FakeSessionFactory(), RoutingContext(
@@ -329,7 +329,7 @@ class TestRouteIntegration:
         decision = asyncio.run(route(factory, RoutingContext(
             query="What is the timely filing deadline?",
             agent_id="router-4c",
-            mode_override="greedy",
+            allocator_override="greedy",
             resource_posture=ResourcePosture(speed_budget="interactive",
                                              confidence_bar=0.85,
                                              caller_mode="chat.default",
@@ -510,7 +510,7 @@ class TestPostureBridgeEndToEnd:
         factory = FakeSessionFactory()
         return asyncio.run(route(factory, RoutingContext(
             query="bridge test", agent_id="router-4c",
-            mode_override="greedy",
+            allocator_override="greedy",
             resource_posture=posture,
             pool_metadata={"slot_0": {
                 "top_score_percentile": 0.60, "pool_size": 400,
@@ -567,7 +567,7 @@ class TestRetryBackReference:
         factory = FakeSessionFactory()
         decision = asyncio.run(route(factory, RoutingContext(
             query="retry pairing test", agent_id="retriever-orchestrator-retry1",
-            mode_override="greedy",
+            allocator_override="greedy",
             resource_posture=ResourcePosture(max_attempts_per_slot=6),
             pool_metadata={"slot_0": {
                 "top_score_percentile": 0.60, "pool_size": 400,

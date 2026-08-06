@@ -100,7 +100,7 @@ def dispatch(
     forced_strategy: str | None,
     allocator_weights: dict[str, float] | None = None,
     query_key: str = "",
-    mode_override: str | None = None,
+    allocator_override: str | None = None,
     phase: str = "bootstrap",
     forced_fraction: float = 0.0,
     forced_arm_weights: dict[str, float] | None = None,
@@ -108,7 +108,7 @@ def dispatch(
 ) -> DispatchDecision:
     """Route to forced bypass, or pick the EXECUTED allocator (others = shadow).
 
-    Precedence: calibration > forced_strategy > mode_override >
+    Precedence: calibration > forced_strategy > allocator_override >
     data-collection throttle > weighted draw.
 
     THROTTLE (phase == "data_collection", Ananth's 1-in-5): a deterministic
@@ -143,13 +143,13 @@ def dispatch(
     # (shadow-only) until Eval's file says otherwise
     weights = allocator_weights or {"greedy": 1 / 3, "optimizer": 1 / 3, "bayesian": 1 / 3}
 
-    if mode_override in ALLOCATOR_ORDER:
-        others = [a for a in ALLOCATOR_ORDER if a != mode_override]
+    if allocator_override in ALLOCATOR_ORDER:
+        others = [a for a in ALLOCATOR_ORDER if a != allocator_override]
         return DispatchDecision(
-            path=mode_override,  # type: ignore[arg-type]
+            path=allocator_override,  # type: ignore[arg-type]
             shadow_allocators=others,
             max_attempts=None,
-            reason=f"caller pinned executed allocator '{mode_override}' "
+            reason=f"caller pinned executed allocator '{allocator_override}' "
                    f"(shadows: {', '.join(others)})",
         )
 

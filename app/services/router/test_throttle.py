@@ -83,9 +83,9 @@ class TestThrottleDraw:
                           phase="data_collection", forced_fraction=1.0)
         assert forced.bypass_kind == "forced_strategy" and forced.shadow_allocators == []
 
-    def test_mode_override_wins_over_throttle(self):
+    def test_allocator_override_wins_over_throttle(self):
         dd = dispatch(is_calibration=False, forced_strategy=None,
-                      query_key="q", mode_override="greedy",
+                      query_key="q", allocator_override="greedy",
                       phase="data_collection", forced_fraction=1.0)
         assert dd.path == "greedy"
         assert dd.bypass_kind is None

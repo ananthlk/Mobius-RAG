@@ -12054,7 +12054,7 @@ class RetrieverAnswerRequest(BaseModel):
     caller_mode: Optional[str] = None            # chat.default / chat.thinking / batch / ...
     token_budget_for_retrieval: Optional[int] = None  # Chat's real context-window budget; None → Structure's table
     forced_strategy: Optional[str] = None        # a/b/c/d/s → single-strategy isolation (offline calibration matrix)
-    mode_override: Optional[str] = None          # greedy/optimizer/bayesian → pin the executed router allocator (throttle comparison)
+    allocator_override: Optional[str] = None          # greedy/optimizer/bayesian → pin the executed router allocator (throttle comparison)
 
 
 # Hard wall-clock ceiling on the WHOLE request (2026-07-26, live-calibration
@@ -12111,7 +12111,7 @@ async def retriever_answer(
                 caller_mode=body.caller_mode,
                 token_budget_for_retrieval=body.token_budget_for_retrieval,
                 forced_strategy=body.forced_strategy,
-                mode_override=body.mode_override,
+                allocator_override=body.allocator_override,
             ),
             timeout=_RETRIEVER_HARD_TIMEOUT_S,
         )
@@ -12119,8 +12119,8 @@ async def retriever_answer(
         elapsed_ms = int((time.monotonic() - t_req_start) * 1000)
         logging.getLogger("app.main").warning(
             "retriever_answer: HARD TIMEOUT after %dms (ceiling=%.0fs) query_len=%d "
-            "mode_override=%s -- returning degraded status=timeout envelope",
-            elapsed_ms, _RETRIEVER_HARD_TIMEOUT_S, len(body.query), body.mode_override,
+            "allocator_override=%s -- returning degraded status=timeout envelope",
+            elapsed_ms, _RETRIEVER_HARD_TIMEOUT_S, len(body.query), body.allocator_override,
         )
         # Tech Health wrapper-landing condition (2026-07-26): one emitter,
         # no parallel dict-building -- a genuine timeout has no real
@@ -12136,7 +12136,7 @@ async def retriever_answer(
             "contract": envelope.to_dict(),
             "latency_ms": {"total_ms": elapsed_ms},
             "dispatch_path": None,
-            "mode_override": body.mode_override,
+            "allocator_override": body.allocator_override,
             "strategies_per_slot": [],
         }
     envelope = build_contract(result, result.synthesis)
@@ -12161,7 +12161,7 @@ async def retriever_answer(
             "synthesis_ms": result.synthesis_ms, "total_ms": result.total_ms,
         },
         "dispatch_path": getattr(result.router_decision, "dispatch_path", None),
-        "mode_override": body.mode_override,
+        "allocator_override": body.allocator_override,
         "strategies_per_slot": strategies_per_slot,
     }
 
@@ -12338,11 +12338,11 @@ class TraceExplorerRequest(BaseModel):
     # Pin the executed router ALLOCATOR (greedy/optimizer/bayesian), 2026-08-05
     # -- distinct axis from forced_strategy: forced_strategy skips the allocator
     # entirely (dispatch_path="forced", picks ONE strategy directly);
-    # mode_override lets the allocator run for real but pins WHICH one makes
+    # allocator_override lets the allocator run for real but pins WHICH one makes
     # the pick, so "run an eval for greedy" means forced_strategy=None +
-    # mode_override="greedy" -- the real allocator choosing, not a hand-forced
+    # allocator_override="greedy" -- the real allocator choosing, not a hand-forced
     # single strategy. None (default) = normal dispatch-decision draw.
-    mode_override: Optional[str] = None
+    allocator_override: Optional[str] = None
     # Caller-declared citability (2026-08-06, previously unreachable from ANY
     # caller anywhere in this codebase -- run_structure/run_retriever_partial
     # both accept it but nothing ever threaded a value in, so citable_required
@@ -12363,7 +12363,7 @@ async def _run_trace_for_query(
     must_facts: list[str] | None, run_eval: bool,
     force_fanout_queries: list[str] | None = None,
     emit_progress=None,
-    mode_override: str | None = None,
+    allocator_override: str | None = None,
     authority_requirement: str | None = None,
 ) -> dict:
     """Core of the Trace Explorer: run one query through the real pipeline,
@@ -12385,7 +12385,7 @@ async def _run_trace_for_query(
     result = await run_retriever_partial_with_retry(
         db, query, caller_mode=caller_mode, forced_strategy=forced_strategy,
         force_fanout_queries=force_fanout_queries, emit_progress=emit_progress,
-        mode_override=mode_override, authority_requirement=authority_requirement,
+        allocator_override=allocator_override, authority_requirement=authority_requirement,
     )
     wall_ms = int((time.monotonic() - t0) * 1000)
     envelope = build_contract(result, result.synthesis)
@@ -12679,7 +12679,7 @@ async def trace_explorer_run(
     result = await _run_trace_for_query(
         db, body.query.strip(), body.forced_strategy, body.caller_mode,
         body.must_facts, body.run_eval, body.force_fanout_queries,
-        mode_override=body.mode_override, authority_requirement=body.authority_requirement,
+        allocator_override=body.allocator_override, authority_requirement=body.authority_requirement,
     )
     _persist_single_trace(result)
     return result
@@ -12688,7 +12688,7 @@ async def trace_explorer_run(
 @app.get("/admin/trace-explorer/run-stream")
 async def trace_explorer_run_stream(
     query: str, forced_strategy: str | None = None, caller_mode: str | None = "chat.default",
-    run_eval: bool = False, mode_override: str | None = None, authority_requirement: str | None = None,
+    run_eval: bool = False, allocator_override: str | None = None, authority_requirement: str | None = None,
 ):
     """SSE variant of /admin/trace-explorer/run (Ananth's ask, 2026-08-05:
     "I would rather have that streaming like how we have in Chat") -- same
@@ -12722,7 +12722,7 @@ async def trace_explorer_run_stream(
                 async with AsyncSessionLocal() as db:
                     result = await _run_trace_for_query(
                         db, query.strip(), forced_strategy, caller_mode,
-                        None, run_eval, emit_progress=_emit, mode_override=mode_override,
+                        None, run_eval, emit_progress=_emit, allocator_override=allocator_override,
                         authority_requirement=authority_requirement,
                     )
                 _persist_single_trace(result)
@@ -12942,7 +12942,7 @@ class BankRunRequest(BaseModel):
     # the whole bank (2026-08-05, Ananth's ask: "run an eval for greedy").
     # Distinct from forced_strategy -- see TraceExplorerRequest's comment.
     # None (default) = normal dispatch-decision draw, same as today.
-    mode_override: Optional[str] = None
+    allocator_override: Optional[str] = None
     # Caller-declared citability across the whole bank (2026-08-06) -- see
     # TraceExplorerRequest's comment; "any" | "citable_required" | None
     # (falls back to "any").
@@ -13071,7 +13071,7 @@ def _persist_bank_state(job_id: str, state: dict):
     payload = {
         "job_id": job_id, "forced_strategy": state["forced_strategy"],
         "caller_mode": state.get("caller_mode"), "name": state.get("name"),
-        "mode_override": state.get("mode_override"),
+        "allocator_override": state.get("allocator_override"),
         "status": state["status"], "total": state["total"], "done": state["done"],
         "started_at": state["started_at"], "summaries": state["summaries"],
         "results": state["results"],
@@ -13097,7 +13097,7 @@ def _persist_bank_state(job_id: str, state: dict):
         blob.metadata = {
             "forced_strategy": str(state["forced_strategy"]), "status": str(state["status"]),
             "caller_mode": str(state.get("caller_mode")), "name": str(state.get("name") or ""),
-            "mode_override": str(state.get("mode_override") or ""),
+            "allocator_override": str(state.get("allocator_override") or ""),
             "total": str(state["total"]), "done": str(state["done"]),
             "started_at": str(state["started_at"]),
         }
@@ -13141,7 +13141,7 @@ async def trace_explorer_run_bank_list():
                 "job_id": job_id,
                 "name": meta.get("name") or None,
                 "forced_strategy": meta.get("forced_strategy"),
-                "mode_override": meta.get("mode_override") or None,
+                "allocator_override": meta.get("allocator_override") or None,
                 "caller_mode": meta.get("caller_mode") if meta.get("caller_mode") != "None" else None,
                 "status": meta.get("status"),
                 "total": int(meta["total"]) if meta.get("total", "").isdigit() else None,
@@ -13162,7 +13162,7 @@ async def trace_explorer_run_bank_list():
 async def _run_bank_job(
     job_id: str, forced_strategy: str | None, caller_mode: str | None, bank_path: str,
     auto_fanout_from_facts: bool = False, auto_fanout_llm: bool = False,
-    auto_fanout_corpus: bool = False, mode_override: str | None = None,
+    auto_fanout_corpus: bool = False, allocator_override: str | None = None,
     authority_requirement: str | None = None,
 ):
     import yaml as _yaml
@@ -13237,7 +13237,7 @@ async def _run_bank_job(
                         db, q["query"], forced_strategy, caller_mode,
                         q.get("must_facts"), run_eval=True,
                         force_fanout_queries=force_fanout_queries,
-                        mode_override=mode_override, authority_requirement=authority_requirement,
+                        allocator_override=allocator_override, authority_requirement=authority_requirement,
                     )
                     logging.getLogger("app.main").warning(
                         "bank run %s: finished qid=%s", job_id, qid,
@@ -13498,13 +13498,13 @@ async def trace_explorer_run_bank(body: BankRunRequest = Body(...)):
         "status": "running", "total": 0, "done": 0, "summaries": [], "results": {},
         "forced_strategy": body.forced_strategy, "caller_mode": body.caller_mode,
         "name": (body.name or "").strip() or None,
-        "mode_override": body.mode_override,
+        "allocator_override": body.allocator_override,
         "started_at": time.monotonic(),
     }
     asyncio.create_task(_run_bank_job(
         job_id, body.forced_strategy, body.caller_mode, body.bank_path or _BANK_PATH_DEFAULT,
         auto_fanout_from_facts=body.auto_fanout_from_facts, auto_fanout_llm=body.auto_fanout_llm,
-        auto_fanout_corpus=body.auto_fanout_corpus, mode_override=body.mode_override,
+        auto_fanout_corpus=body.auto_fanout_corpus, allocator_override=body.allocator_override,
         authority_requirement=body.authority_requirement,
     ))
     return {"job_id": job_id}
@@ -13540,7 +13540,7 @@ async def trace_explorer_run_bank_status(job_id: str):
     return {
         "status": state["status"], "total": state["total"], "done": state["done"],
         "summaries": state["summaries"], "forced_strategy": state["forced_strategy"],
-        "mode_override": state.get("mode_override"), "name": state.get("name"),
+        "allocator_override": state.get("allocator_override"), "name": state.get("name"),
         "error": state.get("error"),
     }
 

@@ -201,7 +201,7 @@ class TestShadowWiring:
         factory = FakeSessionFactory()
         decision = asyncio.run(route(factory, RoutingContext(
             query="portfolio shadow test", agent_id="router-4c",
-            mode_override="greedy",
+            allocator_override="greedy",
             resource_posture=ResourcePosture(max_attempts_per_slot=6,
                                              token_budget=3000),
             pool_metadata={"slot_0": {

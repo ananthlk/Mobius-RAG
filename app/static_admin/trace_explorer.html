@@ -322,7 +322,7 @@ pre.raw{background:var(--panel-2);border:1px solid var(--border);border-radius:8
       </div>
       <div class="field" style="flex:0 0 auto">
         <label>Router allocator</label>
-        <select id="bank-mode-override">
+        <select id="bank-allocator-override">
           <option value="">auto (normal dispatch draw)</option>
           <option value="greedy">greedy (pinned)</option>
           <option value="optimizer">optimizer (pinned)</option>
@@ -1399,7 +1399,7 @@ document.getElementById('oracle-matrix-btn').addEventListener('click', async () 
 
 document.getElementById('bank-run-btn').addEventListener('click', async () => {
   const strategy = document.getElementById('bank-strategy').value || null;
-  const modeOverride = document.getElementById('bank-mode-override').value || null;
+  const allocatorOverride = document.getElementById('bank-allocator-override').value || null;
   const autoFanoutLlm = document.getElementById('bank-auto-fanout-llm').checked;
   const autoFanoutCorpus = document.getElementById('bank-auto-fanout-corpus').checked;
   const runName = document.getElementById('bank-run-name').value.trim() || null;
@@ -1411,7 +1411,7 @@ document.getElementById('bank-run-btn').addEventListener('click', async () => {
     const resp = await fetch('/admin/trace-explorer/run-bank', {
       method: 'POST',
       headers: {'Content-Type':'application/json', ...(adminKey ? {'X-Admin-Key': adminKey} : {})},
-      body: JSON.stringify({forced_strategy: strategy, caller_mode: 'chat.default', auto_fanout_llm: autoFanoutLlm, auto_fanout_corpus: autoFanoutCorpus, name: runName, mode_override: modeOverride}),
+      body: JSON.stringify({forced_strategy: strategy, caller_mode: 'chat.default', auto_fanout_llm: autoFanoutLlm, auto_fanout_corpus: autoFanoutCorpus, name: runName, allocator_override: allocatorOverride}),
     });
     if(!resp.ok){
       document.getElementById('bank-status-line').textContent = `error ${resp.status}: ${(await resp.text()).slice(0,300)}`;
@@ -1657,7 +1657,7 @@ document.getElementById('bank-browse-btn').addEventListener('click', async () =>
     const rows = runs.map(r => `
       <tr class="bank-row" data-jobid="${esc(r.job_id)}">
         <td style="font-size:12.5px">${r.name ? `<b>${esc(r.name)}</b> <span style="font-family:var(--mono);font-size:11px;color:var(--text-faint)">${esc(r.job_id)}</span>` : `<span style="font-family:var(--mono);font-size:12px;color:var(--text-faint)">${esc(r.job_id)} <i>(unnamed)</i></span>`}</td>
-        <td style="font-family:var(--mono);font-size:12px">${esc(r.forced_strategy || 'auto')}${r.mode_override ? ` <span class="pill mode">${esc(r.mode_override)}</span>` : ''}</td>
+        <td style="font-family:var(--mono);font-size:12px">${esc(r.forced_strategy || 'auto')}${r.allocator_override ? ` <span class="pill mode">${esc(r.allocator_override)}</span>` : ''}</td>
         <td style="font-family:var(--mono);font-size:12px">${r.status === 'running' ? '<span style="color:var(--warn)">running</span>' : esc(r.status || '?')}</td>
         <td style="font-family:var(--mono);font-size:12px">${r.done ?? '?'}/${r.total ?? '?'}</td>
         <td style="font-family:var(--mono);font-size:11px;color:var(--text-dim)">${esc(r.started_at || '—')}</td>

@@ -104,7 +104,7 @@ class TestShadowResilience:
         factory = FakeSessionFactory()
         decision = asyncio.run(route(factory, RoutingContext(
             query="q", agent_id="router-4c",
-            mode_override="greedy",  # executed=greedy; shadows=optimizer(explodes)+bayesian
+            allocator_override="greedy",  # executed=greedy; shadows=optimizer(explodes)+bayesian
             resource_posture=ResourcePosture(max_attempts_per_slot=6),
             pool_metadata=POOL,
         )))
@@ -122,7 +122,7 @@ class TestShadowResilience:
         """Same executed plan whether the shadow succeeds or explodes."""
         factory1 = FakeSessionFactory()
         d1 = asyncio.run(route(factory1, RoutingContext(
-            query="q", agent_id="router-4c", mode_override="greedy",
+            query="q", agent_id="router-4c", allocator_override="greedy",
             resource_posture=ResourcePosture(max_attempts_per_slot=6),
             pool_metadata=POOL,
         )))
@@ -133,7 +133,7 @@ class TestShadowResilience:
 
         factory2 = FakeSessionFactory()
         d2 = asyncio.run(route(factory2, RoutingContext(
-            query="q", agent_id="router-4c", mode_override="greedy",
+            query="q", agent_id="router-4c", allocator_override="greedy",
             resource_posture=ResourcePosture(max_attempts_per_slot=6),
             pool_metadata=POOL,
         )))

@@ -77,7 +77,7 @@ async def route(db_session_factory, ctx: RoutingContext) -> RouterDecision:
         forced_strategy=ctx.forced_strategy,
         allocator_weights=policy.get("allocator_weights"),
         query_key=ctx.query,
-        mode_override=ctx.mode_override,
+        allocator_override=ctx.allocator_override,
         # data-collection throttle (Ananth's pullback): policy-driven,
         # file-swappable — phase/fraction/arms all come from Eval's file
         phase=str(policy.get("phase", "bootstrap")),

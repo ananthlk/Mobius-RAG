@@ -215,7 +215,7 @@ class TestPhiRule:
         factory = FakeSessionFactory()
         decision = asyncio.run(route(factory, RoutingContext(
             query="What is the timely filing deadline?",
-            agent_id="router-4c", mode_override="greedy",
+            agent_id="router-4c", allocator_override="greedy",
             resource_posture=ResourcePosture(max_attempts_per_slot=6),
             pool_metadata={"core": {**POOL_DEPTH_2, "priority": 0,
                                     "query_class": "tight_pool"}},
@@ -231,9 +231,9 @@ class TestPhiRule:
     def test_route_returns_trace_for_all_modes(self):
         pool = {"core": {**POOL_DEPTH_2, "priority": 0, "query_class": "tight_pool"}}
         for kwargs, expected_mode in [
-            ({"mode_override": "greedy"}, "greedy"),
-            ({"mode_override": "optimizer"}, "optimizer"),
-            ({"mode_override": "bayesian"}, "bayesian"),
+            ({"allocator_override": "greedy"}, "greedy"),
+            ({"allocator_override": "optimizer"}, "optimizer"),
+            ({"allocator_override": "bayesian"}, "bayesian"),
             ({"is_calibration": True, "forced_strategy": "b"}, "forced"),
         ]:
             decision = asyncio.run(route(FakeSessionFactory(), RoutingContext(

@@ -73,7 +73,7 @@ class RoutingContext:
     agent_id: str
     is_calibration: bool = False
     forced_strategy: Optional[str] = None
-    mode_override: Optional[str] = None  # pins executed allocator: "greedy" | "optimizer" | "bayesian"
+    allocator_override: Optional[str] = None  # pins executed allocator: "greedy" | "optimizer" | "bayesian"
     resource_posture: Optional[ResourcePosture] = None
     # REAL SEAM (completed 2026-07-23 after Retriever caught the comment/code
     # mismatch): the orchestrator passes AnswerShapeResult.slots verbatim here
