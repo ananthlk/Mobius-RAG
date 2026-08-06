@@ -98,3 +98,11 @@ class RoutingContext:
     # disqualifies (fail-open on None; d is the general web strategy).
     payer_crawlable: object = None
     upstream_diagnostics: dict[str, Any] = field(default_factory=dict)  # from Shape/Gate/Reformat
+    # Caller-supplied identifier for cross-DB join back to chat_turns
+    # (2026-08-06, Chat Master's grading-callback gap: the legacy
+    # corpus_search_agent path threaded this as correlation_id=caller_id so
+    # Chat could PATCH /observe/decisions/{correlation_id}/grade after
+    # producing its own synthesis-skipped answer -- the new pipeline never
+    # had anywhere for a caller to supply it). None for calibration/eval
+    # runs and any caller that doesn't need the post-hoc grading callback.
+    correlation_id: Optional[str] = None

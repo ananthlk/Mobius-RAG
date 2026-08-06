@@ -164,8 +164,12 @@ class TestDepthBucketBoundaries:
 # Persistence (ONE-WRITER function itself)
 # ---------------------------------------------------------------------------
 
-ALL_24_COLUMNS = {
-    "decision_id", "agent_id", "query",
+# Was ALL_24_COLUMNS -- 2026-08-06, +correlation_id (Chat Master's grading-
+# callback gap: legacy's correlation_id=caller_id pattern had no equivalent
+# on this pipeline's persist path -- the DB column already existed, this
+# pipeline just never wrote to it). 25 columns now.
+ALL_25_COLUMNS = {
+    "decision_id", "agent_id", "query", "correlation_id",
     "is_calibration", "is_prod", "eval_run_id",
     "depth_bucket", "strategy_chosen", "strategy_sequence",
     "executed_ladder", "shadow_ladder", "confidence_bar",
@@ -177,7 +181,7 @@ ALL_24_COLUMNS = {
 
 
 class TestPersistence:
-    def test_writes_all_24_parameters(self):
+    def test_writes_all_25_parameters(self):
         factory = FakeSessionFactory()
         decision_id = asyncio.run(persist_decision(
             factory,
@@ -196,7 +200,7 @@ class TestPersistence:
         assert decision_id
         assert len(factory.db.calls) == 1
         stmt, params = factory.db.calls[0]
-        assert set(params.keys()) == ALL_24_COLUMNS
+        assert set(params.keys()) == ALL_25_COLUMNS
         assert json.loads(params["strategy_sequence"]) == ["a", "b"]
         assert json.loads(params["executed_ladder"])["allocator"] == "greedy"
         assert json.loads(params["shadow_ladder"])["allocator"] == "optimizer"

@@ -1,7 +1,8 @@
 """ONE-WRITER enforcement: persist_decision() is the ONLY function that INSERTs rag_query_decisions.
 
-Router writes exactly ONE row per query (24 columns after the 2026-07-23
-dual-build addendum), capturing:
+Router writes exactly ONE row per query (25 columns after +correlation_id,
+2026-08-06 -- Chat Master's grading-callback gap, the DB column already
+existed, this function just never wrote to it), capturing:
   - Dispatch decision (forced / greedy / optimizer)
   - `executed_ladder` (the plan Fillers actually walks — drives real outcomes)
   - `shadow_ladder` (the untaken allocator's plan — comparison-only, no outcome)
@@ -34,6 +35,7 @@ async def persist_decision(
     *,
     agent_id: str,
     query: str,
+    correlation_id: Optional[str] = None,
     is_calibration: bool = False,
     is_prod: bool = True,
     eval_run_id: Optional[str] = None,
@@ -121,7 +123,7 @@ async def persist_decision(
                 _sql(
                     """
                     INSERT INTO rag_query_decisions (
-                        id, agent_id, query,
+                        id, agent_id, query, correlation_id,
                         is_calibration, is_prod, eval_run_id,
                         depth_bucket, strategy_chosen, strategy_sequence,
                         executed_ladder, shadow_ladder, confidence_bar,
@@ -130,7 +132,7 @@ async def persist_decision(
                         confidence, accuracy_estimate, cost,
                         total_ms, leaf_key
                     ) VALUES (
-                        :decision_id, :agent_id, :query,
+                        :decision_id, :agent_id, :query, :correlation_id,
                         :is_calibration, :is_prod, :eval_run_id,
                         :depth_bucket, :strategy_chosen, :strategy_sequence,
                         :executed_ladder, :shadow_ladder, :confidence_bar,
@@ -146,6 +148,7 @@ async def persist_decision(
                     "decision_id": decision_id,
                     "agent_id": agent_id,
                     "query": query,
+                    "correlation_id": correlation_id,
                     "is_calibration": is_calibration,
                     "is_prod": is_prod,
                     "eval_run_id": eval_run_id,

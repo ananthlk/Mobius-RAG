@@ -226,6 +226,7 @@ async def route(db_session_factory, ctx: RoutingContext) -> RouterDecision:
     decision_id = await persist_decision(
         db_session_factory,
         agent_id=ctx.agent_id or "router-4c",
+        correlation_id=ctx.correlation_id,
         query=ctx.query,
         is_calibration=ctx.is_calibration,
         is_prod=not ctx.is_calibration,

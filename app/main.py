@@ -12061,6 +12061,16 @@ class RetrieverAnswerRequest(BaseModel):
     # surfaces (TraceExplorerRequest/BankRunRequest) had it already, but a
     # real caller (Chat) can only ever reach it through THIS endpoint.
     authority_requirement: Optional[str] = None
+    # Caller's own turn/message identifier (2026-08-06, Chat Master's
+    # grading-callback gap): persisted verbatim into rag_query_decisions.
+    # correlation_id so the caller can later PATCH
+    # /observe/decisions/{correlation_id}/grade with the answer it
+    # synthesized (chat sets skip_synthesis=True-equivalent -- this pipeline
+    # never authors answer_text, see contract.py). Matches legacy
+    # corpus_search_agent's correlation_id=caller_id pattern exactly; None
+    # is fine for any caller that doesn't need the post-hoc grading
+    # callback (e.g. eval/calibration runs).
+    correlation_id: Optional[str] = None
 
 
 # Hard wall-clock ceiling on the WHOLE request (2026-07-26, live-calibration
@@ -12119,6 +12129,7 @@ async def retriever_answer(
                 forced_strategy=body.forced_strategy,
                 allocator_override=body.allocator_override,
                 authority_requirement=body.authority_requirement,
+                correlation_id=body.correlation_id,
             ),
             timeout=_RETRIEVER_HARD_TIMEOUT_S,
         )
@@ -12145,6 +12156,7 @@ async def retriever_answer(
             "dispatch_path": None,
             "allocator_override": body.allocator_override,
             "authority_requirement": body.authority_requirement,
+            "correlation_id": body.correlation_id,
             "strategies_per_slot": [],
         }
     envelope = build_contract(result, result.synthesis)
@@ -12171,6 +12183,7 @@ async def retriever_answer(
         "dispatch_path": getattr(result.router_decision, "dispatch_path", None),
         "allocator_override": body.allocator_override,
         "authority_requirement": body.authority_requirement,
+        "correlation_id": body.correlation_id,
         "strategies_per_slot": strategies_per_slot,
     }
 

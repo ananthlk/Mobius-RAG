@@ -332,6 +332,7 @@ async def _run_router(
     forced_strategy: str | None = None,
     allocator_override: str | None = None,
     reformat_result: ReformatResult | None = None,
+    correlation_id: str | None = None,
 ) -> RouterDecision:
     pool_metadata = _build_pool_metadata(slots, pool_results)
     # attempt>0 marks a whole-loop technical-failure retry (2026-07-24,
@@ -349,6 +350,7 @@ async def _run_router(
     ctx = RoutingContext(
         query=query,
         agent_id="retriever-orchestrator" if attempt == 0 else f"retriever-orchestrator-retry{attempt}",
+        correlation_id=correlation_id,
         resource_posture=RouterResourcePosture(
             speed_budget=resource_posture.speed_budget,
             confidence_bar=resource_posture.confidence_bar,
@@ -964,6 +966,7 @@ async def run_retriever_partial(
     force_fanout_queries: list[str] | None = None,
     emit_progress: "Callable[[str, str], Awaitable[None]] | None" = None,
     authority_requirement: str | None = None,
+    correlation_id: str | None = None,
 ) -> RetrieverPartialResult:
     """Sequence Gate → Reformat → Structure → Slots → Pool. Stops there —
     Router onward doesn't exist yet. This function's own scope will shrink
@@ -1134,7 +1137,7 @@ async def run_retriever_partial(
             query, slots_result.slots, pool_results,
             structure_result.resource_posture, gate_result, payer_context, caller_mode,
             attempt, retry_of_decision_id, forced_strategy, allocator_override,
-            reformat_result=reformat_result,
+            reformat_result=reformat_result, correlation_id=correlation_id,
         )
         router_ms = int((time.monotonic() - t_router) * 1000)
         if emit_progress:
@@ -1301,6 +1304,7 @@ async def run_retriever_partial_with_retry(
     allocator_override: str | None = None, force_fanout_queries: list[str] | None = None,
     emit_progress: "Callable[[str, str], Awaitable[None]] | None" = None,
     authority_requirement: str | None = None,
+    correlation_id: str | None = None,
 ) -> RetrieverPartialResult:
     """Whole-loop retry on TECHNICAL failure (Ananth, 2026-07-24): "ask
     once, we try our best to get first-pass resolution." If ANY unhandled
@@ -1348,6 +1352,7 @@ async def run_retriever_partial_with_retry(
                 forced_strategy=forced_strategy, allocator_override=allocator_override,
                 force_fanout_queries=force_fanout_queries,
                 emit_progress=emit_progress, authority_requirement=authority_requirement,
+                correlation_id=correlation_id,
             )
         except Exception as exc:
             last_exc = exc
