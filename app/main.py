@@ -12055,6 +12055,12 @@ class RetrieverAnswerRequest(BaseModel):
     token_budget_for_retrieval: Optional[int] = None  # Chat's real context-window budget; None → Structure's table
     forced_strategy: Optional[str] = None        # a/b/c/d/s → single-strategy isolation (offline calibration matrix)
     allocator_override: Optional[str] = None          # greedy/optimizer/bayesian → pin the executed router allocator (throttle comparison)
+    # Caller-declared citability (2026-08-06, Chat integration): "any" |
+    # "citable_required" | None (falls back to "any"). This is the FIRST
+    # production, non-admin route this field reaches -- the trace-explorer
+    # surfaces (TraceExplorerRequest/BankRunRequest) had it already, but a
+    # real caller (Chat) can only ever reach it through THIS endpoint.
+    authority_requirement: Optional[str] = None
 
 
 # Hard wall-clock ceiling on the WHOLE request (2026-07-26, live-calibration
@@ -12112,6 +12118,7 @@ async def retriever_answer(
                 token_budget_for_retrieval=body.token_budget_for_retrieval,
                 forced_strategy=body.forced_strategy,
                 allocator_override=body.allocator_override,
+                authority_requirement=body.authority_requirement,
             ),
             timeout=_RETRIEVER_HARD_TIMEOUT_S,
         )
@@ -12137,6 +12144,7 @@ async def retriever_answer(
             "latency_ms": {"total_ms": elapsed_ms},
             "dispatch_path": None,
             "allocator_override": body.allocator_override,
+            "authority_requirement": body.authority_requirement,
             "strategies_per_slot": [],
         }
     envelope = build_contract(result, result.synthesis)
@@ -12162,6 +12170,7 @@ async def retriever_answer(
         },
         "dispatch_path": getattr(result.router_decision, "dispatch_path", None),
         "allocator_override": body.allocator_override,
+        "authority_requirement": body.authority_requirement,
         "strategies_per_slot": strategies_per_slot,
     }
 
