@@ -211,11 +211,16 @@ def wilson_lower_bound(p_hat: float, n: int, confidence_level: float = 0.95) -> 
 # `exploration_policy:` block in the priors YAML — same swap-without-redeploy
 # contract as the priors themselves.
 DEFAULT_EXPLORATION_POLICY = {
-    # Three-way allocator split (Ananth's third-allocator directive): equal
-    # thirds during bootstrap so all three accumulate comparable executed
-    # samples. Eval owns the weights; a legacy `ab_split_optimizer` in the
-    # file maps to {optimizer: split, greedy: 1-split} when allocator_weights
-    # is absent (back-compat).
+    # Fallback ONLY — priors_bootstrap.yaml's exploration_policy.allocator_weights
+    # is what's actually live and always wins when present (Eval-owned,
+    # code-free cutover). This equal-thirds default was the original
+    # "serve all three, compare via executed outcomes" bootstrap philosophy
+    # (Ananth's third-allocator directive) -- SUPERSEDED 2026-08-06 by
+    # validate-then-serve (greedy pinned to 1.0 in the YAML after clearing
+    # a forced eval-bank matrix; optimizer/bayesian must clear the same bar
+    # before their weight rises above 0). Left as-is here only as a safe
+    # bootstrap-time default for a fresh deploy with no YAML override yet --
+    # not a statement of current policy.
     "allocator_weights": {"greedy": 1 / 3, "optimizer": 1 / 3, "bayesian": 1 / 3},
     "confidence_level": 0.95,  # one-sided level for the LB (locked w/ Eval)
     "phase": "bootstrap",

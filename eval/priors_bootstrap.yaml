@@ -48,6 +48,26 @@
 #   is doubly untrustworthy. latency_p50_ms=4000 is WARM marginal (see cell
 #   comment); do-not-fold on values stands.
 
+# allocator_weights: Eval-owned code-free cutover (dispatch.py reads
+# exploration_policy.allocator_weights). Deterministic weighted draw picks ONE
+# allocator to EXECUTE per production query; untaken allocators log SHADOW plans
+# only (plan-diagnostics, NO executed-outcome attribution — dispatch.py §6b).
+# PINNED TO GREEDY 2026-08-06 (Ananth via Retriever, Eval sign-off): greedy is
+# validated (2026-08-06 mode×authority_requirement matrix; citable→b confirms the
+# ship-gate mechanism on the real allocator). optimizer/bayesian held at 0.0 —
+# they must clear their OWN forced eval-bank validation (the same bar greedy
+# cleared) before any promotion; until then they shadow-compute (decision
+# distribution accrues) but never serve real users. This SUPERSEDES the bootstrap
+# equal-thirds default (priors.py:219), which executed all three at 1/3 —
+# i.e. served UNVALIDATED allocators to 2/3 of production traffic. Validate-then-
+# serve, not serve-all-and-compare. Raise a weight only after that allocator
+# passes its forced-matrix validation (Eval sign-off).
+exploration_policy:
+  allocator_weights:
+    greedy: 1.0
+    optimizer: 0.0
+    bayesian: 0.0
+
 seed_priors:
   depth_0:  # tight corpus (high accuracy, LOW recall)
     a:
