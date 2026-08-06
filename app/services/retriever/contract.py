@@ -195,6 +195,15 @@ def build_contract(
                 # on the citation object the whole time.
                 "rerank_score": c.rerank_score, "filler_strategy": c.filler_strategy,
                 "slot_id": c.slot_id, "slot_semantics": c.slot_semantics,
+                # jpd_tags equivalent (2026-08-06, Chat Master's Phase-1
+                # ask) -- raw merged D/J/P taxonomy dict, same source data
+                # legacy's resolved jpd_tags list derived from
+                # (chunk_d_tags/chunk_p_tags/chunk_j_tags), not pre-resolved
+                # to a dominant-family list -- that derivation
+                # (_jpd_signal's classification) never got ported to this
+                # pipeline, so Chat/ReAct compute whatever summary they need
+                # from the raw dict.
+                "tags": c.tags,
             }
             for c in synthesis_result.citations
         ]

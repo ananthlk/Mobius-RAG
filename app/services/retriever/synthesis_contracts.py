@@ -73,6 +73,17 @@ class CompiledCitation:
     filler_strategy: str | None = None
     slot_id: str = ""
     slot_semantics: str = ""
+    # Threaded through from FilledChunk.tags (2026-08-06, Chat Master's
+    # Phase-1 ask for the cutover spec -- replaces legacy's jpd_tags).
+    # FilledChunk already carried this (filler_b sets it from
+    # candidate.tags), but synthesis.py's compile step never read it, so it
+    # silently never reached this contract -- same threading-gap pattern as
+    # authority_level/source_type before it. Dict, not the resolved J/P/D
+    # family list legacy exposed (that derivation -- _jpd_signal's dominant-
+    # family classification -- lives in corpus_search.py and was never
+    # ported to this pipeline); Chat/ReAct derive whatever summary they need
+    # from the raw tags dict, same posture as confidence_label.
+    tags: dict = field(default_factory=dict)
 
 
 @dataclass

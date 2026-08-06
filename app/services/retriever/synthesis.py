@@ -955,6 +955,11 @@ async def compile_synthesis(
             filler_strategy=chunk.filler_strategy,
             slot_id=slot.slot_id,
             slot_semantics=slot.slot_semantics,
+            # Same threading-gap pattern as authority_level/source_type
+            # before it: FilledChunk.tags already existed (filler_b sets it
+            # from candidate.tags), never read here (2026-08-06, Chat
+            # Master's Phase-1 ask).
+            tags=chunk.tags or {},
         )
         citations.append(citation)
         compiled_slots[slot.slot_id].citations.append(citation)
