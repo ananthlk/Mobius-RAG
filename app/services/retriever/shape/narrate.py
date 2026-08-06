@@ -152,15 +152,30 @@ def _closing_line(result: GateResult) -> str:
     return "So I'll ask you to rephrase that for me."
 
 
-def narrate_full(result: GateResult) -> str:
+def narrate_full(result: GateResult, *, redact: bool = False) -> str:
     """The full step-by-step reasoning trace — every stage of the gate's
     thinking, ending in the resolved archetype (contour). This is the
     "show your work" version; `narrate()` above is the short user-facing
     summary. Same underlying data, different depth.
+
+    `redact` (2026-08-06, Ananth's explicit ruling after Chat asked to
+    persist this for the diagnostics panel): the ONLY place in this whole
+    module that echoes the raw query verbatim is the "You asked: ..."
+    line directly below -- confirmed by grep, nothing else in
+    narrate_full or narrate_reformat_full touches result.query. When
+    True, skip that one line; everything else (codes/counts/reasoning) is
+    already PHI-safe by construction (same posture as `narrate()`, which
+    has always been fine to persist). This does NOT change the
+    not-persisted default -- narrate_full(redact=False) (the module's
+    original contract, TECH's 2026-07-22 review) is still what
+    orchestrator.py builds for the live-only `narrative_full` field.
+    `redact=True` is a SEPARATE, deliberately-safe variant a caller opts
+    into when it actually wants to persist something.
     """
     steps: list[str] = []
 
-    steps.append(f'You asked: "{result.query}"')
+    if not redact:
+        steps.append(f'You asked: "{result.query}"')
 
     if result.kinds_matched == 0:
         steps.append(

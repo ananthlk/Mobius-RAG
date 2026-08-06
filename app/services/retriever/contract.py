@@ -413,6 +413,11 @@ def build_contract(
         # CALLER's (Chat) to uphold: this field must be discarded after
         # rendering, never logged/stored on their side either.
         "narrative_full": partial_result.narrative_full,
+        # Persist-safe sibling (2026-08-06, Ananth's explicit ruling):
+        # same trace content minus the raw-query-echo lines -- safe for
+        # Chat to write to emit_db or any persisted store, unlike
+        # narrative_full above which must stay live-view-only.
+        "narrative_full_redacted": partial_result.narrative_full_redacted,
     }
 
     status = status_override if status_override is not None else _derive_status(partial_result, synthesis_result)

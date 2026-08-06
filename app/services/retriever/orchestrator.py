@@ -219,6 +219,14 @@ class RetrieverPartialResult:
     # information beyond Gate's own narration; see _include_reformat_narration().
     narrative: str = ""       # thinking_trace value -- Gate always, Reformat conditionally (see composition rule)
     narrative_full: str = ""  # combined, Diagnostics-only, NEVER persist (see narrate.py PHI note)
+    # Persist-safe sibling (2026-08-06, Ananth's explicit ruling: Chat
+    # wanted to persist narrative_full for the diagnostics panel; TECH's
+    # 2026-07-22 review already rejected that for the raw field --
+    # decision was to build THIS redacted variant instead, not override
+    # the fail-closed policy). Same content, minus the raw-query-echo
+    # lines (narrate.py/reformat_narrate.py's redact=True path) -- safe
+    # for Chat to write to emit_db or any other persisted store.
+    narrative_full_redacted: str = ""
 
     pipeline_complete: bool = False  # False until Router/Fillers/Synthesis/Contract/Timing exist
     next_step: str = "Router (Reasoning + Strategy) — in build"
@@ -1263,6 +1271,10 @@ async def run_retriever_partial(
         f"--- Shape: Gate ---\n{narrate_gate_full(gate_result)}\n\n"
         f"--- Shape: Reformat ---\n{narrate_reformat_full(gate_result, reformat_result)}"
     )
+    narrative_full_redacted = (
+        f"--- Shape: Gate ---\n{narrate_gate_full(gate_result, redact=True)}\n\n"
+        f"--- Shape: Reformat ---\n{narrate_reformat_full(gate_result, reformat_result, redact=True)}"
+    )
 
     return RetrieverPartialResult(
         query=query,
@@ -1285,6 +1297,7 @@ async def run_retriever_partial(
         total_ms=total_ms,
         narrative=narrative,
         narrative_full=narrative_full,
+        narrative_full_redacted=narrative_full_redacted,
         pipeline_complete=synthesis_result is not None,
         next_step=(
             "Contract/Timing built (see contract.py) but not yet called from"

@@ -162,17 +162,26 @@ def narrate(gate: GateResult, result: ReformatResult) -> str:
     return "I wasn't able to make sense of that — could you rephrase it?"
 
 
-def narrate_full(gate: GateResult, result: ReformatResult) -> str:
+def narrate_full(gate: GateResult, result: ReformatResult, *, redact: bool = False) -> str:
     """Step-by-step trace, Diagnostics-only. NEVER persist — see module
-    docstring's PHI note."""
-    steps: list[str] = [f'You asked: "{result.query}"']
+    docstring's PHI note.
+
+    `redact` (2026-08-06, same ruling/pattern as shape/narrate.py's
+    narrate_full -- see that function's docstring for the full
+    rationale): this module has exactly two raw-query-echo spots
+    ("You asked" + the PRECISE-posture "Search query" line, which falls
+    back to the raw query when there's no rewrite) -- both gated below.
+    Default (redact=False) is unchanged, still the live-only contract.
+    """
+    steps: list[str] = [] if redact else [f'You asked: "{result.query}"']
     found = _found_path(gate)
     if found:
         steps.append(f"Gate found {found}.")
 
     if result.posture == ReformatPosture.PRECISE:
         steps.append("The gate found this precise enough to search for directly, without any rewriting.")
-        steps.append(f"Search query: \"{result.rewritten_queries[0] if result.rewritten_queries else result.query}\"")
+        if not redact:
+            steps.append(f"Search query: \"{result.rewritten_queries[0] if result.rewritten_queries else result.query}\"")
 
     elif result.posture == ReformatPosture.FAN_OUT:
         n_candidates_note = "a large set of" if len(result.fanout_themes) else "several"
