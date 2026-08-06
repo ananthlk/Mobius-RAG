@@ -339,9 +339,11 @@ class TestRouteIntegration:
         )))
         assert isinstance(decision, RouterDecision)
         assert decision.dispatch_path == "greedy"
-        # depth_2 core chain under LB enforcement: [s,a,b,c] (chases the LB bar
-        # until d/f overflow the allowance), honest UNDER_CONFIDENT verdict.
-        assert decision.routing_ladder.per_slot["core"] == ["s", "a", "b", "c"]
+        # RE-DERIVED 2026-08-05 (best-LB-first, Ananth): depth_2 core chain
+        # is now [a,s,d,c] (best-LB order a>s>d>c>b, not fixed s,a,b,c,d) —
+        # chases the LB bar until b overflows the allowance, honest
+        # UNDER_CONFIDENT verdict (same status as before, different order).
+        assert decision.routing_ladder.per_slot["core"] == ["a", "s", "d", "c"]
         assert decision.routing_ladder.allocator == "greedy"
         assert decision.routing_ladder.per_slot_status["core"] == "UNDER_CONFIDENT"
         assert decision.routing_ladder.outcome == "partial_infeasible"
@@ -350,10 +352,20 @@ class TestRouteIntegration:
         assert {s.allocator for s in decision.shadow_ladders} == {"optimizer", "bayesian", "portfolio"}
         assert all(t.role == "shadow" for t in decision.shadow_traces)
 
+        # Retriever 2026-08-05 (post-deploy trace catch): the earlier
+        # per_slot_pool_metadata fix only reached persist_decision's DB
+        # write (feature_vector) — this asserts the RETURNED RouterDecision
+        # (feature_context, what actually flows to callers/routing_keys)
+        # carries the same fields. This is the gap that shipped unnoticed:
+        # the DB-side test below passed while the return value stayed None.
+        assert "per_slot_pool_metadata" in decision.feature_context
+        assert decision.feature_context["per_slot_pool_metadata"]["core"]["pool_size"] == 400
+        assert decision.feature_context["per_slot_depth_buckets"]["core"] == 2
+
         _, params = factory.db.calls[0]
         assert params["depth_bucket"] == 2                      # core slot's bucket
-        assert params["strategy_chosen"] == "s"                 # first rung of core chain
-        assert json.loads(params["strategy_sequence"]) == ["s", "a", "b", "c"]
+        assert params["strategy_chosen"] == "a"                 # RE-DERIVED 2026-08-05: best-LB-first, a leads not s
+        assert json.loads(params["strategy_sequence"]) == ["a", "s", "d", "c"]
         assert params["leaf_key"] == "core"
         assert params["priors_version"].startswith("file:")
         assert params["is_prod"] is True
@@ -371,6 +383,10 @@ class TestRouteIntegration:
         assert fv["dispatch_mode"] == "greedy"
         assert set(fv["shadow_allocators"]) == {"optimizer", "bayesian", "portfolio"}
         assert fv["per_slot_depth_buckets"]["core"] == 2
+        # raw pool signals behind the bucket, for Eval's stratified CIs
+        # (2026-08-05) — must ride alongside the derived bucket, not replace it
+        assert "top_score_percentile" in fv["per_slot_pool_metadata"]["core"]
+        assert "pool_size" in fv["per_slot_pool_metadata"]["core"]
 
     def test_default_traffic_three_way_split_by_deterministic_draw(self):
         """No override → the sha256 draw over equal-thirds weights picks the
@@ -505,15 +521,22 @@ class TestPostureBridgeEndToEnd:
         )))
 
     def test_token_budget_flows_from_dataclass_to_gate(self):
-        """Measured constants (capacity=5): a/b/c=1250, s=750 — budget 1000
-        gates a/b/c through the REAL route() path; s survives as last resort."""
+        """PARTIAL-FILL model: budget 1000 through the REAL route() path
+        seats the chain at scoped fills (floor 1 each, 150+250×3=900 ≤ 1000)
+        instead of gating whole rungs — payload bound by construction proves
+        the dataclass→bridge→assignment flow."""
         decision = self._route(ResourcePosture(
             speed_budget="interactive", max_attempts_per_slot=6,
             token_budget=1000,
         ))
-        chain = decision.routing_ladder.per_slot["slot_0"]
-        assert "a" not in chain and "b" not in chain  # 1250-token rungs gated
+        fills = decision.routing_ladder.per_slot_portfolio["slot_0"]
+        assert fills and all(k >= 1 for k in fills.values())
         assert decision.routing_ladder.per_slot_payload_tokens["slot_0"] <= 1000
+        # default-budget run fills far past 1000 — proves 1000 actually bound
+        loose = self._route(ResourcePosture(
+            speed_budget="interactive", max_attempts_per_slot=6,
+        ))
+        assert loose.routing_ladder.per_slot_payload_tokens["slot_0"] > 1000
 
     def test_token_budget_none_uses_default(self):
         decision = self._route(ResourcePosture(

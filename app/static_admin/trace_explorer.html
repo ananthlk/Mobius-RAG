@@ -5,25 +5,48 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Payor Policy — Trace Explorer</title>
 <style>
+/* Mobius Design Tokens, inlined (mobius-design/tokens.css + tokens-dark.css)
+   -- this page previously hand-rolled its own dark-only palette; now maps
+   onto the real shared token system so it's consistent with the rest of
+   the product, light-first per tokens.css with a dark override. Local
+   --bg/--panel/etc. names kept unchanged so the rest of this stylesheet
+   (and the JS) needs zero rewiring -- they're aliases onto --mobius-*. */
 :root{
-  --bg:#0e1015; --panel:#161922; --panel-2:#1c202b; --border:#2a2f3d;
-  --text:#e6e8ee; --text-dim:#9096a8; --text-faint:#5c6272;
-  --accent:#8b5cf6; --accent-dim:#4c3d80;
-  --good:#3ecf8e; --good-dim:#1c3d33;
-  --warn:#e8b339; --warn-dim:#453a1c;
-  --bad:#f0577a; --bad-dim:#3d1c28;
-  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
-  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+  --mobius-text-primary:#1a1d21; --mobius-text-secondary:#374151; --mobius-text-muted:#64748b;
+  --mobius-bg-primary:#fafbfc; --mobius-bg-secondary:#f1f5f9; --mobius-bg-card:#ffffff; --mobius-bg-hover:#f9fafb;
+  --mobius-border:#e2e8f0; --mobius-border-light:#e5e7eb;
+  --mobius-accent:#3b82f6; --mobius-accent-hover:#2563eb;
+  --mobius-violet:#7c3aed;
+  --mobius-success:#16a34a; --mobius-warning:#f59e0b; --mobius-error:#dc2626;
+  --mobius-font-sans:"DM Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  --mobius-font-mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,monospace;
+
+  --bg:var(--mobius-bg-primary); --panel:var(--mobius-bg-card); --panel-2:var(--mobius-bg-secondary);
+  --border:var(--mobius-border); --border-light:var(--mobius-border-light);
+  --text:var(--mobius-text-primary); --text-dim:var(--mobius-text-secondary); --text-faint:var(--mobius-text-muted);
+  --accent:var(--mobius-accent); --accent-dim:#ece5fc; --violet:var(--mobius-violet);
+  --good:var(--mobius-success); --good-dim:#e2f6ec;
+  --warn:var(--mobius-warning); --warn-dim:#faf0d8;
+  --bad:var(--mobius-error); --bad-dim:#fbe4ea;
+  --mono:var(--mobius-font-mono); --sans:var(--mobius-font-sans);
 }
-@media (prefers-color-scheme: light){
-  :root{
-    --bg:#f4f5f8; --panel:#ffffff; --panel-2:#eceef3;
-    --border:#dbdee6; --text:#1a1d24; --text-dim:#5b6072; --text-faint:#9095a3;
-    --accent:#7c3aed; --accent-dim:#ece5fc;
-    --good:#0f9d63; --good-dim:#e2f6ec;
-    --warn:#b3790a; --warn-dim:#faf0d8;
-    --bad:#d13856; --bad-dim:#fbe4ea;
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --mobius-text-primary:#e6edf3; --mobius-text-secondary:#cbd5e1; --mobius-text-muted:#8b949e;
+    --mobius-bg-primary:#0f1419; --mobius-bg-secondary:#161b22; --mobius-bg-card:#1a2332; --mobius-bg-hover:#1e2d3d;
+    --mobius-border:rgba(255,255,255,.08); --mobius-border-light:rgba(255,255,255,.06);
+    --mobius-accent:#60a5fa; --mobius-accent-hover:#93c5fd; --mobius-violet:#a78bfa;
+    --mobius-success:#22c55e; --mobius-warning:#eab308; --mobius-error:#f87171;
+    --accent-dim:#26314f; --good-dim:#12251d; --warn-dim:#2c2412; --bad-dim:#301820;
   }
+}
+:root[data-theme="dark"]{
+  --mobius-text-primary:#e6edf3; --mobius-text-secondary:#cbd5e1; --mobius-text-muted:#8b949e;
+  --mobius-bg-primary:#0f1419; --mobius-bg-secondary:#161b22; --mobius-bg-card:#1a2332; --mobius-bg-hover:#1e2d3d;
+  --mobius-border:rgba(255,255,255,.08); --mobius-border-light:rgba(255,255,255,.06);
+  --mobius-accent:#60a5fa; --mobius-accent-hover:#93c5fd; --mobius-violet:#a78bfa;
+  --mobius-success:#22c55e; --mobius-warning:#eab308; --mobius-error:#f87171;
+  --accent-dim:#26314f; --good-dim:#12251d; --warn-dim:#2c2412; --bad-dim:#301820;
 }
 *{box-sizing:border-box}
 body{background:var(--bg);color:var(--text);font-family:var(--sans);margin:0;line-height:1.5;font-size:14px}
@@ -144,13 +167,86 @@ pre.raw{background:var(--panel-2);border:1px solid var(--border);border-radius:8
 .fact-support.warn{color:var(--warn)}
 .fact-support.bad{color:var(--bad)}
 .viewing-banner{background:var(--accent-dim);border:1px solid var(--accent);border-radius:8px;padding:8px 14px;font-family:var(--mono);font-size:12px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center}
+
+/* 3-function top-level IA (2026-08-05 redesign) */
+.func-tabs{display:flex;gap:4px;background:var(--panel-2);border:1px solid var(--border);border-radius:12px;padding:4px;margin-bottom:20px}
+.func-tab{flex:1;text-align:center;padding:11px 14px;border-radius:9px;cursor:pointer;user-select:none;font-weight:600;font-size:13.5px;color:var(--text-faint)}
+.func-tab .n{font-family:var(--mono);font-size:10.5px;opacity:.7;display:block;margin-bottom:2px;font-weight:500;letter-spacing:.03em;text-transform:uppercase}
+.func-tab.active{background:var(--panel);color:var(--text);box-shadow:0 1px 2px rgba(0,0,0,.06)}
+.func-tab.active .n{color:var(--accent)}
+.func-tab:not(.active):hover{color:var(--text-dim)}
+.func-panel{display:none}
+.func-panel.active{display:block}
+
+.mode-toggle{display:inline-flex;background:var(--panel-2);border:1px solid var(--border);border-radius:9px;padding:3px;margin-bottom:16px}
+.mode-btn{padding:6px 14px;border-radius:6px;font-size:12.5px;font-weight:600;color:var(--text-faint);cursor:pointer}
+.mode-btn.active{background:var(--panel);color:var(--text);box-shadow:0 1px 2px rgba(0,0,0,.06)}
+
+.pill.chat{background:var(--accent-dim);color:var(--accent)}
+.pill.admin{background:var(--panel-2);color:var(--text-faint);border:1px solid var(--border)}
+.pill{display:inline-flex;align-items:center;font-family:var(--mono);font-size:10.5px;padding:2px 8px;border-radius:99px;font-weight:600}
+.pill.good{background:var(--good-dim);color:var(--good)}
+.pill.warn{background:var(--warn-dim);color:var(--warn)}
+.pill.bad{background:var(--bad-dim);color:var(--bad)}
+
+.collapse{border:1px solid var(--border);border-radius:10px;overflow:hidden;margin-bottom:10px}
+.collapse-head{display:flex;align-items:center;gap:10px;padding:12px 14px;background:var(--panel-2);cursor:pointer;user-select:none}
+.collapse-head::before{content:"▸";font-family:var(--mono);color:var(--text-faint);font-size:11px;transition:transform .15s}
+.collapse.open .collapse-head::before{transform:rotate(90deg)}
+.collapse-title{font-weight:700;font-size:13px}
+.collapse-n{font-family:var(--mono);font-size:11px;color:var(--text-faint);margin-left:auto}
+.collapse-body{display:none;padding:14px;background:var(--panel)}
+.collapse.open .collapse-body{display:block}
+.job-check-row{display:flex;align-items:center;gap:10px;padding:8px 4px;border-bottom:1px solid var(--border-light);font-size:12.5px}
+.job-check-row:last-child{border-bottom:none}
+.job-check-row input{accent-color:var(--accent)}
+
+/* oracle matrix (2026-08-06: generalized "greedy vs oracle" comparison) */
+.om-summary{display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap}
+.om-stat{background:var(--panel-2);border:1px solid var(--border);border-radius:8px;padding:10px 16px;min-width:100px}
+.om-stat .num{font-family:var(--mono);font-size:20px;font-weight:700;font-variant-numeric:tabular-nums}
+.om-stat .lbl{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--text-faint);margin-top:2px}
+.om-stat.beat .num{color:var(--good)}
+.om-stat.tie .num{color:var(--text-faint)}
+.om-stat.miss .num{color:var(--bad)}
+.om-arm{text-align:center;font-family:var(--mono);font-variant-numeric:tabular-nums;font-weight:600;border-radius:5px;position:relative}
+.om-arm.oracle{outline:2px solid var(--accent);outline-offset:-2px}
+.om-arm.oracle::after{content:"★";position:absolute;top:0;right:2px;font-size:8px;color:var(--accent)}
+.om-arm.na{color:var(--text-faint);font-weight:400}
+.om-verdict{font-family:var(--mono);font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:99px;white-space:nowrap}
+.om-verdict.BEAT{background:var(--good-dim);color:var(--good)}
+.om-verdict.TIE{background:var(--panel-2);color:var(--text-faint)}
+.om-verdict.MISS{background:var(--bad-dim);color:var(--bad)}
+.om-verdict.NO_DATA{background:var(--panel-2);color:var(--text-faint)}
+
+/* live streaming stage cards (2026-08-05: "streaming like how we have in
+   chat") -- one card per pipeline stage, appended as SSE events arrive */
+#trace-progress{margin-top:10px;display:flex;flex-direction:column;gap:6px}
+.stage-card{display:flex;align-items:flex-start;gap:10px;padding:9px 12px;background:var(--panel-2);border:1px solid var(--border);border-radius:8px;font-size:12.5px;animation:stage-in .18s ease-out}
+.stage-card .stage-name{font-family:var(--mono);font-weight:700;color:var(--accent);text-transform:uppercase;font-size:10.5px;flex:none;width:70px;padding-top:1px}
+.stage-card .stage-text{color:var(--text-dim);white-space:pre-wrap;word-break:break-word}
+@keyframes stage-in{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:translateY(0)}}
 </style>
 </head>
 <body>
 <div class="wrap">
   <div class="eyebrow">Payor Policy Agent · Trace Explorer</div>
-  <h1>Run any query through the real answer engine</h1>
+  <h1>Run, review, and calibrate the real answer engine</h1>
 
+  <div class="func-tabs">
+    <div class="func-tab active" data-func="trace"><span class="n">01</span>Run a Trace</div>
+    <div class="func-tab" data-func="bank"><span class="n">02</span>Run the Full Bank</div>
+    <div class="func-tab" data-func="priors"><span class="n">03</span>Compute &amp; Capture Priors</div>
+  </div>
+
+  <!-- FUNCTION 1: RUN A TRACE -->
+  <div class="func-panel active" id="func-trace">
+  <div class="mode-toggle">
+    <div class="mode-btn active" data-mode="new">New query</div>
+    <div class="mode-btn" data-mode="review">Review previous</div>
+  </div>
+
+  <div id="trace-mode-new">
   <div class="form-card">
     <div class="form-row">
       <div class="field grow">
@@ -191,12 +287,26 @@ pre.raw{background:var(--panel-2);border:1px solid var(--border);border-radius:8
     </div>
     <button class="run" id="run-btn">Run trace</button>
     <div id="status-line"></div>
+    <div id="trace-progress"></div>
     <div class="keyrow">
       <input type="password" id="f-admin-key" placeholder="X-Admin-Key (stored locally in this browser only)">
       <button class="small-btn" id="save-key-btn">save key</button>
     </div>
   </div>
+  </div>
 
+  <div id="trace-mode-review" style="display:none">
+    <div class="form-card">
+      <div class="card-title" style="font-weight:700;font-size:14px;margin-bottom:3px">Recent traces</div>
+      <div style="font-size:12.5px;color:var(--text-faint);margin-bottom:14px">Pulled from <code>rag_query_decisions</code> — every real Chat turn AND every admin-run trace, one combined history. A <span class="pill admin">admin</span> row has a full persisted trace body (loads exactly as it happened below); a <span class="pill chat">chat</span> row shows the router's summary only — click "re-run" to populate the result view live (an approximation, not a byte-identical replay, since corpus/priors may have moved since).</div>
+      <button class="run" id="trace-history-refresh-btn" style="margin-bottom:12px">Refresh</button>
+      <div id="trace-history-list"></div>
+    </div>
+  </div>
+  </div>
+
+  <!-- FUNCTION 2: RUN THE FULL BANK -->
+  <div class="func-panel" id="func-bank">
   <div class="form-card" style="margin-top:16px">
     <div class="form-row">
       <div class="field" style="flex:0 0 auto">
@@ -211,6 +321,15 @@ pre.raw{background:var(--panel-2);border:1px solid var(--border);border-radius:8
         </select>
       </div>
       <div class="field" style="flex:0 0 auto">
+        <label>Router allocator</label>
+        <select id="bank-mode-override">
+          <option value="">auto (normal dispatch draw)</option>
+          <option value="greedy">greedy (pinned)</option>
+          <option value="optimizer">optimizer (pinned)</option>
+          <option value="bayesian">bayesian (pinned)</option>
+        </select>
+      </div>
+      <div class="field" style="flex:0 0 auto">
         <label>&nbsp;</label>
         <label class="chk"><input type="checkbox" id="bank-auto-fanout-llm"> auto-decompose via LLM (real mechanism)</label>
       </div>
@@ -220,7 +339,13 @@ pre.raw{background:var(--panel-2);border:1px solid var(--border);border-radius:8
       </div>
       <div class="field grow">
         <label>&nbsp;</label>
-        <div style="font-family:var(--mono);font-size:12px;color:var(--text-faint);padding-top:8px">eval/queries_cmhc.yaml — 22 queries, graded against each question's own must_facts. LLM decomposition sees ONLY the query (no must_facts/answer key) and decides for itself whether to break it into targeted sub-queries, forcing FAN_OUT if it does. Corpus decomposition uses Gate's codes + selectivity-weighted tag co-occurrence within the pool intersection to derive sub-query themes deterministically, no LLM call. Both add multi-slot retrieval overhead per query -- noticeably slower than a normal bank run.</div>
+        <div style="font-family:var(--mono);font-size:12px;color:var(--text-faint);padding-top:8px">eval/queries_cmhc.yaml — 22 queries, graded against each question's own must_facts. LLM decomposition sees ONLY the query (no must_facts/answer key) and decides for itself whether to break it into targeted sub-queries, forcing FAN_OUT if it does. Corpus decomposition uses Gate's codes + selectivity-weighted tag co-occurrence within the pool intersection to derive sub-query themes deterministically, no LLM call. Both add multi-slot retrieval overhead per query -- noticeably slower than a normal bank run. <b>To eval the real greedy allocator</b> (2026-08-05): set Bank to "auto (real router)" (NOT a forced strategy — forcing a strategy skips the allocator entirely) and Router allocator to "greedy" — that pins WHICH allocator runs while letting it make its own real strategy pick per query.</div>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="field grow">
+        <label>Run name <span style="text-transform:none;opacity:.7">(optional — helps most for nightly/automated runs)</span></label>
+        <input type="text" id="bank-run-name" placeholder="e.g. nightly-2026-08-05, or leave blank to use the job id">
       </div>
     </div>
     <button class="run" id="bank-run-btn">Run full bank (22 queries)</button>
@@ -238,8 +363,68 @@ pre.raw{background:var(--panel-2);border:1px solid var(--border);border-radius:8
         <div style="font-family:var(--mono);font-size:12px;color:var(--text-faint);padding-top:8px">Paste a job_id (yours, or one someone else started/shared) to follow it live -- polls until done, same as a run you start here. Also auto-loads from a <code>?job_id=</code> URL param.</div>
       </div>
     </div>
+    <div class="form-row" style="margin-top:8px;align-items:flex-end">
+      <div class="field" style="flex:0 0 auto">
+        <label>&nbsp;</label>
+        <button class="run" id="bank-browse-btn" style="margin:0">Browse previous runs</button>
+      </div>
+      <div class="field grow">
+        <label>&nbsp;</label>
+        <div style="font-family:var(--mono);font-size:12px;color:var(--text-faint);padding-top:8px">Every run persisted to GCS is listed here -- no need to already have the job_id.</div>
+      </div>
+    </div>
+    <div id="bank-browse-panel"></div>
     <div id="bank-status-line"></div>
     <div id="bank-log"></div>
+  </div>
+
+  <div class="form-card" style="margin-top:16px" id="oracle-matrix-card">
+    <div class="card-title" style="font-weight:700;font-size:14px;margin-bottom:3px">Oracle comparison</div>
+    <div style="font-size:12.5px;color:var(--text-faint);margin-bottom:12px">Compare the loaded run against the per-query oracle (best single arm among a/b/c/d, Eval's ship-gate SCORE formula) -- auto-resolves the latest single-arm job per strategy at the SAME caller_mode as the loaded run.</div>
+    <button class="run" id="oracle-matrix-btn" disabled>Compare loaded run to oracle</button>
+    <div id="oracle-matrix-status" style="margin-top:8px"></div>
+    <div id="oracle-matrix-result"></div>
+  </div>
+  </div>
+
+  <!-- FUNCTION 3: COMPUTE & CAPTURE PRIORS -->
+  <div class="func-panel" id="func-priors">
+  <div class="form-card" style="margin-top:16px">
+    <div class="form-row">
+      <div class="field grow">
+        <label>Jobs to fold — pre-checked: latest completed run per strategy × mode</label>
+        <div id="priors-lab-selected" style="padding:6px 0">loading latest jobs…</div>
+      </div>
+    </div>
+    <div class="form-row" style="margin-top:8px;align-items:flex-end">
+      <div class="field" style="flex:0 0 auto">
+        <label># buckets</label>
+        <input type="number" id="priors-lab-buckets" value="3" min="2" max="6" style="width:70px">
+      </div>
+      <div class="field" style="flex:0 0 auto">
+        <label>&nbsp;</label>
+        <label class="chk"><input type="checkbox" id="priors-lab-split-mode" checked> split by caller_mode</label>
+      </div>
+      <div class="field grow">
+        <label>&nbsp;</label>
+        <div style="font-family:var(--mono);font-size:12px;color:var(--text-faint);padding-top:8px">Recomputes recall_lift/accuracy_estimate/authority/n/k0/latency_p50_ms from real bank-run data, bucketed by that data's own real pool_size distribution (not the hardcoded depth_bucket cutoffs) -- Eval's population/reconciliation rules applied automatically (zero-output rows counted as 0 for multiplied fields, excluded from the authority gate, documented). READ-ONLY: computes a preview in eval/priors_bootstrap.yaml's cell schema, never writes the file.</div>
+      </div>
+    </div>
+    <button class="run" id="priors-lab-run-btn">Compute priors from selected jobs</button>
+    <details style="margin-top:10px">
+      <summary style="cursor:pointer;font-family:var(--mono);font-size:12px;color:var(--text-faint)">override job selection manually</summary>
+      <textarea id="priors-lab-jobs" rows="4" style="width:100%;font-family:var(--mono);font-size:12.5px;margin-top:6px" placeholder="job_id,strategy,caller_mode (one per line) -- leave blank to use the checked jobs above"></textarea>
+    </details>
+    <div id="priors-lab-status"></div>
+    <div id="priors-lab-result"></div>
+  </div>
+
+  <div class="form-card" style="margin-top:16px">
+    <div class="card-title" style="font-weight:700;font-size:14px;margin-bottom:3px">Score history</div>
+    <div style="font-size:12.5px;color:var(--text-faint);margin-bottom:12px">Every compute call, most recent (current) first. Interim GCS-based history -- Eval-architect's DB-backed compute/publish/retrieve system will supersede this once it lands. Click a row to load that computation's full result above.</div>
+    <button class="run" id="priors-lab-history-refresh-btn" style="margin-bottom:10px">Refresh</button>
+    <div id="priors-lab-history"></div>
+  </div>
   </div>
 
   <div id="statusbar" class="statusbar"></div>
@@ -280,6 +465,21 @@ function switchTab(name){
   document.querySelectorAll('.tabpanel').forEach(p => p.classList.toggle('active', p.id === `tabpanel-${name}`));
 }
 document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => switchTab(t.dataset.tab)));
+
+// 3-function top-level IA (2026-08-05 redesign)
+document.querySelectorAll('.func-tab').forEach(t => t.addEventListener('click', () => {
+  document.querySelectorAll('.func-tab').forEach(x => x.classList.remove('active'));
+  document.querySelectorAll('.func-panel').forEach(x => x.classList.remove('active'));
+  t.classList.add('active');
+  document.getElementById('func-' + t.dataset.func).classList.add('active');
+}));
+document.querySelectorAll('.mode-btn').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('.mode-btn').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  document.getElementById('trace-mode-new').style.display = b.dataset.mode === 'new' ? '' : 'none';
+  document.getElementById('trace-mode-review').style.display = b.dataset.mode === 'review' ? '' : 'none';
+  if(b.dataset.mode === 'review') loadTraceHistory();
+}));
 
 function kv(pairs){
   return `<dl class="kv">${pairs.map(([k,v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join('')}</dl>`;
@@ -703,6 +903,11 @@ function renderStatusbar(d){
     {label: `chunks out: ${(e.chunks||[]).length}`, cls: (e.chunks||[]).length ? 'good' : 'warn'},
   ];
   if(st.fusion_content_merged) pills.push({label:`fusion merged: ${st.fusion_content_merged}`, cls:'good'});
+  const asum = e.authority_summary;
+  if(asum && asum.n_chunks){
+    const pct = Math.round(asum.authority_score * 100);
+    pills.push({label:`authority: ${asum.n_authoritative}/${asum.n_chunks} (${pct}%)`, cls: pct >= 70 ? 'good' : (pct >= 30 ? 'warn' : 'bad')});
+  }
   document.getElementById('statusbar').innerHTML = pills.map(p => `<div class="pill"><span class="dot ${p.cls}"></span>${esc(p.label)}</div>`).join('');
 }
 
@@ -726,43 +931,194 @@ document.getElementById('run-btn').addEventListener('click', async () => {
   const mustFactsRaw = document.getElementById('f-must-facts').value;
   const mustFacts = mustFactsRaw.split('\n').map(s => s.trim()).filter(Boolean);
   const adminKey = document.getElementById('f-admin-key').value.trim();
+  // Real bug (Ananth's catch, 2026-08-05): the backend only computes eval
+  // when run_eval AND must_facts are both truthy -- checking the box with
+  // an empty must-facts textarea silently skips eval with zero feedback,
+  // reading as "the checkbox does nothing." Block it here instead, with an
+  // explicit reason, rather than let that silent no-op happen again.
+  if(runEval && !mustFacts.length){
+    setStatus('run eval is checked but no must_facts entered -- add at least one fact per line (recall needs something to check against), or uncheck run eval', 'err');
+    return;
+  }
 
   const btn = document.getElementById('run-btn');
   btn.disabled = true;
+  document.getElementById('trace-progress').innerHTML = '';
   setStatus('running…');
   const t0 = performance.now();
+
+  // run_eval needs must_facts in a POST body the streaming GET endpoint
+  // doesn't carry -- non-streaming path for that case only, unchanged
+  // from before this feature existed.
+  if(runEval){
+    try {
+      const resp = await fetch('/admin/trace-explorer/run', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json', ...(adminKey ? {'X-Admin-Key': adminKey} : {})},
+        body: JSON.stringify({query, forced_strategy: strategy, caller_mode: callerMode, must_facts: mustFacts, run_eval: true}),
+      });
+      const wallMs = Math.round(performance.now() - t0);
+      if(!resp.ok){ setStatus(`error ${resp.status}: ${(await resp.text()).slice(0,300)}`, 'err'); return; }
+      setStatus(`done in ${wallMs} ms (wall)`, 'ok');
+      renderFullResult(await resp.json());
+    } catch(e) {
+      setStatus('request failed: ' + e.message, 'err');
+    } finally {
+      btn.disabled = false;
+    }
+    return;
+  }
+
+  // Streaming path (Ananth's ask, 2026-08-05: "streaming like how we have
+  // in chat") -- fetch() + manual SSE parsing rather than EventSource,
+  // since EventSource can't send the X-Admin-Key header and the admin
+  // auth middleware is (deliberately) header-only, not query-param.
   try {
-    const resp = await fetch('/admin/trace-explorer/run', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json', ...(adminKey ? {'X-Admin-Key': adminKey} : {})},
-      body: JSON.stringify({
-        query, forced_strategy: strategy, caller_mode: callerMode,
-        must_facts: runEval ? mustFacts : null, run_eval: runEval,
-      }),
+    const params = new URLSearchParams({query, caller_mode: callerMode});
+    if(strategy) params.set('forced_strategy', strategy);
+    const resp = await fetch(`/admin/trace-explorer/run-stream?${params}`, {
+      headers: adminKey ? {'X-Admin-Key': adminKey} : {},
     });
-    const wallMs = Math.round(performance.now() - t0);
-    if(!resp.ok){
-      const body = await resp.text();
-      setStatus(`error ${resp.status}: ${body.slice(0,300)}`, 'err');
+    if(!resp.ok || !resp.body){
+      setStatus(`error ${resp.status}: ${(await resp.text()).slice(0,300)}`, 'err');
       btn.disabled = false;
       return;
     }
-    const d = await resp.json();
-    setStatus(`done in ${wallMs} ms (wall)`, 'ok');
-    document.getElementById('tabbar').style.display = 'flex';
-    window.__tableRegistry = {};
-    renderStatusbar(d);
-    renderEmits(d);
-    renderTelemetry(d);
-    renderDetail(d);
-    renderEval(d);
-    wireAllTables();
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while(true){
+      const {done, value} = await reader.read();
+      if(done) break;
+      buf += decoder.decode(value, {stream: true});
+      let idx;
+      while((idx = buf.indexOf('\n\n')) !== -1){
+        const frame = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        const eventLine = frame.split('\n').find(l => l.startsWith('event: '));
+        const dataLine = frame.split('\n').find(l => l.startsWith('data: '));
+        if(!eventLine || !dataLine) continue;
+        const eventType = eventLine.slice(7).trim();
+        const data = JSON.parse(dataLine.slice(6));
+        if(eventType === 'progress'){
+          document.getElementById('trace-progress').insertAdjacentHTML('beforeend',
+            `<div class="stage-card"><span class="stage-name">${esc(data.stage)}</span><span class="stage-text">${esc(data.text)}</span></div>`);
+        } else if(eventType === 'result'){
+          const wallMs = Math.round(performance.now() - t0);
+          setStatus(`done in ${wallMs} ms (wall)`, 'ok');
+          renderFullResult(data);
+        } else if(eventType === 'error'){
+          setStatus('pipeline error: ' + (data.error || 'unknown'), 'err');
+        }
+      }
+    }
   } catch(e) {
     setStatus('request failed: ' + e.message, 'err');
   } finally {
     btn.disabled = false;
   }
 });
+
+// Shared by a fresh run, a re-run of a chat-originated history row, and
+// loading a saved admin trace -- one result surface for all three entry
+// points into Tab 1 (the consistency principle from the redesign spec).
+function renderFullResult(d){
+  document.getElementById('tabbar').style.display = 'flex';
+  window.__tableRegistry = {};
+  renderStatusbar(d);
+  renderEmits(d);
+  renderTelemetry(d);
+  renderDetail(d);
+  renderEval(d);
+  wireAllTables();
+  switchTab('emits');
+  document.getElementById('tabbar').scrollIntoView({behavior:'smooth', block:'start'});
+}
+
+// ---- Trace history (Ananth's ask, 2026-08-05: "previous events from
+// chat -- we should be storing them anyway") ----
+async function loadTraceHistory(){
+  const adminKey = document.getElementById('f-admin-key').value.trim();
+  const list = document.getElementById('trace-history-list');
+  list.innerHTML = '<div class="empty-note">loading…</div>';
+  try {
+    const resp = await fetch('/admin/trace-explorer/history?limit=30', {
+      headers: adminKey ? {'X-Admin-Key': adminKey} : {},
+    });
+    if(!resp.ok){ list.innerHTML = `<div class="empty-note">error ${resp.status}</div>`; return; }
+    const {history} = await resp.json();
+    if(!history.length){ list.innerHTML = '<div class="empty-note">no traces yet — run one above</div>'; return; }
+    list.innerHTML = history.map(r => `
+      <div class="hist-row" data-id="${esc(r.decision_id)}" data-source="${esc(r.source)}">
+        <div class="hist-q">${esc(r.query)}</div>
+        <div class="hist-meta">
+          <span class="pill ${r.source}">${esc(r.source)}</span>
+          <span class="mono">${esc(r.strategy_chosen || '—')}</span>
+          ${r.total_ms != null ? `<span>${r.total_ms}ms</span>` : ''}
+          <span>${timeAgo(r.ts)}</span>
+        </div>
+      </div>
+    `).join('');
+    list.querySelectorAll('.hist-row').forEach(row => row.addEventListener('click', () => {
+      const id = row.dataset.id, source = row.dataset.source;
+      const query = row.querySelector('.hist-q').textContent;
+      if(source === 'admin'){ loadSavedTrace(id); }
+      else { rerunFromHistory(query, row.querySelector('.mono').textContent); }
+    }));
+  } catch(e) {
+    list.innerHTML = `<div class="empty-note">request failed: ${esc(e.message)}</div>`;
+  }
+}
+document.getElementById('trace-history-refresh-btn').addEventListener('click', loadTraceHistory);
+
+function timeAgo(iso){
+  if(!iso) return '';
+  const s = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
+  if(s < 60) return s + 's ago';
+  if(s < 3600) return Math.round(s/60) + 'm ago';
+  if(s < 86400) return Math.round(s/3600) + 'h ago';
+  return Math.round(s/86400) + 'd ago';
+}
+
+async function loadSavedTrace(decisionId){
+  const adminKey = document.getElementById('f-admin-key').value.trim();
+  setStatus('loading saved trace…');
+  try {
+    const resp = await fetch(`/admin/trace-explorer/result?trace_id=${encodeURIComponent(decisionId)}`, {
+      headers: adminKey ? {'X-Admin-Key': adminKey} : {},
+    });
+    if(!resp.ok){ setStatus(`could not load trace: HTTP ${resp.status}`, 'err'); return; }
+    const d = await resp.json();
+    setStatus('loaded saved trace', 'ok');
+    renderFullResult(d);
+  } catch(e) {
+    setStatus('request failed: ' + e.message, 'err');
+  }
+}
+
+async function rerunFromHistory(query, strategy){
+  // Chat-originated rows have no full persisted trace body (Chat never
+  // calls the admin capture path) -- re-run live instead. Approximate,
+  // not a byte-identical replay: corpus/priors may have moved since.
+  const adminKey = document.getElementById('f-admin-key').value.trim();
+  setStatus('re-running…');
+  try {
+    const resp = await fetch('/admin/trace-explorer/run', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json', ...(adminKey ? {'X-Admin-Key': adminKey} : {})},
+      body: JSON.stringify({
+        query, forced_strategy: (strategy && strategy !== '—') ? strategy.split('+')[0] : null,
+        caller_mode: 'chat.default', run_eval: false,
+      }),
+    });
+    if(!resp.ok){ setStatus(`re-run failed: HTTP ${resp.status}`, 'err'); return; }
+    const d = await resp.json();
+    setStatus('re-run complete (live, approximate replay)', 'ok');
+    renderFullResult(d);
+  } catch(e) {
+    setStatus('request failed: ' + e.message, 'err');
+  }
+}
 
 // ---- Bank runner ----
 let bankPollTimer = null;
@@ -779,29 +1135,129 @@ function renderBankLog(state){
   const idCell = id => `<td style="font-family:var(--mono);font-size:12px;white-space:nowrap">${esc(id)}</td>`;
   const rows = state.summaries.map(s => {
     if(s.status === 'error'){
-      return `<tr class="bank-row" data-qid="${esc(s.id)}">${idCell(s.id)}<td colspan="4" style="color:var(--bad)">error: ${esc(s.error)}</td><td class="score">${s.wall_ms}ms</td></tr>`;
+      return `<tr class="bank-row" data-qid="${esc(s.id)}">${idCell(s.id)}<td colspan="5" style="color:var(--bad)">error: ${esc(s.error)}</td><td class="score">${s.wall_ms}ms</td></tr>`;
     }
     const recallCls = bankRecallClass(s.recall);
+    const authPct = s.authority_score != null ? Math.round(s.authority_score * 100) : null;
+    const authCls = authPct == null ? '' : (authPct >= 70 ? 'good' : (authPct >= 30 ? 'warn' : 'bad'));
+    // Expected (bank's own label for what SHOULD answer this query) vs
+    // executed (what the allocator actually ran) -- Ananth, 2026-08-06:
+    // "show the strategy in the comparison else it is a bit confusing".
+    // Without both side by side a column of all "a" reads as "greedy
+    // always picks a" when it's really just the bank's own composition.
+    const executed = (s.executed_chain || []).join('+') || '—';
+    const expected = s.expected_strategy || '—';
+    const chainMatch = s.expected_strategy && (s.executed_chain || []).includes(s.expected_strategy);
+    const chainCls = expected === '—' ? '' : (chainMatch ? 'good' : 'warn');
     return `<tr class="bank-row" data-qid="${esc(s.id)}">
       ${idCell(s.id)}
       <td class="text">${esc(s.query)}</td>
       <td style="font-family:var(--mono);font-size:12px;color:var(--text-dim)">${esc(s.persona || '—')}</td>
+      <td class="bank-recall ${chainCls}" style="font-family:var(--mono);font-size:11.5px;white-space:nowrap">${esc(expected)} → ${esc(executed)}</td>
       <td class="bank-recall ${recallCls}">${s.recall != null ? Number(s.recall).toFixed(2) : '—'}</td>
       <td style="font-family:var(--mono);font-size:11.5px;white-space:nowrap">${s.n_facts_hit}/${s.n_facts_total} facts</td>
-      <td class="score">${s.chunks_out} chunks · ${s.wall_ms}ms</td>
+      <td class="bank-recall ${authCls}" style="font-size:11.5px">${authPct != null ? authPct + '%' : '—'}</td>
+      <td class="score">${s.chunks_out} chunks · ${s.retrieval_ms != null ? s.retrieval_ms+'ms retr.' : '?ms'} <span style="color:var(--text-dim)">(${s.wall_ms}ms total)</span></td>
     </tr>`;
   }).join('');
-  const avgRecall = state.summaries.filter(s => s.recall != null);
-  const avg = avgRecall.length ? (avgRecall.reduce((a,s) => a + s.recall, 0) / avgRecall.length) : null;
+  const avgOf = (key) => {
+    const list = state.summaries.filter(s => s[key] != null);
+    return list.length ? list.reduce((a,s) => a + s[key], 0) / list.length : null;
+  };
+  const avg = avgOf('recall');
   const avgCls = bankRecallClass(avg);
+  const avgAnswer = avgOf('recall_answer');
+  const avgAnswerCls = bankRecallClass(avgAnswer);
+  const synthLossHtml = (avg != null && avgAnswer != null)
+    ? `<div class="metric"><div class="num bank-recall ${avg - avgAnswer > 0.15 ? 'bad' : (avg - avgAnswer > 0.05 ? 'warn' : 'good')}">${(avg - avgAnswer).toFixed(3)}</div><div class="lbl">synthesis loss</div></div>`
+    : '';
+  const avgAuthPct = avgOf('authority_score') != null ? Math.round(avgOf('authority_score') * 100) : null;
+  const avgAuthCls = avgAuthPct == null ? '' : (avgAuthPct >= 70 ? 'good' : (avgAuthPct >= 30 ? 'warn' : 'bad'));
+  const totalContradicted = state.summaries.reduce((a,s) => a + (s.n_contradicted || 0), 0);
+  const totalHallucinated = state.summaries.reduce((a,s) => a + (s.n_hallucinated_claims || 0), 0);
+  const totalJudgeErrors = state.summaries.filter(s => s.judge_error).length;
+  const avgChunks = avgOf('chunks_out');
+  const avgSeconds = avgOf('wall_ms') != null ? avgOf('wall_ms') / 1000 : null;
+  const avgRetrievalSeconds = avgOf('retrieval_ms') != null ? avgOf('retrieval_ms') / 1000 : null;
+  const avgPoolSize = avgOf('pool_size');
+  const avgBm25Top10 = avgOf('pool_bm25_top10_mean');
+  const avgVectorTop10 = avgOf('pool_vector_top10_mean');
+  const avgReqCoverage = avgOf('pool_required_coverage_mean');
+  const avgBoostCoverage = avgOf('pool_boosted_coverage_mean');
+  const totalFactsHit = state.summaries.reduce((a,s) => a + (s.n_facts_hit || 0), 0);
+  const totalFactsAll = state.summaries.reduce((a,s) => a + (s.n_facts_total || 0), 0);
+  const avgSignalPct = avgOf('signal_ratio') != null ? Math.round(avgOf('signal_ratio') * 100) : null;
+  const avgSignalCls = avgSignalPct == null ? '' : (avgSignalPct >= 60 ? 'good' : (avgSignalPct >= 30 ? 'warn' : 'bad'));
+  const avgDensityPct = avgOf('signal_density') != null ? Math.round(avgOf('signal_density') * 100) : null;
+  const avgDensityCls = avgDensityPct == null ? '' : (avgDensityPct >= 60 ? 'good' : (avgDensityPct >= 30 ? 'warn' : 'bad'));
+  const avgRedundancy = avgOf('avg_fact_redundancy');
+  // Grader-identity stamp (Eval's Tier-1 ruling, 2026-08-04): a whole bank
+  // run should show ONE fact_checker_version/judge_model, not a mix -- a
+  // mix means rows aren't comparable to each other, the exact failure mode
+  // that caused every calibration disaster this week.
+  const fcVersions = new Set(state.summaries.map(s => s.fact_checker_version).filter(Boolean));
+  const judgeModels = new Set(state.summaries.map(s => s.judge_model).filter(Boolean));
+  const graderMixed = fcVersions.size > 1 || judgeModels.size > 1;
+  const graderLabel = graderMixed
+    ? `MIXED GRADERS: ${[...fcVersions].join(', ')} / ${[...judgeModels].join(', ')}`
+    : `${[...fcVersions][0] || '—'} · ${[...judgeModels][0] || '—'}`;
   document.getElementById('bank-log').innerHTML = `
+    <div class="viewing-banner" style="${graderMixed ? 'border-color:var(--bad);background:rgba(220,38,38,0.08)' : ''}">
+      <span>grader: <b>${esc(graderLabel)}</b></span>
+      ${totalJudgeErrors ? `<span style="color:var(--bad)">${totalJudgeErrors} judge error(s) excluded from averages</span>` : ''}
+    </div>
     <div class="metric-row" style="margin-top:14px">
       <div class="metric"><div class="num">${state.done}/${state.total || '?'}</div><div class="lbl">queries run</div></div>
-      <div class="metric"><div class="num${avgCls ? ' bank-recall '+avgCls : ''}">${avg != null ? avg.toFixed(3) : '—'}</div><div class="lbl">avg recall</div></div>
+      <div class="metric"><div class="num${avgCls ? ' bank-recall '+avgCls : ''}">${avg != null ? avg.toFixed(3) : '—'}</div><div class="lbl">avg recall (retrieval)</div></div>
+      <div class="metric"><div class="num${avgAnswerCls ? ' bank-recall '+avgAnswerCls : ''}">${avgAnswer != null ? avgAnswer.toFixed(3) : '—'}</div><div class="lbl">avg recall (answer)</div></div>
+      ${synthLossHtml}
+      <div class="metric"><div class="num${avgAuthCls ? ' bank-recall '+avgAuthCls : ''}">${avgAuthPct != null ? avgAuthPct + '%' : '—'}</div><div class="lbl">avg authority</div></div>
+      <div class="metric"><div class="num${totalContradicted ? ' bank-recall bad' : ''}">${totalContradicted}</div><div class="lbl">contradicted facts</div></div>
+      <div class="metric"><div class="num${totalHallucinated ? ' bank-recall warn' : ''}">${totalHallucinated}</div><div class="lbl">hallucinated claims</div></div>
+      <div class="metric"><div class="num">${totalFactsHit}/${totalFactsAll}</div><div class="lbl">facts hit / total</div></div>
+      <div class="metric"><div class="num">${avgChunks != null ? avgChunks.toFixed(1) : '—'}</div><div class="lbl">avg chunks</div></div>
+      <div class="metric"><div class="num${avgSignalCls ? ' bank-recall '+avgSignalCls : ''}">${avgSignalPct != null ? avgSignalPct+'%' : '—'}</div><div class="lbl">signal/noise (chunks used)</div></div>
+      <div class="metric"><div class="num${avgDensityCls ? ' bank-recall '+avgDensityCls : ''}">${avgDensityPct != null ? avgDensityPct+'%' : '—'}</div><div class="lbl">signal density (position)</div></div>
+      <div class="metric"><div class="num">${avgRedundancy != null ? avgRedundancy.toFixed(2) : '—'}</div><div class="lbl">fact redundancy (offline)</div></div>
+      <div class="metric"><div class="num">${avgRetrievalSeconds != null ? avgRetrievalSeconds.toFixed(1)+'s' : '—'}</div><div class="lbl">avg latency (retrieval only)</div></div>
+      <div class="metric"><div class="num" style="color:var(--text-dim)">${avgSeconds != null ? avgSeconds.toFixed(1)+'s' : '—'}</div><div class="lbl">avg latency (incl. eval)</div></div>
     </div>
+    <div class="metric-row" style="margin-top:10px">
+      <div class="metric"><div class="num">${avgPoolSize != null ? Math.round(avgPoolSize) : '—'}</div><div class="lbl">avg pool size</div></div>
+      <div class="metric"><div class="num">${avgBm25Top10 != null ? avgBm25Top10.toFixed(3) : '—'}</div><div class="lbl">avg BM25 top-10 score</div></div>
+      <div class="metric"><div class="num">${avgVectorTop10 != null ? avgVectorTop10.toFixed(3) : '—'}</div><div class="lbl">avg vector top-10 sim</div></div>
+      <div class="metric"><div class="num">${avgReqCoverage != null ? Math.round(avgReqCoverage*100)+'%' : '—'}</div><div class="lbl">required-tag coverage</div></div>
+      <div class="metric"><div class="num">${avgBoostCoverage != null ? Math.round(avgBoostCoverage*100)+'%' : '—'}</div><div class="lbl">boosted-tag coverage</div></div>
+    </div>
+    ${(() => {
+      // recall@K curve, K=1..max(10, chunks_out) (Ananth, 2026-08-04;
+      // extended range 2026-08-05 per Eval's M1 catch): averaged across
+      // every query that has a non-null point at that K (a query served
+      // fewer than K chunks has no K point -- not counted as 0, just
+      // excluded, same convention as avgOf() above). Capping at K=10 made a
+      // deep-serving query's headline recall (over ALL served chunks)
+      // legitimately exceed recall_at_k[10] whenever chunks_out>10 (e.g.
+      // chat.thinking regularly serves ~15) -- that's the untested rank-11+
+      // tail, not a reconciliation break, but looked like one. Range now
+      // follows the run's own max chunks_out.
+      const maxK = Math.max(10, ...state.summaries.map(s => s.chunks_out || 0));
+      const kVals = Array.from({length:maxK}, (_,i) => i+1).map(k => {
+        const pts = state.summaries.map(s => (s.recall_at_k || {})[k]).filter(v => v != null);
+        return pts.length ? pts.reduce((a,b)=>a+b,0)/pts.length : null;
+      });
+      if (kVals.every(v => v == null)) return '';
+      const cells = kVals.map((v,i) => `
+        <div class="metric" style="flex:1;min-width:0">
+          <div class="num" style="font-size:16px">${v != null ? v.toFixed(2) : '—'}</div>
+          <div class="lbl">K=${i+1}</div>
+        </div>`).join('');
+      return `<div class="metric-row" style="margin-top:10px;flex-wrap:wrap">${cells}</div>
+        <div class="callout" style="margin-top:6px">recall@K: averaged over queries that served at least K chunks (fewer-than-K queries excluded from that K's average, not counted as 0). Truncates each query's ALREADY-ranked served-chunk list at K and sums each fact's GRADED support (0.0/0.5/1.0 partial credit, same formula as "avg recall (retrieval)" above) for facts whose evidence chunk falls within K -- one real run gives the whole curve, no re-querying per K. recall@(query's own chunks_out) reconciles to that query's own headline recall exactly. Range extends to this run's max chunks_out, not a flat K=10, so deep-serving modes show their real tail instead of an artificial cutoff.</div>`;
+    })()}
+    <div class="callout" style="margin-top:10px">signal density = 100% means every fact-backing chunk sat at rank 1 (best case for a synthesizer to actually use it); 0% means it was buried at the very end of the served list ("lost in the middle"). Fact redundancy = avg # of served chunks that independently carry a hit fact's key tokens (deterministic token-overlap, not judge-enumerated -- Eval's ruling, keeps the grader frozen through the authoritative baseline). Testing the hypothesis: low density/signal/redundancy correlates with high synthesis loss. <b>DIAGNOSTIC ONLY (Eval's ruling, 2026-08-04)</b> -- these are unvalidated hypothesis signals, not yet wired into routing/priors; they get promoted only once the correlation is actually measured on volume. Also: "avg recall (answer)" is from a SINGLE-SHOT synth call, not prod Chat's real draft&rarr;critique&rarr;final loop -- it likely understates prod's real answer quality, so "synthesis loss" here is a probable OVER-estimate of the true gap, not prod's actual number. <b>"avg latency (retrieval only)"</b> is Gate&rarr;Reformat&rarr;Structure&rarr;Pool&rarr;Router&rarr;Fillers&rarr;Synthesis only -- what a real Chat turn actually pays; <b>"avg latency (incl. eval)"</b> also counts this bank runner's own 3 extra judge/synth LLM calls per query and is NOT representative of production latency. Pool stats (size/BM25/vector/tag coverage) describe the RAW pool feeding this query before any filler ranks or truncates it -- same for a/b on a given query since they share one pool.</div>
     <div class="tablewrap">
       <table>
-        <thead><tr><th style="width:70px">id</th><th class="col-text">query</th><th style="width:70px">persona</th><th class="col-score">recall</th><th style="width:90px">facts</th><th style="width:150px">chunks/latency</th></tr></thead>
+        <thead><tr><th style="width:70px">id</th><th class="col-text">query</th><th style="width:70px">persona</th><th style="width:130px">expected → executed</th><th class="col-score">recall</th><th style="width:90px">facts</th><th style="width:80px">authority</th><th style="width:200px">chunks/latency</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>
@@ -829,9 +1285,15 @@ async function loadBankResult(qid){
   renderDetail(d);
   renderEval(d);
   wireAllTables();
-  switchTab('emits');
-  const emitsPanel = document.getElementById('tabpanel-emits');
-  emitsPanel.insertAdjacentHTML('afterbegin', `<div class="viewing-banner"><span>Viewing bank result: <b>${esc(qid)}</b></span><span>job ${esc(bankJobId)}</span></div>`);
+  // Default to the Detail tab (step-by-step stage trace: Gate/Reformat/
+  // Structure/Pool/Router/Fillers/Synthesis with per-stage ms) rather than
+  // Emits -- clicking into a bank row is almost always someone asking "why
+  // did this take so long / what happened," which Detail answers and Emits
+  // doesn't (Ananth's catch, 2026-08-04: the step-by-step trace already
+  // existed here but was one non-default tab click away from the bank log).
+  switchTab('detail');
+  const detailPanel = document.getElementById('tabpanel-detail');
+  detailPanel.insertAdjacentHTML('afterbegin', `<div class="viewing-banner"><span>Viewing bank result: <b>${esc(qid)}</b></span><span>job ${esc(bankJobId)}</span></div>`);
   document.getElementById('tabbar').scrollIntoView({behavior:'smooth', block:'start'});
 }
 
@@ -863,16 +1325,84 @@ function watchBankJob(jobId, btn){
     if(state.status !== 'running'){
       clearInterval(bankPollTimer);
       if(btn) btn.disabled = false;
+      document.getElementById('oracle-matrix-btn').disabled = (state.status !== 'done');
+      document.getElementById('oracle-matrix-result').innerHTML = '';
+      document.getElementById('oracle-matrix-status').textContent = '';
     }
   };
   poll();
   bankPollTimer = setInterval(poll, 2000);
 }
 
+// Oracle comparison (2026-08-06, generalized from the one-off "greedy vs
+// oracle" analysis into a reusable feature -- Ananth's ask: "is this
+// possible to show for all of these queries in compute or eval runs").
+function renderOracleMatrix(d){
+  const s = d.summary;
+  document.getElementById('oracle-matrix-status').innerHTML =
+    (d.missing_arms && d.missing_arms.length ? `<div class="callout" style="margin-bottom:10px">no completed single-arm run at ${esc(d.test_caller_mode)} for: ${d.missing_arms.map(esc).join(', ')} -- those cells show as —</div>` : '')
+    + `weights: w_c=${d.weights.w_c}, w_h=${d.weights.w_h} (Eval's ship-gate defaults, w_c not fully ratified)`;
+  const strategies = ['a','b','c','d'];
+  const armCell = (row, strat) => {
+    const v = row.arm_scores[strat];
+    if(v == null) return `<td class="om-arm na">—</td>`;
+    const isOracle = row.oracle_strategy === strat;
+    return `<td class="om-arm${isOracle?' oracle':''}">${v.toFixed(2)}</td>`;
+  };
+  const rows = d.rows.map(row => `
+    <tr>
+      <td class="mono" style="font-size:11px;color:var(--text-faint);white-space:nowrap">${esc(row.query_id)}</td>
+      <td style="font-size:12px;color:var(--text-dim);max-width:280px">${esc(row.query)}</td>
+      ${armCell(row,'a')}${armCell(row,'b')}${armCell(row,'c')}${armCell(row,'d')}
+      <td class="mono" style="font-size:11.5px">${esc((row.test_chain||[]).join('+') || '—')} <span style="color:var(--text-faint)">${row.test_score!=null?row.test_score.toFixed(2):'—'}</span></td>
+      <td><span class="om-verdict ${row.verdict}">${row.verdict}</span></td>
+    </tr>`).join('');
+  document.getElementById('oracle-matrix-result').innerHTML = `
+    <div class="om-summary">
+      <div class="om-stat beat"><div class="num">${s.beat}</div><div class="lbl">beat oracle</div></div>
+      <div class="om-stat tie"><div class="num">${s.tie}</div><div class="lbl">tied oracle</div></div>
+      <div class="om-stat miss"><div class="num">${s.miss}</div><div class="lbl">missed oracle</div></div>
+      ${s.no_data ? `<div class="om-stat"><div class="num">${s.no_data}</div><div class="lbl">no data</div></div>` : ''}
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th style="width:60px">query</th><th style="width:240px">text</th><th class="col-score">a</th><th class="col-score">b</th><th class="col-score">c</th><th class="col-score">d</th><th style="width:120px">served</th><th style="width:80px">verdict</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+document.getElementById('oracle-matrix-btn').addEventListener('click', async () => {
+  if(!bankJobId) return;
+  const adminKey = document.getElementById('f-admin-key').value.trim();
+  const btn = document.getElementById('oracle-matrix-btn');
+  btn.disabled = true;
+  document.getElementById('oracle-matrix-status').textContent = 'computing…';
+  document.getElementById('oracle-matrix-result').innerHTML = '';
+  try {
+    const resp = await fetch('/admin/trace-explorer/oracle-matrix', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json', ...(adminKey ? {'X-Admin-Key': adminKey} : {})},
+      body: JSON.stringify({test_job_id: bankJobId}),
+    });
+    if(!resp.ok){
+      document.getElementById('oracle-matrix-status').textContent = `error ${resp.status}: ${(await resp.text()).slice(0,300)}`;
+      return;
+    }
+    renderOracleMatrix(await resp.json());
+  } catch(e) {
+    document.getElementById('oracle-matrix-status').textContent = 'request failed: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 document.getElementById('bank-run-btn').addEventListener('click', async () => {
   const strategy = document.getElementById('bank-strategy').value || null;
+  const modeOverride = document.getElementById('bank-mode-override').value || null;
   const autoFanoutLlm = document.getElementById('bank-auto-fanout-llm').checked;
   const autoFanoutCorpus = document.getElementById('bank-auto-fanout-corpus').checked;
+  const runName = document.getElementById('bank-run-name').value.trim() || null;
   const adminKey = document.getElementById('f-admin-key').value.trim();
   const btn = document.getElementById('bank-run-btn');
   btn.disabled = true;
@@ -881,7 +1411,7 @@ document.getElementById('bank-run-btn').addEventListener('click', async () => {
     const resp = await fetch('/admin/trace-explorer/run-bank', {
       method: 'POST',
       headers: {'Content-Type':'application/json', ...(adminKey ? {'X-Admin-Key': adminKey} : {})},
-      body: JSON.stringify({forced_strategy: strategy, caller_mode: 'chat.default', auto_fanout_llm: autoFanoutLlm, auto_fanout_corpus: autoFanoutCorpus}),
+      body: JSON.stringify({forced_strategy: strategy, caller_mode: 'chat.default', auto_fanout_llm: autoFanoutLlm, auto_fanout_corpus: autoFanoutCorpus, name: runName, mode_override: modeOverride}),
     });
     if(!resp.ok){
       document.getElementById('bank-status-line').textContent = `error ${resp.status}: ${(await resp.text()).slice(0,300)}`;
@@ -900,6 +1430,255 @@ document.getElementById('bank-load-job-btn').addEventListener('click', () => {
   const jobId = document.getElementById('bank-load-job-id').value.trim();
   if(!jobId) return;
   watchBankJob(jobId, document.getElementById('bank-load-job-btn'));
+});
+
+// Priors Lab (Ananth's ask, 2026-08-05): recompute Router priors cells from
+// real bank-run data instead of re-deriving Eval's population/reconciliation
+// rules by hand every time. Parses "job_id,strategy,caller_mode" lines --
+// the job itself doesn't self-report which strategy/mode it was forced to,
+// so the caller supplies it, same convention as the export scripts used all
+// session. READ-ONLY against /admin/priors-lab/compute -- never writes
+// eval/priors_bootstrap.yaml.
+function renderPriorsLabResult(d){
+  if(d.missing_jobs && d.missing_jobs.length){
+    document.getElementById('priors-lab-status').innerHTML =
+      `<div class="callout" style="color:var(--err,#c33)">missing/unknown job_id(s): ${d.missing_jobs.map(esc).join(', ')}</div>`;
+  } else {
+    document.getElementById('priors-lab-status').textContent = `computed from ${d.n_rows_used} rows across ${d.buckets.length} bucket group(s). cutoffs: [${d.cutoffs.join(', ')}]`;
+  }
+  const strategies = [...new Set(d.buckets.flatMap(b => Object.keys(b.cells)))].sort();
+  // Collapsible per bucket x mode group (Ananth's ask, 2026-08-05:
+  // "collapsible depth_3.chat sections") -- first group open by default so
+  // there's always something visible on first compute, rest collapsed so
+  // scanning many bucket x mode combos doesn't mean scrolling past all of
+  // them expanded.
+  let html = '';
+  d.buckets.forEach((b, i) => {
+    let rows = '';
+    for(const s of strategies){
+      const c = b.cells[s];
+      if(!c) continue;
+      const ok = b.reconciliation_ok[s];
+      rows += `<tr><td>${esc(s)}</td><td class="col-score">${c.recall_lift ?? '—'}</td><td class="col-score">${c.accuracy_estimate ?? '—'}${ok === false ? ' ⚠' : ''}</td><td class="col-score">${c.authority ?? '—'}</td><td class="col-score">${c.n ?? '—'}</td><td class="col-score">${c.k0 ?? '—'}</td><td class="col-score">${c.latency_p50_ms ?? '—'}</td></tr>`;
+      if(b.warnings[s] && b.warnings[s].length){
+        rows += `<tr><td colspan="7" style="font-size:11.5px;color:var(--text-faint);padding-top:0">${b.warnings[s].map(esc).join('<br>')}</td></tr>`;
+      }
+    }
+    html += `<div class="collapse${i === 0 ? ' open' : ''}">
+      <div class="collapse-head">
+        <span class="collapse-title">${esc(b.bucket)}${b.caller_mode ? ' · ' + esc(b.caller_mode) : ' · all modes pooled'}</span>
+        <span class="collapse-n">n=${b.n_rows}</span>
+      </div>
+      <div class="collapse-body">
+        <div class="tablewrap">
+          <table><thead><tr><th>strategy</th><th class="col-score">recall_lift</th><th class="col-score">accuracy_estimate</th><th class="col-score">authority</th><th class="col-score">n</th><th class="col-score">k0</th><th class="col-score">latency_p50_ms</th></tr></thead><tbody>${rows}</tbody></table>
+        </div>
+      </div>
+    </div>`;
+  });
+  document.getElementById('priors-lab-result').innerHTML = html;
+  document.querySelectorAll('#priors-lab-result .collapse-head').forEach(h => h.addEventListener('click', () => {
+    h.parentElement.classList.toggle('open');
+  }));
+}
+
+// Auto-select (Ananth's ask, 2026-08-05): default is the latest COMPLETED
+// job per (strategy, caller_mode) combo -- no copy/paste required. Pulls
+// from GCS blob metadata (cheap, metadata-only, same source Browse-
+// previous-runs uses). Runs on page load so the panel already shows real
+// selected jobs before anyone clicks anything; "Refresh latest jobs &
+// compute" re-resolves fresh (in case a newer run landed) and computes in
+// one action. The manual textarea (collapsed by default) is an override
+// only -- if it has content, that wins over auto-selection; leave it blank
+// to always use the latest jobs.
+async function resolvePriorsLabAutoJobs(){
+  const adminKey = document.getElementById('f-admin-key').value.trim();
+  const el = document.getElementById('priors-lab-selected');
+  el.textContent = 'finding latest jobs…';
+  try {
+    const resp = await fetch('/admin/priors-lab/auto-jobs', {
+      headers: adminKey ? {'X-Admin-Key': adminKey} : {},
+    });
+    if(!resp.ok){
+      el.textContent = `could not auto-select jobs (${resp.status}) -- use manual override below`;
+      return null;
+    }
+    const d = await resp.json();
+    // Checkboxes, pre-checked (Ananth's ask, 2026-08-05: "selecting jobs...
+    // multiselect") -- default is every latest job checked (today's
+    // behavior), but any can be unchecked to exclude that strategy x mode
+    // from the fold without needing the manual-override textarea.
+    el.innerHTML = d.jobs.map(j => `
+      <div class="job-check-row">
+        <input type="checkbox" checked data-job="${esc(j.job_id)}" data-strategy="${esc(j.strategy)}" data-mode="${esc(j.caller_mode)}">
+        <span class="mono" style="width:20px">${esc(j.strategy)}</span>
+        <span class="mono" style="width:110px;color:var(--text-dim)">${esc(j.caller_mode)}</span>
+        <span class="mono" style="color:var(--text-faint)">${esc(j.job_id)}</span>
+      </div>`).join('')
+      + (d.missing_combos && d.missing_combos.length
+          ? `<div style="color:var(--text-faint);margin-top:6px;font-size:12px">no completed run yet for: ${d.missing_combos.map(esc).join(', ')}</div>`
+          : '');
+    return d.jobs;
+  } catch(e) {
+    el.textContent = 'auto-select failed: ' + e.message;
+    return null;
+  }
+}
+
+function checkedPriorsLabJobs(){
+  return [...document.querySelectorAll('#priors-lab-selected input[type=checkbox]:checked')].map(cb => ({
+    job_id: cb.dataset.job, strategy: cb.dataset.strategy, caller_mode: cb.dataset.mode,
+  }));
+}
+
+document.getElementById('priors-lab-run-btn').addEventListener('click', async () => {
+  const adminKey = document.getElementById('f-admin-key').value.trim();
+  const btn = document.getElementById('priors-lab-run-btn');
+  btn.disabled = true;
+  document.getElementById('priors-lab-status').textContent = 'computing…';
+  document.getElementById('priors-lab-result').innerHTML = '';
+  try {
+    const raw = document.getElementById('priors-lab-jobs').value.trim();
+    let jobs;
+    if(raw){
+      jobs = raw.split('\n').map(l => l.trim()).filter(Boolean).map(line => {
+        const [job_id, strategy, caller_mode] = line.split(',').map(s => s.trim());
+        return {job_id, strategy, caller_mode};
+      });
+    } else {
+      // Use whatever's currently CHECKED -- never re-fetch here, that would
+      // silently wipe any box the user just unchecked before clicking
+      // compute. The candidate list is loaded once on page load / mode
+      // switch; this button only reads its current checked state.
+      jobs = checkedPriorsLabJobs();
+      if(!jobs.length) jobs = await resolvePriorsLabAutoJobs();  // nothing loaded yet at all
+    }
+    if(!jobs || !jobs.length){
+      document.getElementById('priors-lab-status').textContent = 'no jobs selected -- check at least one above, run some bank runs first, or use manual override';
+      return;
+    }
+    const resp = await fetch('/admin/priors-lab/compute', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json', ...(adminKey ? {'X-Admin-Key': adminKey} : {})},
+      body: JSON.stringify({
+        jobs: jobs.map(j => ({job_id: j.job_id, strategy: j.strategy, caller_mode: j.caller_mode})),
+        n_buckets: parseInt(document.getElementById('priors-lab-buckets').value, 10) || 3,
+        split_by_mode: document.getElementById('priors-lab-split-mode').checked,
+      }),
+    });
+    if(!resp.ok){
+      document.getElementById('priors-lab-status').textContent = `error ${resp.status}: ${(await resp.text()).slice(0,300)}`;
+      return;
+    }
+    renderPriorsLabResult(await resp.json());
+    loadPriorsLabHistory();  // the just-computed cell becomes the new "current" row
+  } catch(e) {
+    document.getElementById('priors-lab-status').textContent = 'request failed: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// Show the default selection immediately on load -- doesn't compute yet
+// (that's still an explicit click), just proves the "default is the latest
+// successful run per strategy/mode" selection is already resolved and
+// visible without any interaction.
+resolvePriorsLabAutoJobs();
+
+// Score history (Ananth's ask, 2026-08-05: "see the previous scores
+// including the current score") -- interim GCS-blob persistence, one row
+// per compute call, most recent (current) first, headline recall_lift per
+// strategy so a trend is visible without clicking into every row.
+async function loadPriorsLabHistory(){
+  const adminKey = document.getElementById('f-admin-key').value.trim();
+  const el = document.getElementById('priors-lab-history');
+  el.innerHTML = '<div class="empty-note">loading…</div>';
+  try {
+    const resp = await fetch('/admin/priors-lab/history?limit=20', {
+      headers: adminKey ? {'X-Admin-Key': adminKey} : {},
+    });
+    if(!resp.ok){ el.innerHTML = `<div class="empty-note">error ${resp.status}</div>`; return; }
+    const {computations} = await resp.json();
+    if(!computations.length){ el.innerHTML = '<div class="empty-note">no computations yet — compute priors above</div>'; return; }
+    const strategies = ['a','b','c','d'];
+    const rows = computations.map((c, i) => `
+      <tr class="bank-row" data-id="${esc(c.computation_id)}">
+        <td style="font-size:12px">${i === 0 ? '<b>current</b>' : ''} <span class="mono" style="color:var(--text-faint)">${esc(c.computation_id)}</span></td>
+        <td class="mono" style="font-size:11px;color:var(--text-dim)">${timeAgo(c.updated)}</td>
+        <td class="mono" style="font-size:12px">${c.n_rows_used ?? '—'}</td>
+      </tr>`).join('');
+    el.innerHTML = `
+      <div class="tablewrap" style="max-height:280px;overflow-y:auto">
+        <table><thead><tr><th>computation</th><th style="width:100px">when</th><th style="width:60px">rows</th></tr></thead><tbody>${rows}</tbody></table>
+      </div>`;
+    el.querySelectorAll('.bank-row').forEach(row => row.addEventListener('click', () => loadPriorsLabComputation(row.dataset.id)));
+  } catch(e) {
+    el.innerHTML = `<div class="empty-note">request failed: ${esc(e.message)}</div>`;
+  }
+}
+document.getElementById('priors-lab-history-refresh-btn').addEventListener('click', loadPriorsLabHistory);
+
+async function loadPriorsLabComputation(id){
+  const adminKey = document.getElementById('f-admin-key').value.trim();
+  document.getElementById('priors-lab-status').textContent = 'loading computation…';
+  try {
+    const resp = await fetch(`/admin/priors-lab/history/${encodeURIComponent(id)}`, {
+      headers: adminKey ? {'X-Admin-Key': adminKey} : {},
+    });
+    if(!resp.ok){ document.getElementById('priors-lab-status').textContent = `could not load: HTTP ${resp.status}`; return; }
+    const d = await resp.json();
+    document.getElementById('priors-lab-status').innerHTML = `<div class="callout">viewing saved computation ${esc(id)} — headline recall_lift: ${esc(JSON.stringify(d.headline))}</div>`;
+    renderPriorsLabResult(d);
+    document.getElementById('priors-lab-result').scrollIntoView({behavior:'smooth', block:'start'});
+  } catch(e) {
+    document.getElementById('priors-lab-status').textContent = 'request failed: ' + e.message;
+  }
+}
+
+loadPriorsLabHistory();
+
+// Browse-previous-runs (Ananth's ask, 2026-08-04): "we persist every run,
+// why can't we search/browse for previous runs" -- job_id had to already be
+// known/pasted before this. Backed by /admin/trace-explorer/run-bank/list,
+// which reads only each GCS blob's small custom metadata (forced_strategy/
+// status/total/done/started_at), never the multi-MB body, so this stays
+// fast even with dozens of runs on record.
+document.getElementById('bank-browse-btn').addEventListener('click', async () => {
+  const adminKey = document.getElementById('f-admin-key').value.trim();
+  const panel = document.getElementById('bank-browse-panel');
+  panel.innerHTML = '<div style="padding:10px;font-family:var(--mono);font-size:12px;color:var(--text-dim)">loading…</div>';
+  try {
+    const resp = await fetch('/admin/trace-explorer/run-bank/list', {
+      headers: adminKey ? {'X-Admin-Key': adminKey} : {},
+    });
+    if(!resp.ok){ panel.innerHTML = `<div style="padding:10px;color:var(--bad)">failed: HTTP ${resp.status}</div>`; return; }
+    const {runs} = await resp.json();
+    if(!runs.length){ panel.innerHTML = '<div style="padding:10px;color:var(--text-dim)">no persisted runs found</div>'; return; }
+    const rows = runs.map(r => `
+      <tr class="bank-row" data-jobid="${esc(r.job_id)}">
+        <td style="font-size:12.5px">${r.name ? `<b>${esc(r.name)}</b> <span style="font-family:var(--mono);font-size:11px;color:var(--text-faint)">${esc(r.job_id)}</span>` : `<span style="font-family:var(--mono);font-size:12px;color:var(--text-faint)">${esc(r.job_id)} <i>(unnamed)</i></span>`}</td>
+        <td style="font-family:var(--mono);font-size:12px">${esc(r.forced_strategy || 'auto')}${r.mode_override ? ` <span class="pill mode">${esc(r.mode_override)}</span>` : ''}</td>
+        <td style="font-family:var(--mono);font-size:12px">${r.status === 'running' ? '<span style="color:var(--warn)">running</span>' : esc(r.status || '?')}</td>
+        <td style="font-family:var(--mono);font-size:12px">${r.done ?? '?'}/${r.total ?? '?'}</td>
+        <td style="font-family:var(--mono);font-size:11px;color:var(--text-dim)">${esc(r.started_at || '—')}</td>
+      </tr>`).join('');
+    panel.innerHTML = `
+      <div class="tablewrap" style="margin-top:8px;max-height:340px;overflow-y:auto">
+        <table>
+          <thead><tr><th>run</th><th style="width:110px">strategy</th><th style="width:80px">status</th><th style="width:70px">done</th><th>started_at</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+    panel.querySelectorAll('.bank-row').forEach(row => {
+      row.style.cursor = 'pointer';
+      row.addEventListener('click', () => {
+        document.getElementById('bank-load-job-id').value = row.dataset.jobid;
+        watchBankJob(row.dataset.jobid, document.getElementById('bank-load-job-btn'));
+      });
+    });
+  } catch(e) {
+    panel.innerHTML = `<div style="padding:10px;color:var(--bad)">request failed: ${esc(e.message)}</div>`;
+  }
 });
 
 (function autoLoadJobFromUrl(){

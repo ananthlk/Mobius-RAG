@@ -109,6 +109,39 @@ logger = logging.getLogger(__name__)
 _PAYER_CONTEXT_CACHE: dict[str, tuple[PayerContext, float]] = {}
 _PAYER_CONTEXT_CACHE_TTL_S = 300.0
 _PAYER_CONTEXT_CACHE_MAX = 256
+# Slugs with a background warm in flight (see _warm_payer_context_cache) --
+# avoids firing a duplicate warm task per concurrent real_time request for
+# the same cold payer.
+_PAYER_CONTEXT_WARMING: set[str] = set()
+
+
+async def _warm_payer_context_cache(slug: str) -> None:
+    """Background warm for a real_time cold-cache miss. Uses its own DB
+    session (via AsyncSessionLocal) rather than the caller's request-scoped
+    session, which may close before this task finishes -- this task is
+    deliberately fire-and-forget and outlives the request that triggered it.
+
+    Fixes a real bug found live 2026-08-04: before this, a cold cache +
+    speed_budget=="real_time" returned None WITHOUT ever calling
+    resolve_payer_context(), so the cache could never warm for any payer
+    whose traffic is always real_time -- which is most production traffic
+    (chat.copilot and chat.default both map to real_time). Result: filler
+    b/c/d authority-domain-match scoring silently got payer_context=None on
+    every cold-cache real_time turn, forever. This background warm means the
+    *next* turn for that payer (even still real_time) gets a populated
+    cache, instead of the gap being permanent."""
+    from app.database import AsyncSessionLocal
+    try:
+        async with AsyncSessionLocal() as bg_db:
+            result = await resolve_payer_context(bg_db, slug)
+        now = time.monotonic()
+        if len(_PAYER_CONTEXT_CACHE) >= _PAYER_CONTEXT_CACHE_MAX:
+            _PAYER_CONTEXT_CACHE.pop(next(iter(_PAYER_CONTEXT_CACHE)))  # evict oldest
+        _PAYER_CONTEXT_CACHE[slug] = (result, now)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("payer context: background warm failed for slug=%s: %s", slug, exc)
+    finally:
+        _PAYER_CONTEXT_WARMING.discard(slug)
 
 
 async def _resolve_payer_context_cached(
@@ -120,8 +153,14 @@ async def _resolve_payer_context_cached(
         return cached[0]
 
     if speed_budget == "real_time":
-        # Cold cache + real_time: don't pay the live-call latency. Falls
-        # through to Router's existing fail-open gate (payer_crawlable=None).
+        # Cold cache + real_time: don't pay the live-call latency THIS turn
+        # (falls through to Router's existing fail-open gate,
+        # payer_crawlable=None) -- but kick off a background warm so the
+        # cache isn't permanently dead for this payer. See
+        # _warm_payer_context_cache for why this matters.
+        if slug not in _PAYER_CONTEXT_WARMING:
+            _PAYER_CONTEXT_WARMING.add(slug)
+            asyncio.create_task(_warm_payer_context_cache(slug))
         return None
 
     result = await resolve_payer_context(db, slug)
@@ -471,7 +510,7 @@ async def _run_fillers_simple(
     pool_by_query = {pr.query: pr for pr in pool_results}
     default_pool = pool_results[0] if len(pool_results) == 1 else None
 
-    async def _try_strategy(strategy: str, slot, pr) -> tuple[FilledSlot, str | None]:
+    async def _try_strategy(strategy: str, slot, pr) -> tuple[FilledSlot, str | None, dict | None]:
         single_shape = AnswerShapeResult(
             query=raw_query, posture=None, slots=[slot], reason="", slots_ms=0,
         )
@@ -481,10 +520,16 @@ async def _run_fillers_simple(
             elif strategy == "b":
                 result = fill_shape_vector(pr, single_shape)
             elif strategy == "c":
+                # payer_context threaded through, same design as filler_d
+                # just below (already-resolved, not re-fetched) -- lets
+                # filler_c mark a citation authoritative when it's actually
+                # from the payer's own domain (2026-08-04, Ananth's live
+                # catch: was blanket "external" for every citation before).
                 result = await fill_shape_llm_retrieval(
                     pr, single_shape, raw_query,
                     db=db, agent_id="retriever-orchestrator",
                     tag_matches=[*gate_result.d_codes, *gate_result.j_codes, *gate_result.p_codes],
+                    payer_context=payer_context,
                 )
             elif strategy == "d":
                 # payer_context threaded through, NOT re-resolved here --
@@ -515,7 +560,15 @@ async def _run_fillers_simple(
                     pr, single_shape, raw_query,
                     tag_matches=[*gate_result.d_codes, *gate_result.j_codes, *gate_result.p_codes],
                 )
-            return result.slots[0], None
+            # Third element: the filler's OWN emit dict (e.g. filler_d's
+            # search_ms/fetch_ms/bm25_ms/n_vertex_hits breakdown) -- Ananth's
+            # catch, 2026-08-04: this was computed by every filler but
+            # discarded right here, so a query taking 13s under strategy d
+            # had no way to show whether that was the web search call, the
+            # per-URL page fetches, or BM25 re-ranking. Purely additive,
+            # attached to attempt_spans below -- nothing existing reads it
+            # so nothing existing breaks.
+            return result.slots[0], None, result.emit
         except Exception as exc:
             logger.warning(
                 "orchestrator.fillers_simple slot=%s strategy=%s error=%r",
@@ -525,7 +578,7 @@ async def _run_fillers_simple(
                 slot_id=slot.slot_id, slot_semantics=slot.slot_semantics,
                 capacity=slot.capacity, required=slot.required,
                 chunks=[], occupancy=0, under_filled=True, over_filled=False,
-            ), repr(exc)
+            ), repr(exc), None
 
     # Per-slot mutable state across turns: "remaining" is a real mutable
     # list (not a fixed chain + cursor) specifically so a not-yet-ready "d"
@@ -692,10 +745,11 @@ async def _run_fillers_simple(
 
         any_error: str | None = None
         total_delivered = 0
-        for (strategy, k_i), (filled_slot, error) in zip(portfolio.items(), results):
+        for (strategy, k_i), (filled_slot, error, filler_emit) in zip(portfolio.items(), results):
             st["attempt_spans"].append({
                 "strategy": strategy, "attempt_number": 1,
                 "t_attempt_start_ms": t_attempt_start, "t_attempt_end_ms": t_attempt_end,
+                "filler_emit": filler_emit,
             })
             st["executed"].append(strategy)
             st["retained_chunks"].extend(filled_slot.chunks)
@@ -733,11 +787,12 @@ async def _run_fillers_simple(
             continue
         strategy = _pick_and_consume(st)
         t_attempt_start = int((time.monotonic() - t0) * 1000)
-        filled_slot, error = await _try_strategy(strategy, _capped_slot(slot, st, strategy), pr)
+        filled_slot, error, filler_emit = await _try_strategy(strategy, _capped_slot(slot, st, strategy), pr)
         t_attempt_end = int((time.monotonic() - t0) * 1000)
         st["attempt_spans"].append({
             "strategy": strategy, "attempt_number": 1,
             "t_attempt_start_ms": t_attempt_start, "t_attempt_end_ms": t_attempt_end,
+            "filler_emit": filler_emit,
         })
         st["executed"].append(strategy)
         st["filled_slot"] = filled_slot
@@ -782,11 +837,12 @@ async def _run_fillers_simple(
             slot = st["slot"]
             pr = pool_by_query.get(slot.rewritten_query) or default_pool
             t_attempt_start = int((time.monotonic() - t0) * 1000)
-            filled_slot, error = await _try_strategy(strategy, _capped_slot(slot, st, strategy), pr)
+            filled_slot, error, filler_emit = await _try_strategy(strategy, _capped_slot(slot, st, strategy), pr)
             t_attempt_end = int((time.monotonic() - t0) * 1000)
             st["attempt_spans"].append({
                 "strategy": strategy, "attempt_number": len(st["attempt_spans"]) + 1,
                 "t_attempt_start_ms": t_attempt_start, "t_attempt_end_ms": t_attempt_end,
+                "filler_emit": filler_emit,
             })
             st["remaining"].remove(strategy)  # not necessarily index 0 -- "d" may still sit ahead, deferred
             st["executed"].append(strategy)
@@ -906,6 +962,8 @@ async def run_retriever_partial(
     retry_of_decision_id: str | None = None, token_budget_for_retrieval: int | None = None,
     forced_strategy: str | None = None, mode_override: str | None = None,
     force_fanout_queries: list[str] | None = None,
+    emit_progress: "Callable[[str, str], Awaitable[None]] | None" = None,
+    authority_requirement: str | None = None,
 ) -> RetrieverPartialResult:
     """Sequence Gate → Reformat → Structure → Slots → Pool. Stops there —
     Router onward doesn't exist yet. This function's own scope will shrink
@@ -950,7 +1008,11 @@ async def run_retriever_partial(
     t0 = time.monotonic()
 
     gate_result = await run_gate(db, query)
+    if emit_progress:
+        await emit_progress("gate", narrate_gate(gate_result))
     reformat_result = await run_reformat(db, gate_result)
+    if emit_progress:
+        await emit_progress("reformat", narrate_reformat(gate_result, reformat_result))
     if force_fanout_queries:
         # run_slots' FAN_OUT branch is entirely driven by fanout_themes (one
         # theme per rewritten_query, same order -- see slots.py's
@@ -976,8 +1038,16 @@ async def run_retriever_partial(
         )
     structure_result = run_structure(
         reformat_result, caller_mode=caller_mode, token_budget_for_retrieval=token_budget_for_retrieval,
+        authority_requirement=authority_requirement,
     )
     slots_result = run_slots(structure_result)
+    if emit_progress:
+        await emit_progress(
+            "structure",
+            f"breadth={structure_result.resource_posture.breadth}, "
+            f"confidence_bar={structure_result.resource_posture.confidence_bar}, "
+            f"{len(slots_result.slots)} slot(s) planned",
+        )
 
     # Payer context (site_domain/display_name/crawlable) only depends on
     # Gate's j_codes, same as Pool -- run both concurrently so this costs
@@ -1038,6 +1108,9 @@ async def run_retriever_partial(
     # else: no-retrieval postures (CLARIFY/CLARIFY_REPHRASE/DECLINE) reach
     # here with an all-zero ResourcePosture -- same convention Pool itself
     # uses, not an error case. pool_results stays [].
+    if emit_progress:
+        n_cands = sum(len(pr.candidates) for pr in pool_results)
+        await emit_progress("pool", f"{n_cands} candidate(s) across {len(pool_results)} pool(s)")
 
     payer_context = await payer_context_task if payer_context_task else None
     # NOT awaited here (2026-07-24 fix, Web Search's catch): _run_router
@@ -1064,6 +1137,9 @@ async def run_retriever_partial(
             reformat_result=reformat_result,
         )
         router_ms = int((time.monotonic() - t_router) * 1000)
+        if emit_progress:
+            chain = router_decision.routing_ladder.per_slot if router_decision and router_decision.routing_ladder else {}
+            await emit_progress("router", f"dispatch={router_decision.dispatch_path if router_decision else '?'}, chain={chain}")
 
         t_fillers = time.monotonic()
         try:
@@ -1096,6 +1172,8 @@ async def run_retriever_partial(
             exc.retriever_partial_decision_id = getattr(router_decision, "decision_id", None)
             raise
         fillers_ms = int((time.monotonic() - t_fillers) * 1000)
+        if emit_progress:
+            await emit_progress("fillers", f"{filled_shape.emit.get('slots_filled')} slot(s) filled, {filled_shape.emit.get('under_filled')} under-filled")
 
         # Synthesis (Step 5), wired in 2026-07-24 -- first live caller of
         # compile_synthesis(). Same exception-stamping treatment as Fillers
@@ -1150,6 +1228,8 @@ async def run_retriever_partial(
             exc.retriever_partial_decision_id = getattr(router_decision, "decision_id", None)
             raise
         synthesis_ms = int((time.monotonic() - t_synthesis) * 1000)
+        if emit_progress:
+            await emit_progress("synthesis", "answer synthesized")
     elif prescreen_search_task is not None:
         # No-retrieval posture (0 slots/pool) but a prescreen was still
         # fired (its gating only checks posture/authority_requirement, not
@@ -1219,6 +1299,8 @@ async def run_retriever_partial_with_retry(
     db: AsyncSession, query: str, caller_mode: str | None = None, max_retries: int = 1,
     token_budget_for_retrieval: int | None = None, forced_strategy: str | None = None,
     mode_override: str | None = None, force_fanout_queries: list[str] | None = None,
+    emit_progress: "Callable[[str, str], Awaitable[None]] | None" = None,
+    authority_requirement: str | None = None,
 ) -> RetrieverPartialResult:
     """Whole-loop retry on TECHNICAL failure (Ananth, 2026-07-24): "ask
     once, we try our best to get first-pass resolution." If ANY unhandled
@@ -1265,6 +1347,7 @@ async def run_retriever_partial_with_retry(
                 token_budget_for_retrieval=token_budget_for_retrieval,
                 forced_strategy=forced_strategy, mode_override=mode_override,
                 force_fanout_queries=force_fanout_queries,
+                emit_progress=emit_progress, authority_requirement=authority_requirement,
             )
         except Exception as exc:
             last_exc = exc
@@ -1275,4 +1358,35 @@ async def run_retriever_partial_with_retry(
                 len(query), attempt, exc, retry_of_decision_id,
                 "retrying" if attempt < max_retries else "giving up, re-raising",
             )
+            # Invalidate (not just rollback) before retrying (Ananth's live
+            # catch, 2026-08-04, corrected same day): a DB-level failure
+            # (e.g. a statement-timeout cancellation deep in Pool) leaves
+            # `db`'s transaction ABORTED -- without SOME recovery, the retry
+            # attempt reuses the SAME session with the SAME aborted
+            # transaction and its very first query (Gate's probe) fails
+            # immediately with InFailedSQLTransactionError, masking the real
+            # original error behind a confusing second one.
+            #
+            # Originally used db.rollback() here, matching the bank-loop's
+            # own pre-existing recovery (main.py, 2026-07-29) -- but that
+            # combination (SET LOCAL statement_timeout, new 2026-08-04, +
+            # rollback after the resulting QueryCanceledError) turned out to
+            # leave the underlying asyncpg connection with a dangling
+            # transaction at the PROTOCOL level even after SQLAlchemy's
+            # rollback() returns cleanly. Confirmed live: this connection
+            # then got returned to the shared pool (this engine is
+            # process-wide, not per-endpoint) and corrupted an unrelated
+            # /upload request with "cannot use Connection.transaction() in a
+            # manually started transaction" -- a real production-impact bug
+            # from this exact fix. db.invalidate() is the safe fix: it
+            # discards the physical connection entirely rather than trusting
+            # it's clean, so SQLAlchemy opens a fresh one on next use. Costs
+            # a new connection instead of reusing one, but that's cheap next
+            # to corrupting unrelated requests. Best-effort: if invalidate
+            # itself raises (e.g. connection already gone), swallow it and
+            # let the retry's own exception surface instead.
+            try:
+                await db.invalidate()
+            except Exception:  # noqa: BLE001 -- best-effort recovery
+                pass
     raise last_exc

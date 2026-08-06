@@ -337,6 +337,19 @@ def build_contract(
         "routing_verdict": routing_verdict,
         "authority_requirement": posture.authority_requirement if posture else None,
         "model_trace": model_trace,
+        # Router's feature_context (2026-08-05, live gap found while
+        # verifying the earlier per_slot_pool_metadata claim): Router's
+        # `feature_vector` addition only ever reached persist_decision's
+        # DB-write args, never RouterDecision.feature_context -- the field
+        # that actually returns to this contract builder. The two are
+        # SEPARATE dicts; the fix has to land on both sides (Router adding
+        # the fields to feature_context; this line exposing it here) or the
+        # data is computed and persisted to Router's own DB but invisible
+        # to every consumer of this API response (trace-explorer, bank
+        # summaries, Eval's sweep exports) -- exactly the gap the earlier
+        # "flows end-to-end" claim missed, caught by an actual post-deploy
+        # live-trace check rather than trusting the prior verification.
+        "feature_context": getattr(router_decision, "feature_context", {}) if router_decision else {},
         # suggested_links: NOT included here on purpose -- Filler f
         # (Sitemap)'s output routing (FilledShape field vs bypass) is still
         # an open question with DB/Retriever as of 2026-07-24. Adding a

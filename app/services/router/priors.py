@@ -89,6 +89,14 @@ class StrategyProfile:
     n: int = SEED_PSEUDO_COUNT  # sample count behind the estimates
     k0: int = K0_NOMINAL      # capacity recall_lift was observed at (per-cell;
                               # mandatory companion to n from the empirical writer)
+    authority: float = 1.0    # [0, 1] — P(strategy's evidence is citable to a
+                              # payor), MEAN. Default 1.0 = fully authoritative
+                              # (no data yet ⇒ no new exclusions). Feeds
+                              # allocation.strategy_authority_eligible as an
+                              # ADDITIONAL gate alongside the legacy hardcoded
+                              # NON_CITABLE_STRATEGIES set — additive only, so
+                              # an unpopulated file changes nothing (Eval's
+                              # 2026-08-05 per-strategy-prior proposal).
 
 
 def _betacf(a: float, b: float, x: float) -> float:
@@ -353,6 +361,7 @@ def _parse_priors_yaml(raw: dict[str, Any], version: str) -> PriorsBundle:
                 accuracy_estimate=_clamp01(vals.get("accuracy_estimate")),
                 n=n,
                 k0=k0,
+                authority=_clamp01(vals.get("authority", 1.0)),
             )
             by_depth.setdefault(str(strategy_id), {})[depth] = profile
 

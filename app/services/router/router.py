@@ -285,6 +285,15 @@ async def route(db_session_factory, ctx: RoutingContext) -> RouterDecision:
             "allocator_weights": dd.weights,
             "draw": dd.draw,
             "per_slot_depth_buckets": per_slot_depth,
+            # Eval-architect 2026-08-05 (via Retriever): the RAW pool signals
+            # behind per_slot_depth_buckets (top_score_percentile, pool_size,
+            # distinct_content_topk) were computed, consumed locally by
+            # compute_depth_bucket, then discarded — never serialized. Needed
+            # to stratify Wilson/Bayesian CIs by actual pool composition
+            # instead of pooling all queries as identically-distributed.
+            # Additive only: mirrors per_slot_depth_buckets's own pattern,
+            # same dict, same trace path, no behavior change.
+            "per_slot_pool_metadata": ctx.pool_metadata,
             "gate_j_codes": ctx.gate_j_codes,
             "gate_d_codes": ctx.gate_d_codes,
             "payer_crawlable": ctx.payer_crawlable,
@@ -342,6 +351,15 @@ async def route(db_session_factory, ctx: RoutingContext) -> RouterDecision:
             "feasible": executed_ladder.feasible,
             "dispatch_path": dd.path,
             "shadow_allocators": [s.allocator for s in shadow_ladders],
+            # Retriever 2026-08-05 (post-deploy trace catch): feature_vector
+            # above only reaches persist_decision's DB write — this dict is
+            # what actually returns to the caller and flows into contract.py's
+            # routing_keys (API/trace-explorer/bank summaries). The earlier
+            # per_slot_pool_metadata fix landed the data in the DB but left it
+            # invisible everywhere else — same fields, same source, mirrored
+            # here so external consumers actually see it.
+            "per_slot_depth_buckets": per_slot_depth,
+            "per_slot_pool_metadata": ctx.pool_metadata,
         },
         dispatch_path=dd.path,
         reason=dd.reason,

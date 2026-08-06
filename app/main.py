@@ -12335,6 +12335,21 @@ class TraceExplorerRequest(BaseModel):
     caller_mode: Optional[str] = "chat.default"
     must_facts: Optional[list[str]] = None
     run_eval: bool = False
+    # Pin the executed router ALLOCATOR (greedy/optimizer/bayesian), 2026-08-05
+    # -- distinct axis from forced_strategy: forced_strategy skips the allocator
+    # entirely (dispatch_path="forced", picks ONE strategy directly);
+    # mode_override lets the allocator run for real but pins WHICH one makes
+    # the pick, so "run an eval for greedy" means forced_strategy=None +
+    # mode_override="greedy" -- the real allocator choosing, not a hand-forced
+    # single strategy. None (default) = normal dispatch-decision draw.
+    mode_override: Optional[str] = None
+    # Caller-declared citability (2026-08-06, previously unreachable from ANY
+    # caller anywhere in this codebase -- run_structure/run_retriever_partial
+    # both accept it but nothing ever threaded a value in, so citable_required
+    # has never fired outside tests). "any" | "citable_required" | None
+    # (falls back to "any", same default as always -- exposing this doesn't
+    # change existing behavior, only makes the other value reachable).
+    authority_requirement: Optional[str] = None
     # DEBUG override (2026-07-29): manually decompose `query` into these
     # targeted sub-queries and force Reformat's posture to FAN_OUT,
     # bypassing whatever Gate/Reformat actually decided -- see
@@ -12347,19 +12362,30 @@ async def _run_trace_for_query(
     db: AsyncSession, query: str, forced_strategy: str | None, caller_mode: str | None,
     must_facts: list[str] | None, run_eval: bool,
     force_fanout_queries: list[str] | None = None,
+    emit_progress=None,
+    mode_override: str | None = None,
+    authority_requirement: str | None = None,
 ) -> dict:
     """Core of the Trace Explorer: run one query through the real pipeline,
     return {query, forced_strategy, emits, telemetry, detailed_trace, eval}.
     Shared by the single-query endpoint and the bank runner below so both
     stay byte-identical in what they compute -- no parallel implementation
-    to drift out of sync."""
+    to drift out of sync.
+
+    emit_progress (2026-08-05, Ananth's ask: "streaming like how we have in
+    chat"): optional async callback(stage_name, text), threaded straight
+    into run_retriever_partial's own per-stage hooks -- see that function
+    for exactly which stages fire it. None (default) is a complete no-op,
+    byte-identical to before this existed; only the new SSE endpoint below
+    passes one."""
     from app.services.retriever.orchestrator import run_retriever_partial_with_retry
     from app.services.retriever.contract import build_contract
 
     t0 = time.monotonic()
     result = await run_retriever_partial_with_retry(
         db, query, caller_mode=caller_mode, forced_strategy=forced_strategy,
-        force_fanout_queries=force_fanout_queries,
+        force_fanout_queries=force_fanout_queries, emit_progress=emit_progress,
+        mode_override=mode_override, authority_requirement=authority_requirement,
     )
     wall_ms = int((time.monotonic() - t0) * 1000)
     envelope = build_contract(result, result.synthesis)
@@ -12387,11 +12413,106 @@ async def _run_trace_for_query(
         except Exception as exc:  # noqa: BLE001
             router_narrative = f"(router narrate() failed: {exc})"
 
+    # Authority score, 2026-08-04 (Ananth): rollup of each chunk's ALREADY-
+    # COMPUTED synthesis.py `authority` field (authoritative/external/planned
+    # -- see _infer_authority, which already fuses the precise per-candidate
+    # authority_level with a source_type fallback). This doesn't compute a
+    # new signal, just aggregates the existing one to answer "how many of
+    # this answer's sources are actually authoritative" per query/strategy,
+    # for eval comparison across a/b/c/d/s -- some strategies (filler_c's
+    # external Perplexity citations, filler_d's open web) are structurally
+    # more likely to be non-authoritative than others (a/b/s ranking our own
+    # ingested, vetted corpus), which the plain recall number doesn't show.
+    _n_chunks = len(emits_chunks or [])
+    _n_authoritative = sum(1 for c in (emits_chunks or []) if c.get("authority") == "authoritative")
+    authority_summary = {
+        "n_chunks": _n_chunks,
+        "n_authoritative": _n_authoritative,
+        "authority_score": round(_n_authoritative / _n_chunks, 4) if _n_chunks else None,
+    }
+
+    # Pool summary, 2026-08-04 (Ananth): a genuinely EARLIER-stage signal
+    # than everything else built today -- characterizes the raw POOL (every
+    # candidate Pool assembled, before any filler ranks/truncates it) rather
+    # than the final served chunks. Hypothesis: a rich, dense pool (many
+    # high-scoring candidates, not just one outlier) should predict a
+    # better final answer; a sparse pool (score falls off a cliff after the
+    # top 1-2) should predict a weaker one -- an input-side predictor to
+    # pair against the output-side signal_density/redundancy/synthesis_loss
+    # metrics. Pool is SHARED across a/b (same candidates feed both
+    # fillers' ranking), so this is computed once per query, independent of
+    # which strategy is forced -- comparing it against a's vs b's own
+    # recall/loss is exactly the "does pool richness predict outcome"
+    # question Ananth's asking.
+    def _pool_stats(values: list[float]) -> dict:
+        if not values:
+            return {"n": 0, "mean": None, "std": None}
+        n = len(values)
+        mean = sum(values) / n
+        var = sum((v - mean) ** 2 for v in values) / n
+        return {"n": n, "mean": round(mean, 4), "std": round(var ** 0.5, 4)}
+
+    _all_pool_candidates = [c for p in result.pool for c in (p.candidates or [])]
+    _bm25_scores = sorted((c.bm25_score for c in _all_pool_candidates if c.bm25_score is not None), reverse=True)
+    _vector_scores = sorted((c.vector_similarity for c in _all_pool_candidates if c.vector_similarity is not None), reverse=True)
+
+    # Tag strength -- required vs boosted (Ananth, 2026-08-04): reuses
+    # filler_a's REAL _compute_meta_boost_score matching logic (text+tags
+    # substring match against Gate's phrase buckets), split into two
+    # separate numbers instead of that function's single blended score --
+    # "how well-covered is the pool on REQUIRED phrases" is a different
+    # question from "...on BOOSTED phrases," and blending them together
+    # (as meta_boost_score does for ranking purposes) would hide which one
+    # is actually driving a rich vs sparse pool.
+    def _phrase_coverage(text: str, tags: dict, phrases: list) -> float:
+        if not phrases:
+            return 0.0
+        text_lower = (text or "").lower()
+        tags_str = " ".join(
+            re.sub(r"[._]", " ", str(k).lower()) + " " + str(v).lower()
+            for k, v in (tags or {}).items()
+        )
+        total_weight = sum(w for _, w in phrases)
+        if total_weight <= 0:
+            return 0.0
+        present_weight = sum(
+            w for phrase, w in phrases
+            if phrase.lower() in text_lower or phrase.lower() in tags_str
+        )
+        return present_weight / total_weight
+
+    _required_coverages: list[float] = []
+    _boosted_coverages: list[float] = []
+    for _p in result.pool:
+        _req = _p.required_phrases or []
+        _boost = _p.boosted_phrases or []
+        for _c in (_p.candidates or []):
+            if _req:
+                _required_coverages.append(_phrase_coverage(_c.text, _c.tags, _req))
+            if _boost:
+                _boosted_coverages.append(_phrase_coverage(_c.text, _c.tags, _boost))
+
+    pool_summary = {
+        "pool_size": len(_all_pool_candidates),
+        "bm25_top10": _pool_stats(_bm25_scores[:10]),
+        "bm25_all": _pool_stats(_bm25_scores),
+        "vector_top10": _pool_stats(_vector_scores[:10]),
+        "vector_all": _pool_stats(_vector_scores),
+        "required_coverage": _pool_stats(_required_coverages),
+        "boosted_coverage": _pool_stats(_boosted_coverages),
+        # Fraction of the pool with FULL required-phrase coverage (1.0) --
+        # a stricter "how many candidates are fully on-topic" signal,
+        # distinct from the mean (partial-credit) coverage above.
+        "n_full_required_match": sum(1 for v in _required_coverages if v >= 0.999),
+    }
+
     emits = {
         "status": contract_dict.get("status"),
         "chosen_slot": contract_dict.get("chosen_slot"),
         "score": contract_dict.get("score"),
         "chunks": emits_chunks,
+        "authority_summary": authority_summary,
+        "pool_summary": pool_summary,
         "attempt_count": contract_dict.get("attempt_count"),
         "routing_verdict": (contract_dict.get("routing_keys") or {}).get("routing_verdict"),
         # The REAL thinking/emit surfaces RAG produces toward Chat -- THREE
@@ -12443,25 +12564,98 @@ async def _run_trace_for_query(
 
     eval_result = None
     if run_eval and must_facts:
-        from app.services.fact_checker import check_facts
+        from app.services.fact_checker import check_facts, FACT_CHECKER_VERSION
         chunks = [
             {"chunk_id": c.get("chunk_id"), "text": c.get("text")}
             for c in (contract_dict.get("chunks") or [])
         ]
+        # Tier 1 telemetry (Eval's ruling, 2026-08-04): a bank-summary row
+        # must be self-describing enough to tell WITHOUT cross-referencing
+        # anything whether it's comparable to another row -- grader identity
+        # + error state BEFORE more metrics. Every calibration disaster this
+        # week (700-char truncation, dev-fallback ruler, mixed pro/flash) was
+        # a row that looked valid but was graded by a different/broken
+        # instrument.
         verdict = await check_facts(
             query=query, must_facts=must_facts, chunks=chunks,
             answer=None, stage="rag_eval_adjudicate",
         )
+        n_contradicted = sum(1 for v in (getattr(verdict, "verdicts", None) or []) if v.contradicted)
         eval_result = {
-            "coverage": getattr(verdict, "coverage", None),
+            "coverage": getattr(verdict, "coverage", None),  # retrieval-recall (in_chunk view)
+            "coverage_answer": None,  # filled below -- synthesized-recall (in_answer view)
             "facts": [
-                {"fact": getattr(v, "fact", "?"), "support": v.support, "in_chunk": v.support >= 0.5}
+                {
+                    "fact": getattr(v, "fact", "?"), "support": v.support,
+                    "in_chunk": v.support >= 0.5, "contradicted": v.contradicted,
+                    "passage": v.passage,
+                }
                 for v in (getattr(verdict, "verdicts", None) or [])
             ],
-            "note": ("recall-only: must_facts vs retrieved chunks. No synthesized answer "
-                     "text exists outside Chat, so answer-coverage/groundedness can't be "
-                     "graded from this endpoint."),
+            "n_contradicted": n_contradicted,
+            "hallucinated_claims": [],  # filled below -- needs a synthesized answer to exist
+            # Grader-identity stamp -- non-negotiable per Eval's ruling. Lets
+            # any consumer tell from the row ALONE whether it's comparable to
+            # another row, without cross-referencing a deploy timeline.
+            "fact_checker_version": FACT_CHECKER_VERSION,
+            "judge_model": getattr(verdict, "model", None),
+            "error": bool(getattr(verdict, "error", False)),
+            "error_transient": bool(getattr(verdict, "error_transient", False)),
+            "note": ("coverage = retrieval-recall (must_facts vs retrieved chunks, chunk-only "
+                     "mode). coverage_answer = synthesized-recall (must_facts vs a real answer "
+                     "synthesized from those same chunks) -- the gap between the two is the "
+                     "synthesis-loss curve (Eval's biggest calibration lever)."),
         }
+
+        # Synthesized-recall pass (in_answer view) -- mirrors
+        # scripts/prefix_grade_3mode.py's synthesize()+mode-b grading, same
+        # discipline: a real synth call, then check_facts AGAINST that real
+        # answer (not None), so hallucinated_claims/grounded/contradicted-vs-
+        # answer are meaningful rather than structurally empty.
+        if chunks:
+            from app.services import llm_manager_client as _llm_client
+            _synth_system = (
+                "You are a claims/payer support assistant. Answer the question using ONLY "
+                "the provided source passages -- state the codes, day-counts, and yes/no "
+                "determinations they support. If the passages don't answer it, say so. "
+                "Do not invent facts."
+            )
+            _body = "\n\n".join(f"[{i+1}] {c.get('text','')}" for i, c in enumerate(chunks[:12]))
+            try:
+                _synth_raw, _synth_meta = await _llm_client.generate(
+                    system=_synth_system, user=f"Question: {query}\n\nPassages:\n{_body}\n\nAnswer:",
+                    stage="rag_eval_adjudicate", max_tokens=3000,
+                )
+                _synth_answer = (_synth_raw or "").strip()
+                _answer_verdict = await check_facts(
+                    query=query, must_facts=must_facts, chunks=chunks,
+                    answer=_synth_answer, stage="rag_eval_adjudicate",
+                )
+                eval_result["coverage_answer"] = getattr(_answer_verdict, "coverage", None)
+                eval_result["hallucinated_claims"] = list(getattr(_answer_verdict, "hallucinated_claims", None) or [])
+                eval_result["synth_answer"] = _synth_answer
+                eval_result["synth_model"] = (_synth_meta or {}).get("model")
+                # For synthesis-loss attribution (Eval's ask, 2026-08-04):
+                # links THIS bank-eval-harness's synth call back to Chat's
+                # own PG telemetry row via the same llm_call_id mechanism
+                # filler_c already uses (llm_manager_client.generate()'s
+                # returned meta dict carries it straight from Chat's proxy,
+                # not something RAG invents). NOTE: this is the OFFLINE
+                # eval-harness synth call (recall_answer/synthesis-loss
+                # diagnostic only) -- NOT Chat's real production
+                # answer-synthesis call, which happens entirely outside RAG
+                # and has no call_id RAG could ever carry.
+                eval_result["synth_call_id"] = (_synth_meta or {}).get("llm_call_id")
+                # Free from the existing usage dict (Eval's Tier-3 ruling,
+                # 2026-08-04: capture opportunistically, don't build a
+                # pricing table ahead of need -- no cost_usd field exists on
+                # this dict, only real via the locked proxy same as
+                # judge_model, so left None on dev-fallback).
+                eval_result["synth_input_tokens"] = (_synth_meta or {}).get("input_tokens")
+                eval_result["synth_output_tokens"] = (_synth_meta or {}).get("output_tokens")
+            except Exception as exc:  # noqa: BLE001 -- synth/full-grade failure must not kill chunk-only eval
+                logging.getLogger("app.main").warning("synthesized-recall pass failed: %s", exc)
+                eval_result["synth_error"] = str(exc)[:300]
 
     return {
         "query": query,
@@ -12482,10 +12676,205 @@ async def trace_explorer_run(
     detailed_trace. See module comment above for the 3-tier contract."""
     if not (body.query and body.query.strip()):
         raise HTTPException(status_code=400, detail="query is required")
-    return await _run_trace_for_query(
+    result = await _run_trace_for_query(
         db, body.query.strip(), body.forced_strategy, body.caller_mode,
         body.must_facts, body.run_eval, body.force_fanout_queries,
+        mode_override=body.mode_override, authority_requirement=body.authority_requirement,
     )
+    _persist_single_trace(result)
+    return result
+
+
+@app.get("/admin/trace-explorer/run-stream")
+async def trace_explorer_run_stream(
+    query: str, forced_strategy: str | None = None, caller_mode: str | None = "chat.default",
+    run_eval: bool = False, mode_override: str | None = None, authority_requirement: str | None = None,
+):
+    """SSE variant of /admin/trace-explorer/run (Ananth's ask, 2026-08-05:
+    "I would rather have that streaming like how we have in Chat") -- same
+    underlying pipeline call, same final payload, but pushes a small event
+    after each stage (Gate/Reformat/Structure/Pool/Router/Fillers/Synthesis)
+    as run_retriever_partial reaches it, instead of the caller waiting on
+    one request for the whole ~10-20s pipeline with no feedback.
+
+    GET + query params (not POST + body) because EventSource, the standard
+    browser SSE client, can only issue GET -- same constraint as every
+    other SSE endpoint in this file.
+
+    Emits `event: progress` frames per stage, one final `event: result`
+    frame carrying the exact same JSON /run returns (also persisted to GCS
+    the same way), or `event: error` on failure. Frontend: new
+    EventSource(url), listen for both event types."""
+    import json as _json
+    from app.database import AsyncSessionLocal
+
+    if not (query and query.strip()):
+        raise HTTPException(status_code=400, detail="query is required")
+
+    async def _sse_generator():
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def _emit(stage: str, text: str):
+            await queue.put({"stage": stage, "text": text})
+
+        async def _run():
+            try:
+                async with AsyncSessionLocal() as db:
+                    result = await _run_trace_for_query(
+                        db, query.strip(), forced_strategy, caller_mode,
+                        None, run_eval, emit_progress=_emit, mode_override=mode_override,
+                        authority_requirement=authority_requirement,
+                    )
+                _persist_single_trace(result)
+                await queue.put({"__done__": result})
+            except Exception as exc:  # noqa: BLE001
+                await queue.put({"__error__": str(exc)})
+
+        task = asyncio.ensure_future(_run())
+        try:
+            while True:
+                item = await queue.get()
+                if "__done__" in item:
+                    yield f"event: result\ndata: {_json.dumps(item['__done__'], default=str)}\n\n"
+                    break
+                if "__error__" in item:
+                    yield f"event: error\ndata: {_json.dumps({'error': item['__error__']})}\n\n"
+                    break
+                yield f"event: progress\ndata: {_json.dumps(item)}\n\n"
+        finally:
+            if not task.done():
+                task.cancel()
+
+    return StreamingResponse(
+        _sse_generator(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+_SINGLE_TRACE_GCS_PREFIX = "eval-artifacts/trace_explorer_single"
+
+
+def _persist_single_trace(result: dict) -> None:
+    """Every single-trace run gets saved to GCS (Ananth's ask, 2026-08-05:
+    "review a chat/previous question" as one of Trace Explorer's 3 core
+    functions) -- mirrors _persist_bank_state's pattern (metadata-only
+    listing, full body on demand), just for one query instead of a whole
+    bank. Best-effort: a persistence failure must never break the actual
+    trace response."""
+    import json as _json
+    import uuid as _uuid
+    try:
+        # Keyed on the SAME decision_id rag_query_decisions uses (contract.py's
+        # routing_keys.decision_id, set from RouterDecision.decision_id) --
+        # not a fresh random id -- so /admin/trace-explorer/history can join
+        # a chat/admin row to its full persisted trace body by id. Falls back
+        # to a fresh id only on the rare no-retrieval posture where no
+        # router_decision exists at all.
+        decision_id = (
+            ((result.get("telemetry") or {}).get("routing_keys") or {}).get("decision_id")
+            or _uuid.uuid4().hex[:12]
+        )
+        client = storage.Client()
+        bucket = client.bucket(GCS_BUCKET)
+        blob = bucket.blob(f"{_SINGLE_TRACE_GCS_PREFIX}/{decision_id}.json")
+        blob.metadata = {
+            "query": (result.get("query") or "")[:200],
+            "forced_strategy": str(result.get("forced_strategy")),
+            "caller_mode": str((result.get("emits") or {}).get("caller_mode") or ""),
+            "status": str((result.get("emits") or {}).get("status")),
+        }
+        blob.upload_from_string(_json.dumps(result, default=str), content_type="application/json")
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger("app.main").warning("single-trace persist failed: %s", exc)
+
+
+@app.get("/admin/trace-explorer/list")
+async def trace_explorer_list_recent(limit: int = 30):
+    """Browse recent single-trace runs -- metadata-only (query/strategy/
+    status), same cheap-listing pattern as run-bank/list. Powers "review a
+    previous question" without needing the trace_id already known."""
+    try:
+        client = storage.Client()
+        bucket = client.bucket(GCS_BUCKET)
+        runs = []
+        for blob in client.list_blobs(bucket, prefix=f"{_SINGLE_TRACE_GCS_PREFIX}/"):
+            meta = blob.metadata or {}
+            trace_id = blob.name.rsplit("/", 1)[-1].removesuffix(".json")
+            runs.append({
+                "trace_id": trace_id,
+                "query": meta.get("query"),
+                "forced_strategy": meta.get("forced_strategy"),
+                "caller_mode": meta.get("caller_mode"),
+                "status": meta.get("status"),
+                "updated": blob.updated.isoformat() if blob.updated else None,
+            })
+        runs.sort(key=lambda r: r.get("updated") or "", reverse=True)
+        return {"runs": runs[:limit]}
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger("app.main").warning("single-trace list failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"failed to list traces: {exc}")
+
+
+@app.get("/admin/trace-explorer/result")
+async def trace_explorer_get_saved(trace_id: str):
+    """Load one previously-saved single trace by id."""
+    import json as _json
+    try:
+        client = storage.Client()
+        bucket = client.bucket(GCS_BUCKET)
+        blob = bucket.blob(f"{_SINGLE_TRACE_GCS_PREFIX}/{trace_id}.json")
+        if not blob.exists():
+            raise HTTPException(status_code=404, detail="unknown trace_id")
+        return _json.loads(blob.download_as_text())
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"failed to load trace: {exc}")
+
+
+@app.get("/admin/trace-explorer/history")
+async def trace_explorer_history(limit: int = 30, db: AsyncSession = Depends(get_db)):
+    """Combined chat + admin history (Ananth's ask, 2026-08-05: "previous
+    events from chat -- we should be storing them anyway"). rag_query_
+    decisions is the ONE-WRITER table (persist.py) every Router decision
+    lands in, prod Chat traffic included (is_prod=true) -- no new storage
+    needed, just a read. Each row also checks whether a full admin trace
+    body exists in GCS (_SINGLE_TRACE_GCS_PREFIX) so the frontend knows
+    whether clicking it loads an exact historical trace or has to re-run
+    live (chat-originated rows were never captured beyond this summary
+    row -- Chat doesn't call the admin capture path)."""
+    from sqlalchemy import text as _sql
+    rows = (await db.execute(_sql("""
+        SELECT id, ts, query, is_prod, strategy_chosen, confidence, cost,
+               total_ms, correlation_id, caller
+        FROM rag_query_decisions
+        WHERE eval_run_id IS NULL
+        ORDER BY ts DESC
+        LIMIT :limit
+    """), {"limit": limit})).mappings().all()
+
+    client = storage.Client()
+    bucket = client.bucket(GCS_BUCKET)
+    out = []
+    for r in rows:
+        source = "chat" if r["is_prod"] else "admin"
+        has_full_trace = False
+        if source == "admin":
+            has_full_trace = bucket.blob(f"{_SINGLE_TRACE_GCS_PREFIX}/{r['id']}.json").exists()
+        out.append({
+            "decision_id": str(r["id"]),
+            "ts": r["ts"].isoformat() if r["ts"] else None,
+            "query": r["query"],
+            "source": source,
+            "strategy_chosen": r["strategy_chosen"],
+            "confidence": r["confidence"],
+            "cost": r["cost"],
+            "total_ms": r["total_ms"],
+            "correlation_id": r["correlation_id"],
+            "caller": r["caller"],
+            "has_full_trace": has_full_trace,
+        })
+    return {"history": out}
 
 
 # ---------------------------------------------------------------------------
@@ -12501,11 +12890,63 @@ async def trace_explorer_run(
 _BANK_JOBS: dict[str, dict] = {}
 _BANK_PATH_DEFAULT = "eval/queries_cmhc.yaml"
 
+# Offline redundancy (Eval's ruling, 2026-08-04): deterministic chunk-to-fact
+# token-overlap, computed from served chunk texts + must_fact text -- NOT a
+# judge-enumerated "all supporting passages" list, which would need a
+# fact_checker.py rubric change (version bump) right when Eval needs the
+# grader FROZEN through the authoritative a/b baseline. This needs no LLM
+# call and no rubric touch: "how many served chunks redundantly carry this
+# fact's key tokens" is a real, reliable signal-density proxy on its own.
+_REDUNDANCY_STOPWORDS = frozenset({
+    "the", "a", "an", "is", "are", "for", "to", "of", "and", "or", "in", "on",
+    "at", "by", "with", "as", "be", "this", "that", "must", "will", "from",
+    "within", "not", "only", "applies", "required",
+})
+
+
+def _tokenize_for_redundancy(text: str) -> set[str]:
+    return {
+        w for w in re.findall(r"[a-z0-9]+", (text or "").lower())
+        if len(w) >= 3 and w not in _REDUNDANCY_STOPWORDS
+    }
+
+
+def _fact_redundancy_count(fact_text: str, chunk_texts: list[str], threshold: float = 0.4) -> int:
+    """Count of served chunks whose token overlap with `fact_text` clears
+    `threshold` (fraction of the FACT's own key tokens found in that chunk)
+    -- how many independent copies of this fact's content the pool served,
+    not just the one the judge happened to cite."""
+    fact_tokens = _tokenize_for_redundancy(fact_text)
+    if not fact_tokens:
+        return 0
+    count = 0
+    for text in chunk_texts:
+        chunk_tokens = _tokenize_for_redundancy(text)
+        if not chunk_tokens:
+            continue
+        if len(fact_tokens & chunk_tokens) / len(fact_tokens) >= threshold:
+            count += 1
+    return count
+
 
 class BankRunRequest(BaseModel):
     forced_strategy: Optional[str] = None
     caller_mode: Optional[str] = "chat.default"
     bank_path: Optional[str] = None
+    # Optional human name (Ananth's ask, 2026-08-05): "we should be able to
+    # name a run against the job -- especially nightly job runs." Purely a
+    # label; job_id stays the real identifier everywhere else. None/blank
+    # falls back to "(unnamed)" in the UI, never blocks a run.
+    name: Optional[str] = None
+    # Pin the executed router ALLOCATOR (greedy/optimizer/bayesian) across
+    # the whole bank (2026-08-05, Ananth's ask: "run an eval for greedy").
+    # Distinct from forced_strategy -- see TraceExplorerRequest's comment.
+    # None (default) = normal dispatch-decision draw, same as today.
+    mode_override: Optional[str] = None
+    # Caller-declared citability across the whole bank (2026-08-06) -- see
+    # TraceExplorerRequest's comment; "any" | "citable_required" | None
+    # (falls back to "any").
+    authority_requirement: Optional[str] = None
     # DEBUG experiment (2026-07-29): auto-decompose each query into one
     # sub-query per must_fact (deterministic template, no extra LLM call)
     # and force FAN_OUT with them -- tests whether decomposition recovers
@@ -12609,6 +13050,9 @@ def _bank_run_json_path(job_id: str) -> str:
     return _os_path_join_root(f"eval/artifacts/trace_explorer_bank_{job_id}.json")
 
 
+_BANK_RUN_GCS_PREFIX = "eval-artifacts/trace_explorer_bank"
+
+
 def _persist_bank_state(job_id: str, state: dict):
     """Write the run's full state (summaries + per-question results) to
     eval/artifacts/ -- same convention as this repo's other forced-bank
@@ -12616,29 +13060,110 @@ def _persist_bank_state(job_id: str, state: dict):
     not just at the end, so a mid-run redeploy/restart (this session's own
     in-memory _BANK_JOBS is otherwise wiped by exactly that) doesn't lose
     whatever already completed. Best-effort: a write failure is logged,
-    never raised -- the in-memory job must keep running regardless."""
+    never raised -- the in-memory job must keep running regardless.
+
+    Also mirrored to GCS (mobius-rag-uploads-dev). Local disk alone is not
+    enough once this runs on Cloud Run: the container filesystem is wiped
+    on every new revision deploy, and we deploy repeatedly mid-eval-campaign
+    (a/b/c/d/s), so a run finishing right before the next deploy would
+    otherwise vanish with no way to recover it."""
     import json as _json
+    payload = {
+        "job_id": job_id, "forced_strategy": state["forced_strategy"],
+        "caller_mode": state.get("caller_mode"), "name": state.get("name"),
+        "mode_override": state.get("mode_override"),
+        "status": state["status"], "total": state["total"], "done": state["done"],
+        "started_at": state["started_at"], "summaries": state["summaries"],
+        "results": state["results"],
+    }
     try:
         path = _bank_run_json_path(job_id)
-        payload = {
-            "job_id": job_id, "forced_strategy": state["forced_strategy"],
-            "status": state["status"], "total": state["total"], "done": state["done"],
-            "started_at": state["started_at"], "summaries": state["summaries"],
-            "results": state["results"],
-        }
         tmp_path = path + ".tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
             _json.dump(payload, f, indent=1, default=str)
         import os as _os
         _os.replace(tmp_path, path)
     except Exception as exc:  # noqa: BLE001
-        logging.getLogger("app.main").warning("bank run %s: failed to persist json: %s", job_id, exc)
+        logging.getLogger("app.main").warning("bank run %s: failed to persist json (local): %s", job_id, exc)
+    try:
+        client = storage.Client()
+        bucket = client.bucket(GCS_BUCKET)
+        blob = bucket.blob(f"{_BANK_RUN_GCS_PREFIX}/{job_id}.json")
+        # Custom metadata on the blob itself (not the payload body) so the
+        # list endpoint can browse/sort every past run WITHOUT downloading
+        # each one's full body -- these runs are 20-40MB (summaries + full
+        # per-query results), and listing 20+ of them by downloading each in
+        # full would be slow and wasteful just to show a job picker.
+        blob.metadata = {
+            "forced_strategy": str(state["forced_strategy"]), "status": str(state["status"]),
+            "caller_mode": str(state.get("caller_mode")), "name": str(state.get("name") or ""),
+            "mode_override": str(state.get("mode_override") or ""),
+            "total": str(state["total"]), "done": str(state["done"]),
+            "started_at": str(state["started_at"]),
+        }
+        blob.upload_from_string(_json.dumps(payload, default=str), content_type="application/json")
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger("app.main").warning("bank run %s: failed to persist json (gcs): %s", job_id, exc)
+
+
+def _load_bank_state_from_gcs(job_id: str) -> dict | None:
+    """Recover a run's persisted state from GCS when local disk has
+    nothing -- the normal case right after a Cloud Run redeploy."""
+    import json as _json
+    try:
+        client = storage.Client()
+        bucket = client.bucket(GCS_BUCKET)
+        blob = bucket.blob(f"{_BANK_RUN_GCS_PREFIX}/{job_id}.json")
+        if not blob.exists():
+            return None
+        return _json.loads(blob.download_as_text())
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger("app.main").warning("bank run %s: failed to load json (gcs): %s", job_id, exc)
+        return None
+
+
+@app.get("/admin/trace-explorer/run-bank/list")
+async def trace_explorer_run_bank_list():
+    """Browse every past run persisted to GCS (see _persist_bank_state) --
+    reads each blob's custom METADATA only (forced_strategy/status/total/
+    done/started_at), never the multi-MB body, so listing 20+ runs stays
+    fast. Ananth's ask (2026-08-04): "we persist every run, why can't we
+    search/browse for previous runs" -- job_id had to be known/pasted before
+    this; now the trace UI can offer an actual picker."""
+    try:
+        client = storage.Client()
+        bucket = client.bucket(GCS_BUCKET)
+        runs = []
+        for blob in client.list_blobs(bucket, prefix=f"{_BANK_RUN_GCS_PREFIX}/"):
+            meta = blob.metadata or {}
+            job_id = blob.name.rsplit("/", 1)[-1].removesuffix(".json")
+            runs.append({
+                "job_id": job_id,
+                "name": meta.get("name") or None,
+                "forced_strategy": meta.get("forced_strategy"),
+                "mode_override": meta.get("mode_override") or None,
+                "caller_mode": meta.get("caller_mode") if meta.get("caller_mode") != "None" else None,
+                "status": meta.get("status"),
+                "total": int(meta["total"]) if meta.get("total", "").isdigit() else None,
+                "done": int(meta["done"]) if meta.get("done", "").isdigit() else None,
+                "started_at": meta.get("started_at"),
+                "updated": blob.updated.isoformat() if blob.updated else None,
+            })
+        runs.sort(key=lambda r: r.get("updated") or "", reverse=True)
+        return {"runs": runs}
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger("app.main").warning("bank run list: failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"failed to list bank runs: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger("app.main").warning("bank run %s: failed to load json (gcs): %s", job_id, exc)
+        return None
 
 
 async def _run_bank_job(
     job_id: str, forced_strategy: str | None, caller_mode: str | None, bank_path: str,
     auto_fanout_from_facts: bool = False, auto_fanout_llm: bool = False,
-    auto_fanout_corpus: bool = False,
+    auto_fanout_corpus: bool = False, mode_override: str | None = None,
+    authority_requirement: str | None = None,
 ):
     import yaml as _yaml
     from app.database import AsyncSessionLocal
@@ -12651,6 +13176,33 @@ async def _run_bank_job(
         queries = bank.get("queries", [])
         state["total"] = len(queries)
         async with AsyncSessionLocal() as db:
+            # Pre-warm the payer_context cache for every distinct payer slug
+            # in this bank BEFORE the timed loop starts. Without this, a
+            # caller_mode=chat.default/chat.copilot (real_time) run would
+            # measure each query's cold-start payer_context=None -- the
+            # orchestrator's background-warm fix (2026-08-04) only kicks in
+            # AFTER a miss, so a one-shot bank run would never actually
+            # benefit from it. Pre-warming here means a/b/c/d bank runs
+            # across copilot/default/thinking all measure the same
+            # steady-state authority scoring, which is what real repeat
+            # production traffic for a payer settles into anyway.
+            from app.services.retriever.fillers.payer_context import (
+                extract_payer_slug, resolve_payer_context,
+            )
+            from app.services.retriever import orchestrator as _orch
+            _warmed_slugs: set[str] = set()
+            for q in queries:
+                gate = await run_gate(db, q["query"])
+                slug = extract_payer_slug(getattr(gate, "j_codes", None))
+                if slug and slug not in _warmed_slugs and slug not in _orch._PAYER_CONTEXT_CACHE:
+                    _warmed_slugs.add(slug)
+                    try:
+                        result = await resolve_payer_context(db, slug)
+                        _orch._PAYER_CONTEXT_CACHE[slug] = (result, time.monotonic())
+                    except Exception as exc:  # noqa: BLE001
+                        logging.getLogger("app.main").warning(
+                            "bank run %s: payer pre-warm failed for slug=%s: %s", job_id, slug, exc
+                        )
             for q in queries:
                 qid = q.get("id", "?")
                 t0 = time.monotonic()
@@ -12670,24 +13222,221 @@ async def _run_bank_job(
                         decomposed = await _decompose_query_corpus(db, gate, q["query"])
                         if len(decomposed) > 1:
                             force_fanout_queries = decomposed
+                    # Heartbeat logging (Ananth, 2026-08-04): three separate
+                    # unexplained bank-run stalls this session with zero
+                    # DB-lock/LLM-retry evidence -- this call is the ONE
+                    # multi-minute await in the loop, so if it hangs again,
+                    # this log line is the only way to tell "still inside
+                    # _run_trace_for_query for qid=X" apart from "the loop
+                    # itself deadlocked before even calling it."
+                    logging.getLogger("app.main").warning(
+                        "bank run %s: starting qid=%s (strategy=%s mode=%s)",
+                        job_id, qid, forced_strategy, caller_mode,
+                    )
                     result = await _run_trace_for_query(
                         db, q["query"], forced_strategy, caller_mode,
                         q.get("must_facts"), run_eval=True,
                         force_fanout_queries=force_fanout_queries,
+                        mode_override=mode_override, authority_requirement=authority_requirement,
+                    )
+                    logging.getLogger("app.main").warning(
+                        "bank run %s: finished qid=%s", job_id, qid,
                     )
                     state["results"][qid] = result
                     ev = result.get("eval") or {}
+                    _n_chunks_out = len((result.get("emits") or {}).get("chunks") or [])
+                    # recall@K, K=1..10 (Ananth, 2026-08-04): fact_checker's
+                    # "passage" field is a 1-based index into the served
+                    # chunk list (fact_checker.py:114) -- recall@K is just
+                    # "what fraction of must_facts have passage <= K,"
+                    # computed by truncating the ALREADY-graded fact list,
+                    # not by re-running retrieval/eval per K. This is the
+                    # correct recall@K methodology (rank-list truncation, IR
+                    # standard) vs re-querying at K different capacities,
+                    # which would conflate ranking quality with a fetch-limit
+                    # effect. Only meaningful up to chunks_out -- a query
+                    # served fewer than 10 chunks can't show a K=10 point
+                    # any different from its own chunks_out point.
+                    #
+                    # SUPPORT-WEIGHTED, not binary in_chunk (Ananth's live
+                    # catch, 2026-08-04): the headline "recall"/coverage
+                    # number is mean GRADED support (fact_checker.py
+                    # support_sum/n_must, 0.0/0.5/1.0 partial credit), not a
+                    # binary hit count. The first version of this used
+                    # in_chunk (support>=0.5 thresholded to a bool), which
+                    # silently rounded partial credit up to a full hit --
+                    # produced the nonsensical-looking "recall@8 > overall
+                    # recall" (a query with facts graded [1,1,0.5,0.5] shows
+                    # coverage=0.75 but binary in_chunk reports 100% "hit").
+                    # Using the same support_sum/n formula as coverage, just
+                    # restricted to facts whose passage falls within K, makes
+                    # recall@max(K) reconcile to the headline coverage number
+                    # exactly (mod rounding) instead of silently disagreeing
+                    # with it.
+                    # K range extended to max(10, chunks_out) -- Eval's M1
+                    # catch, 2026-08-05: capping at K=10 made a deep-serving
+                    # query's headline recall (over ALL served chunks)
+                    # legitimately exceed recall_at_k[10] whenever
+                    # chunks_out>10 (e.g. chat.thinking regularly serves
+                    # ~15) -- that's the untested rank-11+ tail, not a
+                    # reconciliation break, but it LOOKS like one unless the
+                    # curve actually reaches chunks_out.
+                    _facts_for_k = ev.get("facts") or []
+                    _n_facts_total = len(_facts_for_k)
+                    _recall_at_k = {}
+                    for _k in range(1, max(10, _n_chunks_out) + 1):
+                        if _n_facts_total:
+                            _support_sum_at_k = sum(
+                                f.get("support") or 0.0 for f in _facts_for_k
+                                if f.get("passage") is not None and f["passage"] <= _k
+                            )
+                            _recall_at_k[_k] = round(_support_sum_at_k / _n_facts_total, 4)
+                        else:
+                            _recall_at_k[_k] = None
+                    # Signal/noise, not recall restated (Ananth, 2026-08-04):
+                    # facts_hit/total only says "did we find what we needed";
+                    # it says nothing about how much of what we RETURNED was
+                    # actually useful. Uses the passage index already on each
+                    # fact (which chunk backed it) to count DISTINCT chunks
+                    # that backed at least one supported fact, vs total
+                    # chunks served -- an approximate but real precision
+                    # signal (a chunk not cited by any tested must_fact could
+                    # still be legitimately useful context the bank doesn't
+                    # test for, so this underestimates true signal, not an
+                    # exact ground truth).
+                    _signal_passages = {
+                        f["passage"] for f in (ev.get("facts") or [])
+                        if f.get("in_chunk") and f.get("passage") is not None
+                    }
+                    _signal_ratio = round(len(_signal_passages) / _n_chunks_out, 4) if _n_chunks_out else None
+                    # Position-density (Ananth, 2026-08-04): tests the "lost
+                    # in the middle" hypothesis -- are signal chunks
+                    # front-loaded (near rank 1, where a synthesizer is most
+                    # likely to actually use them) or buried near the end of
+                    # the served list? 1.0 = every signal chunk at rank 1,
+                    # 0.0 = every signal chunk at the very last rank.
+                    # Complements signal_ratio (HOW MUCH is useful) with
+                    # WHERE it sits, to test the synthesis-loss correlation
+                    # hypothesis (more scattered/buried signal -> harder for
+                    # the synthesizer to find it -> bigger recall-vs-
+                    # recall_answer gap).
+                    _signal_density = None
+                    if _signal_passages and _n_chunks_out > 1:
+                        _avg_pos = sum(_signal_passages) / len(_signal_passages)
+                        _signal_density = round(1 - (_avg_pos - 1) / (_n_chunks_out - 1), 4)
+                    # Offline redundancy (Eval's ruling -- deterministic
+                    # token-overlap, NOT a judge-enumerated list; see the
+                    # module-level helper's docstring for why).
+                    _served_texts = [c.get("text") or "" for c in ((result.get("emits") or {}).get("chunks") or [])]
+                    _hit_facts = [f for f in (ev.get("facts") or []) if f.get("in_chunk")]
+                    _redundancy_counts = [
+                        _fact_redundancy_count(f.get("fact") or "", _served_texts) for f in _hit_facts
+                    ]
+                    _avg_redundancy = round(sum(_redundancy_counts) / len(_redundancy_counts), 4) if _redundancy_counts else None
+                    # per_slot_pool_metadata (Router's fix, 2026-08-05): raw
+                    # depth-signal Router's own compute_depth_bucket reads
+                    # (top_score_percentile, distinct_content_topk) --
+                    # previously only reachable via a SECOND per-query API
+                    # call to the full trace (Eval-architect's re-export came
+                    # back empty because of exactly this gap). Surfaced
+                    # directly in the summary now so a sweep persists it in
+                    # one pass. Averaged across slots (FAN_OUT queries have
+                    # >1); pool_size above already covers the single-number
+                    # case, this adds the two fields pool_size alone can't
+                    # substitute for.
+                    _pool_meta = (
+                        ((result.get("telemetry") or {}).get("routing_keys") or {})
+                        .get("feature_context") or {}
+                    ).get("per_slot_pool_metadata") or {}
+                    _tsp_vals = [m.get("top_score_percentile") for m in _pool_meta.values() if m.get("top_score_percentile") is not None]
+                    _dct_vals = [m.get("distinct_content_topk") for m in _pool_meta.values() if m.get("distinct_content_topk") is not None]
+                    # capacity + fillers_ms (Eval-architect's row-shape ask,
+                    # 2026-08-05): the last two fields Priors Lab's compute
+                    # endpoint had to fetch via a second per-query call --
+                    # same extraction logic (fill_depth's first executed
+                    # rung's capacity; telemetry.latency_ms.fillers_ms, the
+                    # real per-strategy filler-only latency, never wall_ms),
+                    # now in the summary directly so a bank run alone is a
+                    # complete eval_bank_run_rows row, no second pull needed.
+                    _fill_depth = ((result.get("telemetry") or {}).get("routing_keys") or {}).get("fill_depth") or {}
+                    _capacity = None
+                    for _slot_fills in _fill_depth.values():
+                        if _slot_fills:
+                            _capacity = _slot_fills[0].get("capacity")
+                            break
+                    _fillers_ms = ((result.get("telemetry") or {}).get("latency_ms") or {}).get("fillers_ms")
+                    # Executed chain (Ananth, 2026-08-06: "show the strategy
+                    # in the comparison else it is a bit confusing" --
+                    # expected_strategy is the BANK's label for what should
+                    # answer the query, not what the allocator actually ran;
+                    # showing only expected_strategy in the bank-run table
+                    # reads as "greedy always picks X" when it's really the
+                    # bank's own composition. Same extraction oracle_matrix
+                    # already does per-query via a second trace pull --
+                    # computed here once, in the summary, so the bank table
+                    # doesn't need a second call to show it.)
+                    _executed = (((result.get("telemetry") or {}).get("routing_keys") or {}).get("executed_order")) or {}
+                    _executed_chain: list[str] = []
+                    for _v in _executed.values():
+                        _executed_chain.extend(_v)
                     state["summaries"].append({
                         "id": qid, "query": q["query"],
                         "persona": q.get("persona"), "expected_strategy": (q.get("expected") or {}).get("strategy"),
+                        "executed_chain": _executed_chain,
                         "must_facts": q.get("must_facts"),
                         "status": "ok",
                         "recall": ev.get("coverage"),
                         "n_facts_hit": sum(1 for f in (ev.get("facts") or []) if f.get("in_chunk")),
                         "n_facts_total": len(ev.get("facts") or []),
-                        "chunks_out": len((result.get("emits") or {}).get("chunks") or []),
+                        "chunks_out": _n_chunks_out,
+                        "n_signal_chunks": len(_signal_passages),
+                        "signal_ratio": _signal_ratio,
+                        "signal_density": _signal_density,
+                        "avg_fact_redundancy": _avg_redundancy,
+                        "authority_score": ((result.get("emits") or {}).get("authority_summary") or {}).get("authority_score"),
+                        # Pool-input signal (Ananth, 2026-08-04): richness/
+                        # density of the RAW pool feeding this query, before
+                        # any filler ranks/truncates it. Same for a/b on a
+                        # given query (shared pool) -- the point is
+                        # comparing it against a's vs b's own recall/loss to
+                        # test "does pool richness predict outcome."
+                        "pool_size": ((result.get("emits") or {}).get("pool_summary") or {}).get("pool_size"),
+                        "pool_bm25_top10_mean": (((result.get("emits") or {}).get("pool_summary") or {}).get("bm25_top10") or {}).get("mean"),
+                        "pool_bm25_top10_std": (((result.get("emits") or {}).get("pool_summary") or {}).get("bm25_top10") or {}).get("std"),
+                        "pool_vector_top10_mean": (((result.get("emits") or {}).get("pool_summary") or {}).get("vector_top10") or {}).get("mean"),
+                        "pool_vector_top10_std": (((result.get("emits") or {}).get("pool_summary") or {}).get("vector_top10") or {}).get("std"),
+                        "pool_required_coverage_mean": (((result.get("emits") or {}).get("pool_summary") or {}).get("required_coverage") or {}).get("mean"),
+                        "pool_boosted_coverage_mean": (((result.get("emits") or {}).get("pool_summary") or {}).get("boosted_coverage") or {}).get("mean"),
+                        "pool_n_full_required_match": ((result.get("emits") or {}).get("pool_summary") or {}).get("n_full_required_match"),
+                        "top_score_percentile": round(sum(_tsp_vals) / len(_tsp_vals), 4) if _tsp_vals else None,
+                        "distinct_content_topk": round(sum(_dct_vals) / len(_dct_vals), 2) if _dct_vals else None,
+                        "capacity": _capacity,
+                        "fillers_ms": _fillers_ms,
                         "wall_ms": int((time.monotonic() - t0) * 1000),
+                        # Retrieval-only latency, split out from wall_ms above
+                        # (Ananth's catch, 2026-08-04): wall_ms times the WHOLE
+                        # eval pipeline -- retrieval + chunk-only check_facts +
+                        # the single-shot synth call + full-mode check_facts,
+                        # three extra LLM round-trips a real Chat turn never
+                        # makes. retrieval_ms is just Gate->Reformat->Structure
+                        # ->Pool->Router->Fillers->Synthesis (telemetry.latency_ms.
+                        # total_ms, already computed per-query, just never
+                        # surfaced at the bank level before).
+                        "retrieval_ms": ((result.get("telemetry") or {}).get("latency_ms") or {}).get("total_ms"),
                         "decomposed_into": force_fanout_queries,
+                        # Tier 1 (Eval's ruling, 2026-08-04): grader-identity
+                        # stamp + error state, so this row is self-describing
+                        # about whether it's comparable to another row --
+                        # THE gap that let every calibration disaster this
+                        # week look like a valid row.
+                        "fact_checker_version": ev.get("fact_checker_version"),
+                        "judge_model": ev.get("judge_model"),
+                        "judge_error": ev.get("error"),
+                        "judge_error_transient": ev.get("error_transient"),
+                        "recall_answer": ev.get("coverage_answer"),
+                        "n_contradicted": ev.get("n_contradicted"),
+                        "n_hallucinated_claims": len(ev.get("hallucinated_claims") or []),
+                        "recall_at_k": _recall_at_k,
                     })
                 except Exception as exc:  # noqa: BLE001 -- one bad query must not kill the bank run
                     logging.getLogger("app.main").warning("bank run: query %s failed: %s", qid, exc)
@@ -12702,9 +13451,25 @@ async def _run_bank_job(
                     # cascading one hiccup into a wall of unrelated errors for
                     # the rest of the bank (confirmed live 2026-07-29: cmhc013's
                     # real ConnectionDoesNotExistError masked as 10 identical
-                    # downstream failures). Roll back so the session recovers.
+                    # downstream failures).
+                    #
+                    # Upgraded rollback()->invalidate() (2026-08-04, same-day
+                    # correction): once Pool's new statement_timeout landed,
+                    # a rollback() after the resulting QueryCanceledError left
+                    # the underlying asyncpg connection with a dangling
+                    # transaction at the PROTOCOL level even though
+                    # SQLAlchemy's rollback() returned cleanly -- confirmed
+                    # live, that connection then went back to the process-
+                    # wide shared pool and corrupted an UNRELATED /upload
+                    # request ("cannot use Connection.transaction() in a
+                    # manually started transaction"). invalidate() discards
+                    # the physical connection outright rather than trusting
+                    # it's clean -- this session object still works fine
+                    # afterward (SQLAlchemy transparently gets a fresh
+                    # connection on next use), it just never risks handing a
+                    # possibly-corrupted connection back to anyone else.
                     try:
-                        await db.rollback()
+                        await db.invalidate()
                     except Exception:  # noqa: BLE001 -- best-effort recovery
                         pass
                 state["done"] += 1
@@ -12731,12 +13496,16 @@ async def trace_explorer_run_bank(body: BankRunRequest = Body(...)):
     job_id = uuid.uuid4().hex[:12]
     _BANK_JOBS[job_id] = {
         "status": "running", "total": 0, "done": 0, "summaries": [], "results": {},
-        "forced_strategy": body.forced_strategy, "started_at": time.monotonic(),
+        "forced_strategy": body.forced_strategy, "caller_mode": body.caller_mode,
+        "name": (body.name or "").strip() or None,
+        "mode_override": body.mode_override,
+        "started_at": time.monotonic(),
     }
     asyncio.create_task(_run_bank_job(
         job_id, body.forced_strategy, body.caller_mode, body.bank_path or _BANK_PATH_DEFAULT,
         auto_fanout_from_facts=body.auto_fanout_from_facts, auto_fanout_llm=body.auto_fanout_llm,
-        auto_fanout_corpus=body.auto_fanout_corpus,
+        auto_fanout_corpus=body.auto_fanout_corpus, mode_override=body.mode_override,
+        authority_requirement=body.authority_requirement,
     ))
     return {"job_id": job_id}
 
@@ -12749,14 +13518,18 @@ def _load_bank_state_from_disk(job_id: str) -> dict | None:
     per-query results) to disk after EVERY query specifically so a job
     survives a restart. The status/result endpoints just never read it
     back. Without this, "watch a job from before the last restart" (the
-    self-serve point of this whole tool) silently 404s."""
+    self-serve point of this whole tool) silently 404s.
+
+    Falls back further to GCS when local disk has nothing too -- on
+    Cloud Run, a redeploy wipes the container filesystem entirely, so
+    disk alone only covers same-instance restarts, not a new revision."""
     import json as _json
     import os as _os
     path = _bank_run_json_path(job_id)
-    if not _os.path.exists(path):
-        return None
-    with open(path, encoding="utf-8") as f:
-        return _json.load(f)
+    if _os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            return _json.load(f)
+    return _load_bank_state_from_gcs(job_id)
 
 
 @app.get("/admin/trace-explorer/run-bank/status")
@@ -12767,6 +13540,7 @@ async def trace_explorer_run_bank_status(job_id: str):
     return {
         "status": state["status"], "total": state["total"], "done": state["done"],
         "summaries": state["summaries"], "forced_strategy": state["forced_strategy"],
+        "mode_override": state.get("mode_override"), "name": state.get("name"),
         "error": state.get("error"),
     }
 
@@ -12780,6 +13554,309 @@ async def trace_explorer_run_bank_result(job_id: str, qid: str):
     if result is None:
         raise HTTPException(status_code=404, detail="unknown qid or not finished yet")
     return result
+
+
+class PriorsLabJobSpec(BaseModel):
+    job_id: str
+    strategy: str  # a/b/c/d/s -- the strategy this job FORCED
+    caller_mode: str
+
+
+class PriorsLabRequest(BaseModel):
+    jobs: list[PriorsLabJobSpec]
+    n_buckets: int = 3
+    split_by_mode: bool = False
+    cutoffs: Optional[list[int]] = None  # override auto-derived quantile cutoffs
+
+
+@app.get("/admin/priors-lab/auto-jobs")
+async def priors_lab_auto_jobs():
+    """For each (strategy, caller_mode) combo with at least one completed
+    bank run on record, return the MOST RECENT one -- Ananth's ask
+    (2026-08-05): "there's a bunch of jobs [per combo], default the last job
+    is selected." Reuses the same GCS blob-metadata listing the Browse-
+    previous-runs picker already uses (cheap: metadata only, no bodies).
+    Only considers forced_strategy in a/b/c/d (s and auto/None aren't a
+    priors-lab strategy axis) and status=done (a still-running or errored
+    job isn't a usable priors input)."""
+    try:
+        client = storage.Client()
+        bucket = client.bucket(GCS_BUCKET)
+        latest: dict[tuple[str, str], dict] = {}
+        for blob in client.list_blobs(bucket, prefix=f"{_BANK_RUN_GCS_PREFIX}/"):
+            meta = blob.metadata or {}
+            strategy = meta.get("forced_strategy")
+            mode = meta.get("caller_mode")
+            if strategy not in ("a", "b", "c", "d") or not mode or mode == "None":
+                continue
+            if meta.get("status") != "done":
+                continue
+            job_id = blob.name.rsplit("/", 1)[-1].removesuffix(".json")
+            updated = blob.updated.isoformat() if blob.updated else ""
+            key = (strategy, mode)
+            if key not in latest or updated > latest[key]["updated"]:
+                latest[key] = {"job_id": job_id, "strategy": strategy, "caller_mode": mode, "updated": updated}
+        jobs = sorted(latest.values(), key=lambda j: (j["strategy"], j["caller_mode"]))
+        missing = [
+            f"{s}/{m}" for s in ("a", "b", "c", "d")
+            for m in ("chat.copilot", "chat.default", "chat.thinking")
+            if (s, m) not in latest
+        ]
+        return {"jobs": jobs, "missing_combos": missing}
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger("app.main").warning("priors-lab auto-jobs: failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"failed to list bank runs: {exc}")
+
+
+@app.post("/admin/priors-lab/compute")
+async def priors_lab_compute(body: PriorsLabRequest = Body(...)):
+    """Repeatable priors computation from real bank-run data -- the module
+    Ananth asked for (2026-08-05) so the depth_3 fold's rules (population
+    consistency, zero-output handling, real k0/latency) don't have to be
+    re-derived by hand every time. READ-ONLY: computes a preview in
+    priors_bootstrap.yaml's cell schema, never writes the file -- that
+    write stays Eval's seam (see priors_lab.py module docstring)."""
+    from app.services.retriever.priors_lab import PriorsLabRow, compute_priors_table
+
+    rows: list[PriorsLabRow] = []
+    missing_jobs = []
+    for spec in body.jobs:
+        state = _BANK_JOBS.get(spec.job_id) or _load_bank_state_from_disk(spec.job_id)
+        if state is None:
+            missing_jobs.append(spec.job_id)
+            continue
+        for qid, result in (state.get("results") or {}).items():
+            summary = next((s for s in state["summaries"] if s.get("id") == qid), {})
+            if summary.get("status") != "ok":
+                continue
+            telemetry = result.get("telemetry") or {}
+            latency_ms = telemetry.get("latency_ms") or {}
+            fill_depth = (
+                (telemetry.get("routing_keys") or {}).get("fill_depth") or {}
+            )
+            # first slot's first executed rung's capacity -- this bank's
+            # queries are single-slot (direct_answer); a multi-slot bank
+            # would need this keyed per slot, not assumed singular.
+            capacity = None
+            for slot_fills in fill_depth.values():
+                if slot_fills:
+                    capacity = slot_fills[0].get("capacity")
+                    break
+            rows.append(PriorsLabRow(
+                query_id=qid, caller_mode=spec.caller_mode, strategy=spec.strategy,
+                pool_size=summary.get("pool_size"),
+                recall=summary.get("recall"),
+                recall_answer=summary.get("recall_answer"),
+                authority=summary.get("authority_score"),
+                capacity=capacity,
+                fillers_ms=latency_ms.get("fillers_ms"),
+            ))
+
+    table = compute_priors_table(
+        rows, n_buckets=body.n_buckets, split_by_mode=body.split_by_mode, cutoffs=body.cutoffs,
+    )
+    table["missing_jobs"] = missing_jobs
+    table["n_rows_used"] = len(rows)
+    computation_id = _persist_priors_lab_computation(table, body)
+    table["computation_id"] = computation_id
+    return table
+
+
+_PRIORS_LAB_HISTORY_GCS_PREFIX = "eval-artifacts/priors_lab_computations"
+
+
+def _priors_lab_headline(table: dict) -> dict:
+    """Cheap headline for the history list -- depth_3's recall_lift per
+    strategy if present (this corpus's only real cell today), else the
+    first bucket's. Just enough to eyeball "did this change" without
+    downloading the full body."""
+    for b in table.get("buckets", []):
+        if b.get("bucket", "").startswith("b1") or "depth_3" in b.get("bucket", ""):
+            return {s: c.get("recall_lift") for s, c in b.get("cells", {}).items()}
+    if table.get("buckets"):
+        b = table["buckets"][0]
+        return {s: c.get("recall_lift") for s, c in b.get("cells", {}).items()}
+    return {}
+
+
+def _persist_priors_lab_computation(table: dict, body: "PriorsLabRequest") -> str | None:
+    """Every compute call gets saved (Ananth's ask, 2026-08-05: "see the
+    previous scores including the current score" in the Priors Lab tab) --
+    interim GCS-blob persistence, same pattern as bank runs and single
+    traces, NOT the DB-backed history Eval-architect's build will own
+    (gated on Database's schema ratification -- see priors_lab.py's module
+    docstring on the phased plan). Best-effort: a persistence failure must
+    never break the actual compute response."""
+    import json as _json
+    import uuid as _uuid
+    try:
+        computation_id = _uuid.uuid4().hex[:12]
+        client = storage.Client()
+        bucket = client.bucket(GCS_BUCKET)
+        blob = bucket.blob(f"{_PRIORS_LAB_HISTORY_GCS_PREFIX}/{computation_id}.json")
+        blob.metadata = {
+            "n_rows_used": str(table.get("n_rows_used")),
+            "split_by_mode": str(body.split_by_mode),
+            "n_buckets": str(body.n_buckets),
+            "job_ids": ",".join(j.job_id for j in body.jobs)[:1400],  # GCS metadata value cap
+        }
+        blob.upload_from_string(_json.dumps({
+            **table, "headline": _priors_lab_headline(table),
+            "jobs": [j.model_dump() for j in body.jobs],
+        }, default=str), content_type="application/json")
+        return computation_id
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger("app.main").warning("priors-lab computation persist failed: %s", exc)
+        return None
+
+
+@app.get("/admin/priors-lab/history")
+async def priors_lab_history(limit: int = 30):
+    """Browse past Priors Lab computations -- metadata-only listing, same
+    cheap pattern as run-bank/list. Powers "see the previous scores" in
+    the Priors Lab tab."""
+    try:
+        client = storage.Client()
+        bucket = client.bucket(GCS_BUCKET)
+        runs = []
+        for blob in client.list_blobs(bucket, prefix=f"{_PRIORS_LAB_HISTORY_GCS_PREFIX}/"):
+            meta = blob.metadata or {}
+            computation_id = blob.name.rsplit("/", 1)[-1].removesuffix(".json")
+            runs.append({
+                "computation_id": computation_id,
+                "n_rows_used": meta.get("n_rows_used"),
+                "split_by_mode": meta.get("split_by_mode"),
+                "n_buckets": meta.get("n_buckets"),
+                "updated": blob.updated.isoformat() if blob.updated else None,
+            })
+        runs.sort(key=lambda r: r.get("updated") or "", reverse=True)
+        return {"computations": runs[:limit]}
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger("app.main").warning("priors-lab history list failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"failed to list priors-lab history: {exc}")
+
+
+@app.get("/admin/priors-lab/history/{computation_id}")
+async def priors_lab_history_get(computation_id: str):
+    """Load one previously-computed Priors Lab result by id, including its
+    cheap headline (per-strategy recall_lift) for a quick current-vs-
+    previous comparison without re-rendering the full table."""
+    import json as _json
+    try:
+        client = storage.Client()
+        bucket = client.bucket(GCS_BUCKET)
+        blob = bucket.blob(f"{_PRIORS_LAB_HISTORY_GCS_PREFIX}/{computation_id}.json")
+        if not blob.exists():
+            raise HTTPException(status_code=404, detail="unknown computation_id")
+        return _json.loads(blob.download_as_text())
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"failed to load computation: {exc}")
+
+
+class OracleMatrixRequest(BaseModel):
+    test_job_id: str
+    # {"a": job_id, "b": job_id, ...} -- explicit single-arm job per strategy.
+    # None (default) auto-resolves the latest completed job per strategy at
+    # the TEST job's own caller_mode (mixing modes would compare apples to
+    # oranges, so auto-resolution is mode-matched, not global-latest).
+    arm_job_ids: Optional[dict[str, str]] = None
+    w_c: float = 1.0
+    w_h: float = 0.5
+
+
+def _latest_arm_job(strategy: str, caller_mode: str) -> Optional[str]:
+    """Latest completed single-arm job for (strategy, caller_mode) -- same
+    GCS-metadata lookup priors-lab/auto-jobs uses, scoped to one combo."""
+    client = storage.Client()
+    bucket = client.bucket(GCS_BUCKET)
+    best_id, best_updated = None, ""
+    for blob in client.list_blobs(bucket, prefix=f"{_BANK_RUN_GCS_PREFIX}/"):
+        meta = blob.metadata or {}
+        if meta.get("forced_strategy") != strategy or meta.get("caller_mode") != caller_mode:
+            continue
+        if meta.get("status") != "done":
+            continue
+        updated = blob.updated.isoformat() if blob.updated else ""
+        if updated > best_updated:
+            best_updated = updated
+            best_id = blob.name.rsplit("/", 1)[-1].removesuffix(".json")
+    return best_id
+
+
+@app.post("/admin/trace-explorer/oracle-matrix")
+async def trace_explorer_oracle_matrix(body: OracleMatrixRequest = Body(...)):
+    """Per-query oracle comparison for any bank run (Ananth's ask,
+    2026-08-06: generalizing the one-off "greedy vs oracle" analysis into a
+    real, reusable feature). Compares a TEST run (any dispatch -- greedy,
+    optimizer, forced, auto) against the per-query oracle (best single arm
+    among a/b/c/d), using oracle_matrix.py's SCORE formula. READ-ONLY,
+    computes from already-persisted bank runs, writes nothing."""
+    from app.services.retriever.oracle_matrix import compute_oracle_matrix
+
+    test_state = _BANK_JOBS.get(body.test_job_id) or _load_bank_state_from_disk(body.test_job_id)
+    if test_state is None:
+        raise HTTPException(status_code=404, detail=f"unknown test_job_id {body.test_job_id}")
+    test_mode = test_state.get("caller_mode") or "chat.default"
+
+    # Resolve arm jobs (explicit or auto, mode-matched).
+    arm_job_ids = dict(body.arm_job_ids or {})
+    missing_arms = []
+    for strat in ("a", "b", "c", "d"):
+        if strat in arm_job_ids:
+            continue
+        found = _latest_arm_job(strat, test_mode)
+        if found:
+            arm_job_ids[strat] = found
+        else:
+            missing_arms.append(strat)
+
+    # Pull arm summaries (recall_answer/authority/contradictions/hallucinations).
+    arm_rows_by_strategy: dict[str, dict[str, dict]] = {}
+    for strat, job_id in arm_job_ids.items():
+        state = _BANK_JOBS.get(job_id) or _load_bank_state_from_disk(job_id)
+        if state is None:
+            missing_arms.append(strat)
+            continue
+        by_q = {}
+        for s in state.get("summaries", []):
+            if s.get("status") != "ok":
+                continue
+            by_q[s["id"]] = {
+                "recall_answer": s.get("recall_answer"), "authority": s.get("authority_score"),
+                "n_contradicted": s.get("n_contradicted"), "n_hallucinated": s.get("n_hallucinated_claims"),
+                "n_facts_total": s.get("n_facts_total"),
+            }
+        arm_rows_by_strategy[strat] = by_q
+
+    # Pull test run's rows + ACTUAL EXECUTED chain per query (needs the full
+    # per-query trace, same as the manual analysis did -- executed_order
+    # isn't in the summary).
+    test_rows = []
+    for s in test_state.get("summaries", []):
+        if s.get("status") != "ok":
+            continue
+        qid = s["id"]
+        result = (test_state.get("results") or {}).get(qid) or {}
+        rk = (result.get("telemetry") or {}).get("routing_keys") or {}
+        executed = rk.get("executed_order") or {}
+        chain: list[str] = []
+        for v in executed.values():
+            chain.extend(v)
+        test_rows.append({
+            "query_id": qid, "query": s.get("query"), "chain": chain,
+            "recall_answer": s.get("recall_answer"), "authority": s.get("authority_score"),
+            "n_contradicted": s.get("n_contradicted"), "n_hallucinated": s.get("n_hallucinated_claims"),
+            "n_facts_total": s.get("n_facts_total"),
+        })
+
+    matrix = compute_oracle_matrix(test_rows, arm_rows_by_strategy, w_c=body.w_c, w_h=body.w_h)
+    matrix["arm_job_ids"] = arm_job_ids
+    matrix["missing_arms"] = sorted(set(missing_arms))
+    matrix["test_job_id"] = body.test_job_id
+    matrix["test_caller_mode"] = test_mode
+    return matrix
 
 
 @app.get("/trace-explorer", response_class=HTMLResponse)

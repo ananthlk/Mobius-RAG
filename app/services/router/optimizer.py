@@ -69,6 +69,8 @@ from app.services.router.allocation import (
     chain_success_probability,
     decision_helpers,
     DEFAULT_TOKEN_ALLOWANCE_PER_SLOT,
+    PAYLOAD_TOKENS_PER_CHUNK,
+    _PAYLOAD_TOKENS_UNKNOWN_STRATEGY as _PAYLOAD_TOKENS_UNKNOWN,
     decision_terminal_action,
     eligible_strategies,
     ladder_outcome,
@@ -134,13 +136,15 @@ def _viable_strategies(
             st.steps.append(StrategyStep(
                 sid, "skipped", skip_reason="crawl_gated_payer_not_crawlable"))
             continue
-        if not strategy_authority_eligible(sid, authority_requirement, slot.required):
-            st.steps.append(StrategyStep(
-                sid, "skipped", skip_reason="authority_gated_non_citable"))
-            continue
         prof, source = lookup_with_fallback(depth_bucket, sid, bundle)
         if prof is None:
             st.steps.append(StrategyStep(sid, "skipped", skip_reason="no_prior"))
+            continue
+        if not strategy_authority_eligible(sid, authority_requirement, slot.required,
+                                           prof.authority):
+            st.steps.append(StrategyStep(
+                sid, "skipped", skip_reason="authority_gated_non_citable",
+                prior_source=source))
             continue
         if prof.recall_lift <= 0.0:
             st.steps.append(StrategyStep(sid, "skipped",
@@ -153,9 +157,10 @@ def _viable_strategies(
                                          prior_source=source, recall_lift=prof.recall_lift,
                                          latency_p50_ms=prof.latency_p50_ms))
             continue
-        if rung_payload_tokens(sid, slot.capacity) > token_allowance:
-            # per-rung gate: chain payload is NOT additive (single winner
-            # fills the slot), so no subset-level check is needed
+        # PARTIAL-FILL model (Ananth 2026-07-24): viable if ONE chunk is
+        # affordable; actual fills assigned jointly post-solve (SUM model —
+        # retention live). Old all-or-nothing gate = d-starvation cause #5.
+        if PAYLOAD_TOKENS_PER_CHUNK.get(sid, _PAYLOAD_TOKENS_UNKNOWN) > token_allowance:
             warn_if_estimate_driven_skip(sid, slot.capacity, token_allowance)
             st.steps.append(StrategyStep(sid, "skipped",
                                          skip_reason="payload_over_token_allowance",
@@ -371,8 +376,25 @@ def optimize_allocation(
         ladder.per_slot_helpers[slot.slot_id] = slot_helper_plan(status, c["j_codes"], c["d_codes"])
         ladder.per_slot_accuracy[slot.slot_id] = acc
         ladder.per_slot_latency_ms[slot.slot_id] = option.latency_ms
-        ladder.per_slot_payload_tokens[slot.slot_id] = chain_payload_tokens(
-            chain, slot.capacity)
+        # PARTIAL-FILL assignment on the chosen subset (SUM model)
+        from app.services.router.portfolio import assign_chain_fills
+        members = [(s_, profiles[s_][0], slot.capacity) for s_ in chain]
+        fills = assign_chain_fills(members, c["token_allowance_per_slot"])
+        kept = [s_ for s_ in chain if fills.get(s_, 0) >= 1]
+        if kept != chain:
+            for s_ in chain:
+                if s_ not in kept:
+                    st.steps.append(StrategyStep(
+                        s_, "skipped",
+                        skip_reason="budget_fill_zero_after_assignment"))
+            chain = kept
+            ladder.per_slot[slot.slot_id] = chain
+        if fills:
+            ladder.per_slot_portfolio[slot.slot_id] = {
+                s_: fills[s_] for s_ in chain}
+        ladder.per_slot_payload_tokens[slot.slot_id] = sum(
+            fills.get(s_, 0) * PAYLOAD_TOKENS_PER_CHUNK.get(
+                s_, _PAYLOAD_TOKENS_UNKNOWN) for s_ in chain)
         ladder.total_estimated_cost += option.cost
         slot_accs.append(acc)
 

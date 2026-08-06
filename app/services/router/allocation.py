@@ -146,22 +146,40 @@ def strategy_tag_eligible(strategy_id: str, j_codes: Optional[list]) -> bool:
     )
 
 
-# THIRD eligibility dimension — CRAWLABILITY (Ananth's question via Retriever
-# 2026-07-23, same bug class as the s tag-gate): strategy `d` (web search /
-# fetch+extract) is near-guaranteed weak against a payor whose site is
-# affirmatively NON-crawlable. Signal source: fillers/payer_context.py's
-# tri-state verdict (Payor Platform metafact, discovered_sources fallback) —
-# threaded as query-level context `payer_crawlable: True|False|None`.
-# ASYMMETRY vs the s gate, deliberate: this one FAILS OPEN on None/unknown —
-# d is the general-purpose web strategy, usable on non-payor queries too;
-# only an affirmative crawlable=False verdict disqualifies it. (The s gate
-# fails closed because s requires affirmative payor evidence to be meaningful.)
-# Priors semantics RATIFIED by Eval 2026-07-23: SINGLE d cell per depth,
-# redefined as P(success | not affirmatively non-crawlable) — matching what
-# this gate enforces. No speculative cell split at n=8 (would halve effective
-# sample size for zero benefit); revisit at Week-3+ only if real per-mode
-# (True vs None) outcome counts show the modes genuinely differ.
-CRAWL_GATED_STRATEGIES = frozenset({"d"})
+# THIRD eligibility dimension — CRAWLABILITY. BUILT 2026-07-23, DISABLED
+# 2026-07-24 (Ananth via Retriever) — kept as dormant machinery, not deleted,
+# because the call is explicitly "for now."
+#
+# ORIGINAL premise: strategy `d` is near-guaranteed weak against a payor
+# whose site is affirmatively NON-crawlable, gated on fillers/payer_context.py's
+# tri-state verdict (`payer_crawlable: True|False|None`), fail-OPEN on None.
+#
+# WHY DISABLED (Ananth's correction, live-trace-driven, 2026-07-24): the
+# premise conflates two different questions. `payer_crawlable` measures
+# whether OUR fetcher can reach the payor's OWN domain directly — but d is a
+# general web search (Vertex+DDG; verified in filler_d.py: only USES a
+# `site:domain` operator when a site_domain happens to be present, otherwise
+# searches broadly) that can surface THIRD-PARTY sources — cached pages,
+# provider bulletins, law-firm summaries — discussing that payor even when
+# the payor's own site blocks direct scraping. If anything, a genuinely
+# non-crawlable payor site is exactly when general web search matters MOST,
+# not when it should be excluded. Confirmed on a live query (Sunshine Health,
+# payer_crawlable=False) where the gate was silently starving d, currently
+# the strongest-recall arm per Eval's forced-arm calibration (0.67 marginal).
+#
+# CONSEQUENCE FOR EVAL: the priors comment this replaced said d's SINGLE
+# cell per depth means "P(success | not affirmatively non-crawlable)" — that
+# population definition is now WRONG going forward: d executes on
+# crawlable=False queries too, broadening the population the cell describes.
+# Flagged to Eval 2026-07-24; the seed cell's semantics need re-stating (not
+# a value change — do-not-fold still stands on VALUES; this is a MEANING
+# correction), and any future empirical d cell must not silently inherit the
+# old population assumption.
+#
+# REVERSIBILITY: re-enable by restoring `frozenset({"d"})`; strategy_crawl_eligible
+# and the whole eligibility-check call site are untouched, so this is a
+# one-line flip either direction, not a design fork.
+CRAWL_GATED_STRATEGIES = frozenset()
 
 
 def strategy_crawl_eligible(strategy_id: str, payer_crawlable) -> bool:
@@ -183,6 +201,26 @@ _SPEED_BUDGET_MS = {
     "interactive": 5000,
     "background": 60000,
     "none": 10**9,
+}
+
+# CALLER-MODE-SCOPED latency allowance override (Ananth 2026-08-05, via
+# Retriever): d's real measured latency (9732ms attempt_ms) needs the
+# CUMULATIVE chain latency through s+a+b+c+d (13832ms at today's seed
+# values — the chain tries cheap-fast-first and d is last) to clear the
+# per-rung budget check; the generic interactive formula (5000*1.25=6250ms)
+# structurally excludes d in every mode, confirmed via the real 3-mode
+# allocator run for cmhc001 (all 3 modes skip d on over_latency_allowance).
+# Scoped NARROWLY to chat.thinking, per explicit instruction — real_time
+# modes (chat.copilot/chat.default) stay tight. NOT a bump to the shared
+# "interactive" speed_budget_ms value: that string is also used by
+# auth_agent (Structure's caller_mode table), which must stay untouched.
+# This map is checked BEFORE the speed_budget*tolerance formula in
+# resolve_constraints and, when present, IS the final allowance (no
+# further multiplier) — simplest way to hit a specific cumulative-latency
+# target without touching the shared formula's other callers. Reversible:
+# delete the chat.thinking entry, falls back to the standard formula.
+CALLER_MODE_LATENCY_ALLOWANCE_OVERRIDE_MS = {
+    "chat.thinking": 16000,  # clears cumulative-through-d (13832ms) with ~16% headroom
 }
 
 # Optional (required=False) slots are supplementary by design: they get ONE
@@ -402,6 +440,21 @@ def _speed_budget_to_ms(speed_budget: str) -> int:
 # ---------------------------------------------------------------------------
 NON_CITABLE_STRATEGIES = frozenset({"d"})  # live web: accurate ≠ citable to a payor
 
+# Per-strategy authority PRIOR threshold (Eval's 2026-08-05 proposal): a
+# strategy is ALSO ineligible under citable_required if its measured
+# `authority` prior sits below this bar. ADDITIVE to NON_CITABLE_STRATEGIES
+# above, never a replacement — an unpopulated priors file (authority
+# defaults to 1.0) changes nothing, so this activates only once Eval folds
+# real per-strategy authority measurements.
+# EVAL-RATIFIED 2026-08-05: 0.6 (was a 0.5 seed placeholder). c's measured
+# authority band is 0.48-0.52 — at 0.5 with `>=`, c would have PASSED
+# (0.50 >= 0.50) and wrongly survived citable_required slots. 0.6 excludes
+# c cleanly and sits clear above its whole band, so n=1 wobble can't flip
+# it. Caller-gated (only bites under citable_required) — does not preempt
+# Ananth's pending "any"-default A/B ruling, just makes the existing
+# caller-declared path correct for c once real values land.
+AUTHORITY_CITABLE_THRESHOLD = 0.6
+
 # SUPPLEMENT-ONLY strategies (Eval's category-error finding, cmhc002 collapse
 # 2026-07-23): s (Payor Fact Store) returns ONE certified fact — a code, not
 # answer content. It supplements corpus retrieval; it must never SUBSTITUTE
@@ -417,14 +470,23 @@ AUTHORITY_CITABLE_REQUIRED = "citable_required"
 
 
 def strategy_authority_eligible(strategy_id: str, authority_requirement: str,
-                                slot_required: bool) -> bool:
-    """False only when a non-citable strategy would fill an evidence-bearing
-    (required) slot under a caller-declared citability requirement."""
+                                slot_required: bool,
+                                authority: float = 1.0) -> bool:
+    """False when a non-citable strategy would fill an evidence-bearing
+    (required) slot under a caller-declared citability requirement.
+
+    Two OR'd checks: the legacy hardcoded classification (NON_CITABLE_
+    STRATEGIES) and the per-strategy authority prior vs threshold. `authority`
+    defaults to 1.0 (fully authoritative) so callers that don't pass a real
+    prior — or profiles with no measured authority yet — see no new
+    exclusions beyond the legacy set."""
     if authority_requirement != AUTHORITY_CITABLE_REQUIRED:
         return True
     if not slot_required:
         return True  # context, not evidence — d stays useful here
-    return strategy_id not in NON_CITABLE_STRATEGIES
+    if strategy_id in NON_CITABLE_STRATEGIES:
+        return False
+    return authority >= AUTHORITY_CITABLE_THRESHOLD
 
 
 # ---------------------------------------------------------------------------
@@ -502,12 +564,17 @@ def resolve_constraints(resource_posture: dict[str, Any]) -> dict[str, Any]:
     tolerance_pct = resolve_tolerance_pct(resource_posture)
     speed_budget_ms = _speed_budget_to_ms(resource_posture.get("speed_budget", "interactive"))
     confidence_bar = float(resource_posture.get("confidence_bar", 0.85))
+    mode_override_ms = CALLER_MODE_LATENCY_ALLOWANCE_OVERRIDE_MS.get(
+        resource_posture.get("caller_mode"))
+    latency_allowance_ms = (
+        float(mode_override_ms) if mode_override_ms is not None
+        else speed_budget_ms * (1.0 + tolerance_pct))
     return {
         "tolerance_pct": tolerance_pct,
         "speed_budget_ms": speed_budget_ms,
         "confidence_bar": confidence_bar,
         "adjusted_bar": confidence_bar * (1.0 - tolerance_pct),
-        "latency_allowance_ms": speed_budget_ms * (1.0 + tolerance_pct),
+        "latency_allowance_ms": latency_allowance_ms,
         "j_codes": resource_posture.get("gate_j_codes") or [],
         "d_codes": resource_posture.get("gate_d_codes") or [],
         # SOFT SAFETY CEILING only (Ananth via Structure, 2026-07-23):
@@ -654,9 +721,27 @@ def _next_viable_strategy(
 ) -> Optional[tuple[str, StrategyProfile, str]]:
     """Next rung selection; records skips.
 
-    Default: first unused ELIGIBLE strategy in cheap-fast-first priority
-    order. Degenerate-case exception: on a REQUIRED slot's final available
-    attempt, best per-rung LB wins instead (see LAST-ATTEMPT RULE below)."""
+    BEST-LB-FIRST (Ananth 2026-08-05, confidence-density over latency) —
+    REQUIRED slots only: every rung picks the highest per-rung Wilson LB
+    among viable strategies, using the priors already loaded for this
+    depth_bucket — not a static priority order. Supersedes the prior
+    cheap-fast-first default for required slots (was: first eligible
+    strategy in STRATEGY_PRIORITY_ORDER wins, with a LAST-ATTEMPT-only
+    best-LB exception — see git history). Priority order now only breaks
+    exact LB ties. REAL TRADEOFF, accepted: a high-LB but slow strategy
+    (e.g. d, ~9.7s) can now be tried before a fast-but-lower-LB one (e.g.
+    a, ~0.5s) — some queries get noticeably slower in exchange for closer
+    oracle-matching. Live-verified motivation: the old fixed order made
+    citable_required a structural no-op in common cases (chain never went
+    deep enough to reach where it would exclude anything) and missed the
+    true best strategy on real bucket-3 data where it wasn't cheapest.
+
+    OPTIONAL slots are UNCHANGED and orthogonal to this directive: they
+    still take the first viable rung in cheap-fast-first order and stop
+    (Eval's efficiency ruling — telemetry-only slots never pay wall-clock
+    for confidence). See the `if not state.slot.required` early-return
+    inside the loop below.
+    SUPPLEMENT_ONLY gate still applies on the sole/first rung (below)."""
     effective_max = _effective_max_attempts(state.slot, state.max_attempts)
     if len(state.chain) >= effective_max:
         return None
@@ -676,15 +761,15 @@ def _next_viable_strategy(
         if not strategy_crawl_eligible(strategy_id, state.payer_crawlable):
             _record_skip(state, strategy_id, "crawl_gated_payer_not_crawlable", None, "")
             continue
-        if not strategy_authority_eligible(strategy_id, state.authority_requirement,
-                                           state.slot.required):
-            _record_skip(state, strategy_id, "authority_gated_non_citable", None, "")
-            continue
         prof, source = lookup_with_fallback(
             state.depth_bucket, strategy_id, bundle
         )
         if prof is None:
             _record_skip(state, strategy_id, "no_prior", None, source)
+            continue
+        if not strategy_authority_eligible(strategy_id, state.authority_requirement,
+                                           state.slot.required, prof.authority):
+            _record_skip(state, strategy_id, "authority_gated_non_citable", prof, source)
             continue
         if prof.recall_lift <= 0.0:
             _record_skip(state, strategy_id, "zero_or_negative_recall_lift", prof, source)
@@ -692,31 +777,38 @@ def _next_viable_strategy(
         if state.latency_ms + prof.latency_p50_ms > latency_allowance_ms:
             _record_skip(state, strategy_id, "over_latency_allowance", prof, source)
             continue
-        if rung_payload_tokens(strategy_id, state.slot.capacity) > state.token_allowance:
+        # PARTIAL-FILL model (Ananth 2026-07-24: "take 3 of d" beats no d):
+        # a rung is payload-viable if even ONE chunk is affordable — the
+        # actual per-rung fill is assigned jointly post-chain
+        # (portfolio.assign_chain_fills: diversity floor + value knapsack,
+        # Σ fills·tokens ≤ budget by construction — the SUM model, live now
+        # that the orchestrator RETAINS across rungs). The old all-or-nothing
+        # gate (capacity × per-chunk > budget → skip) was cause #5 of the
+        # live d-starvation: it excluded d entirely at capacity 10 × budget
+        # 3000 when d at fill 6 fits exactly.
+        per_chunk = PAYLOAD_TOKENS_PER_CHUNK.get(
+            strategy_id, _PAYLOAD_TOKENS_UNKNOWN_STRATEGY)
+        if per_chunk > state.token_allowance:
             warn_if_estimate_driven_skip(strategy_id, state.slot.capacity,
                                          state.token_allowance)
             _record_skip(state, strategy_id, "payload_over_token_allowance", prof, source)
             continue
         viable.append((strategy_id, prof, source))
-        if not last_attempt:
-            # room to fall back → cheap-fast-first heuristic is justified
+        if not state.slot.required:
+            # OPTIONAL slots keep cheap-fast-first, UNCHANGED (Eval's
+            # ruling, orthogonal to the best-LB-first directive above):
+            # telemetry-only slots never pay wall-clock for confidence,
+            # so they take the first viable rung and stop — no LB
+            # comparison, no SUPPLEMENT_ONLY gate (matches the pre-existing
+            # behavior exactly, which never reached that block either).
             return strategy_id, prof, source
     if not viable:
         return None
-    # LAST-ATTEMPT RULE (cmhc002 collapse fix, 2026-07-23): with no room to
-    # fall back, the static cheap-first order degenerates ("always plan the
-    # cheapest alone" at max_attempts=1 — planned ['s'] for content queries,
-    # 0-occupancy on 19/22 bank queries). When this rung is the slot's final
-    # available attempt, pick the STRONGEST viable rung (max per-rung LB;
-    # ties → priority order), matching what the optimizer already did.
-    # REQUIRED slots only — optional slots keep cheapest-first (Eval's
-    # ruling: telemetry-only slots never pay wall-clock for confidence).
-    #
-    # SUPPLEMENT GATE on the sole rung: at tied LBs (e.g. depth_1: s=a=.35)
-    # the tie-break would still hand the single shot to s — a bare fact-store
-    # code for a content question. If this is the slot's ONLY rung (empty
-    # chain), supplement-only strategies are excluded while anything else is
-    # viable (see SUPPLEMENT_ONLY_STRATEGIES).
+    # SUPPLEMENT GATE on the sole/first rung: at tied LBs (e.g. depth_1:
+    # s=a=.35) the tie-break would still hand the shot to s — a bare
+    # fact-store code for a content question. If this is the slot's FIRST
+    # rung (empty chain), supplement-only strategies are excluded while
+    # anything else is viable (see SUPPLEMENT_ONLY_STRATEGIES).
     if not state.chain:
         non_supplement = [c for c in viable if c[0] not in SUPPLEMENT_ONLY_STRATEGIES]
         if non_supplement:
@@ -841,6 +933,31 @@ def allocate_strategies(
                 break
             _add_strategy(st, nxt[0], nxt[1], nxt[2], ladder)
 
+    # PARTIAL-FILL assignment (post-chain, per slot): jointly scope each
+    # rung's fill to the token budget — diversity floor seats every member,
+    # remainder by value. Fills are the SUM-model budget enforcement
+    # (retention live: every executed rung's chunks union). Members whose
+    # floor is unaffordable drop from the chain with a trace reason.
+    from app.services.router.portfolio import assign_chain_fills
+    for st in states:
+        if not st.chain:
+            continue
+        members = [(sid_, prof_, st.slot.capacity)
+                   for sid_, prof_ in zip(st.chain, st.profiles)]
+        fills = assign_chain_fills(members, c["token_allowance_per_slot"])
+        dropped = [sid_ for sid_ in st.chain if fills.get(sid_, 0) < 1]
+        if dropped:
+            keep = [(sid_, prof_) for sid_, prof_ in zip(st.chain, st.profiles)
+                    if sid_ not in dropped]
+            for sid_ in dropped:
+                _record_skip(state=st, strategy_id=sid_,
+                             reason="budget_fill_zero_after_assignment",
+                             prof=None, source="")
+            st.chain = [sid_ for sid_, _ in keep]
+            st.profiles = [prof_ for _, prof_ in keep]
+            st.latency_ms = sum(p.latency_p50_ms for p in st.profiles)
+        st.fills = {sid_: fills[sid_] for sid_ in st.chain}
+
     # Assemble ladder + per-slot verdicts (per-QUESTION: required slots gated,
     # optional slots reported)
     for st in states:
@@ -854,8 +971,13 @@ def allocate_strategies(
         ladder.per_slot_helpers[sid] = slot_helper_plan(status, c["j_codes"], c["d_codes"])
         ladder.per_slot_accuracy[sid] = st.accuracy
         ladder.per_slot_latency_ms[sid] = st.latency_ms
-        ladder.per_slot_payload_tokens[sid] = chain_payload_tokens(
-            st.chain, st.slot.capacity)
+        fills = getattr(st, "fills", {}) or {}
+        if fills:
+            ladder.per_slot_portfolio[sid] = dict(fills)
+        # SUM model: worst case = every rung runs and its fill is retained
+        ladder.per_slot_payload_tokens[sid] = sum(
+            k * PAYLOAD_TOKENS_PER_CHUNK.get(s_, _PAYLOAD_TOKENS_UNKNOWN_STRATEGY)
+            for s_, k in fills.items())
 
         st.trace.payload_tokens_worst_case = ladder.per_slot_payload_tokens[sid]
         st.trace.final_chain = list(st.chain)

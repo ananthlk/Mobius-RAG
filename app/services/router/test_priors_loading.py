@@ -66,10 +66,11 @@ def _posture():
 class TestFileIsPrimarySource:
     """DELIBERATE change-detectors on the LIVE eval file — the one test class
     that must be re-derived whenever Eval folds new data into the priors.
-    Current pins: PURE SEED. The 2026-07-23 Beta-update fold was RETRACTED
-    same day (Eval's spot-check proved the recall grading inflated —
-    token-presence proxy); re-derive to posteriors only when a fold from
-    LLM-judge-graded counts lands."""
+    The 2026-07-23 Beta-update fold was RETRACTED same day (Eval's
+    spot-check proved the recall grading inflated — token-presence proxy).
+    Current pins (2026-08-05): depth_3's a/b/c/d are a REAL, ruler-confirmed
+    fold (n=65, k0=9) — the first cell to graduate past seed. Everything
+    else (s at every depth; a/b/c/d elsewhere) is still pure n=8 seed."""
 
     def test_loads_real_eval_file_by_default(self):
         bundle = load_priors(force_reload=True)
@@ -79,7 +80,13 @@ class TestFileIsPrimarySource:
         assert prof.recall_lift == pytest.approx(0.543)
         assert prof.n == 8  # pure seed pseudo-count (fold retracted)
         assert prof.latency_p50_ms == 500
-        assert prof.cost == pytest.approx(1.0)
+        # cost_per_attempt zeroed across ALL strategies (Ananth, 2026-07-26):
+        # these values were never derived from real calibration -- same
+        # seed-data status as accuracy_estimate/recall_lift -- so cost no
+        # longer participates as an unvalidated tie-breaker in the LB-
+        # maximizer's argmax (allocation.py/optimizer.py: required slots
+        # break ties on (lb, confidence, -cost, -latency)).
+        assert prof.cost == pytest.approx(0.0)
 
     def test_version_string_carries_file_identity(self):
         bundle = load_priors(force_reload=True)
@@ -92,22 +99,44 @@ class TestFileIsPrimarySource:
         prof_unknown = lookup_priors_qclass_fallback("no_such_class", "a", bundle)
         assert prof_unknown.recall_lift == pytest.approx(0.543)  # depth-2 fallback
 
-    def test_all_cells_are_pure_seed_pseudo_count(self):
-        """Fold-retraction guard: EVERY cell must sit at the n=8 seed
-        pseudo-count until a fold from LLM-judge-graded counts lands."""
+    def test_depth_3_abcd_are_real_fold_everything_else_seed(self):
+        """RE-DERIVED 2026-08-05 (per this class's own docstring): depth_3's
+        a/b/c/d cells are now a REAL fold — ruler confirmed (judge_model=
+        factcheck/gemini-2.5-pro pulled from persisted job traces, 264
+        gradings uniform), n=65 (22-query x 3-mode sweep, less the 4
+        cmhc013 x chat.copilot rows that are genuinely bucket_2 pool_size,
+        not bucket_3 — excluding them was itself a real, twice-repeated
+        population-contamination catch on this thread). Everything else
+        (s at every depth; a/b/c/d at depths 0/1/2/4) remains pure n=8
+        seed — no other cell has a comparable real observation yet."""
         bundle = load_priors(force_reload=True)
-        for depth in (0, 1, 2, 3, 4):
+        for sid in ("a", "b", "c", "d"):
+            prof = lookup_priors(3, sid, bundle)
+            assert prof.n == 65, f"{sid} depth_3 n"
+            assert prof.k0 == 9, f"{sid} depth_3 k0"
+        assert lookup_priors(3, "s", bundle).n == 8  # s untouched by this fold
+        for depth in (0, 1, 2, 4):
             for sid in ("a", "b", "c", "d", "s"):
-                assert lookup_priors(depth, sid, bundle).n == 8
+                assert lookup_priors(depth, sid, bundle).n == 8, f"{sid} depth_{depth} n"
 
 
 class TestSwapWithoutCodeChange:
     def test_editing_yaml_changes_allocation(self, tmp_path, monkeypatch):
         """THE core swappability test: same code, two YAML files, different ladders.
 
-        A: s lift .5 @ n=8 (lb .249) → chases the LB bar through both rungs.
-        B: s lift .95 @ n=200 (lb .918 ≥ adjusted bar .7225) → [s] alone.
-        Also proves n-per-cell flows from the file into the enforced LB."""
+        RE-DERIVED 2026-08-05 (best-LB-first + SUPPLEMENT_ONLY): the ONLY
+        two cells in this file are s/a, and SUPPLEMENT_ONLY excludes s from
+        the sole/FIRST rung whenever a (non-supplement) is viable —
+        REGARDLESS of s's LB, by design (a categorical rule, not a
+        confidence comparison: s is a fact-store lookup, never sole
+        evidence). So the chain composition [a,s] is now IDENTICAL in both
+        scenarios; the observable behavior change moves to STATUS/LB:
+        A: s lift .5 @ n=8 (lb .249) → chain doesn't clear, UNDER_CONFIDENT.
+        B: s lift .95 @ n=200 (lb .918) → same [a,s] chain now clears the
+        bar comfortably (composed LB .941), CLEARED.
+        Still proves n-per-cell flows from the file into the enforced LB —
+        same file-swap contract, just observed through status/LB now that
+        SUPPLEMENT_ONLY structurally caps what chain COMPOSITION can show."""
         yaml_a = tmp_path / "priors_a.yaml"
         yaml_b = tmp_path / "priors_b.yaml"
         _write_yaml(yaml_a, s_lift_depth2=0.500, s_n=8)
@@ -115,12 +144,15 @@ class TestSwapWithoutCodeChange:
 
         monkeypatch.setenv("ROUTER_PRIORS_PATH", str(yaml_a))
         ladder_a = allocate_strategies([_slot()], {"slot_0": POOL_DEPTH_2}, _posture())
-        assert ladder_a.per_slot["slot_0"] == ["s", "a"]
+        assert ladder_a.per_slot["slot_0"] == ["a", "s"]
+        assert ladder_a.per_slot_status["slot_0"] == "UNDER_CONFIDENT"
 
         monkeypatch.setenv("ROUTER_PRIORS_PATH", str(yaml_b))
         ladder_b = allocate_strategies([_slot()], {"slot_0": POOL_DEPTH_2}, _posture())
-        assert ladder_b.per_slot["slot_0"] == ["s"]  # behavior changed, zero code change
+        # behavior changed, zero code change — same chain shape, but now clears
+        assert ladder_b.per_slot["slot_0"] == ["a", "s"]
         assert ladder_b.per_slot_status["slot_0"] == "CLEARED"
+        assert ladder_b.per_slot_lb["slot_0"] > ladder_a.per_slot_lb["slot_0"]
 
     def test_rewriting_same_file_invalidates_cache_via_mtime(self, tmp_path, monkeypatch):
         """Eval's loop rewrites the file in place → Router picks it up (mtime cache)."""

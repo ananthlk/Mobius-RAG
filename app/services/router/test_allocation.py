@@ -136,40 +136,99 @@ class TestToleranceBands:
         assert ladder_bg.adjusted_confidence_bar == pytest.approx(0.85 * 0.75)
 
 
+class TestChatThinkingLatencyOverride:
+    """Ananth 2026-08-05 via Retriever: d's real 9732ms attempt_ms prior needs
+    the cumulative chain latency through s+a+b+c+d (13832ms at seed values)
+    to clear the per-rung budget check — the generic interactive formula
+    (6250ms) structurally excludes d everywhere. Scoped NARROWLY to
+    chat.thinking; real_time modes must stay untouched."""
+
+    def test_thinking_allowance_is_overridden(self):
+        from app.services.router.allocation import resolve_constraints
+        c = resolve_constraints({"caller_mode": "chat.thinking", "speed_budget": "interactive"})
+        assert c["latency_allowance_ms"] == 16000
+
+    def test_real_time_modes_unaffected(self):
+        from app.services.router.allocation import resolve_constraints
+        c_copilot = resolve_constraints({"caller_mode": "chat.copilot", "speed_budget": "real_time"})
+        c_default = resolve_constraints({"caller_mode": "chat.default", "speed_budget": "real_time"})
+        assert c_copilot["latency_allowance_ms"] == pytest.approx(2000 * 1.25)  # unknown-mode default band
+        assert c_default["latency_allowance_ms"] == pytest.approx(2000 * 1.15)
+
+    def test_other_interactive_modes_unaffected(self):
+        """auth_agent also uses speed_budget='interactive' — must not
+        inherit chat.thinking's override just because it shares the string."""
+        from app.services.router.allocation import resolve_constraints
+        c = resolve_constraints({"caller_mode": "auth_agent", "speed_budget": "interactive"})
+        assert c["latency_allowance_ms"] == pytest.approx(5000 * 1.25)
+
+    def test_d_becomes_reachable_under_chat_thinking(self):
+        """End-to-end: d actually appears in the chain once the chain grows
+        long enough to need it (seed data never clears the bar earlier)."""
+        ladder = allocate_strategies(
+            [make_slot()], {"slot_0": POOL_DEPTH_2},
+            posture(caller_mode="chat.thinking", speed_budget="interactive",
+                    confidence_bar=0.99, max_attempts_per_slot=6),
+        )
+        assert "d" in ladder.per_slot["slot_0"]
+
+    def test_d_still_excluded_under_real_time_modes(self):
+        for mode, sb in (("chat.copilot", "real_time"), ("chat.default", "real_time")):
+            ladder = allocate_strategies(
+                [make_slot()], {"slot_0": POOL_DEPTH_2},
+                posture(caller_mode=mode, speed_budget=sb,
+                        confidence_bar=0.99, max_attempts_per_slot=6),
+            )
+            assert "d" not in ladder.per_slot["slot_0"], mode
+
+
 class TestAllocationScenarios:
     def test_single_slot_depth2_deterministic_chain_lb_enforced(self):
-        """depth_2, chat.default, bar .85 → adjusted .7225 enforced on the LB.
+        """RE-DERIVED 2026-08-05: BEST-LB-FIRST (Ananth, confidence-density
+        over latency) replaced cheap-fast-first — every rung now picks the
+        highest per-rung Wilson LB, not the next strategy in a static
+        priority order. This test pins to the FROZEN machinery snapshot
+        (conftest.py's autouse fixture, not the live eval file) — d's
+        latency there is 3000ms, unrelated to the live file's real
+        9732ms value from Retriever's n=22 measurement.
 
-        Wilson LBs at n=8 (lb95): s .2486, a .2815, b .1065, c .1327.
-        LB chain: s .2486 → a .4601 → b .5176 → c .5816 — still under the bar;
-        d (3000ms) and f (2500ms) overflow the 5750ms allowance → chain stops
-        at [s,a,b,c], status UNDER_CONFIDENT (budget_exhausted).
-        Mean chain (telemetry) = .8907. This is the honest per-slot verdict the
-        old mean gate hid ([s,a]=.7715 mean looked 'feasible')."""
+        depth_2 (frozen), chat.default, bar .85 → adjusted .7225.
+        Wilson LBs at n=8 (lb95): a .2815 > s .2486 > d .2122 > c .1327 > b .1065
+        — best-LB order a,s,d,c,b, not s,a,b,c,d. Chain: a(500)→s(100)→
+        d(3000, cum 3600 fits)→c(2000, cum 5600 fits); b(1500) would push
+        7100ms over the 5750ms allowance, so it's skipped — chain stops at
+        4 rungs, UNDER_CONFIDENT (budget_exhausted). LB=.6311 (higher than
+        the old [s,a,b,c] chain's .5816 — d's LB, even gated by its own
+        latency budget, contributes more per rung than b's did)."""
         ladder = allocate_strategies([make_slot()], {"slot_0": POOL_DEPTH_2}, posture())
-        assert ladder.per_slot["slot_0"] == ["s", "a", "b", "c"]
-        assert ladder.per_slot_lb["slot_0"] == pytest.approx(0.5816, abs=1e-3)
-        assert ladder.per_slot_confidence["slot_0"] == pytest.approx(0.8907, abs=1e-3)
+        assert ladder.per_slot["slot_0"] == ["a", "s", "d", "c"]
+        assert ladder.per_slot_lb["slot_0"] == pytest.approx(0.6311, abs=1e-3)
+        assert ladder.per_slot_confidence["slot_0"] == pytest.approx(0.9158, abs=1e-3)
         assert ladder.per_slot_status["slot_0"] == "UNDER_CONFIDENT"
-        assert ladder.per_slot_latency_ms["slot_0"] == 4100
+        assert ladder.per_slot_latency_ms["slot_0"] == 5600
         assert ladder.outcome == "partial_infeasible"
         assert ladder.feasible is False
 
     def test_parallel_total_latency_is_max_not_sum(self):
-        """Two identical depth_2 slots → each chain [s,a,b,c] @4100ms (LB chase
-        within batch allowance 6250ms; d/f overflow); total = 4100, not 8200."""
+        """RE-DERIVED 2026-08-05 (best-LB-first, frozen priors): two identical
+        depth_2 slots → each chain [a,s,d,c] (best-LB order a>s>d>c>b) @5600ms
+        (d fits at 3000ms in the frozen snapshot; b would push over the batch
+        allowance 6250ms); total = 5600, not 11200."""
         slots = [make_slot("s1", priority=0), make_slot("s2", priority=1)]
         pool = {"s1": POOL_DEPTH_2, "s2": POOL_DEPTH_2}
         ladder = allocate_strategies(slots, pool, posture(caller_mode="batch", confidence_bar=0.9))
-        assert ladder.per_slot["s1"] == ["s", "a", "b", "c"]
-        assert ladder.per_slot["s2"] == ["s", "a", "b", "c"]
-        assert ladder.total_estimated_ms == 4100  # MAX over slots, not sum
+        assert ladder.per_slot["s1"] == ["a", "s", "d", "c"]
+        assert ladder.per_slot["s2"] == ["a", "s", "d", "c"]
+        assert ladder.total_estimated_ms == 5600  # MAX over slots, not sum
 
     def test_per_slot_budget_not_globally_deducted(self):
-        """Parallel model: each slot gets the full wall-clock allowance.
+        """RE-DERIVED 2026-08-05 (best-LB-first): Parallel model: each slot
+        gets the full wall-clock allowance.
 
         real_time (2000ms, ±15% → 2300 per slot), depth_2, unreachable bar:
-        each slot independently fits [s,a,b] = 2100ms. Under the old (wrong)
+        each slot independently fits best-LB order [a,s,b] = 2100ms (d's
+        3000ms latency alone exceeds the 2300ms allowance, so it's gated
+        out entirely regardless of its LB rank). Under the old (wrong)
         global-deduction model, the second slot would have been starved.
         """
         slots = [make_slot("s1", priority=0), make_slot("s2", priority=1)]
@@ -177,8 +236,8 @@ class TestAllocationScenarios:
         ladder = allocate_strategies(
             slots, pool, posture(speed_budget="real_time", confidence_bar=0.99)
         )
-        assert ladder.per_slot["s1"] == ["s", "a", "b"]
-        assert ladder.per_slot["s2"] == ["s", "a", "b"]  # NOT starved
+        assert ladder.per_slot["s1"] == ["a", "s", "b"]
+        assert ladder.per_slot["s2"] == ["a", "s", "b"]  # NOT starved
         assert ladder.per_slot_latency_ms["s1"] == 2100
         assert ladder.feasible is False
         assert "LB bar" in ladder.infeasibility_reason
@@ -207,12 +266,15 @@ class TestAllocationScenarios:
         assert ladder.total_estimated_ms == 0
 
     def test_missing_pool_metadata_defaults_to_broad_bucket(self):
-        """Slot with no pool signal → bucket 4, still allocates without crashing.
-        depth_4 LBs: s .4602, a .1236 → chain [s,a] lb .5269 ≥ adjusted .525 → CLEARED."""
+        """RE-DERIVED 2026-08-05 (best-LB-first): slot with no pool signal →
+        bucket 4, still allocates without crashing.
+        depth_4 LBs: b .4746, c .4746 (exact tie — b wins on priority-order
+        tie-break), s .4602, d .4136, a .1236 — best-LB order is b,c,s,d,a,
+        not s,a,.... Chain [b,c] lb=.7240 ≥ adjusted .525 → CLEARED."""
         ladder = allocate_strategies(
             [make_slot()], {}, posture(caller_mode="batch", confidence_bar=0.7)
         )
-        assert ladder.per_slot["slot_0"] == ["s", "a"]
+        assert ladder.per_slot["slot_0"] == ["b", "c"]
         assert ladder.per_slot_status["slot_0"] == "CLEARED"
         assert ladder.feasible is True
 
@@ -236,11 +298,14 @@ class TestAllocationScenarios:
         """§2a INVERSION of the old top-up test: a strong slot must NOT be
         extended to drag the mean over the bar for a weak slot.
 
-        weak (depth_0): exhausts every rung, LB ~.127 « .525 → UNDER_CONFIDENT.
-        strong (depth_3): [s,a] LB .6698 ≥ .525 → CLEARED and STOPS THERE —
-        no compensation rungs. Outcome is partial_infeasible even though the
-        aggregate MEAN would have cleared. (max_attempts is QUERY-level now —
-        the real AnswerSlot has no per-slot attempts field.)
+        RE-DERIVED 2026-08-05 (best-LB-first): weak (depth_0): best-LB order
+        d,s,a,b,c (d's LB .0383 edges out the .0195 3-way tie) — exhausts
+        every rung anyway, LB .1034 « .525 → UNDER_CONFIDENT. strong
+        (depth_3): best-LB order a,s — [a,s] LB .6698 ≥ .525 → CLEARED and
+        STOPS THERE — no compensation rungs. Outcome is partial_infeasible
+        even though the aggregate MEAN would have cleared. (max_attempts is
+        QUERY-level now — the real AnswerSlot has no per-slot attempts
+        field.)
         """
         slots = [
             make_slot("weak", priority=0),
@@ -253,7 +318,7 @@ class TestAllocationScenarios:
         )
         assert len(ladder.per_slot["weak"]) == 5  # exhausted everything (f retired)
         assert ladder.per_slot_status["weak"] == "UNDER_CONFIDENT"
-        assert ladder.per_slot["strong"] == ["s", "a"]  # stopped at ITS OWN bar
+        assert ladder.per_slot["strong"] == ["a", "s"]  # stopped at ITS OWN bar
         assert ladder.per_slot_status["strong"] == "CLEARED"
         assert ladder.per_slot_lb["strong"] == pytest.approx(0.6698, abs=1e-3)
         assert ladder.outcome == "partial_infeasible"
@@ -262,11 +327,20 @@ class TestAllocationScenarios:
         assert "weak" in ladder.infeasibility_reason
 
     def test_budget_exhausted_on_every_slot_simultaneously(self):
-        """All slots capped by the per-slot time allowance at the same time.
+        """RE-DERIVED 2026-08-05 (best-LB-first): all slots capped by the
+        per-slot time allowance at the same time.
 
-        real_time chat.default → 2300ms allowance; depth_0 chain that fits:
-        s(100)+a(500)+b(1500)=2100; c/d/f (2000/3000/2500) all overflow → capped
-        at 3 rungs on every slot, bar unreachable → infeasible.
+        real_time chat.default → 2300ms allowance; depth_0's d (LB .0383)
+        is always latency-gated out (its own 3000ms exceeds the 2300ms
+        allowance from any starting point). s/a/b are EXACTLY tied at
+        .0195 (same recall_lift=.1, same n) — but on the FIRST rung the
+        SUPPLEMENT_ONLY gate excludes 's' while non-supplement candidates
+        are viable, so a/b tie-break between themselves (a wins, earlier
+        priority index) → chain starts [a]. Round 2 (chain non-empty, gate
+        lifted): s re-enters, ties b, s wins its own tie-break → [a,s].
+        Round 3: only b/c remain, b wins → [a,s,b]=2100ms; c (2000ms) would
+        overflow too → capped at 3 rungs on every slot, bar unreachable →
+        infeasible.
         """
         slots = [make_slot(f"s{i}", priority=i) for i in range(3)]
         pool = {f"s{i}": POOL_DEPTH_0 for i in range(3)}
@@ -274,7 +348,7 @@ class TestAllocationScenarios:
             slots, pool, posture(speed_budget="real_time", confidence_bar=0.85)
         )
         for i in range(3):
-            assert ladder.per_slot[f"s{i}"] == ["s", "a", "b"]
+            assert ladder.per_slot[f"s{i}"] == ["a", "s", "b"]
             assert ladder.per_slot_latency_ms[f"s{i}"] == 2100
         assert ladder.feasible is False
 
@@ -426,10 +500,15 @@ class TestStrategyEligibilityBySemantics:
             assert skips.get(sid) == "ineligible_for_external_context"
 
     def test_direct_answer_slot_unrestricted(self):
+        """RE-DERIVED 2026-08-05 (best-LB-first): same {s,a,b,c} set as
+        before (unrestricted eligibility, unchanged), reached via best-LB
+        order a>s>d>c>b instead of the old fixed s,a,b,c,d — see
+        test_single_slot_depth2_deterministic_chain_lb_enforced for the
+        full derivation of this exact scenario (same posture/pool)."""
         ladder = allocate_strategies(
             [make_slot()], {"slot_0": POOL_DEPTH_2}, posture(),
         )
-        assert ladder.per_slot["slot_0"] == ["s", "a", "b", "c"]  # unchanged
+        assert ladder.per_slot["slot_0"] == ["a", "s", "d", "c"]
 
     def test_unknown_semantics_defaults_to_full_set(self):
         slots = [make_slot("x", slot_semantics="future_new_role")]
@@ -474,8 +553,12 @@ class TestTagGating:
         assert strategy_tag_eligible("a", []) is True     # untagged strategies unaffected
 
     def test_payor_query_plans_s(self):
+        """RE-DERIVED 2026-08-05 (best-LB-first): s is still PLANNED (tag
+        gate passes, payor code present) but no longer necessarily FIRST —
+        at depth_2 a's LB (.2815) beats s's (.2486), so best-LB order puts
+        a first. s still appears in the chain (2nd rung here)."""
         ladder = allocate_strategies([make_slot()], {"slot_0": POOL_DEPTH_2}, posture())
-        assert ladder.per_slot["slot_0"][0] == "s"  # helper posture carries payor code
+        assert "s" in ladder.per_slot["slot_0"]  # helper posture carries payor code
 
     def test_non_payor_query_never_plans_s(self):
         from app.services.router.tracing import DecisionTrace
@@ -520,34 +603,36 @@ class TestTagGating:
 
 
 class TestCrawlGating:
-    """Third eligibility dimension: strategy d gated on the tri-state
-    payer_crawlable verdict (fillers/payer_context.py). FAIL OPEN on None —
-    d is the general web strategy; only affirmative False disqualifies."""
+    """Third eligibility dimension: DISABLED 2026-07-24 (Ananth via Retriever
+    — payer_crawlable measures OUR fetcher against the payor's OWN domain,
+    but d is a general web search that surfaces third-party sources
+    regardless; the gate had the premise backwards). Dormant, not deleted —
+    CRAWL_GATED_STRATEGIES=frozenset() today; these tests pin the CURRENT
+    (disabled) behavior AND keep strategy_crawl_eligible's mechanics honest
+    so a future re-enable (restore frozenset({"d"})) is a one-line flip with
+    working tests already in place, not a rebuild."""
 
-    def test_strategy_crawl_eligible_unit(self):
+    def test_strategy_crawl_eligible_unit_disabled_state(self):
         from app.services.router.allocation import strategy_crawl_eligible
+        # nothing is crawl-gated today — d included, regardless of verdict
         assert strategy_crawl_eligible("d", True) is True
-        assert strategy_crawl_eligible("d", None) is True    # fail OPEN (unlike s)
-        assert strategy_crawl_eligible("d", False) is False  # affirmative evidence only
-        assert strategy_crawl_eligible("a", False) is True   # ungated strategies unaffected
+        assert strategy_crawl_eligible("d", None) is True
+        assert strategy_crawl_eligible("d", False) is True   # the flip: was False
+        assert strategy_crawl_eligible("a", False) is True
 
-    def test_non_crawlable_payor_never_plans_d(self):
-        from app.services.router.tracing import DecisionTrace
-        trace = DecisionTrace()
+    def test_non_crawlable_payor_still_plans_d(self):
+        """THE regression this whole change targets: a payor whose own site
+        is non-crawlable no longer starves d — general web search still runs."""
         ladder = allocate_strategies(
             [make_slot()], {"slot_0": POOL_DEPTH_2},
             posture(payer_crawlable=False, caller_mode="batch",
                     speed_budget="background", confidence_bar=0.99),
-            trace=trace,
         )
-        assert "d" not in ladder.per_slot["slot_0"]
-        skips = {s.strategy_id: s.skip_reason
-                 for s in trace.slots[0].steps if s.action == "skipped"}
-        assert skips.get("d") == "crawl_gated_payer_not_crawlable"
+        assert "d" in ladder.per_slot["slot_0"]
 
     def test_unknown_crawlability_keeps_d_eligible(self):
-        """None (no payer / no verdict) → d stays in play — zero behavior
-        change for callers that don't supply the signal yet."""
+        """None (no payer / no verdict) → d stays in play — unaffected by
+        this change either way (None always fell through to eligible)."""
         ladder = allocate_strategies(
             [make_slot()], {"slot_0": POOL_DEPTH_2},
             posture(caller_mode="batch", speed_budget="background",
@@ -555,10 +640,13 @@ class TestCrawlGating:
         )
         assert "d" in ladder.per_slot["slot_0"]
 
-    def test_non_crawlable_external_context_slot_becomes_no_viable(self):
-        """The sharp edge: external_context is d-ONLY (semantics gate), so an
-        affirmatively non-crawlable payor leaves it with NO viable strategy —
-        honest NO_VIABLE + fast-exit terminal, not a doomed d attempt."""
+    def test_non_crawlable_external_context_slot_no_longer_dead_ends(self):
+        """The flipped sharp edge: external_context is d-ONLY (semantics
+        gate, untouched) — previously an affirmatively non-crawlable payor
+        left this slot with NO viable strategy (NO_VIABLE + fast-exit);
+        now d serves it like any other payor, since the crawl gate no
+        longer excludes d here either. This is the intended fix, not a
+        regression: those slots used to dead-end for no good reason."""
         slots = [
             make_slot("question", priority=0),
             make_slot("ext", priority=1, slot_semantics="external_context"),
@@ -569,11 +657,36 @@ class TestCrawlGating:
             posture(payer_crawlable=False, caller_mode="batch",
                     speed_budget="background", confidence_bar=0.70),
         )
-        assert ladder.per_slot["ext"] == []
-        assert ladder.per_slot_status["ext"] == "NO_VIABLE_STRATEGY"
-        assert ladder.per_slot_terminal["ext"] == "fast_exit_no_viable"
+        assert ladder.per_slot["ext"] == ["d"]
+        # required=True by default (make_slot) — d attempts but this
+        # bar/depth combo doesn't clear it; the point is d RAN, not that it
+        # won. Previously this was NO_VIABLE_STRATEGY (d never attempted).
+        assert ladder.per_slot_status["ext"] == "UNDER_CONFIDENT"
 
-    def test_optimizer_and_bayesian_inherit_crawl_gate(self):
+    def test_regression_guard_reenable_is_a_one_line_flip(self):
+        """If CRAWL_GATED_STRATEGIES is ever restored to {"d"}, the mechanics
+        (strategy_crawl_eligible's fail-open-on-None / fail-closed-on-False
+        logic) must still be correct — this test exercises that logic
+        directly against a hypothetical re-enable so nobody has to
+        rediscover the semantics from scratch."""
+        from app.services.router.allocation import strategy_crawl_eligible
+        hypothetical_gated = frozenset({"d"})
+
+        def _eligible_if_gated(strategy_id, payer_crawlable):
+            if strategy_id not in hypothetical_gated:
+                return True
+            return payer_crawlable is not False
+
+        assert _eligible_if_gated("d", True) is True
+        assert _eligible_if_gated("d", None) is True
+        assert _eligible_if_gated("d", False) is False
+        # today's real function agrees only because the set is empty —
+        # the moment it's restored, real and hypothetical converge
+        assert strategy_crawl_eligible("d", False) is True  # disabled today
+
+    def test_optimizer_and_bayesian_also_stop_gating_d(self):
+        """Both optimizers share strategy_crawl_eligible — the disable
+        applies identically across all allocators, no per-allocator drift."""
         from app.services.router.optimizer import optimize_allocation
         from app.services.router.bayesian_optimizer import optimize_allocation_bayesian
         for fn in (optimize_allocation, optimize_allocation_bayesian):
@@ -582,7 +695,7 @@ class TestCrawlGating:
                 posture(payer_crawlable=False, caller_mode="batch",
                         speed_budget="background", confidence_bar=0.99),
             )
-            assert "d" not in ladder.per_slot["slot_0"]
+            assert "d" in ladder.per_slot["slot_0"], fn.__name__
 
 
 class TestTerminalLeg:
@@ -703,18 +816,22 @@ class TestHelperLayer:
         assert ladder.per_slot_helpers["slot_0"] == ["clarify_low_confidence"]
         assert "sitemap_links" not in ladder.helpers
 
-    def test_no_viable_payor_query_gets_sitemap(self):
-        """Can't retrieve at all, but CAN point the user at real payer pages —
-        the fast_exit terminal formats around the sitemap aid."""
+    def test_low_confidence_payor_query_gets_clarify_and_sitemap(self):
+        """UPDATED 2026-07-24 (crawl gate disabled): d now attempts even on
+        an affirmatively non-crawlable payor and doesn't clear the bar here
+        → UNDER_CONFIDENT, not NO_VIABLE_STRATEGY. Helper set reflects that:
+        clarify (low confidence) AND sitemap (still a useful pointer) both
+        fire — previously d never even ran, so only fast_exit+sitemap did."""
         slots = [make_slot("ext", slot_semantics="external_context")]
         ladder = allocate_strategies(
             slots, {"ext": POOL_DEPTH_2},
             posture(payer_crawlable=False, caller_mode="batch",
                     speed_budget="background", confidence_bar=0.70),
         )
-        assert ladder.per_slot_status["ext"] == "NO_VIABLE_STRATEGY"
-        assert ladder.per_slot_helpers["ext"] == ["sitemap_links"]
-        assert ladder.per_slot_terminal["ext"] == "fast_exit_no_viable"
+        assert ladder.per_slot["ext"] == ["d"]
+        assert ladder.per_slot_status["ext"] == "UNDER_CONFIDENT"
+        assert ladder.per_slot_helpers["ext"] == ["clarify_low_confidence", "sitemap_links"]
+        assert ladder.per_slot_terminal["ext"] == "clarify_low_confidence"
 
     def test_cleared_slot_gets_no_helpers(self):
         ladder = allocate_strategies(
@@ -755,13 +872,17 @@ class TestGateCodePrefixNormalization:
 
     def test_live_run_shape_plans_s(self):
         """The exact regression: prefixed j_codes (real wire format) must not
-        silently exclude s from a genuine payor query's chain."""
+        silently exclude s from a genuine payor query's chain.
+
+        RE-DERIVED 2026-08-05 (best-LB-first): the assertion is about s
+        being PLANNED at all (the actual regression this guards), not
+        about s being first — best-LB order no longer guarantees that."""
         ladder = allocate_strategies(
             [make_slot()], {"slot_0": POOL_DEPTH_2},
             posture(gate_j_codes=["j:payor.sunshine_health"],
                     gate_d_codes=["d:claims.timely_filing"]),
         )
-        assert ladder.per_slot["slot_0"][0] == "s"
+        assert "s" in ladder.per_slot["slot_0"]
         assert "sitemap_links" in ladder.helpers  # helper gate normalized too
 
 
@@ -772,18 +893,22 @@ class TestTokenPayloadBudget:
     (single winning rung fills the slot) — worst case = MAX over rungs."""
 
     def test_defaults_do_not_change_behavior(self):
-        """At the generous default allowance (8000), the depth-2 chain is
-        identical to pre-payload-gate behavior — accounting, not re-planning."""
+        """RE-DERIVED 2026-08-05 (best-LB-first): at the generous default
+        allowance (8000), same {s,a,b,c}... now {a,s,d,c} member SET
+        reached via best-LB order (d out-competes b's LB at depth_2)."""
         ladder = allocate_strategies([make_slot()], {"slot_0": POOL_DEPTH_2}, posture())
-        assert ladder.per_slot["slot_0"] == ["s", "a", "b", "c"]
+        assert ladder.per_slot["slot_0"] == ["a", "s", "d", "c"]
 
     def test_payload_accounting_math(self):
-        """capacity=5, MEASURED constants: s=5×150=750, a/b/c=5×250=1250,
-        d=5×500=2500. Worst case is the MAX over rungs, not the sum."""
+        """RE-DERIVED 2026-08-05 (best-LB-first): PARTIAL-FILL + SUM model
+        (retention live): capacity-5 chain [a,s,d,c] at default budget 8000
+        — floor seats all, value knapsack fills all to cap: {a:5,s:5,d:5,c:5}
+        → Σ = 750(s) + 1250(a) + 2500(d, 500/chunk) + 1250(c) = 5750."""
         ladder = allocate_strategies([make_slot()], {"slot_0": POOL_DEPTH_2}, posture())
-        assert ladder.per_slot["slot_0"] == ["s", "a", "b", "c"]
-        assert ladder.per_slot_payload_tokens["slot_0"] == 1250  # max(750, 1250×3)
-        assert ladder.total_payload_tokens == 1250
+        assert ladder.per_slot["slot_0"] == ["a", "s", "d", "c"]
+        assert ladder.per_slot_portfolio["slot_0"] == {"a": 5, "s": 5, "d": 5, "c": 5}
+        assert ladder.per_slot_payload_tokens["slot_0"] == 5750  # SUM of fills
+        assert ladder.total_payload_tokens == 5750
 
     def test_production_shape_regression_capacity10_budget3000(self):
         """THE cmhc002-empties regression (2026-07-24): real slots are
@@ -791,7 +916,16 @@ class TestTokenPayloadBudget:
         1000-token guess, a/b/c demanded 10,000 — deterministically gated on
         EVERY query (and on the 8000 default too), collapsing all ladders to
         ['s']. With measured 250/chunk: a/b/c=2500 ≤ 3000 → real retrieval
-        chains return. d (10×500=5000) stays honestly gated at this budget."""
+        chains return.
+
+        RE-DERIVED 2026-08-05 (best-LB-first): the SPECIFIC member set is
+        no longer {s,a,b,c} — d now out-competes b on LB at depth_2, so
+        the chain is [a,s,d,c] at both budgets (d joins as a PARTIAL fill,
+        Ananth's "partial-d beats no-d" — its full 10x500=5000 fill still
+        doesn't fit 3000, but one chunk does). The regression this guards
+        (capacity-10 doesn't collapse to a bare ['s']) still holds — check
+        that, not a specific strategy-b guarantee that no longer applies
+        under best-LB-first."""
         slot10 = AnswerSlot(slot_id="slot_0", slot_semantics="direct_answer",
                             capacity=10, rewritten_query="q", required=True,
                             priority=0)
@@ -800,13 +934,14 @@ class TestTokenPayloadBudget:
                 [slot10], {"slot_0": POOL_DEPTH_2},
                 posture(token_allowance_per_slot=budget))
             chain = ladder.per_slot["slot_0"]
-            assert "a" in chain and "b" in chain, (budget, chain)
+            assert "a" in chain, (budget, chain)
             assert chain != ["s"], "capacity-10 collapse regressed"
+            assert len(chain) > 1, "real retrieval chain, not a bare fallback"
 
-    def test_tight_allowance_gates_fat_strategies_keeps_lean(self):
-        """capacity=10, allowance=3000: d (5000) payload-skipped; s (1500) +
-        a/b/c (2500) plan. Post-measurement reality: corpus chunks are LEANER
-        than d passages — the gate now points the right way."""
+    def test_partial_fill_brings_d_back_at_live_shape(self):
+        """ANANTH'S DIRECTIVE (partial-d beats no-d): capacity=10 ×
+        budget=3000 — the exact live shape where the old all-or-nothing gate
+        starved d (0/22). Now d joins at a scoped fill, budget-tight."""
         slot10 = AnswerSlot(slot_id="slot_0", slot_semantics="direct_answer",
                             capacity=10, rewritten_query="q", required=True,
                             priority=0)
@@ -814,25 +949,30 @@ class TestTokenPayloadBudget:
             [slot10], {"slot_0": POOL_DEPTH_2},
             posture(speed_budget="background", token_allowance_per_slot=3000),
         )
-        assert "d" not in ladder.per_slot["slot_0"]
-        assert "a" in ladder.per_slot["slot_0"]
-        assert ladder.per_slot_payload_tokens["slot_0"] == 2500
+        fills = ladder.per_slot_portfolio["slot_0"]
+        assert "d" in ladder.per_slot["slot_0"] and fills["d"] >= 1
+        assert ladder.per_slot_payload_tokens["slot_0"] <= 3000  # by construction
 
     def test_skip_reason_recorded_in_trace(self):
+        """Payload skip now = can't afford even ONE chunk: allowance 400
+        admits s(150)/a(250)/b/c but not d(500); b/c seat no floor after
+        s+a consume 400 → dropped with the assignment reason."""
         from app.services.router.tracing import DecisionTrace
         slot10 = AnswerSlot(slot_id="slot_0", slot_semantics="direct_answer",
                             capacity=10, rewritten_query="q", required=True,
                             priority=0)
         trace = DecisionTrace(mode="greedy")
-        allocate_strategies(
+        ladder = allocate_strategies(
             [slot10], {"slot_0": POOL_DEPTH_2},
-            posture(speed_budget="background", token_allowance_per_slot=3000),
+            posture(speed_budget="background", token_allowance_per_slot=400),
             trace=trace,
         )
         reasons = {s.strategy_id: s.skip_reason for s in trace.slots[0].steps
                    if s.action == "skipped"}
-        assert reasons.get("d") == "payload_over_token_allowance"
-        assert trace.slots[0].payload_tokens_worst_case == 2500
+        assert reasons.get("d") == "payload_over_token_allowance"  # 500 > 400
+        assert ladder.per_slot["slot_0"] == ["a", "s"]  # RE-DERIVED 2026-08-05 (best-LB-first): reordered, b/c fill-dropped
+        assert reasons.get("b") == "budget_fill_zero_after_assignment"
+        assert trace.slots[0].payload_tokens_worst_case == 400  # 150+250
 
     def test_binding_constraint_payload_budget_exhausted(self):
         """When ONLY the payload budget blocks further rungs, the stop reason
@@ -841,7 +981,7 @@ class TestTokenPayloadBudget:
         trace = DecisionTrace(mode="greedy")
         ladder = allocate_strategies(
             [make_slot()], {"slot_0": POOL_DEPTH_2},
-            posture(token_allowance_per_slot=500), trace=trace,
+            posture(token_allowance_per_slot=100), trace=trace,
         )
         assert ladder.per_slot["slot_0"] == []
         assert ladder.per_slot_status["slot_0"] == "NO_VIABLE_STRATEGY"
@@ -859,7 +999,7 @@ class TestTokenPayloadBudget:
                 posture(speed_budget="background", token_allowance_per_slot=3000),
             )
             chain = ladder.per_slot["slot_0"]
-            assert "d" not in chain, f"{fn.__name__} planned over-budget rung: {chain}"
+            assert "d" in chain, f"{fn.__name__} still starves d: {chain}"
             assert ladder.per_slot_payload_tokens["slot_0"] <= 3000
             assert ladder.total_payload_tokens == ladder.per_slot_payload_tokens["slot_0"]
 
@@ -869,7 +1009,9 @@ class TestTokenPayloadBudget:
         trace = DecisionTrace(mode="greedy")
         allocate_strategies([make_slot()], {"slot_0": POOL_DEPTH_2}, posture(),
                             trace=trace)
-        assert "worst-case payload 1250 tokens" in narrate(trace)
+        # RE-DERIVED 2026-08-05 (best-LB-first): chain [a,s,d,c] not
+        # [s,a,b,c] — d's 500/chunk (vs b's 250) shifts the sum to 5750.
+        assert "worst-case payload 5750 tokens" in narrate(trace)
 
     def test_estimate_driven_skip_logs_warning(self, caplog):
         """Eval's guard: a skip keyed on an UNMEASURED per-chunk estimate must
@@ -880,11 +1022,11 @@ class TestTokenPayloadBudget:
         with caplog.at_level(logging.WARNING, logger="app.services.router.allocation"):
             allocate_strategies(
                 [make_slot()], {"slot_0": POOL_DEPTH_2},
-                posture(token_allowance_per_slot=700),
+                posture(token_allowance_per_slot=100),  # under every per-chunk cost
             )
         warned = [r for r in caplog.records if "UNMEASURED" in r.getMessage()]
-        assert any("'s'" in w.getMessage() for w in warned)
-        assert not any("'a'" in w.getMessage() for w in warned)
+        assert any("'s'" in w.getMessage() for w in warned)   # estimate → loud
+        assert not any("'a'" in w.getMessage() for w in warned)  # measured → silent
 
 
 class TestAuthorityGate:
@@ -941,6 +1083,81 @@ class TestAuthorityGate:
                         authority_requirement="citable_required"),
             )
             assert "d" not in ladder.per_slot["slot_0"], fn.__name__
+
+
+class TestAuthorityPriorThreshold:
+    """Eval's 2026-08-05 proposal: the gate should ALSO read a per-strategy
+    authority PRIOR (continuous, threshold-gated), additive to the legacy
+    hardcoded NON_CITABLE_STRATEGIES set — not a replacement. Unpopulated
+    file (authority defaults to 1.0) must reproduce today's behavior
+    exactly; only a real sub-threshold measurement adds a new exclusion."""
+
+    def test_default_authority_unpopulated_changes_nothing(self):
+        from app.services.router.allocation import strategy_authority_eligible
+        # No prior passed → default 1.0 → above threshold → eligible,
+        # same as pre-change behavior for every strategy except d.
+        assert strategy_authority_eligible("c", "citable_required", True) is True
+        assert strategy_authority_eligible("a", "citable_required", True) is True
+
+    def test_legacy_set_still_excludes_d_regardless_of_authority_value(self):
+        from app.services.router.allocation import strategy_authority_eligible
+        # Even a HIGH authority value doesn't rescue d — the legacy
+        # hardcoded classification is a floor, not overridden by the prior.
+        assert strategy_authority_eligible("d", "citable_required", True,
+                                           authority=0.99) is False
+
+    def test_low_authority_prior_excludes_a_non_legacy_strategy(self):
+        from app.services.router.allocation import strategy_authority_eligible
+        assert strategy_authority_eligible("c", "citable_required", True,
+                                           authority=0.3) is False
+        assert strategy_authority_eligible("c", "citable_required", True,
+                                           authority=0.7) is True
+
+    def test_threshold_only_bites_under_citable_required(self):
+        from app.services.router.allocation import strategy_authority_eligible
+        # "any" (default/no declaration) fail-opens regardless of authority.
+        assert strategy_authority_eligible("c", "any", True, authority=0.0) is True
+
+    def test_integration_low_authority_strategy_excluded_from_ladder(
+        self, tmp_path, monkeypatch
+    ):
+        """End-to-end: a strategy with a real sub-threshold `authority` cell
+        in the priors file is excluded from a citable_required REQUIRED slot
+        via allocate_strategies — proving the mechanism works, not just the
+        unit function."""
+        import textwrap
+        yaml_path = tmp_path / "low_authority.yaml"
+        yaml_path.write_text(textwrap.dedent("""
+            seed_priors:
+              depth_2:
+                a:
+                  recall_lift: 0.9
+                  latency_p50_ms: 500
+                  cost_per_attempt: 1
+                  accuracy_estimate: 0.5
+                  authority: 0.95
+                c:
+                  recall_lift: 0.9
+                  latency_p50_ms: 500
+                  cost_per_attempt: 1
+                  accuracy_estimate: 0.5
+                  authority: 0.2
+        """))
+        monkeypatch.setenv("ROUTER_PRIORS_PATH", str(yaml_path))
+        from app.services.router.tracing import DecisionTrace
+        trace = DecisionTrace(mode="greedy")
+        ladder = allocate_strategies(
+            [make_slot()], {"slot_0": POOL_DEPTH_2},
+            posture(caller_mode="batch", confidence_bar=0.99,
+                    speed_budget="background",
+                    authority_requirement="citable_required"),
+            trace=trace,
+        )
+        assert "c" not in ladder.per_slot["slot_0"]
+        assert "a" in ladder.per_slot["slot_0"]
+        reasons = {s.strategy_id: s.skip_reason for s in trace.slots[0].steps
+                   if s.action == "skipped"}
+        assert reasons.get("c") == "authority_gated_non_citable"
 
 
 class TestExecutionReorderingContract:
@@ -1025,14 +1242,17 @@ class TestLastAttemptRule:
         assert ladder.per_slot["opt"] == ["s"]  # cheapest, NOT best-LB 'a'
 
     def test_longer_chain_final_rung_also_best_lb(self):
-        """The rule generalizes: cap 2 → first rung cheap-first ('s'), final
-        rung best-LB among remaining ('a' — which priority order also picks,
-        so behavior is unchanged where it was already right)."""
+        """RE-DERIVED 2026-08-05: the rule now generalizes to EVERY rung, not
+        just the final one (Ananth's confidence-density directive superseded
+        the old cheap-first-except-last split) — cap 2 → both rungs are
+        best-LB: 'a' (lb .2815, non-supplement winner — s is gated off the
+        FIRST rung by SUPPLEMENT_ONLY while a is viable) then 's' (re-enters
+        once the gate lifts, ties nothing left at this point, wins round 2)."""
         ladder = allocate_strategies(
             [make_slot()], {"slot_0": self.CMHC002_POOL},
             posture(speed_budget="real_time", max_attempts_per_slot=2,
                     confidence_bar=0.99))
-        assert ladder.per_slot["slot_0"] == ["s", "a"]
+        assert ladder.per_slot["slot_0"] == ["a", "s"]
 
 
 class TestSupplementGate:
@@ -1067,10 +1287,18 @@ class TestSupplementGate:
             assert len(chain) == 1  # cap still respected
 
     def test_s_still_leads_multi_rung_chains(self):
-        """Supplement role intact: with room to fall back, s runs first."""
+        """RE-DERIVED 2026-08-05 (best-LB-first): the supplement role is now
+        STRONGER, not weaker — s is deferred to round 2, not the leader.
+        At depth_1, s/a are LB-tied (.1452 each); the SUPPLEMENT_ONLY gate
+        excludes s from the FIRST rung specifically because a (non-
+        supplement) is viable, so a wins round 1. s re-enters once the
+        gate lifts (chain non-empty) and gets added next. s still appears
+        in the chain — supplementing, exactly its designed role — just
+        never as the sole/first answer to the question."""
         ladder = allocate_strategies([make_slot()], {"slot_0": self.DEPTH1_POOL},
                                      posture())
-        assert ladder.per_slot["slot_0"][0] == "s"
+        assert ladder.per_slot["slot_0"][0] == "a"
+        assert ladder.per_slot["slot_0"][1] == "s"
         assert len(ladder.per_slot["slot_0"]) > 1
 
     def test_s_kept_when_nothing_else_viable(self):

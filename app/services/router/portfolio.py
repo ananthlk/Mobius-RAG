@@ -166,6 +166,57 @@ def _solve_knapsack(
     return best_alloc[u_best]
 
 
+def assign_chain_fills(
+    members: list[tuple[str, StrategyProfile, int]],  # (sid, profile, capacity)
+    budget_tokens: int,
+    floor: int = 1,
+) -> dict[str, int]:
+    """Per-rung fill assignment for CHAIN allocators (Ananth's partial-fill
+    directive, 2026-07-24: "I'll take 3 of d" — scope a rung down to fit the
+    budget rather than skip-or-nothing).
+
+    Two passes: (1) DIVERSITY FLOOR — each member gets `floor` chunks if
+    affordable, cheapest-first (the §4-ratified "≥1 from each viable
+    strategy" principle applied at retrieval planning, so d is present even
+    when seed values under-rank it); (2) remaining budget by VALUE via the
+    exact knapsack (LB-track q per token). Fills are SEED-APPORTIONED
+    planning during bootstrap — the transform's inert ruling holds: fills
+    steer APPORTIONMENT only; reported chain confidence stays on the
+    UNTRANSFORMED cell values until cells activate with real (r, n, k0).
+
+    Members whose fill lands at 0 (floor unaffordable) are the caller's to
+    drop from the chain, with a trace reason. Σ fills·tokens ≤ budget BY
+    CONSTRUCTION — under the retention model (chain rungs union, payload is
+    additive) this IS the SUM-model budget enforcement.
+    """
+    fills: dict[str, int] = {}
+    remaining = max(0, int(budget_tokens))
+    # pass 1: floor, cheapest per-chunk first (maximizes members seated)
+    for sid, prof, cap in sorted(
+            members, key=lambda m: PAYLOAD_TOKENS_PER_CHUNK.get(
+                m[0], _PAYLOAD_TOKENS_UNKNOWN_STRATEGY)):
+        tokens = PAYLOAD_TOKENS_PER_CHUNK.get(sid, _PAYLOAD_TOKENS_UNKNOWN_STRATEGY)
+        seat = min(floor, cap, max(0, remaining // tokens))
+        if seat > 0:
+            fills[sid] = seat
+            remaining -= seat * tokens
+    # pass 2: remainder by value (exact knapsack over residual caps)
+    candidates = []
+    for sid, prof, cap in members:
+        if sid not in fills:
+            continue
+        tokens = PAYLOAD_TOKENS_PER_CHUNK.get(sid, _PAYLOAD_TOKENS_UNKNOWN_STRATEGY)
+        residual_cap = min(cap, 2 * prof.k0) - fills[sid]  # slot cap + trust window
+        lb_r = wilson_lower_bound(prof.recall_lift, prof.n)
+        q_lb = q_from_recall(lb_r, prof.k0)
+        v_lb = -math.log(1.0 - q_lb) if q_lb < 1.0 else float("inf")
+        if residual_cap > 0 and v_lb > 0:
+            candidates.append((sid, v_lb, v_lb, tokens, residual_cap))
+    for sid, extra in _solve_knapsack(candidates, remaining).items():
+        fills[sid] = fills.get(sid, 0) + extra
+    return fills
+
+
 def allocate_portfolio(
     slots: list[AnswerSlot],
     pool_metadata: dict[str, dict],
@@ -242,14 +293,15 @@ def allocate_portfolio(
                 st.steps.append(StrategyStep(
                     sid, "skipped", skip_reason="crawl_gated_payer_not_crawlable"))
                 continue
-            if not strategy_authority_eligible(sid, c["authority_requirement"],
-                                               slot.required):
-                st.steps.append(StrategyStep(
-                    sid, "skipped", skip_reason="authority_gated_non_citable"))
-                continue
             prof, source = lookup_with_fallback(depth, sid, bundle)
             if prof is None:
                 st.steps.append(StrategyStep(sid, "skipped", skip_reason="no_prior"))
+                continue
+            if not strategy_authority_eligible(sid, c["authority_requirement"],
+                                               slot.required, prof.authority):
+                st.steps.append(StrategyStep(
+                    sid, "skipped", skip_reason="authority_gated_non_citable",
+                    prior_source=source))
                 continue
             if prof.recall_lift <= 0.0:
                 st.steps.append(StrategyStep(

@@ -217,9 +217,10 @@ class TestShadowWiring:
         plans = json.loads(params["shadow_ladder"])["plans"]
         port = next(p for p in plans if p["allocator"] == "portfolio")
         assert port["per_slot_portfolio"]["slot_0"]  # real {strategy: k}
-        # chain allocators don't carry a portfolio
+        # PARTIAL-FILL model (2026-07-24): chain allocators now ALSO carry
+        # per-rung fills in per_slot_portfolio (budget-scoped, SUM model)
         chain = next(p for p in plans if p["allocator"] != "portfolio")
-        assert chain["per_slot_portfolio"] is None
+        assert chain["per_slot_portfolio"]["slot_0"]
 
 
 class TestExplorationPolicyParser:
