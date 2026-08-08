@@ -12097,7 +12097,34 @@ class RetrieverAnswerRequest(BaseModel):
 # fine queries, tight enough that Chat/a user is never left hanging for
 # minutes. Does NOT fix the underlying contention/hard-query cost (tracked
 # separately) -- it bounds the FAILURE MODE so it degrades instead of resets.
+#
+# CALLER-MODE-AWARE (2026-08-08, real bug found live: 17 hard timeouts in
+# 6h, still 3 in the last 30min of genuinely organic traffic -- confirmed
+# via Cloud Run logs). Root cause: this ceiling was FLAT across every
+# caller_mode, but chat.thinking's own per-slot latency_allowance_ms is
+# 16000ms (allocation.py's CALLER_MODE_LATENCY_ALLOWANCE_OVERRIDE_MS,
+# scoped narrowly to chat.thinking for the same reason) -- a FAN_OUT query
+# (multiple slots, each independently budgeted, plus Router's own
+# multi-turn loop allowing up to 5 turns per slot) has a legitimate,
+# by-design upper bound that can exceed 45s for chat.thinking, which is
+# explicitly the "background/patient" mode (mirrors allocation.py's
+# _BACKGROUND_MODES = {"chat.thinking", "batch", "background"} -- kept as
+# a separate constant here rather than importing that private set, to keep
+# this module's timeout policy decoupled from allocation.py's planning-
+# time heuristic; update both if the mode roster changes). Likely got
+# worse the same night authority-conditioned routing shipped: chat.thinking
+# now executes portfolio unconditionally (was a probabilistic draw before)
+# and reaches `d` (p50 ~9.7s, the slowest strategy) at a lower call_number
+# than before, both pushing real per-slot wall-clock closer to the ceiling.
 _RETRIEVER_HARD_TIMEOUT_S = 45.0
+_RETRIEVER_BACKGROUND_CALLER_MODES = frozenset({"chat.thinking", "batch", "background"})
+_RETRIEVER_HARD_TIMEOUT_BACKGROUND_S = 120.0
+
+
+def _retriever_hard_timeout_s(caller_mode: str | None) -> float:
+    if caller_mode in _RETRIEVER_BACKGROUND_CALLER_MODES:
+        return _RETRIEVER_HARD_TIMEOUT_BACKGROUND_S
+    return _RETRIEVER_HARD_TIMEOUT_S
 
 
 @app.post("/api/retriever/answer")
@@ -12128,6 +12155,7 @@ async def retriever_answer(
         raise HTTPException(status_code=400, detail="query is required")
 
     t_req_start = time.monotonic()
+    hard_timeout_s = _retriever_hard_timeout_s(body.caller_mode)
     try:
         result = await asyncio.wait_for(
             run_retriever_partial_with_retry(
@@ -12139,14 +12167,14 @@ async def retriever_answer(
                 authority_requirement=body.authority_requirement,
                 correlation_id=body.correlation_id, call_number=body.call_number,
             ),
-            timeout=_RETRIEVER_HARD_TIMEOUT_S,
+            timeout=hard_timeout_s,
         )
     except asyncio.TimeoutError:
         elapsed_ms = int((time.monotonic() - t_req_start) * 1000)
         logging.getLogger("app.main").warning(
-            "retriever_answer: HARD TIMEOUT after %dms (ceiling=%.0fs) query_len=%d "
-            "allocator_override=%s -- returning degraded status=timeout envelope",
-            elapsed_ms, _RETRIEVER_HARD_TIMEOUT_S, len(body.query), body.allocator_override,
+            "retriever_answer: HARD TIMEOUT after %dms (ceiling=%.0fs, caller_mode=%s) "
+            "query_len=%d allocator_override=%s -- returning degraded status=timeout envelope",
+            elapsed_ms, hard_timeout_s, body.caller_mode, len(body.query), body.allocator_override,
         )
         # Tech Health wrapper-landing condition (2026-07-26): one emitter,
         # no parallel dict-building -- a genuine timeout has no real
