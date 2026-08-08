@@ -63,6 +63,22 @@
 # serve, not serve-all-and-compare. Raise a weight only after that allocator
 # passes its forced-matrix validation (Eval sign-off).
 exploration_policy:
+  # AUTHORITY-CONDITIONED ROUTING (Ananth's rule, 2026-08-08, following
+  # Eval-RAG's portfolio-vs-greedy promote study, both arms verified at
+  # matched call_number=3 -- see dispatch.py's docstring for the full
+  # reasoning and the exact deviation from Eval-RAG's stricter citable
+  # recommendation): default True means allocator_weights below is DEAD for
+  # real traffic -- dispatch() picks the executed allocator directly from
+  # authority_requirement/call_number instead of the weighted draw:
+  #   citable_required, call_number<2  -> greedy
+  #   citable_required, call_number>=2 -> portfolio
+  #   any / unset                      -> portfolio, always
+  # Set False to revert to the legacy allocator_weights draw below
+  # (code-free kill switch -- e.g. if production data says the citable
+  # call_number<2 relaxation needs walking back).
+  authority_conditioned_routing: true
+  # Legacy weighted draw -- only reachable when authority_conditioned_routing
+  # is false. Kept as the fallback/rollback config, not currently live.
   allocator_weights:
     greedy: 1.0
     optimizer: 0.0

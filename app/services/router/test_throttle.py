@@ -18,9 +18,15 @@ from app.services.router.dispatch import (
 
 
 def _dd(query, **kw):
+    # authority_conditioned_routing=False: these tests exercise the legacy
+    # throttle/weighted-draw path (Ananth's 2026-08-08 authority routing
+    # sits ABOVE the throttle in precedence and would otherwise short-
+    # circuit it for authority_requirement in (None, "any") -- the case
+    # every one of these calls hits since none set it).
     base = dict(is_calibration=False, forced_strategy=None,
                 query_key=query, phase="data_collection",
-                forced_fraction=0.2, has_payor_context=True)
+                forced_fraction=0.2, has_payor_context=True,
+                authority_conditioned_routing=False)
     base.update(kw)
     return dispatch(**base)
 
@@ -146,34 +152,52 @@ class TestThrottleEndToEnd:
         hit = next(q for q in (f"throttle e2e {i}" for i in range(200))
                    if dispatch(is_calibration=False, forced_strategy=None,
                                query_key=q, phase="data_collection",
-                               forced_fraction=0.2, has_payor_context=True
+                               forced_fraction=0.2, has_payor_context=True,
+                               authority_conditioned_routing=False
                                ).bypass_kind == "data_collection_throttle")
 
+        # load_priors() caches a process-level singleton -- mutating
+        # bundle.exploration_policy in place leaks into every OTHER test
+        # that calls load_priors() without force_reload, regardless of file
+        # (real bug found live 2026-08-08: this leak broke unrelated
+        # test_integration_production_shapes.py tests whenever this test ran
+        # earlier in the same pytest process). try/finally + a real
+        # force_reload restores the untouched real file for every test after
+        # this one.
         bundle = load_priors(force_reload=True)
-        bundle.exploration_policy["phase"] = "data_collection"
-        bundle.exploration_policy["forced_fraction"] = 0.2
+        original_policy = dict(bundle.exploration_policy)
+        try:
+            bundle.exploration_policy["phase"] = "data_collection"
+            bundle.exploration_policy["forced_fraction"] = 0.2
+            bundle.exploration_policy["authority_conditioned_routing"] = False
 
-        factory = FakeSessionFactory()
-        decision = asyncio.run(route(factory, RoutingContext(
-            query=hit, agent_id="router-4c",
-            resource_posture=ResourcePosture(max_attempts_per_slot=6),
-            pool_metadata={"slot_0": {
-                "top_score_percentile": 0.60, "pool_size": 400,
-                "required": True, "priority": 0,
-                "slot_semantics": "direct_answer", "capacity": 10,
-            }},
-            gate_j_codes=["payor.sunshine_health"],
-        )))
-        assert decision.dispatch_path == "forced"
-        assert decision.routing_ladder.per_slot["slot_0"]  # forced arm's chain
-        assert {s.allocator for s in decision.shadow_ladders} == \
-            {"greedy", "optimizer", "bayesian", "portfolio"}
-        params = factory.db.calls[0][1]
-        fv = json.loads(params["feature_vector"])
-        assert fv["bypass_kind"] == "data_collection_throttle"
-        plans = json.loads(params["shadow_ladder"])["plans"]
-        assert {p["allocator"] for p in plans} == \
-            {"greedy", "optimizer", "bayesian", "portfolio"}
+            factory = FakeSessionFactory()
+            decision = asyncio.run(route(factory, RoutingContext(
+                query=hit, agent_id="router-4c",
+                resource_posture=ResourcePosture(max_attempts_per_slot=6),
+                pool_metadata={"slot_0": {
+                    "top_score_percentile": 0.60, "pool_size": 400,
+                    "required": True, "priority": 0,
+                    "slot_semantics": "direct_answer", "capacity": 10,
+                }},
+                gate_j_codes=["payor.sunshine_health"],
+            )))
+            assert decision.dispatch_path == "forced"
+            assert decision.routing_ladder.per_slot["slot_0"]  # forced arm's chain
+            assert {s.allocator for s in decision.shadow_ladders} == \
+                {"greedy", "optimizer", "bayesian", "portfolio"}
+            params = factory.db.calls[0][1]
+            fv = json.loads(params["feature_vector"])
+            assert fv["bypass_kind"] == "data_collection_throttle"
+            plans = json.loads(params["shadow_ladder"])["plans"]
+            assert {p["allocator"] for p in plans} == \
+                {"greedy", "optimizer", "bayesian", "portfolio"}
+        finally:
+            # restore the untouched real file for every test that runs
+            # after this one in the same process
+            bundle.exploration_policy.clear()
+            bundle.exploration_policy.update(original_policy)
+            load_priors(force_reload=True)
 
     def test_isolation_forced_still_shadowless_end_to_end(self):
         """Caller-forced route(): no shadows, bypass_kind=forced_strategy —

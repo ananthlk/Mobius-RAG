@@ -84,7 +84,8 @@ class TestDispatchThreeWay:
             weights = {name: 1.0}
             for q in ["query one", "query two", "query three"]:
                 d = dispatch(is_calibration=False, forced_strategy=None,
-                             allocator_weights=weights, query_key=q)
+                             allocator_weights=weights, query_key=q,
+                             authority_conditioned_routing=False)
                 assert d.path == name
                 assert set(d.shadow_allocators) == ({"greedy", "optimizer", "bayesian", "portfolio"} - {name})
                 assert d.draw is not None and 0.0 <= d.draw < 1.0
@@ -96,7 +97,8 @@ class TestDispatchThreeWay:
         seen = set()
         for i in range(60):
             d = dispatch(is_calibration=False, forced_strategy=None,
-                         allocator_weights=weights, query_key=f"query {i}")
+                         allocator_weights=weights, query_key=f"query {i}",
+                         authority_conditioned_routing=False)
             seen.add(d.path)
         assert seen == {"greedy", "optimizer", "bayesian"}
 
@@ -119,7 +121,7 @@ class TestDispatchThreeWay:
         assert stable_draw("query A") != stable_draw("query B")
         # reason string carries the draw + weights arithmetic for the narrate layer
         d = dispatch(is_calibration=False, forced_strategy=None,
-                     query_key="query A")
+                     query_key="query A", authority_conditioned_routing=False)
         assert f"{d.draw:.4f}" in d.reason
         assert "weights" in d.reason
 
@@ -392,29 +394,48 @@ class TestRouteIntegration:
         assert "top_score_percentile" in fv["per_slot_pool_metadata"]["core"]
         assert "pool_size" in fv["per_slot_pool_metadata"]["core"]
 
-    def test_default_traffic_three_way_split_by_deterministic_draw(self):
-        """No override → the sha256 draw over equal-thirds weights picks the
-        executed allocator; the other TWO shadow. Expectation derived from the
-        draw itself, not hardcoded."""
-        from app.services.router.dispatch import _pick_allocator, stable_draw
+    def test_default_traffic_authority_conditioned_routes_to_portfolio(self):
+        """No authority_requirement set → authority-conditioned routing
+        (Ananth's rule, 2026-08-08, default ON) treats it as 'any' and
+        executes portfolio unconditionally -- REPLACES the old equal-thirds
+        weighted-draw default for real traffic. See dispatch()'s docstring."""
         query = "any production query"
-        weights = {"greedy": 1/3, "optimizer": 1/3, "bayesian": 1/3}
-        expected = _pick_allocator(weights, stable_draw(query))
-        others = {"greedy", "optimizer", "bayesian"} - {expected}
-
         factory = FakeSessionFactory()
         decision = asyncio.run(route(factory, RoutingContext(
             query=query, agent_id="router-4c",
             resource_posture=ResourcePosture(max_attempts_per_slot=6),
             pool_metadata=self._pool(),
         )))
-        assert decision.dispatch_path == expected
-        assert {s.allocator for s in decision.shadow_ladders} == others | {"portfolio"}
-        # all three plans in the persisted row
+        assert decision.dispatch_path == "portfolio"
+        assert {s.allocator for s in decision.shadow_ladders} == {"greedy", "optimizer", "bayesian"}
         _, params = factory.db.calls[0]
-        assert json.loads(params["executed_ladder"])["allocator"] == expected
+        assert json.loads(params["executed_ladder"])["allocator"] == "portfolio"
         shadow_plans = json.loads(params["shadow_ladder"])["plans"]
-        assert {p["allocator"] for p in shadow_plans} == others | {"portfolio"}
+        assert {p["allocator"] for p in shadow_plans} == {"greedy", "optimizer", "bayesian"}
+
+    def test_citable_required_call_number_1_routes_to_greedy_end_to_end(self):
+        """Wiring check through the real route() call, not just dispatch()
+        in isolation: citable_required + call_number=1 -> greedy."""
+        factory = FakeSessionFactory()
+        decision = asyncio.run(route(factory, RoutingContext(
+            query="citable e2e query", agent_id="router-4c",
+            call_number=1,
+            resource_posture=ResourcePosture(max_attempts_per_slot=6,
+                                             authority_requirement="citable_required"),
+            pool_metadata=self._pool(),
+        )))
+        assert decision.dispatch_path == "greedy"
+
+    def test_citable_required_call_number_3_routes_to_portfolio_end_to_end(self):
+        factory = FakeSessionFactory()
+        decision = asyncio.run(route(factory, RoutingContext(
+            query="citable e2e query turn3", agent_id="router-4c",
+            call_number=3,
+            resource_posture=ResourcePosture(max_attempts_per_slot=6,
+                                             authority_requirement="citable_required"),
+            pool_metadata=self._pool(),
+        )))
+        assert decision.dispatch_path == "portfolio"
 
     def test_calibration_route_forces_single_strategy(self):
         factory = FakeSessionFactory()

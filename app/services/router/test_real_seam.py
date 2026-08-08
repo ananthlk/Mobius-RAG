@@ -176,6 +176,11 @@ class TestVerbatimSlotsSeam:
         factory = FakeSessionFactory()
         decision = asyncio.run(route(factory, RoutingContext(
             query=shape.query, agent_id="router-4c",
+            # pinned: this test is about the slots/pool_metadata seam, not
+            # allocator selection -- isolates it from authority-conditioned
+            # routing's default (2026-08-08), which would otherwise pick
+            # portfolio and change per_slot's ladder shape as a side effect.
+            allocator_override="greedy",
             resource_posture=ResourcePosture(max_attempts_per_slot=6),
             slots=shape.slots,
             # metadata deliberately claims different required/semantics —

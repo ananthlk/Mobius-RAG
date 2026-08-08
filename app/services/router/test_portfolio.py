@@ -171,16 +171,53 @@ class TestAllocation:
 class TestShadowWiring:
     """Portfolio rides as the FOURTH allocator, shadow-only at bootstrap."""
 
-    def test_dispatch_never_executes_portfolio_by_default(self):
+    def test_dispatch_never_executes_portfolio_by_default_legacy_weighted_draw(self):
+        """With authority-conditioned routing OFF (legacy path, e.g. Eval's
+        kill switch), portfolio stays shadow-only until allocator_weights
+        says otherwise -- the original bootstrap invariant."""
         from app.services.router.dispatch import dispatch
         seen = set()
         for i in range(60):
             dd = dispatch(is_calibration=False, forced_strategy=None,
-                          allocator_weights=None, query_key=f"q{i}")
+                          allocator_weights=None, query_key=f"q{i}",
+                          authority_conditioned_routing=False)
             seen.add(dd.path)
             assert dd.path != "portfolio"
             assert "portfolio" in dd.shadow_allocators
         assert seen == {"greedy", "optimizer", "bayesian"}
+
+    def test_authority_conditioned_routing_sends_any_to_portfolio_always(self):
+        """Ananth's rule (2026-08-08, default ON): authority_requirement
+        'any' or unset executes portfolio unconditionally -- this REPLACES
+        the old shadow-only-by-default invariant above for real traffic."""
+        from app.services.router.dispatch import dispatch
+        for authority in (None, "any"):
+            for i in range(10):
+                dd = dispatch(is_calibration=False, forced_strategy=None,
+                              query_key=f"q{i}", authority_requirement=authority)
+                assert dd.path == "portfolio"
+
+    def test_authority_conditioned_routing_citable_call_number_split(self):
+        """Ananth's rule: citable_required + call_number<2 -> greedy;
+        call_number>=2 -> portfolio (deviates from Eval-RAG's unconditional
+        citable floor -- flagged, revisit with production data)."""
+        from app.services.router.dispatch import dispatch
+        dd1 = dispatch(is_calibration=False, forced_strategy=None,
+                       query_key="q", authority_requirement="citable_required",
+                       call_number=1)
+        assert dd1.path == "greedy"
+        dd_none = dispatch(is_calibration=False, forced_strategy=None,
+                           query_key="q", authority_requirement="citable_required",
+                           call_number=None)
+        assert dd_none.path == "greedy"  # None fails closed to call 1
+        dd2 = dispatch(is_calibration=False, forced_strategy=None,
+                       query_key="q", authority_requirement="citable_required",
+                       call_number=2)
+        assert dd2.path == "portfolio"
+        dd3 = dispatch(is_calibration=False, forced_strategy=None,
+                       query_key="q", authority_requirement="citable_required",
+                       call_number=3)
+        assert dd3.path == "portfolio"
 
     def test_weights_file_can_shift_traffic_to_portfolio(self):
         """Eval's code-free cutover: weights including portfolio route real

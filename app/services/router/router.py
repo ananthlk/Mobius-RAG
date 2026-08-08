@@ -84,6 +84,11 @@ async def route(db_session_factory, ctx: RoutingContext) -> RouterDecision:
         forced_fraction=float(policy.get("forced_fraction", 0.0) or 0.0),
         forced_arm_weights=policy.get("forced_arm_weights"),
         has_payor_context=bool(ctx.gate_j_codes),
+        authority_requirement=resource_posture.authority_requirement,
+        call_number=ctx.call_number,
+        authority_conditioned_routing=bool(
+            policy.get("authority_conditioned_routing", True)
+        ),
     )
 
     posture_dict = {

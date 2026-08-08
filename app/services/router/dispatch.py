@@ -46,7 +46,7 @@ THROTTLE_ARM_ROSTER = ("a", "b", "c", "d", "s")
 @dataclass
 class DispatchDecision:
     """Which path handles this query — and, in production, which allocator executes."""
-    path: Literal["forced", "greedy", "optimizer", "bayesian"]
+    path: Literal["forced", "greedy", "optimizer", "bayesian", "portfolio"]
     shadow_allocators: list[str] = field(default_factory=list)  # production: the untaken ones
     bypass_kind: Optional[Literal["calibration", "forced_strategy",
                                   "data_collection_throttle"]] = None
@@ -105,11 +105,41 @@ def dispatch(
     forced_fraction: float = 0.0,
     forced_arm_weights: dict[str, float] | None = None,
     has_payor_context: bool = False,
+    authority_requirement: str | None = None,
+    call_number: int | None = None,
+    authority_conditioned_routing: bool = True,
 ) -> DispatchDecision:
     """Route to forced bypass, or pick the EXECUTED allocator (others = shadow).
 
     Precedence: calibration > forced_strategy > allocator_override >
-    data-collection throttle > weighted draw.
+    authority-conditioned routing > data-collection throttle > weighted draw.
+
+    AUTHORITY-CONDITIONED ROUTING (Ananth's rule, 2026-08-08, following
+    Eval-RAG's portfolio-vs-greedy promote study — see docs/rag-agents/
+    retriever-fleet-schematic.md): the offline matrix (both arms verified at
+    call_number=3, matched conditions, reproduced under re-verification)
+    showed portfolio synthesizes citable_required answers less coherently
+    than greedy's single-strategy concentration (answer_recall -0.08 to
+    -0.13 vs greedy, retrieval recall itself roughly at parity -- this is a
+    blend x synthesizer interaction, NOT a retrieval deficit), while
+    portfolio wins `any` decisively and robustly (+0.08 to +0.21) even after
+    a trust/contradiction penalty.
+
+    Eval-RAG's own recommendation was a strict, unconditional floor
+    (citable_required -> greedy, ALWAYS, no portfolio weight ever) plus a
+    graduated 0.3-weight rollout on `any`. Ananth's explicit call: relax the
+    citable floor by call_number (untested turn axis -- every citable job
+    tonight was pinned to call_number=3, so call_number<2 behavior on
+    citable is unvalidated, not proven safe) and go 100% portfolio on `any`
+    unconditionally rather than graduated. This is a KNOWN, FLAGGED
+    deviation from Eval-RAG's exact sign-off, made explicitly to revisit
+    once real production call_number-conditioned citable data exists --
+    not a silent override.
+
+    `authority_conditioned_routing` is a kill switch (Eval-owned via the
+    priors policy file, code-free): default True ships Ananth's rule; False
+    reverts to the legacy weighted `allocator_weights` draw below, e.g. if
+    production data says the call_number<2 citable relaxation was wrong.
 
     THROTTLE (phase == "data_collection", Ananth's 1-in-5): a deterministic
     salted draw sends `forced_fraction` of traffic to a forced-strategy arm
@@ -151,6 +181,34 @@ def dispatch(
             max_attempts=None,
             reason=f"caller pinned executed allocator '{allocator_override}' "
                    f"(shadows: {', '.join(others)})",
+        )
+
+    if authority_conditioned_routing:
+        effective_call = call_number or 1
+        if authority_requirement == "citable_required":
+            chosen = "greedy" if effective_call < 2 else "portfolio"
+            others = [a for a in ALLOCATOR_ORDER if a != chosen]
+            return DispatchDecision(
+                path=chosen,  # type: ignore[arg-type]
+                shadow_allocators=others,
+                max_attempts=None,
+                reason=(f"authority-conditioned routing: citable_required, "
+                        f"call_number={effective_call} -> '{chosen}' "
+                        f"(Ananth's rule 2026-08-08; call_number<2 -> greedy, "
+                        f">=2 -> portfolio -- deviates from Eval-RAG's "
+                        f"unconditional citable floor, flagged, revisit with "
+                        f"production data)"),
+            )
+        # any / unset -- portfolio always (Ananth's rule; Eval-RAG signed off
+        # on the *direction*, tripwired production monitoring pending)
+        others = [a for a in ALLOCATOR_ORDER if a != "portfolio"]
+        return DispatchDecision(
+            path="portfolio",
+            shadow_allocators=others,
+            max_attempts=None,
+            reason=(f"authority-conditioned routing: authority_requirement="
+                    f"{authority_requirement!r} -> 'portfolio' always "
+                    f"(Ananth's rule 2026-08-08)"),
         )
 
     if phase == "data_collection" and forced_fraction > 0.0:
