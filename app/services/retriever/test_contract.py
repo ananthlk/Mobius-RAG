@@ -198,6 +198,28 @@ class TestBuildContractDegradedPaths:
         assert envelope.status == "no_retrieval"
         assert envelope.attempt_count == 0
 
+    def test_clarify_posture_surfaces_clarify_questions_structured(self):
+        """Real gap found live (2026-08-08): Reformat's clarify_questions
+        were computed but never reached the contract -- React had no
+        structured field to read, only PHI-flagged prose. Fixed by
+        threading them into routing_keys."""
+        pr = _partial_result(
+            filled_shape=None,
+            reformat=ReformatResult(
+                query="q", posture=ReformatPosture.CLARIFY,
+                clarify_questions=["Which state or jurisdiction did you mean?"],
+            ),
+        )
+        envelope = build_contract(pr, None)
+        assert envelope.status == "no_retrieval"
+        assert envelope.routing_keys["clarify_questions"] == [
+            "Which state or jurisdiction did you mean?"
+        ]
+
+    def test_non_clarify_posture_reports_empty_clarify_questions(self):
+        envelope = build_contract(_partial_result(), None)
+        assert envelope.routing_keys["clarify_questions"] == []
+
     def test_empty_citations_reports_empty_status(self):
         envelope = build_contract(_partial_result(), _synthesis_result(citations=[]))
         assert envelope.status == "empty"

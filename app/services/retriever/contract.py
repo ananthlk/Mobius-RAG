@@ -427,6 +427,20 @@ def build_contract(
         # natural home for routing-metadata sub-keys.
         "terminal_action": ladder.terminal_action if ladder else None,
         "routing_verdict": routing_verdict,
+        # Real gap found live (2026-08-08, Ananth: "these are not getting
+        # passed back to react"): Reformat computes real candidate
+        # clarifying questions for CLARIFY/CLARIFY_REPHRASE postures
+        # (ReformatResult.clarify_questions) but NOTHING ever copied them
+        # into this contract -- the only place the question text survived
+        # was narrative_full's prose, which is PHI-flagged/never-persist
+        # diagnostics text, not a field a caller is meant to parse
+        # programmatically. A CLARIFY turn's status is "no_retrieval" with
+        # no other signal for what to actually ask the user. Empty list for
+        # every other posture (real "nothing to ask", not a missing field).
+        "clarify_questions": (
+            list(partial_result.reformat.clarify_questions)
+            if partial_result.reformat else []
+        ),
         "authority_requirement": posture.authority_requirement if posture else None,
         "model_trace": model_trace,
         # Router's feature_context (2026-08-05, live gap found while
