@@ -150,6 +150,89 @@ def _derive_status(partial_result: RetrieverPartialResult, synthesis_result: Syn
     return "ok"
 
 
+def _build_module_trace(
+    partial_result: RetrieverPartialResult,
+    router_decision,
+    routing_keys: dict,
+    latency_ms: dict,
+) -> list[dict]:
+    """Summary-row diagnostics field for Chat FE's 8-stage accordion
+    (2026-08-07, their exact spec -- see cross-session handoff): one entry
+    per stage-instance, ORDERED, `ms: null` where a stage genuinely has no
+    separate timing (Structure -- folded into slots_ms, no standalone
+    figure exists). Phase 1 only: summary counts/timings, not the full
+    admin-only `detailed_trace` (candidate-level d/j/p codes) -- that's
+    explicitly scoped as phase 2 per the same handoff (payload size + PHI
+    review not done yet).
+
+    Pool/Filler emit one entry PER SLOT when the posture is FAN_OUT (real
+    stage-instances, matching Chat FE's ask), not a single collapsed row --
+    but per-slot Pool timing doesn't exist upstream (pool_ms is one
+    aggregate across every slot's pool call), so only the first Pool entry
+    carries `ms`; later ones carry candidates only rather than fabricate a
+    per-slot split. Filler timing DOES exist per (slot, attempt) via
+    attempt_spans, so those entries get real, not aggregate, ms.
+    """
+    trace: list[dict] = [
+        {"n": 1, "stage": "Gate", "ms": latency_ms.get("gate_ms")},
+        {"n": 2, "stage": "Reformat", "ms": latency_ms.get("reformat_ms")},
+        {"n": 3, "stage": "Structure", "ms": None},
+        {"n": 4, "stage": "Slots", "ms": latency_ms.get("slots_ms")},
+    ]
+    n = 5
+
+    pool_meta = routing_keys.get("feature_context", {}).get("per_slot_pool_metadata") or {}
+    if pool_meta:
+        for i, (slot_id, meta) in enumerate(pool_meta.items()):
+            trace.append({
+                "n": n, "stage": "Pool",
+                "ms": latency_ms.get("pool_ms") if i == 0 else None,
+                "candidates": meta.get("pool_size"),
+            })
+            n += 1
+    else:
+        trace.append({"n": n, "stage": "Pool", "ms": latency_ms.get("pool_ms"), "candidates": 0})
+        n += 1
+
+    trace.append({
+        "n": n, "stage": "Router", "ms": latency_ms.get("router_ms"),
+        "dispatch_path": getattr(router_decision, "dispatch_path", None),
+    })
+    n += 1
+
+    attempt_spans = routing_keys.get("attempt_spans", {}) or {}
+    fill_depth = routing_keys.get("fill_depth", {}) or {}
+    portfolio_fill = routing_keys.get("portfolio_fill", {}) or {}
+    filler_slot_ids = set(attempt_spans) | set(fill_depth) | set(portfolio_fill)
+    if filler_slot_ids:
+        for slot_id in filler_slot_ids:
+            spans = attempt_spans.get(slot_id, [])
+            ms = sum(
+                s["t_attempt_end_ms"] - s["t_attempt_start_ms"] for s in spans
+            ) if spans else None
+            pf = portfolio_fill.get(slot_id)
+            fd = fill_depth.get(slot_id)
+            if pf:
+                occupancy = sum(v["k_delivered"] for v in pf.values())
+                capacity = sum(v["k_planned"] for v in pf.values())
+            elif fd:
+                occupancy = sum(e["occupancy"] for e in fd)
+                capacity = fd[-1]["capacity"] if fd else None
+            else:
+                occupancy = capacity = None
+            trace.append({
+                "n": n, "stage": "Filler", "ms": ms, "slot": slot_id,
+                "occupancy": occupancy, "capacity": capacity,
+            })
+            n += 1
+    else:
+        trace.append({"n": n, "stage": "Filler", "ms": latency_ms.get("fillers_ms")})
+        n += 1
+
+    trace.append({"n": n, "stage": "Synthesis", "ms": latency_ms.get("synthesis_ms")})
+    return trace
+
+
 def build_contract(
     partial_result: RetrieverPartialResult,
     synthesis_result: SynthesisResult | None = None,
@@ -419,6 +502,10 @@ def build_contract(
         # narrative_full above which must stay live-view-only.
         "narrative_full_redacted": partial_result.narrative_full_redacted,
     }
+
+    traces["module_trace"] = _build_module_trace(
+        partial_result, router_decision, routing_keys, latency_ms,
+    )
 
     status = status_override if status_override is not None else _derive_status(partial_result, synthesis_result)
 
