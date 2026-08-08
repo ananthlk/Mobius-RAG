@@ -597,6 +597,29 @@ async def expand_query_via_lexicon(
     n_phrases_before_filter = 0
     n_phrases_after_filter = 0
 
+    # Real bug found live, 2026-08-08 (Ananth's catch via ReAct's reported
+    # false-positive CLARIFY-ask): _MAX_ENTRIES_PER_QUERY caps the whole
+    # loop at 12 total matches, but snapshot order was whatever
+    # _load_lexicon_snapshot happened to return -- NOT prioritized by kind.
+    # A query with enough incidental overlap with generic ".general" domain
+    # phrases (e.g. "general eligibility REQUIREMENTS for Florida Medicaid"
+    # matching benefits.general/billing_codes.general/claims.general/etc.)
+    # could exhaust the entire 12-entry budget on low-value D matches
+    # BEFORE the loop ever reached the j/p entries later in snapshot order
+    # -- confirmed live: j_codes=[] and p_codes=[] came back completely
+    # EMPTY, not "didn't match", but "never evaluated". Gate then correctly
+    # (given that starved input) couldn't find jurisdiction and asked to
+    # clarify on a query that plainly stated "Florida".
+    #
+    # Fix: evaluate j/p-kind entries before d-kind entries, stable within
+    # each group (preserves whatever relevance ordering the snapshot
+    # already carries). j/p are the load-bearing "who/what process" axes
+    # Gate's own contour logic treats as a hard requirement (missing_kinds
+    # check) -- they must never lose the match-budget race to generic
+    # domain umbrella phrases just because of snapshot iteration order.
+    _kind_priority = {"j": 0, "p": 0, "d": 1}
+    snapshot = sorted(snapshot, key=lambda e: _kind_priority.get(e["kind"], 1))
+
     for entry in snapshot:
         if len(expansion.matched_codes) >= _MAX_ENTRIES_PER_QUERY:
             break

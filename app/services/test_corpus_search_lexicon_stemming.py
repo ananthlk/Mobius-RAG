@@ -125,3 +125,29 @@ class TestStemIndexLiveCollisionSafety:
         async with AsyncSessionLocal() as db:
             exp = await expand_query_via_lexicon(db, "How do I file a home health aide reimbursement claim?")
         assert not any("hiv_aids" in c for c in exp.matched_codes)
+
+
+class TestMatchBudgetKindPriority:
+    """Real regression (2026-08-08, ReAct's live-traffic report, Ananth's
+    catch): _MAX_ENTRIES_PER_QUERY=12 caps the WHOLE match loop, and
+    snapshot order used to be whatever _load_lexicon_snapshot returned --
+    not kind-prioritized. A query with enough incidental overlap with
+    generic ".general" domain phrases could exhaust the entire budget on
+    low-value D matches before the loop ever reached J/P entries later in
+    snapshot order -- confirmed live: jurisdiction/process came back
+    completely empty (never evaluated), not "didn't match", on a query
+    that plainly stated "Florida". Fix: J/P kinds now sort before D."""
+
+    @pytest.mark.asyncio
+    async def test_generic_word_overlap_does_not_starve_jurisdiction_match(self):
+        """The exact real regression -- "general" and "requirements" fuzzy-
+        match many .general domain phrases; jurisdiction must still surface."""
+        async with AsyncSessionLocal() as db:
+            exp = await expand_query_via_lexicon(
+                db, "general eligibility requirements for Florida Medicaid"
+            )
+        assert any("florida" in c.lower() for c in exp.jurisdiction_tags), (
+            f"jurisdiction starved out of the match budget by generic domain "
+            f"matches -- jurisdiction_tags={exp.jurisdiction_tags}"
+        )
+        assert any("medicaid" in c.lower() for c in exp.jurisdiction_tags)
