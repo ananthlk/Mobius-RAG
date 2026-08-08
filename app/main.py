@@ -12071,6 +12071,14 @@ class RetrieverAnswerRequest(BaseModel):
     # is fine for any caller that doesn't need the post-hoc grading
     # callback (e.g. eval/calibration runs).
     correlation_id: Optional[str] = None
+    # Which call number this is within Chat's own retry/round loop for the
+    # SAME underlying user question (2026-08-07, Ananth's directive: "let's
+    # restrict c until the 3rd turn"). react_loop already tracks a round
+    # counter (see the trace-explorer transcripts showing "Round N/10") --
+    # this exposes it. None/1 (unset or genuinely first call) fails CLOSED:
+    # portfolio's cost gate treats it as turn 1, restricting the costly
+    # strategy c. Only the portfolio allocator reads this today.
+    call_number: Optional[int] = None
 
 
 # Hard wall-clock ceiling on the WHOLE request (2026-07-26, live-calibration
@@ -12129,7 +12137,7 @@ async def retriever_answer(
                 forced_strategy=body.forced_strategy,
                 allocator_override=body.allocator_override,
                 authority_requirement=body.authority_requirement,
-                correlation_id=body.correlation_id,
+                correlation_id=body.correlation_id, call_number=body.call_number,
             ),
             timeout=_RETRIEVER_HARD_TIMEOUT_S,
         )
@@ -12378,6 +12386,11 @@ class TraceExplorerRequest(BaseModel):
     # orchestrator.py's run_retriever_partial docstring for why this
     # exists. None (default) is a complete no-op.
     force_fanout_queries: Optional[list[str]] = None
+    # Which call number this is in a caller's retry loop (2026-08-07,
+    # portfolio's turn-gated cost floor for strategy c). None/1 fails closed
+    # to turn 1. Diagnostic surface only -- exposes the same field
+    # RetrieverAnswerRequest carries for real callers.
+    call_number: Optional[int] = None
 
 
 async def _run_trace_for_query(
@@ -12387,6 +12400,7 @@ async def _run_trace_for_query(
     emit_progress=None,
     allocator_override: str | None = None,
     authority_requirement: str | None = None,
+    call_number: int | None = None,
 ) -> dict:
     """Core of the Trace Explorer: run one query through the real pipeline,
     return {query, forced_strategy, emits, telemetry, detailed_trace, eval}.
@@ -12408,6 +12422,7 @@ async def _run_trace_for_query(
         db, query, caller_mode=caller_mode, forced_strategy=forced_strategy,
         force_fanout_queries=force_fanout_queries, emit_progress=emit_progress,
         allocator_override=allocator_override, authority_requirement=authority_requirement,
+        call_number=call_number,
     )
     wall_ms = int((time.monotonic() - t0) * 1000)
     envelope = build_contract(result, result.synthesis)
@@ -12702,6 +12717,7 @@ async def trace_explorer_run(
         db, body.query.strip(), body.forced_strategy, body.caller_mode,
         body.must_facts, body.run_eval, body.force_fanout_queries,
         allocator_override=body.allocator_override, authority_requirement=body.authority_requirement,
+        call_number=body.call_number,
     )
     _persist_single_trace(result)
     return result
@@ -12988,6 +13004,11 @@ class BankRunRequest(BaseModel):
     # co-occurring tags win over common background-noise ones. See
     # _decompose_query_corpus below.
     auto_fanout_corpus: bool = False
+    # Which call number to simulate for the whole bank run (2026-08-07,
+    # portfolio's turn-gated c/d floors). None/1 fails closed to turn 1
+    # (same as any other caller) -- pass 2 or 3 to test the unlocked
+    # behavior across a full bank, same param TraceExplorerRequest carries.
+    call_number: Optional[int] = None
 
 
 _DECOMPOSE_SYSTEM_PROMPT = (
@@ -13185,7 +13206,7 @@ async def _run_bank_job(
     job_id: str, forced_strategy: str | None, caller_mode: str | None, bank_path: str,
     auto_fanout_from_facts: bool = False, auto_fanout_llm: bool = False,
     auto_fanout_corpus: bool = False, allocator_override: str | None = None,
-    authority_requirement: str | None = None,
+    authority_requirement: str | None = None, call_number: int | None = None,
 ):
     import yaml as _yaml
     from app.database import AsyncSessionLocal
@@ -13260,6 +13281,7 @@ async def _run_bank_job(
                         q.get("must_facts"), run_eval=True,
                         force_fanout_queries=force_fanout_queries,
                         allocator_override=allocator_override, authority_requirement=authority_requirement,
+                        call_number=call_number,
                     )
                     logging.getLogger("app.main").warning(
                         "bank run %s: finished qid=%s", job_id, qid,
@@ -13527,7 +13549,7 @@ async def trace_explorer_run_bank(body: BankRunRequest = Body(...)):
         job_id, body.forced_strategy, body.caller_mode, body.bank_path or _BANK_PATH_DEFAULT,
         auto_fanout_from_facts=body.auto_fanout_from_facts, auto_fanout_llm=body.auto_fanout_llm,
         auto_fanout_corpus=body.auto_fanout_corpus, allocator_override=body.allocator_override,
-        authority_requirement=body.authority_requirement,
+        authority_requirement=body.authority_requirement, call_number=body.call_number,
     ))
     return {"job_id": job_id}
 

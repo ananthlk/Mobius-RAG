@@ -106,3 +106,12 @@ class RoutingContext:
     # had anywhere for a caller to supply it). None for calibration/eval
     # runs and any caller that doesn't need the post-hoc grading callback.
     correlation_id: Optional[str] = None
+    # Which call number THIS is, within Chat's own retry/round loop for the
+    # SAME underlying user question (2026-08-07, Ananth's directive: "let's
+    # restrict c until the 3rd turn"). None/1 (unknown or genuinely first
+    # call) fails CLOSED -- treated as turn 1, c restricted -- rather than
+    # silently allowing c whenever a caller doesn't send this. Chat's own
+    # react_loop already tracks this as its round counter; this just exposes
+    # it to the allocator that can act on it (currently: portfolio's cost
+    # gate; chain allocators don't read it, out of scope for this directive).
+    call_number: Optional[int] = None

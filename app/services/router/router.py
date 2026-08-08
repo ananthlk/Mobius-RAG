@@ -104,6 +104,8 @@ async def route(db_session_factory, ctx: RoutingContext) -> RouterDecision:
         "token_allowance_per_slot": resource_posture.token_budget,
         # caller-declared citability → authority-gated eligibility (d)
         "authority_requirement": resource_posture.authority_requirement,
+        # call_number → portfolio's cost gate (c restricted until turn 3)
+        "call_number": ctx.call_number,
     }
     per_slot_depth = {
         sid: compute_depth_bucket(meta) for sid, meta in ctx.pool_metadata.items()

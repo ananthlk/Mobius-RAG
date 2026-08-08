@@ -596,6 +596,15 @@ def resolve_constraints(resource_posture: dict[str, Any]) -> dict[str, Any]:
         # caller-declared citability (appeal vs casual chat); fail-open default
         "authority_requirement": str(resource_posture.get(
             "authority_requirement", AUTHORITY_ANY)),
+        # Which call number this is in Chat's retry loop (2026-08-07,
+        # portfolio's cost gate). None/missing fails CLOSED to 1 (first
+        # call) -- see RoutingContext.call_number's docstring.
+        "call_number": int(resource_posture.get("call_number") or 1),
+        # caller_mode passthrough (2026-08-07, portfolio's turn-floor
+        # bypass: thinking mode + authority=any waives the c/d turn floors
+        # from round 1). Already on the raw posture dict elsewhere in this
+        # module; just wasn't in THIS returned dict yet.
+        "caller_mode": resource_posture.get("caller_mode"),
     }
 
 

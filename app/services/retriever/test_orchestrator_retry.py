@@ -23,7 +23,7 @@ async def test_retries_once_on_technical_failure_and_succeeds():
     failure, not a low-confidence answer."""
     call_count = {"n": 0}
 
-    async def flaky(db, query, caller_mode=None, attempt=0, retry_of_decision_id=None, token_budget_for_retrieval=None, forced_strategy=None, allocator_override=None, force_fanout_queries=None, emit_progress=None, authority_requirement=None, correlation_id=None):
+    async def flaky(db, query, caller_mode=None, attempt=0, retry_of_decision_id=None, token_budget_for_retrieval=None, forced_strategy=None, allocator_override=None, force_fanout_queries=None, emit_progress=None, authority_requirement=None, correlation_id=None, call_number=None):
         call_count["n"] += 1
         if attempt == 0:
             raise ConnectionError("connection was closed in the middle of operation")
@@ -41,7 +41,7 @@ async def test_gives_up_and_reraises_after_max_retries_exhausted():
     """Both attempts fail -- the caller must see the real exception, not a
     silently-swallowed empty result. "We try our best" has a real limit,
     not infinite retries."""
-    async def always_fails(db, query, caller_mode=None, attempt=0, retry_of_decision_id=None, token_budget_for_retrieval=None, forced_strategy=None, allocator_override=None, force_fanout_queries=None, emit_progress=None, authority_requirement=None, correlation_id=None):
+    async def always_fails(db, query, caller_mode=None, attempt=0, retry_of_decision_id=None, token_budget_for_retrieval=None, forced_strategy=None, allocator_override=None, force_fanout_queries=None, emit_progress=None, authority_requirement=None, correlation_id=None, call_number=None):
         raise ConnectionError("still broken")
 
     with patch("app.services.retriever.orchestrator.run_retriever_partial", side_effect=always_fails):
@@ -55,7 +55,7 @@ async def test_succeeds_first_try_without_ever_retrying():
     logic even triggered."""
     call_count = {"n": 0}
 
-    async def clean(db, query, caller_mode=None, attempt=0, retry_of_decision_id=None, token_budget_for_retrieval=None, forced_strategy=None, allocator_override=None, force_fanout_queries=None, emit_progress=None, authority_requirement=None, correlation_id=None):
+    async def clean(db, query, caller_mode=None, attempt=0, retry_of_decision_id=None, token_budget_for_retrieval=None, forced_strategy=None, allocator_override=None, force_fanout_queries=None, emit_progress=None, authority_requirement=None, correlation_id=None, call_number=None):
         call_count["n"] += 1
         return RetrieverPartialResult(query=query)
 
@@ -73,7 +73,7 @@ async def test_each_attempt_passed_the_correct_attempt_number():
     is distinguishable, not a silent duplicate query observation."""
     seen_attempts = []
 
-    async def record_attempt(db, query, caller_mode=None, attempt=0, retry_of_decision_id=None, token_budget_for_retrieval=None, forced_strategy=None, allocator_override=None, force_fanout_queries=None, emit_progress=None, authority_requirement=None, correlation_id=None):
+    async def record_attempt(db, query, caller_mode=None, attempt=0, retry_of_decision_id=None, token_budget_for_retrieval=None, forced_strategy=None, allocator_override=None, force_fanout_queries=None, emit_progress=None, authority_requirement=None, correlation_id=None, call_number=None):
         seen_attempts.append(attempt)
         if attempt == 0:
             raise RuntimeError("boom")
@@ -95,7 +95,7 @@ async def test_retry_of_decision_id_threaded_when_attempt0_persisted_before_dyin
     exact pairing instead of fuzzy matching."""
     seen_retry_of_decision_ids = []
 
-    async def dies_after_persisting(db, query, caller_mode=None, attempt=0, retry_of_decision_id=None, token_budget_for_retrieval=None, forced_strategy=None, allocator_override=None, force_fanout_queries=None, emit_progress=None, authority_requirement=None, correlation_id=None):
+    async def dies_after_persisting(db, query, caller_mode=None, attempt=0, retry_of_decision_id=None, token_budget_for_retrieval=None, forced_strategy=None, allocator_override=None, force_fanout_queries=None, emit_progress=None, authority_requirement=None, correlation_id=None, call_number=None):
         seen_retry_of_decision_ids.append(retry_of_decision_id)
         if attempt == 0:
             exc = RuntimeError("fillers blew up after router persisted")
@@ -116,7 +116,7 @@ async def test_retry_of_decision_id_none_when_failure_precedes_router():
     retry_of_decision_id must stay None, not a stale/wrong value."""
     seen_retry_of_decision_ids = []
 
-    async def dies_before_router(db, query, caller_mode=None, attempt=0, retry_of_decision_id=None, token_budget_for_retrieval=None, forced_strategy=None, allocator_override=None, force_fanout_queries=None, emit_progress=None, authority_requirement=None, correlation_id=None):
+    async def dies_before_router(db, query, caller_mode=None, attempt=0, retry_of_decision_id=None, token_budget_for_retrieval=None, forced_strategy=None, allocator_override=None, force_fanout_queries=None, emit_progress=None, authority_requirement=None, correlation_id=None, call_number=None):
         seen_retry_of_decision_ids.append(retry_of_decision_id)
         if attempt == 0:
             raise ConnectionError("gate's db call dropped")  # no decision_id attribute set

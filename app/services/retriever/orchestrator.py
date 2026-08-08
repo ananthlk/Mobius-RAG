@@ -48,6 +48,7 @@ from app.services.retriever.shape.narrate import narrate_full as narrate_gate_fu
 from app.services.retriever.shape.reformat import run_reformat
 from app.services.retriever.shape.reformat_narrate import narrate as narrate_reformat
 from app.services.retriever.shape.reformat_narrate import narrate_full as narrate_reformat_full
+from app.services.router.router_narrate import narrate as router_narrate_fn
 from app.services.retriever.shape.structure import run_structure
 from app.services.retriever.shape.slots import AnswerShapeResult, run_slots
 from app.services.retriever.pool.contracts import PoolResult
@@ -341,6 +342,7 @@ async def _run_router(
     allocator_override: str | None = None,
     reformat_result: ReformatResult | None = None,
     correlation_id: str | None = None,
+    call_number: int | None = None,
 ) -> RouterDecision:
     pool_metadata = _build_pool_metadata(slots, pool_results)
     # attempt>0 marks a whole-loop technical-failure retry (2026-07-24,
@@ -359,6 +361,7 @@ async def _run_router(
         query=query,
         agent_id="retriever-orchestrator" if attempt == 0 else f"retriever-orchestrator-retry{attempt}",
         correlation_id=correlation_id,
+        call_number=call_number,
         resource_posture=RouterResourcePosture(
             speed_budget=resource_posture.speed_budget,
             confidence_bar=resource_posture.confidence_bar,
@@ -975,6 +978,7 @@ async def run_retriever_partial(
     emit_progress: "Callable[[str, str], Awaitable[None]] | None" = None,
     authority_requirement: str | None = None,
     correlation_id: str | None = None,
+    call_number: int | None = None,
 ) -> RetrieverPartialResult:
     """Sequence Gate → Reformat → Structure → Slots → Pool. Stops there —
     Router onward doesn't exist yet. This function's own scope will shrink
@@ -1146,6 +1150,7 @@ async def run_retriever_partial(
             structure_result.resource_posture, gate_result, payer_context, caller_mode,
             attempt, retry_of_decision_id, forced_strategy, allocator_override,
             reformat_result=reformat_result, correlation_id=correlation_id,
+            call_number=call_number,
         )
         router_ms = int((time.monotonic() - t_router) * 1000)
         if emit_progress:
@@ -1267,9 +1272,29 @@ async def run_retriever_partial(
         narrative = f"{narrate_gate(gate_result)}\n\n{narrate_reformat(gate_result, reformat_result)}"
     else:
         narrative = narrate_gate(gate_result)
+    # Router's own narrate() (router_narrate.py) -- built long ago, "user-
+    # facing by design, same as Gate's" (RouterDecision's own docstring),
+    # but never composed into narrative_full until now (2026-08-07,
+    # Ananth: "I want the trace from every module, not just the first 2").
+    # Confirmed PHI-safe by construction (grepped: zero references to query
+    # text anywhere in router_narrate.py, only slot ids/strategy
+    # ids/numbers -- Router's own standing rule, same posture as
+    # continuation.py's). Even so, kept OUT of narrative_full_redacted
+    # (the persist-safe field) for now -- its own module docstring says
+    # "NEVER persisted... enforced by test_tracing.py", and that test
+    # specifically guards Router's OWN persist_decision() row (a different
+    # boundary than this field), so it's not a hard conflict, but staying
+    # conservative on a blanket rule stated in its own module rather than
+    # unilaterally reinterpreting it under time pressure.
+    router_narrative = (
+        f"\n\n--- Router ---\n{router_narrate_fn(router_decision.trace)}"
+        if router_decision is not None and router_decision.trace is not None
+        else ""
+    )
     narrative_full = (
         f"--- Shape: Gate ---\n{narrate_gate_full(gate_result)}\n\n"
         f"--- Shape: Reformat ---\n{narrate_reformat_full(gate_result, reformat_result)}"
+        f"{router_narrative}"
     )
     narrative_full_redacted = (
         f"--- Shape: Gate ---\n{narrate_gate_full(gate_result, redact=True)}\n\n"
@@ -1318,6 +1343,7 @@ async def run_retriever_partial_with_retry(
     emit_progress: "Callable[[str, str], Awaitable[None]] | None" = None,
     authority_requirement: str | None = None,
     correlation_id: str | None = None,
+    call_number: int | None = None,
 ) -> RetrieverPartialResult:
     """Whole-loop retry on TECHNICAL failure (Ananth, 2026-07-24): "ask
     once, we try our best to get first-pass resolution." If ANY unhandled
@@ -1365,7 +1391,7 @@ async def run_retriever_partial_with_retry(
                 forced_strategy=forced_strategy, allocator_override=allocator_override,
                 force_fanout_queries=force_fanout_queries,
                 emit_progress=emit_progress, authority_requirement=authority_requirement,
-                correlation_id=correlation_id,
+                correlation_id=correlation_id, call_number=call_number,
             )
         except Exception as exc:
             last_exc = exc

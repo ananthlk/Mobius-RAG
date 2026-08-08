@@ -98,6 +98,106 @@ from app.services.router.priors import K0_NOMINAL  # noqa: E402 (re-export for t
 
 _R_CLAMP = 0.999  # r=1.0 would give q=1, ln(0) → -inf; clamp for stability
 
+# SAME-STRATEGY DIMINISHING RETURNS (2026-08-07, Ananth's directive after
+# reviewing the portfolio-vs-greedy/bayesian bank comparison: "is 1st chunk
+# from every strategy better than 3 from a and 2 from c" -- the model's
+# original flat-value-per-copy assumption said no, since it valued every
+# chunk of a strategy identically regardless of how many it had already
+# taken. PROVISIONAL constant, not yet Eval-calibrated against a real
+# empirical recall@k curve (that data exists in the forced single-arm sweep
+# rows from tonight's greedy validation but hasn't been mined into a decay
+# shape yet -- this is a placeholder pending that analysis, chosen to be
+# directionally correct rather than precisely fit). Each additional chunk
+# from the SAME strategy is modeled as DECAY_SAME_STRATEGY× the per-chunk
+# hit probability of the previous one (q_copy_n = q_i * decay^(n-1)) --
+# chunk 1 unaffected, chunk 2 discounted, etc. This makes a FRESH strategy's
+# first chunk compete fairly against a THIRD chunk of an already-included
+# strategy, instead of the old model where every copy looked identical.
+DECAY_SAME_STRATEGY = 0.7
+
+# COST-GATED STRATEGIES (2026-08-07, Ananth's directive: "stop c or have
+# extra penalties and use it if and only when we really need it"). These
+# strategies carry a REAL marginal dollar cost per attempt (an LLM call,
+# unlike a/b/d/s which are ~free) that priors.cost_per_attempt has never
+# actually been populated with (confirmed: every seed cell hardcodes
+# cost_per_attempt=0, including c's -- so the knapsack has been treating a
+# genuinely costly strategy as free). Rather than guess at a real dollar
+# figure and fold it into the value function as a soft penalty (which still
+# lets `c` win purely on token-efficiency grounds, exactly what happened in
+# tonight's bank run), this is a hard GATE: allocate_portfolio first solves
+# using only the FREE strategies, and only lets a cost-gated strategy
+# compete for the leftover/full budget if the free-only allocation doesn't
+# clear the slot's confidence bar on its own. "Use only when really needed"
+# implemented literally, not as a tunable weight.
+_COST_GATED_STRATEGIES = frozenset({"c"})
+
+# PER-STRATEGY TURN FLOOR (2026-08-07, Ananth's directives, in sequence:
+# "let's restrict c until the 3rd turn... if we get to rag for the third
+# time lets allow c", then "lets d in on r2 and c on r3"). A HARD exclusion
+# from the candidate pool entirely below this turn -- not a soft penalty.
+# Rationale is DIFFERENT per strategy even though the mechanism is shared:
+#   c: turn 3 -- c is the one strategy with a real (if currently
+#      unmeasured) marginal DOLLAR cost per call. On top of this turn
+#      floor, c ALSO stays subject to the separate coverage-bar gate below
+#      once turn-unlocked (being turn 3+ doesn't force c in, just allows it
+#      to compete if the free strategies genuinely aren't enough).
+#   d: turn 2 -- d has ~zero dollar cost but real high LATENCY (p50
+#      ~9.7s, live-verified vastly exceeding chat.default's ~2.3s
+#      allowance). Turn-unlocking d is a deliberate override of the
+#      standalone latency gate below (see its call site) -- by turn 2 the
+#      caller is already committing to another round-trip regardless, so
+#      paying d's real latency is an accepted, conscious tradeoff, not
+#      something the same rigid real_time allowance should keep blocking.
+#      No coverage-bar condition for d (unlike c) -- turn 2 unlocks it
+#      outright, per Ananth's ask.
+_STRATEGY_MIN_TURN: dict[str, int] = {"d": 2, "c": 3}
+
+# COST-GATE FORCE TURN (2026-08-07, Ananth: "we will never use c in
+# thinking, that feels off... could we force a bit of c in turn 3 of
+# thinking too"). Real gap: under chat.thinking's bigger latency/token
+# budget, the FREE strategies alone (s/a/b/d) already clear the confidence
+# bar every time -- so c's "only if genuinely needed" bar-gate (just above)
+# correctly never opens, meaning c NEVER gets exercised under thinking
+# mode at all, turn 3 included. Turn 3 is meant to be a real escalation
+# checkpoint, not just "eligible but still gated the same as turn 1-2 would
+# be if the bypass applied there." At this turn, c competes in the FULL
+# knapsack unconditionally -- no free-only bar-check first. This is exactly
+# what chat.default's turn 3 already does DE FACTO today (free-only s/a/b
+# there happens to fall short of the bar every time, so the gate always
+# opens) -- making it an EXPLICIT, deliberate rule here makes that
+# consistent for thinking mode too, instead of accidentally depending on
+# whether the free strategies happen to be enough.
+_COST_GATE_FORCE_TURN = 3
+
+# TOKEN-COST RANKING OVERRIDE (2026-08-07, Ananth's directive: "the token
+# preference is too punitive... let's make the penalty 0% and see what the
+# raw answer is, then optimize"). PAYLOAD_TOKENS_PER_CHUNK's real d=500
+# (vs a/b/c=250) is a MEASURED value (allocation.py's own comment: "a/b/c/d
+# now measured") -- web content genuinely comes back larger, so this is NOT
+# a modeling penalty to just delete; other consumers of that constant (real
+# context-window budget accounting) need the true number. This override is
+# scoped to portfolio's OWN knapsack RANKING decision only: for VALUE/TOKEN
+# comparison purposes, treat d's per-chunk cost as if it were the same as
+# a/b/c (250, i.e. 0% extra penalty) so d can compete for selection purely
+# on its recall_lift merits. The REAL token cost (PAYLOAD_TOKENS_PER_CHUNK's
+# 500) still governs how much of the actual budget gets consumed once d is
+# selected -- this only changes which candidate LOOKS most valuable per
+# token during the solve, not what gets charged against the budget
+# afterward. Experimental: empty dict = no override (real costs everywhere,
+# the pre-2026-08-07 behavior); set d's override key to try other levels
+# between 250 (0% penalty, current) and 500 (full real penalty) once we've
+# seen the raw, unconstrained answer this call is asking for.
+_TOKEN_COST_RANKING_OVERRIDE: dict[str, int] = {"d": 250}
+
+
+def _portfolio_tokens(sid: str) -> int:
+    """PAYLOAD_TOKENS_PER_CHUNK, with _TOKEN_COST_RANKING_OVERRIDE applied --
+    used ONLY inside allocate_portfolio (not assign_chain_fills, which stays
+    on the real, unoverridden constant -- chain-allocator fill-scoping is
+    out of scope for this directive)."""
+    return _TOKEN_COST_RANKING_OVERRIDE.get(
+        sid, PAYLOAD_TOKENS_PER_CHUNK.get(sid, _PAYLOAD_TOKENS_UNKNOWN_STRATEGY))
+
 
 def q_from_recall(r: float, k0: int = K0_NOMINAL) -> float:
     """Per-chunk hit probability from a cell's recall_lift (ratified transform)."""
@@ -108,6 +208,20 @@ def q_from_recall(r: float, k0: int = K0_NOMINAL) -> float:
 def coverage(qs_ks: list[tuple[float, int]]) -> float:
     """P(covered) = 1 − Π (1−q_i)^{k_i}."""
     miss = reduce(lambda acc, qk: acc * (1.0 - qk[0]) ** qk[1], qs_ks, 1.0)
+    return 1.0 - miss
+
+
+def decayed_coverage(qs_ks: list[tuple[float, int]], decay: float = 1.0) -> float:
+    """P(covered) under the SAME-STRATEGY diminishing-returns model: the
+    n-th chunk (0-indexed) from a strategy contributes q_i*decay**n instead
+    of the flat q_i every copy used in `coverage()` above. decay=1.0
+    reduces to exactly `coverage()` (verified equal in tests). Must be used
+    consistently with whatever decay `_solve_knapsack` was called with —
+    reporting flat coverage() on a decayed allocation overstates it."""
+    miss = 1.0
+    for q, k in qs_ks:
+        for n in range(k):
+            miss *= 1.0 - min(_R_CLAMP, q * (decay ** n))
     return 1.0 - miss
 
 
@@ -131,11 +245,25 @@ def _gcd_all(values: list[int]) -> int:
 def _solve_knapsack(
     candidates: list[tuple[str, float, float, int, int]],  # (sid, v_mean, v_lb, tokens, cap)
     budget_tokens: int,
+    *,
+    decay: float = 1.0,
 ) -> dict[str, int]:
     """Exact bounded knapsack: maximize Σ k_i·v_lb_i s.t. Σ k_i·tokens_i ≤ budget.
 
     DP over the budget quantized at gcd(token costs). Objective uses the LB
     track (the enforced quantity); mean track is recomputed on the result.
+
+    `decay` (2026-08-07, Ananth's directive, DECAY_SAME_STRATEGY at the
+    default call site): when < 1.0, the n-th copy (0-indexed) of a strategy
+    is worth v_lb converted back from a decayed q (q * decay**n) instead of
+    the flat v_lb every previous copy used -- makes repeated chunks from the
+    SAME strategy worth progressively less, so a fresh strategy's first
+    chunk can compete fairly against a third/fourth chunk of an
+    already-included one instead of the old flat-value model where every
+    copy looked identical. Default 1.0 (no decay) preserves the exact prior
+    behavior for assign_chain_fills' call site below, which this parameter
+    intentionally does NOT change -- chain-allocator fill-scoping is a
+    separate, already-ratified mechanism, not in scope for this directive.
     """
     if not candidates or budget_tokens <= 0:
         return {}
@@ -150,11 +278,21 @@ def _solve_knapsack(
         if v_lb <= 0.0:
             continue
         cost_units = tokens // unit
+        # Recover q_lb from v_lb (v_lb = -ln(1-q_lb)) so each copy's decayed
+        # q can be converted back to a per-copy value -- keeps the decayed
+        # allocation's REPORTED coverage mathematically consistent with
+        # 1-Π(1-q_copy), not just a value-space fudge (see the render loop's
+        # matching decay application below for the same reason).
+        q_lb = 1.0 - math.exp(-v_lb) if v_lb < float("inf") else 1.0
         # bounded item: iterate copies (caps are small, ≤ slot capacity)
         for _copy in range(cap):
+            q_copy = min(_R_CLAMP, q_lb * (decay ** _copy))
+            v_copy = -math.log(1.0 - q_copy) if q_copy < 1.0 else float("inf")
+            if v_copy <= 0.0:
+                break  # decayed to worthless; higher copies only decay further
             # standard 0/1 pass per copy (descending to avoid reuse of this copy)
             for u in range(n_units, cost_units - 1, -1):
-                cand = best_val[u - cost_units] + v_lb
+                cand = best_val[u - cost_units] + v_copy
                 if cand > best_val[u] + 1e-12:
                     alloc = dict(best_alloc[u - cost_units])
                     if alloc.get(sid, 0) < cap:
@@ -293,6 +431,27 @@ def allocate_portfolio(
                 st.steps.append(StrategyStep(
                     sid, "skipped", skip_reason="crawl_gated_payer_not_crawlable"))
                 continue
+            _min_turn = _STRATEGY_MIN_TURN.get(sid)
+            # THINKING+ANY BYPASS (2026-08-07, Ananth: "d and c can come in
+            # r1 if authority=any and thinking mode"). Both signals already
+            # say "take your time, don't be strict" -- chat.thinking accepts
+            # higher latency by construction (that's the mode's whole
+            # point), and authority=any means the caller isn't demanding
+            # citable sources, so there's no reason to withhold c/d for cost
+            # or latency caution on round 1 specifically in this combo.
+            _turn_floor_waived = (
+                c["caller_mode"] == "chat.thinking"
+                and c["authority_requirement"] != "citable_required"
+            )
+            _turn_unlocked = (
+                _min_turn is None or _turn_floor_waived or c["call_number"] >= _min_turn
+            )
+            if _min_turn is not None and not _turn_unlocked:
+                st.steps.append(StrategyStep(
+                    sid, "skipped",
+                    skip_reason=f"turn_gated (call_number={c['call_number']} < "
+                                f"{_min_turn})"))
+                continue
             prof, source = lookup_with_fallback(depth, sid, bundle)
             if prof is None:
                 st.steps.append(StrategyStep(sid, "skipped", skip_reason="no_prior"))
@@ -308,14 +467,21 @@ def allocate_portfolio(
                     sid, "skipped", skip_reason="zero_or_negative_recall_lift",
                     prior_source=source, recall_lift=prof.recall_lift))
                 continue
-            if prof.latency_p50_ms > c["latency_allowance_ms"]:
+            # Turn-unlocking a strategy in _STRATEGY_MIN_TURN (d, specifically)
+            # IS the deliberate override of this latency gate -- by the turn
+            # it unlocks at, the caller has already accepted a slower
+            # round-trip. Strategies with no turn floor (a/b/s) always go
+            # through this check normally; it's never silently skipped for
+            # them.
+            _latency_gate_applies = sid not in _STRATEGY_MIN_TURN
+            if _latency_gate_applies and prof.latency_p50_ms > c["latency_allowance_ms"]:
                 # parallel model: a contributor's OWN p50 must fit the allowance
                 st.steps.append(StrategyStep(
                     sid, "skipped", skip_reason="over_latency_allowance",
                     prior_source=source, recall_lift=prof.recall_lift,
                     latency_p50_ms=prof.latency_p50_ms))
                 continue
-            tokens = PAYLOAD_TOKENS_PER_CHUNK.get(sid, _PAYLOAD_TOKENS_UNKNOWN_STRATEGY)
+            tokens = _portfolio_tokens(sid)
             q_mean = q_from_recall(prof.recall_lift, prof.k0)  # per-cell k₀
             lb_r = wilson_lower_bound(prof.recall_lift, prof.n, confidence_level)
             q_lb = q_from_recall(lb_r, prof.k0)
@@ -332,11 +498,57 @@ def allocate_portfolio(
 
         # optional slots: cheapest single chunk only (Eval's optional-cheap
         # ruling carries over — telemetry-only slots never spend real budget)
+        cost_gate_used = False
         if not slot.required and candidates:
             cheapest = min(candidates, key=lambda cand: (cand[3], -cand[2]))
             alloc = {cheapest[0]: 1}
         else:
-            alloc = _solve_knapsack(candidates, budget)
+            # COST GATE (Ananth's directive): solve free-only first; only
+            # let cost-gated strategies (c) compete if free-only can't clear
+            # this slot's own bar. "Use c if and only when we really need
+            # it" implemented as a hard gate, not a value-space penalty that
+            # c could still out-token-efficiency its way past.
+            free_candidates = [cand for cand in candidates if cand[0] not in _COST_GATED_STRATEGIES]
+            gated_present = len(free_candidates) < len(candidates)
+            _force_cost_gate_open = c["call_number"] >= _COST_GATE_FORCE_TURN
+            if gated_present and _force_cost_gate_open:
+                # Turn 3+: c competes for real, no "only if needed" check --
+                # see _COST_GATE_FORCE_TURN's docstring.
+                alloc = _solve_knapsack(candidates, budget, decay=DECAY_SAME_STRATEGY)
+                cost_gate_used = True
+            else:
+                alloc = _solve_knapsack(free_candidates, budget, decay=DECAY_SAME_STRATEGY)
+            if gated_present and not _force_cost_gate_open:
+                free_qk = [
+                    (q_from_recall(
+                        wilson_lower_bound(profiles[sid][0].recall_lift, profiles[sid][0].n, confidence_level),
+                        profiles[sid][0].k0), k)
+                    for sid, k in alloc.items()
+                ]
+                # GATE CHECK uses FLAT (undecayed) coverage deliberately —
+                # `adjusted_bar` was calibrated against the flat model (every
+                # allocator up to now, and this same function's own FINAL
+                # reported lb_cov below, compares against it that way).
+                # Checking the gate against DECAYED coverage would silently
+                # stack two conservatisms (decay lowers the estimate, then
+                # the lowered estimate gets compared to a bar that assumes
+                # it wasn't lowered) -- confirmed live: with the decayed
+                # check, c triggered on 4/4 real test queries, defeating
+                # "use c only when really needed." Flat coverage for the
+                # GATE DECISION only; the final rendered lb_cov (below) still
+                # uses decay, since that's an honest accounting of what the
+                # chosen allocation actually delivers, not a threshold check.
+                free_lb_cov = coverage(free_qk)
+                if free_lb_cov < c["adjusted_bar"]:
+                    alloc = _solve_knapsack(candidates, budget, decay=DECAY_SAME_STRATEGY)
+                    cost_gate_used = True
+                else:
+                    for cand in candidates:
+                        if cand[0] in _COST_GATED_STRATEGIES:
+                            st.steps.append(StrategyStep(
+                                cand[0], "skipped",
+                                skip_reason=f"cost_gate_not_needed (free-only coverage "
+                                            f"{free_lb_cov:.3f} already clears bar {c['adjusted_bar']:.3f})"))
 
         # ---- render the slot result ----
         qk_lb = []
@@ -349,7 +561,7 @@ def allocate_portfolio(
             lb_r = wilson_lower_bound(prof.recall_lift, prof.n, confidence_level)
             qk_mean.append((q_mean, k))
             qk_lb.append((q_from_recall(lb_r, prof.k0), k))
-            payload += k * PAYLOAD_TOKENS_PER_CHUNK.get(sid, _PAYLOAD_TOKENS_UNKNOWN_STRATEGY)
+            payload += k * _portfolio_tokens(sid)
             latency = max(latency, prof.latency_p50_ms)
             st.steps.append(StrategyStep(
                 sid, "added", prior_source=source,
@@ -359,8 +571,12 @@ def allocate_portfolio(
                 cost=prof.cost, accuracy_estimate=prof.accuracy_estimate))
             ladder.total_estimated_cost += prof.cost  # cost per contributing strategy
 
-        mean_cov = coverage(qk_mean)
-        lb_cov = coverage(qk_lb)
+        # decayed_coverage, not coverage() -- must match whatever decay
+        # _solve_knapsack used, or this overstates the real allocation's
+        # coverage (a single-chunk optional-slot alloc is unaffected: decay
+        # only bites at k>1). See DECAY_SAME_STRATEGY's docstring.
+        mean_cov = decayed_coverage(qk_mean, DECAY_SAME_STRATEGY)
+        lb_cov = decayed_coverage(qk_lb, DECAY_SAME_STRATEGY)
         # scheduling-hint order: k desc, then static priority (NOT fallback priority)
         order = sorted(alloc, key=lambda sid: (-alloc[sid],
                                                STRATEGY_PRIORITY_ORDER.index(sid)))
