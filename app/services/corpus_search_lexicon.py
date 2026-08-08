@@ -319,14 +319,30 @@ async def _load_lexicon_snapshot(db: AsyncSession) -> list[dict[str, Any]]:
             )
             rows = result.mappings().all()
         except Exception as exc:
+            # Real bug found live, 2026-08-04 (Ananth's catch): this used to
+            # cache [] with a FRESH _cache_loaded_at on failure -- since this
+            # cache is PROCESS-GLOBAL (shared across every concurrent
+            # request/query on the instance, not per-call), one transient
+            # failure (e.g. this query hitting a shared session whose
+            # transaction was aborted by an unrelated earlier statement)
+            # poisoned Gate's lexicon matching to "zero tags, ever" for every
+            # query on the WHOLE instance for the next _CACHE_TTL_SECONDS (5
+            # min) -- confirmed live: 16/22 bank-run queries silently got
+            # zero d/j/p codes, zero pool candidates, zero chunks, with no
+            # error surfaced (Gate's own query succeeded fine, it just had
+            # nothing to match against). Fix: on failure, keep serving the
+            # last GOOD snapshot if one exists (stale-but-real beats empty),
+            # and do NOT stamp _cache_loaded_at -- next call retries
+            # immediately instead of being locked into the failure for the
+            # full TTL. Only fall back to [] when there has never been a
+            # successful load at all (fresh-process cold start).
             logger.warning(
                 "corpus_search_lexicon: failed to load policy_lexicon_entries: %s "
-                "(falling back to empty lexicon)",
+                "(%s)",
                 exc,
+                "keeping last good snapshot" if _cache_payload is not None else "no prior snapshot, returning empty (not cached)",
             )
-            _cache_payload = []
-            _cache_loaded_at = now
-            return _cache_payload
+            return _cache_payload if _cache_payload is not None else []
 
         snapshot: list[dict[str, Any]] = []
         for row in rows:

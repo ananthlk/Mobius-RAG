@@ -34,6 +34,36 @@ _CHUNK_COLS = """
     document_status, source_type, content_sha, page_number, paragraph_index, document_authority_level
 """
 
+# Statement timeout for Pool's candidate-fetch queries (Ananth's live catch,
+# 2026-08-04): the coverage-scoring query in particular does a per-row
+# correlated jsonb_object_keys() count via a Bitmap Heap Scan that can touch
+# tens of thousands of rows -- under a cold buffer cache or concurrent load,
+# confirmed live to take 6-9+ MINUTES with no bound at all, appearing
+# indistinguishable from a genuine hang (no error, no DB lock a monitoring
+# query could see -- just a legitimately slow scan with nothing capping it).
+# Every other external call in this codebase already has a timeout (Vertex
+# Grounding, the LLM proxy, HTTP fetches) -- this was the one gap.
+# Raised 20s->60s (2026-08-04, same day): 20s turned out too tight under
+# real live conditions -- the small Cloud SQL instance (db-custom-2-7680,
+# 2 vCPU/7.68GB RAM for a 1.94M-row table) is cache-thrashing after a full
+# day of sustained sweep load (20+ deploys, dozens of bank runs, real
+# production traffic sharing the same instance), confirmed via EXPLAIN
+# ANALYZE showing genuine disk I/O (96% cache misses on a representative
+# query), not a bad query plan. Every query in a live re-run consistently
+# hit 20s and failed -- a capacity problem, not a hang, so raised the bound
+# rather than keep fighting it with a tight timeout. Still finite: a query
+# that can't finish in 60s under DB capacity that recovers (e.g. off-peak,
+# a properly-sized instance) is still a real signal worth surfacing, not
+# something to raise indefinitely.
+_POOL_QUERY_TIMEOUT_MS = 60_000
+
+
+async def _set_pool_query_timeout(db) -> None:
+    """SET LOCAL only applies within the current transaction (same pattern
+    already established by the HNSW ef_search tuning below) -- must be
+    re-issued before each candidate query, not just once per session."""
+    await db.execute(sql_text(f"SET LOCAL statement_timeout = {_POOL_QUERY_TIMEOUT_MS}"))
+
 # Additive ranking signal for Filler a (BM25), 2026-07-23 -- Fillers can't
 # make DB calls (gate b), so Pool computes this once per match candidate
 # regardless of which arm surfaced it, not just for a "bm25 arm" that no
@@ -196,12 +226,26 @@ class PublicSourceAdapter(SourceAdapter):
         # S3.1 step 3/4. chunk_*_tags ?| :codes is the predicate GIN (i)
         # covers (gate resolved 2026-07-23) -- bounded to pool.document_ids
         # regardless, never a blind scan of the 1.94M table.
+        # `, id ASC` tiebreak (Ananth's live catch, 2026-08-04): `coverage`
+        # is a small integer (count of matched tag codes) -- ties are common,
+        # not rare, and ORDER BY coverage DESC alone left them to whatever
+        # order Postgres happened to scan rows in, which is NOT guaranteed
+        # stable across executions/plans. Confirmed live: the SAME query
+        # against the SAME pool produced a DIFFERENT top-ranked chunk across
+        # two bank runs (two chunks tied on bm25_score too, further downstream
+        # in fill_shape_bm25's composite rerank -- Python's sort is stable, so
+        # the real non-determinism traces back to Pool's own candidate order
+        # here, not the filler's rerank). Legacy corpus_search.py already hit
+        # and fixed this exact class of bug (its own "Determinism fix
+        # (2026-05-03): ORDER BY bm25_score DESC, id ASC" comment) -- this
+        # port never carried that fix over into the new Pool module.
         # NULLIF(..., 'null'::jsonb) matters: verified live (2026-07-23) that
         # chunk_{d,p,j}_tags stores an actual JSON-null LITERAL on ~55k rows
         # (not SQL NULL) -- jsonb_object_keys() throws "cannot call
         # jsonb_object_keys on a scalar" on that value, and plain COALESCE
         # doesn't catch it (COALESCE only fires on true SQL NULL).
         t1 = time.monotonic()
+        await _set_pool_query_timeout(self.db)
         rows = (await self.db.execute(
             sql_text(f"""
                 SELECT {_CHUNK_COLS},
@@ -218,7 +262,7 @@ class PublicSourceAdapter(SourceAdapter):
                         OR (:p_codes = '{{}}' OR chunk_p_tags ?| :p_codes)
                         OR (:j_codes = '{{}}' OR chunk_j_tags ?| :j_codes)
                     )
-                ORDER BY coverage DESC
+                ORDER BY coverage DESC, id ASC
                 LIMIT :width
             """),
             {
@@ -270,6 +314,7 @@ class PublicSourceAdapter(SourceAdapter):
         # itself rejects higher values (it doesn't, confirmed live).
         ef_search = min(max(width, 100), 1000)
         await self.db.execute(sql_text(f"SET LOCAL hnsw.ef_search = {ef_search}"))
+        await _set_pool_query_timeout(self.db)
         # REAL CORRECTNESS BUG found+fixed 2026-07-23 (Payor-Policy's
         # live-trace report, verified directly): vector_search() had ZERO
         # payer/jurisdiction filtering -- a bare similarity search over the
@@ -304,6 +349,24 @@ class PublicSourceAdapter(SourceAdapter):
                             WHERE k LIKE 'payor.%' AND k != ALL(CAST(:j_payors AS text[]))
                         )
                     )
+                -- NO tiebreak here, unlike the coverage/inherited queries
+                -- (Ananth's live catch, 2026-08-04 -- REVERTED same day):
+                -- a `, id ASC` was added earlier today for determinism, same
+                -- reasoning as those two queries, but this one is DIFFERENT
+                -- -- pgvector's HNSW index can only accelerate
+                -- `ORDER BY embedding <=> query_vec LIMIT k` when that
+                -- expression is the ONLY sort key. Adding id ASC silently
+                -- disabled the ANN index entirely: confirmed via EXPLAIN,
+                -- plan flipped from "Index Scan using
+                -- rag_published_embeddings_vec_hnsw" to a full
+                -- "Parallel Seq Scan" across all 1.94M rows computing exact
+                -- distances -- this was the actual cause of today's
+                -- widespread bank-eval timeouts (mistakenly chased as DB
+                -- capacity/contention for hours before isolating it here).
+                -- Cosine-distance ties are rare enough in practice that
+                -- losing tie-break determinism on JUST this query is an
+                -- acceptable trade against silently losing the index on
+                -- every vector search in production.
                 ORDER BY embedding_vec <=> CAST(:query_vec AS vector)
                 LIMIT :width
             """),
@@ -352,12 +415,13 @@ class PublicSourceAdapter(SourceAdapter):
         # meaningful signal (see _BM25_SCORE_EXPR fix above), prioritizing by
         # it means the AHCA-inherited chunks that actually relate to the
         # query surface first when `width` truncates the set.
+        await _set_pool_query_timeout(self.db)
         rows = (await self.db.execute(
             sql_text(f"""
                 SELECT {_CHUNK_COLS}, {_BM25_SCORE_EXPR}
                 FROM rag_published_embeddings
                 WHERE document_id = ANY(:doc_ids)
-                ORDER BY bm25_score DESC
+                ORDER BY bm25_score DESC, id ASC
                 LIMIT :width
             """),
             {"doc_ids": doc_ids, "width": width, "query": query, "expansion_phrases": expansion_phrases},

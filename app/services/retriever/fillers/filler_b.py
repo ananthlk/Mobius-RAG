@@ -367,6 +367,20 @@ def fill_shape_vector(
                     document_status=candidate.document_status,
                     content_sha=candidate.content_sha,
                     source_type=candidate.source_type,
+                    # Real bug found live, 2026-08-04 (Ananth caught it from
+                    # the trace UI's new authority_score field): this filler
+                    # READS candidate.authority_level for its own ranking
+                    # score (_authority_score(c.authority_level) above) but
+                    # never threaded it onto the output FilledChunk --
+                    # synthesis.py's _infer_authority then had nothing but
+                    # the coarse source_type fallback to go on, and
+                    # source_type="hierarchical" isn't in
+                    # _AUTHORITATIVE_SOURCE_TYPES ({"internal","fact_store"}),
+                    # so every b-served chunk was mislabeled "external" even
+                    # when it was our own real ingested, authoritative
+                    # corpus content. filler_a already threads this
+                    # correctly (contracts.py:302) -- b was the outlier.
+                    authority_level=candidate.authority_level,
                     tags=candidate.tags or {},
                     is_neighbor=candidate.is_neighbor,
                     original_score=rerank_score_by_id[candidate.chunk_id],

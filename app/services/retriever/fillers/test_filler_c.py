@@ -368,7 +368,7 @@ async def test_chunk_from_citation_hashes_url_and_quote_together(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_fill_shape_threads_required_and_respects_capacity(monkeypatch):
-    async def fake_run_llm_retrieval(db, query, *, agent_id, correlation_id=None):
+    async def fake_run_llm_retrieval(db, query, *, agent_id, correlation_id=None, payer_domain=None):
         citations = [
             ValidatedCitation(
                 candidate=CitationCandidate(), status="retrieved",
@@ -404,7 +404,7 @@ async def test_fill_shape_threads_required_and_respects_capacity(monkeypatch):
 async def test_fill_shape_uses_slot_rewritten_query_over_raw_query(monkeypatch):
     seen_queries = []
 
-    async def fake_run_llm_retrieval(db, query, *, agent_id, correlation_id=None):
+    async def fake_run_llm_retrieval(db, query, *, agent_id, correlation_id=None, payer_domain=None):
         seen_queries.append(query)
         return "", [], {
             "llm_ms": 0, "validate_ms": 0, "total_ms": 0,
@@ -427,7 +427,7 @@ async def test_fill_shape_uses_slot_rewritten_query_over_raw_query(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_fill_shape_survives_per_slot_exception_without_crashing(monkeypatch):
-    async def fake_run_llm_retrieval(db, query, *, agent_id, correlation_id=None):
+    async def fake_run_llm_retrieval(db, query, *, agent_id, correlation_id=None, payer_domain=None):
         raise RuntimeError("simulated LLM/DB failure")
 
     monkeypatch.setattr(filler_c, "_run_llm_retrieval", fake_run_llm_retrieval)

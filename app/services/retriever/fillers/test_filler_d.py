@@ -549,7 +549,7 @@ class TestFillShapeExternalPrescreened:
         prescreened = filler_d.PrescreenedSearch(
             hits=[_SearchHit("t", "", "http://prescreened.com")],
             search_backend="vertex", site_domain=None, exact_terms=[], boost_terms=[],
-            search_ms=6500, n_vertex_hits=1, n_vertex_unconstrained_hits=0, n_ddg_hits=0,
+            search_raw_ms=6500, n_vertex_hits=1, n_vertex_unconstrained_hits=0, n_ddg_hits=0,
         )
 
         result = await fill_shape_external(
@@ -561,7 +561,7 @@ class TestFillShapeExternalPrescreened:
         assert result.slots[0].occupancy == 1
         assert result.slots[0].chunks[0].chunk_id == filler_d._stable_chunk_id("http://prescreened.com")
         assert result.emit["prescreened"] is True
-        assert result.emit["search_ms"] == 6500  # the sunk cost, carried through for observability
+        assert result.emit["search_raw_ms"] == 6500  # the sunk cost, carried through for observability
 
     @pytest.mark.asyncio
     async def test_none_prescreened_runs_search_as_before(self, monkeypatch):

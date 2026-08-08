@@ -90,6 +90,15 @@ logger = logging.getLogger(__name__)
 _FETCH_TIMEOUT_S = 8.0
 _MAX_PASSAGE_CHARS = 2000
 _VERTEX_GROUNDING_MODEL = "gemini-2.5-flash"
+# Real bug found live, 2026-08-04 (Ananth's catch: a bank run stuck at the
+# same done-count for 9+ minutes with no DB lock and no error logged): unlike
+# _search_web's DDG fallback (10s urllib timeout below), _search_web_vertex
+# had NO timeout on the Vertex Grounding call at all. prescreen_search awaits
+# both via asyncio.gather, so a hung/slow Vertex call blocks the ENTIRE
+# retrieval indefinitely -- the DDG leg's own timeout can't save it since
+# gather() waits for every task. 20s is generous vs DDG's 10s (grounding
+# genuinely can be slower) but still finite.
+_VERTEX_SEARCH_TIMEOUT_S = 20.0
 
 # Widened funnel (2026-07-23, per Ananth: "get 15 or 20 to fill 5" instead
 # of pulling exactly N-for-N). Verified live what each backend's real
@@ -385,10 +394,13 @@ async def _search_web_vertex(
 
         client = genai.Client(vertexai=True, project=VERTEX_PROJECT_ID, location=VERTEX_LOCATION)
         tool = Tool(google_search=GoogleSearch())
-        response = await client.aio.models.generate_content(
-            model=_VERTEX_GROUNDING_MODEL,
-            contents=prompt,
-            config=GenerateContentConfig(tools=[tool]),
+        response = await asyncio.wait_for(
+            client.aio.models.generate_content(
+                model=_VERTEX_GROUNDING_MODEL,
+                contents=prompt,
+                config=GenerateContentConfig(tools=[tool]),
+            ),
+            timeout=_VERTEX_SEARCH_TIMEOUT_S,
         )
         cand = response.candidates[0] if response.candidates else None
         gm = getattr(cand, "grounding_metadata", None) if cand else None
@@ -789,7 +801,16 @@ class PrescreenedSearch:
     site_domain: str | None
     exact_terms: list[str]
     boost_terms: list[str]
-    search_ms: int
+    # RAW internal duration of prescreen_search()'s own execution, timed
+    # from when this function itself started running -- NOT wall-clock
+    # contribution to the turn (Eval's ruling, 2026-08-04): since
+    # prescreen_search_task fires early (right after Pool, before Router
+    # decides), a meaningful chunk of this can overlap with upstream
+    # stages before d's attempt span even begins. Named _raw so no
+    # consumer sums it into a per-stage total expecting stages to
+    # reconcile to end-to-end wall clock -- that invariant only holds for
+    # marginal/wall-clock-contribution fields, which this is not.
+    search_raw_ms: int
     n_vertex_hits: int
     n_vertex_unconstrained_hits: int
     n_ddg_hits: int
@@ -910,7 +931,7 @@ async def prescreen_search(
         site_domain=site_domain,
         exact_terms=exact_terms,
         boost_terms=boost_terms,
-        search_ms=search_ms,
+        search_raw_ms=search_ms,
         n_vertex_hits=len(vertex_hits),
         n_vertex_unconstrained_hits=len(vertex_unconstrained_hits),
         n_ddg_hits=len(ddg_hits),
@@ -983,7 +1004,7 @@ async def fill_shape_external(
     )
     web_hits = search.hits
     search_backend = search.search_backend
-    search_ms = search.search_ms
+    search_raw_ms = search.search_raw_ms
     vertex_hits_count = search.n_vertex_hits
     vertex_unconstrained_hits_count = search.n_vertex_unconstrained_hits
     ddg_hits_count = search.n_ddg_hits
@@ -1062,7 +1083,7 @@ async def fill_shape_external(
         "empty_slots": len([s for s in filled_slots if s.occupancy == 0]),
         "under_filled": len([s for s in filled_slots if s.under_filled]),
         "total_chunks_assigned": total_assigned,
-        "search_ms": search_ms,
+        "search_raw_ms": search_raw_ms,
         "fetch_ms": fetch_ms,
         "bm25_ms": bm25_ms,
         "total_ms": int((time.monotonic() - t_start) * 1000),

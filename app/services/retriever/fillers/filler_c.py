@@ -33,6 +33,7 @@ import json
 import logging
 import re
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -107,6 +108,14 @@ class ValidatedCitation:
     last_fetch_status: int | None = None
     locate_method: str = ""
     notes: str = ""
+    # 2026-08-04 (Ananth, live catch): every external citation was
+    # defaulting to authority="external" regardless of source, even a
+    # citation from the payer's own official domain (sunshinehealth.com).
+    # filler_d already solved this exact problem (_domain_matches_payer) --
+    # ported here, not imported, same "port don't import" convention this
+    # module's docstring already follows for everything else borrowed from
+    # filler_d/legacy.
+    authority_level: str | None = None
     # Tri-state, per Eval's ruling 2026-07-23 (synthesis-module-spec.md §9.1):
     # True=LLM gave a quote and it was found in the served text; False=LLM
     # gave a quote but it was NOT found anywhere we looked (today's
@@ -586,6 +595,21 @@ async def _retrieve_at_section_page(
     return None, None, ""
 
 
+def _domain_matches_payer(url: str | None, payer_domain: str | None) -> bool:
+    """Ported from filler_d.py (same "port don't import" convention this
+    module already follows) -- a citation is only authoritative-by-domain
+    if it actually came from the payer's OWN site, not a third-party
+    aggregator writing ABOUT the payer. Normalizes both sides (strip a
+    leading "www.", lowercase)."""
+    if not url or not payer_domain:
+        return False
+    host = (urllib.parse.urlparse(url).netloc or "").lower()
+    host = host[4:] if host.startswith("www.") else host
+    domain = payer_domain.lower()
+    domain = domain[4:] if domain.startswith("www.") else domain
+    return bool(host) and host == domain
+
+
 # ---------------------------------------------------------------------------
 # Main citation pipeline -- ask the LLM, locate + fetch each citation.
 # ---------------------------------------------------------------------------
@@ -593,6 +617,7 @@ async def _retrieve_at_section_page(
 
 async def _run_llm_retrieval(
     db: AsyncSession, raw_query: str, *, agent_id: str, correlation_id: str | None = None,
+    payer_domain: str | None = None,
 ) -> tuple[str, list[ValidatedCitation], dict]:
     """Returns (llm_answer, validated_citations, telemetry)."""
     t_start = time.monotonic()
@@ -646,6 +671,7 @@ async def _run_llm_retrieval(
             candidate=cand, status="retrieved_external",
             matched_chunk_text=relay_text, matched_page=cand.page,
             discovered_source_url=cand.url, locate_method="llm_direct_relay",
+            authority_level=("payer_domain_match" if _domain_matches_payer(cand.url, payer_domain) else None),
             notes="relayed directly from the LLM's citation, no corpus cross-check",
         ))
 
@@ -731,6 +757,12 @@ def _chunk_from_citation(v: ValidatedCitation) -> FilledChunk | None:
         is_neighbor=False,
         original_score=original_score,
         assignment_reason=assignment_reason,
+        # Same gap class as quote_verified below -- was computed on
+        # ValidatedCitation but never threaded onto the output FilledChunk,
+        # so every external citation defaulted to authority="external" via
+        # synthesis.py's source_type fallback, even ones from the payer's
+        # own official domain (2026-08-04, live catch).
+        authority_level=v.authority_level,
         # Was silently dropped here -- v already carries the correct tri-state
         # (computed in _run_llm_retrieval), but this constructor never passed
         # it through, so FilledChunk.quote_verified stayed at its None default
@@ -760,17 +792,26 @@ async def fill_shape_llm_retrieval(
     agent_id: str = "filler_c",
     correlation_id: str | None = None,
     tag_matches: list[str] | None = None,
+    payer_context: Any | None = None,
 ) -> FilledShape:
     """Ask the LLM for facts+citations per slot, validate against the
     corpus, reshape into FilledChunk. `pool_result`/`tag_matches` accepted
     for signature consistency with a/b/s; unused in v1 (same "unused v1"
     convention as those fillers' own unused params).
 
+    `payer_context` (2026-08-04): threaded through the same way filler_d
+    receives it (orchestrator resolves once, passes to both -- avoids a
+    second Payor Platform call), used only for `_domain_matches_payer` --
+    every citation from the payer's own official domain now gets marked
+    authoritative instead of the old blanket "external" for all external
+    citations.
+
     One real LLM call per slot, using that slot's own `rewritten_query`
     when set (FAN_OUT themes), falling back to `raw_query` otherwise --
     asking the top-level query for a thematic sub-slot would defeat the
     point of per-theme filling.
     """
+    payer_domain = getattr(payer_context, "site_domain", None)
     filled_slots: list[FilledSlot] = []
     total_assigned = 0
     per_slot_emit: list[dict] = []
@@ -786,6 +827,7 @@ async def fill_shape_llm_retrieval(
         try:
             llm_answer, citations, slot_telemetry = await _run_llm_retrieval(
                 db, query_for_slot, agent_id=agent_id, correlation_id=correlation_id,
+                payer_domain=payer_domain,
             )
             chunks = [c for c in (_chunk_from_citation(v) for v in citations) if c is not None]
             filled_slot.chunks = chunks[: slot.capacity]
