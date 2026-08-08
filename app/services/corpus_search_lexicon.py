@@ -268,13 +268,26 @@ def _normalize_phrase(p: Any) -> str:
 def _extract_phrases(spec: Any) -> list[str]:
     """Pull phrases out of a lexicon entry's spec JSON.
 
-    Accepts ``strong_phrases``, ``aliases``, and ``phrases`` keys (all
-    optional).  Returns a deduplicated lowercase list.
+    Accepts ``strong_phrases``, ``aliases``, ``phrases``, and
+    ``query_expansion_phrases`` keys (all optional).  Returns a
+    deduplicated lowercase list.
+
+    ``query_expansion_phrases`` (2026-08-08, docs/rag-agents/query-
+    expansion-phrases-spec.md, Lexicon-owned field/content, this read side
+    is mine): QUERY-SIDE ONLY -- this function is exclusively used to build
+    the phrase bag THIS module (corpus_search_lexicon.py / Gate) matches
+    queries against. Doc-tagging (policy_path_b.py's own separate
+    get_phrase_to_tag_map) reads only strong_phrases + weak_keywords and
+    deliberately does NOT read this key -- resolves the two-faces tension
+    where a phrase good for expanding queries (generic, e.g. "how to
+    apply") would be toxic for tagging documents (over-broad, would pollute
+    unrelated docs on the next retag). Safe to add here without any
+    doc-tagging-side change.
     """
     if not isinstance(spec, dict):
         return []
     bag: list[str] = []
-    for key in ("strong_phrases", "aliases", "phrases"):
+    for key in ("strong_phrases", "aliases", "phrases", "query_expansion_phrases"):
         v = spec.get(key)
         if isinstance(v, list):
             bag.extend(_normalize_phrase(x) for x in v if x)

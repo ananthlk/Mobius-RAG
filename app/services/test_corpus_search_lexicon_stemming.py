@@ -14,6 +14,7 @@ import pytest
 
 from app.database import AsyncSessionLocal
 from app.services.corpus_search_lexicon import (
+    _extract_phrases,
     _match_entry,
     expand_query_via_lexicon,
     _load_lexicon_snapshot,
@@ -151,3 +152,32 @@ class TestMatchBudgetKindPriority:
             f"matches -- jurisdiction_tags={exp.jurisdiction_tags}"
         )
         assert any("medicaid" in c.lower() for c in exp.jurisdiction_tags)
+
+
+class TestQueryExpansionPhrasesField:
+    """docs/rag-agents/query-expansion-phrases-spec.md (2026-08-08,
+    Lexicon-owned field, this read side mine): query_expansion_phrases is
+    QUERY-SIDE ONLY -- resolves the two-faces tension where a phrase good
+    for matching queries (generic, e.g. "how to apply") is toxic for
+    tagging documents (over-broad, pollutes unrelated docs on retag)."""
+
+    def test_extract_phrases_includes_query_expansion_phrases(self):
+        spec = {
+            "strong_phrases": ["apply for medicaid"],
+            "query_expansion_phrases": ["how to apply", "application process"],
+        }
+        phrases = _extract_phrases(spec)
+        assert "apply for medicaid" in phrases
+        assert "how to apply" in phrases
+        assert "application process" in phrases
+
+    def test_extract_phrases_dedupes_across_strong_and_expansion(self):
+        spec = {
+            "strong_phrases": ["enrollment"],
+            "query_expansion_phrases": ["enrollment"],
+        }
+        assert _extract_phrases(spec).count("enrollment") == 1
+
+    def test_extract_phrases_absent_key_is_backward_compatible(self):
+        spec = {"strong_phrases": ["dme"]}
+        assert _extract_phrases(spec) == ["dme"]
