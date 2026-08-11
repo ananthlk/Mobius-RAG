@@ -393,6 +393,15 @@ class TestRouteIntegration:
         # (2026-08-05) — must ride alongside the derived bucket, not replace it
         assert "top_score_percentile" in fv["per_slot_pool_metadata"]["core"]
         assert "pool_size" in fv["per_slot_pool_metadata"]["core"]
+        # Real gap found live (2026-08-08): authority_requirement/
+        # call_number/caller_mode drove real dispatch decisions all night
+        # but were never persisted -- every cross-agent comparison that
+        # needed them had to fall back to cross-database joins by query
+        # text + timestamp. Eval-RAG's blocking prereq for the production
+        # contradiction-rate tripwire.
+        assert fv["caller_mode"] == "chat.default"
+        assert fv["call_number"] == 1  # unset in this test's RoutingContext -- fails closed to 1
+        assert fv["authority_requirement"] == "any"  # ResourcePosture's own default
 
     def test_default_traffic_authority_conditioned_routes_to_portfolio(self):
         """No authority_requirement set → authority-conditioned routing

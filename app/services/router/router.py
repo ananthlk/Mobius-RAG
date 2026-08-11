@@ -315,6 +315,30 @@ async def route(db_session_factory, ctx: RoutingContext) -> RouterDecision:
             # identical-text queries (Eval-ratified). Absent (None) on
             # non-retry rows.
             "retry_of_decision": ctx.upstream_diagnostics.get("retry_of_decision"),
+            # Real gap found live, hit repeatedly tonight (2026-08-08 -- 5th
+            # instance of the same failure family per Eval-RAG: "a condition
+            # exists but isn't persisted queryably, so you can't verify
+            # apples-to-apples"). authority_requirement/call_number/
+            # caller_mode all drive real dispatch decisions (authority-
+            # conditioned routing, portfolio's turn floors) but were NEVER
+            # in feature_vector -- every comparison/tripwire/audit tonight
+            # that needed them had to fall back to cross-database joins
+            # against chat_turns by query text + timestamp, or trust
+            # unverifiable job names. This is the specific prerequisite
+            # Eval-RAG flagged as blocking their production contradiction-
+            # rate tripwire for the any-100% portfolio rollout (can't
+            # compute an any-specific rate without authority_requirement on
+            # the row). Additive only, same pattern as per_slot_pool_metadata
+            # above -- no behavior change, just stops discarding data that
+            # already exists on resource_posture/ctx.
+            "authority_requirement": resource_posture.authority_requirement,
+            # Fail-closed to 1, same convention as resolve_constraints'
+            # own "call_number": int(resource_posture.get("call_number") or 1)
+            # -- persist the EFFECTIVE value dispatch actually used, not
+            # raw None, which is what every real caller with an unset
+            # call_number implicitly means (turn 1).
+            "call_number": ctx.call_number or 1,
+            "caller_mode": resource_posture.caller_mode,
         },
         strategy_scores=dict(executed_ladder.per_slot_confidence),
         priors_version=bundle.version,
