@@ -32,10 +32,37 @@ from app.services.retriever.shape.contracts import (
 # dependency, and importing it would reach backward across a layer boundary
 # that doesn't exist yet. Kept in sync by hand until/unless TECH proposes a
 # shared source of truth. Verified live 2026-07-23, corpus_search_router.py:118-159.
+#
+# INTERIM 2026-08-11 (Eval-RAG, Ananth's directive to cut slack now rather
+# than wait for the full calibration pass): chat.copilot/chat.default/
+# chat.thinking dropped from 0.70/0.85/0.95 to 0.40/0.45/0.55 -- anchored
+# to the cold-start achievable-gate ceiling (~0.46, the most a strong full
+# 3-strategy portfolio retrieval reaches right NOW, at seed n under the
+# uncalibrated 0.7 same-strategy decay constant; verified live, reconciles
+# to a real reported gate of 0.4633). Real root cause diagnosed same
+# session: 5/5 real production queries -- all single-topic, non-multi-part
+# -- exhausted the full 3-round call_number retry budget before this
+# change, confirming the OLD bars sat above what the gate could ever
+# produce, not that retrieval itself was weak. Set just below that ceiling
+# so a strong single-round retrieval clears with margin (stops needless
+# escalation) while a genuinely weak one (gate ~0.20-0.25) still escalates
+# (bar isn't dead, just reachable). Mode ordering preserved (copilot <
+# default < thinking).
+#
+# NOT the calibrated value -- do not treat as final. Real fix = per-
+# strategy same-strategy-decay fit from forced-arm recall@k data (the 0.7
+# decay constant is itself an uncalibrated guess, confirmed the dominant
+# suppressor) + bars re-anchored to production reference-free faithfulness
+# grading, both queued as Eval-RAG's next-session resume with real budget.
+# As production n accumulates the achievable gate rises toward ~0.59 even
+# under the current decay, and a properly-fit (likely milder) decay lifts
+# it further -- these interim bars will likely need to go UP once that
+# lands, not down. auth_agent/research/batch left untouched -- Eval-RAG's
+# interim scoped explicitly to copilot/default/thinking only.
 _ACCURACY_NEED = {
-    "chat.copilot": 0.70,
-    "chat.default": 0.85,
-    "chat.thinking": 0.95,
+    "chat.copilot": 0.40,
+    "chat.default": 0.45,
+    "chat.thinking": 0.55,
     "auth_agent": 1.00,
     "research": 0.95,
     "batch": 0.90,
