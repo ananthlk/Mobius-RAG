@@ -327,3 +327,69 @@ def test_discovered_via_values_are_a_known_set():
     # outside this set should raise a code review eyebrow.
     sample = {"sitemap", "bfs_link", "manual", "curator"}
     assert sample == KNOWN
+
+
+@pytest.mark.asyncio
+async def test_reupsert_fills_empty_provenance_but_never_clobbers(session):
+    """Real gap found live (2026-08-11, Payor Platform's Sprint 3 sign-off
+    circulation): a URL discovered WITHOUT provenance (e.g. an old
+    sitemap/backfill row, seed_url=NULL) must have its seed_url/
+    depth_from_seed/discovered_via/scrape_job_id filled in the first time
+    a real crawl re-upserts it as a child of a master link -- fill-if-
+    empty, per Payor Platform's described COALESCE semantics. Equally
+    important: a row that ALREADY has real provenance from its original
+    discovery must never have that provenance overwritten by a later,
+    unrelated upsert (e.g. a fresh sitemap re-crawl re-touching a URL
+    that was already tied to a master link)."""
+    from app.curator.service import upsert_source
+
+    url = "https://www.sunshinehealth.com/providers/Billing-manual/guide-1.html"
+
+    # First sight: no provenance at all (mirrors the real 795 pre-existing
+    # Sunshine rows discovered via backfill/sitemap, seed_url=NULL).
+    row = await upsert_source(session, url=url)
+    assert row.seed_url is None
+    assert row.depth_from_seed is None
+    assert row.discovered_via is None
+
+    # Re-upsert as a discovered child of a master link -- must FILL the
+    # previously-empty provenance fields.
+    row = await upsert_source(
+        session, url=url,
+        discovered_via="bfs_link", seed_url="https://www.sunshinehealth.com/providers/Billing-manual.html",
+        depth_from_seed=1, scrape_job_id="job-abc",
+    )
+    assert row.seed_url == "https://www.sunshinehealth.com/providers/Billing-manual.html"
+    assert row.depth_from_seed == 1
+    assert row.discovered_via == "bfs_link"
+    assert row.scrape_job_id == "job-abc"
+
+    # A THIRD upsert with different provenance must NOT clobber what's
+    # already there -- fill-if-empty only, real provenance is sticky.
+    row = await upsert_source(
+        session, url=url,
+        discovered_via="sitemap", seed_url="https://www.sunshinehealth.com/OTHER-master.html",
+        depth_from_seed=9, scrape_job_id="job-xyz",
+    )
+    assert row.seed_url == "https://www.sunshinehealth.com/providers/Billing-manual.html"
+    assert row.depth_from_seed == 1
+    assert row.discovered_via == "bfs_link"
+    assert row.scrape_job_id == "job-abc"
+
+
+@pytest.mark.asyncio
+async def test_reupsert_with_fetch_status_none_leaves_last_fetch_status_null(session):
+    """The AI enumeration lane (list_only mode) posts discovered-not-
+    fetched children with fetch_status=None -- last_fetch_status must
+    stay NULL (the "discovered, not fetched" marker), not get coerced to
+    0 or any other sentinel. Confirms the discover-only write path is
+    distinguishable from a real fetch."""
+    from app.curator.service import upsert_source
+
+    row = await upsert_source(
+        session, url="https://www.sunshinehealth.com/providers/guide-2.html",
+        discovered_via="bfs_link", seed_url="https://www.sunshinehealth.com/providers/Billing-manual.html",
+        fetch_status=None,
+    )
+    assert row.last_fetch_status is None
+    assert row.fetch_attempt_count in (0, None)

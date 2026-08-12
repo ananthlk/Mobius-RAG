@@ -86,6 +86,26 @@ async def upsert_source(
             scrape_job_id=scrape_job_id,
         )
         db.add(row)
+    else:
+        # Real gap found live (2026-08-11, Payor Platform's Sprint 3 sign-
+        # off circulation): seed_url/depth_from_seed/discovered_via/
+        # scrape_job_id were only ever set on first insert -- re-upserting
+        # an EXISTING row (e.g. the 795 pre-existing Sunshine discovered_
+        # sources rows, all seed_url=NULL, discovered via backfill/sitemap
+        # long before any bfs_link enumeration ran) left those fields
+        # permanently NULL forever, even once a real crawl discovers the
+        # same URL as a child of a master link. Fill-if-empty only (never
+        # clobber real provenance a URL already has from its original
+        # discovery) -- matches Payor Platform's described COALESCE
+        # semantics exactly, just needed to actually exist in code.
+        if seed_url and row.seed_url is None:
+            row.seed_url = seed_url
+        if depth_from_seed is not None and row.depth_from_seed is None:
+            row.depth_from_seed = depth_from_seed
+        if discovered_via and row.discovered_via is None:
+            row.discovered_via = discovered_via
+        if scrape_job_id and row.scrape_job_id is None:
+            row.scrape_job_id = scrape_job_id
 
     # Always-update fields (liveness)
     row.last_seen_at = now
