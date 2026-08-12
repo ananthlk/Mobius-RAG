@@ -44,6 +44,15 @@ async def upsert_source(
     state_hint: str | None = None,
     program_hint: str | None = None,
     authority_hint: str | None = None,
+    # ── Attempt-audit fields (Crawler) ──────────────────────────────
+    # All optional and default-off: existing callers are unaffected and
+    # log nothing. Pass ``record_attempt=True`` to append a row to
+    # source_fetch_attempts alongside the liveness update.
+    record_attempt: bool = False,
+    latency_ms: int | None = None,
+    robots_decision: str | None = None,
+    error_message: str | None = None,
+    run_id: str | None = None,
 ) -> DiscoveredSource:
     """Insert or update a discovered_sources row.
 
@@ -87,6 +96,11 @@ async def upsert_source(
         )
         db.add(row)
 
+    # Capture the pre-fetch hash BEFORE the liveness block overwrites it —
+    # content_hash_before is the whole basis of drift attribution, and by
+    # the time we append the attempt row below it is already gone.
+    hash_before = row.content_hash
+
     # Always-update fields (liveness)
     row.last_seen_at = now
     if fetch_status is not None:
@@ -105,6 +119,31 @@ async def upsert_source(
             row.content_hash = content_hash
 
     await db.flush()
+
+    if record_attempt:
+        # Flush first: a brand-new row has no id until it hits the DB, and
+        # the attempt FKs to it.
+        #
+        # Deliberately AFTER the liveness update and outside the
+        # ``fetch_status is not None`` guard: a network-level failure has no
+        # HTTP status at all, and those are exactly the attempts the audit
+        # trail must not lose. Callers signal them with
+        # ``record_attempt=True, fetch_status=None, error_message=...``.
+        from app.curator.fetch_attempts import record_fetch_attempt
+
+        await record_fetch_attempt(
+            db,
+            discovered_source_id=row.id,
+            http_status=fetch_status,
+            bytes_downloaded=content_length,
+            latency_ms=latency_ms,
+            robots_decision=robots_decision,
+            content_hash_before=hash_before,
+            content_hash_after=content_hash,
+            error_message=error_message,
+            run_id=run_id,
+        )
+
     return row
 
 
