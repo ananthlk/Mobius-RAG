@@ -104,6 +104,24 @@ async def session():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Crawler attempt-audit trail (DB seat ruled 2026-08-12). Mirrors
+        # app/migrations/add_source_fetch_attempts.py, minus pg types.
+        await conn.exec_driver_sql("""
+            CREATE TABLE source_fetch_attempts (
+                attempt_id TEXT PRIMARY KEY,
+                discovered_source_id TEXT NOT NULL
+                    REFERENCES discovered_sources(id) ON DELETE CASCADE,
+                attempted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                http_status INTEGER,
+                bytes_downloaded INTEGER,
+                latency_ms INTEGER,
+                robots_decision TEXT,
+                content_hash_before TEXT,
+                content_hash_after TEXT,
+                error_message TEXT,
+                run_id TEXT
+            )
+        """)
 
     # Make the model class talk to this engine. The model uses
     # column types that SQLite tolerates for INSERT/SELECT (TEXT for
@@ -393,3 +411,143 @@ async def test_reupsert_with_fetch_status_none_leaves_last_fetch_status_null(ses
     )
     assert row.last_fetch_status is None
     assert row.fetch_attempt_count in (0, None)
+
+
+# ── Attempt-audit trail (source_fetch_attempts) ──────────────────────
+#
+# DB seat ruled the need ACCEPTED 2026-08-12 and authored the DDL. These
+# lock down the behaviour that makes the trail worth having: that it
+# records what discovered_sources structurally cannot.
+
+
+async def _attempts(session, source_id=None):
+    """All attempt rows, oldest first. Raw SQL — mirrors how an auditor
+    would actually query the trail.
+
+    NOTE: SQLite persists UUIDs as dashless hex ('e95a94a9...') while
+    ``str(uuid)`` renders dashes, so a naive ``WHERE id = :sid`` never
+    matches here. Purely a scaffold artifact — Postgres has a native uuid
+    type — so we normalise both sides rather than distort the schema.
+    """
+    from sqlalchemy import text
+
+    result = await session.execute(
+        text("SELECT * FROM source_fetch_attempts ORDER BY rowid")
+    )
+    rows = [dict(r._mapping) for r in result]
+    if source_id is None:
+        return rows
+
+    def _norm(v):
+        return str(v).replace("-", "").lower()
+
+    return [r for r in rows if _norm(r["discovered_source_id"]) == _norm(source_id)]
+
+
+@pytest.mark.asyncio
+async def test_attempt_not_recorded_unless_requested(session):
+    """Default-off. Every pre-existing caller of upsert_source must keep
+    working and write nothing to the trail -- otherwise adding the audit
+    table silently changes the behaviour of paths I don't own."""
+    from app.curator.service import upsert_source
+
+    await upsert_source(
+        session, url="https://www.sunshinehealth.com/a.html", fetch_status=200,
+    )
+    assert await _attempts(session) == []
+
+
+@pytest.mark.asyncio
+async def test_attempt_records_hash_transition_not_just_final_state(session):
+    """THE point of the trail: discovered_sources keeps only the latest
+    hash, so after a change you can no longer see what it changed FROM.
+    The attempt row must preserve before -> after."""
+    from app.curator.service import upsert_source
+
+    url = "https://www.sunshinehealth.com/policy.pdf"
+    await upsert_source(
+        session, url=url, fetch_status=200, content_hash="hash-v1",
+        record_attempt=True, run_id="run-1",
+    )
+    row = await upsert_source(
+        session, url=url, fetch_status=200, content_hash="hash-v2",
+        record_attempt=True, run_id="run-2",
+    )
+
+    trail = await _attempts(session, row.id)
+    assert len(trail) == 2
+    # First fetch: nothing before it.
+    assert trail[0]["content_hash_before"] is None
+    assert trail[0]["content_hash_after"] == "hash-v1"
+    # Second: the transition is preserved even though the source row has
+    # already been overwritten to v2.
+    assert trail[1]["content_hash_before"] == "hash-v1"
+    assert trail[1]["content_hash_after"] == "hash-v2"
+    assert row.content_hash == "hash-v2"
+
+
+@pytest.mark.asyncio
+async def test_attempt_records_network_failure_with_no_http_status(session):
+    """A timeout/DNS failure has NO status code. discovered_sources can't
+    represent it distinctly (last_fetch_status stays NULL, same as
+    never-fetched), so the trail is the only place it survives. This is
+    the case that must not be dropped by the fetch_status guard."""
+    from app.curator.service import upsert_source
+
+    row = await upsert_source(
+        session, url="https://timeout.example.com/x.pdf",
+        fetch_status=None, record_attempt=True,
+        error_message="connect timeout after 30s", robots_decision="unknown",
+    )
+
+    trail = await _attempts(session, row.id)
+    assert len(trail) == 1
+    assert trail[0]["http_status"] is None
+    assert trail[0]["error_message"] == "connect timeout after 30s"
+    assert trail[0]["robots_decision"] == "unknown"
+    # The source row itself still looks "never fetched" -- which is exactly
+    # why the trail has to carry this.
+    assert row.last_fetch_status is None
+
+
+@pytest.mark.asyncio
+async def test_trail_distinguishes_transient_403_from_persistent_block(session):
+    """The motivating defect class. [403, 200, 200] and [403, 403, 403]
+    collapse to the same single last_fetch_status column depending only on
+    when you look; the trail keeps them distinguishable, which is what
+    makes a robots fix provable rather than asserted."""
+    from app.curator.service import upsert_source
+
+    transient = "https://waf.example.com/transient.html"
+    for status, decision in ((403, "disallow_all"), (200, "crawlable"), (200, "crawlable")):
+        t_row = await upsert_source(
+            session, url=transient, fetch_status=status,
+            record_attempt=True, robots_decision=decision,
+        )
+
+    blocked = "https://waf.example.com/blocked.html"
+    for _ in range(3):
+        b_row = await upsert_source(
+            session, url=blocked, fetch_status=403,
+            record_attempt=True, robots_decision="disallow_all",
+        )
+
+    assert [a["http_status"] for a in await _attempts(session, t_row.id)] == [403, 200, 200]
+    assert [a["http_status"] for a in await _attempts(session, b_row.id)] == [403, 403, 403]
+    # Latest-state alone cannot tell these apart in the general case --
+    # here both end on a status that hides the history that produced it.
+    assert t_row.last_fetch_status == 200
+    assert b_row.last_fetch_status == 403
+
+
+@pytest.mark.asyncio
+async def test_bad_robots_decision_rejected_at_call_site(session):
+    """Typos must fail loudly rather than silently split audit aggregates
+    (a 'crawlabel' bucket nobody notices is worse than an exception)."""
+    from app.curator.service import upsert_source
+
+    with pytest.raises(ValueError, match="robots_decision"):
+        await upsert_source(
+            session, url="https://x.example.com/y.html", fetch_status=200,
+            record_attempt=True, robots_decision="crawlabel",
+        )
