@@ -87,7 +87,6 @@ logger = logging.getLogger(__name__)
 # reason to change them; this module doesn't recalibrate, it re-implements).
 # ---------------------------------------------------------------------------
 
-_FETCH_TIMEOUT_S = 8.0
 _MAX_PASSAGE_CHARS = 2000
 _VERTEX_GROUNDING_MODEL = "gemini-2.5-flash"
 # Real bug found live, 2026-08-04 (Ananth's catch: a bank run stuck at the
@@ -375,7 +374,7 @@ async def _search_web_vertex(
     real search operators in the prompt text (grounding has no structured
     field for them); ``grounding_chunks`` exposes no per-source snippet, so
     hits come back with ``snippet=""`` — real page text is filled in by
-    ``_fetch_and_extract``.
+    ``_fetch_via_crawler_batch`` (Crawler's shared fetch service).
     """
     prompt = query
     for term in (exact or []):
@@ -481,118 +480,109 @@ async def _search_web(
 # ---------------------------------------------------------------------------
 
 
-async def _fetch_and_extract(hit: _SearchHit) -> _Passage:
-    """Fetch one URL with timeout, extract main text (HTML sections or PDF
-    page text). Ported from ``corpus_search_strategy_d.py``'s
-    ``_fetch_and_extract``, re-verified fresh (real HTTP call, real
-    extraction, not assumed correct from reading the original).
+# Migration (2026-08-13, Ananth's directive: "ask them to use you, not
+# incorporate -- not 2 places"): the Crawler agent (Sourcing sub-scope,
+# owns mobius-web-scraper + all no-crawl-rules compliance fleet-wide)
+# found this module's old _fetch_and_extract had ZERO robots.txt
+# enforcement on arbitrary open-web URLs -- a real compliance gap (payer
+# WAFs + at least one payer's ToU forbid scraping outright), plus a fresh
+# httpx.AsyncClient PER HIT (15 hits = 15 TCP+TLS handshakes, no pooling).
+# CALL, DON'T COPY: their concrete case for the seam -- they'd just found
+# a silent data-corruption bug (Brotli responses returned as raw
+# compressed bytes with a false "200 ok" status, extraction only ever
+# reporting "extract_failed") that would have shipped invisibly if this
+# module had vendored their fetch code instead of calling their service.
+# Calling means every future fix like that lands here automatically.
+_CRAWLER_FETCH_BATCH_URL = "https://mobius-web-scraper-ortabkknqa-uc.a.run.app/fetch/batch"
+_CRAWLER_FETCH_TIME_BUDGET_S = 20
+_CRAWLER_FETCH_TIMEOUT_S = 8
+_CRAWLER_FETCH_CONCURRENCY = 8
+# Give the whole-batch HTTP call itself a little headroom over the
+# service's own time_budget_s so a slightly-late batch reply doesn't get
+# double-timed-out by our own client on top of the service's own budget.
+_CRAWLER_FETCH_CLIENT_TIMEOUT_S = _CRAWLER_FETCH_TIME_BUDGET_S + 5
+
+
+async def _fetch_via_crawler_batch(hits: list[_SearchHit]) -> list[_Passage]:
+    """Fetch+extract a batch of search hits via the Crawler's shared
+    fetch service (robots-gated, pooled connections, PDF+HTML extraction)
+    instead of this module doing its own per-hit HTTP+extraction.
+
+    Contract (Crawler-authored, matches _Passage field-for-field so this
+    is a mapping, not a redesign): POST {url:[...], time_budget_s,
+    max_chars, timeout_s, concurrency} -> {results:[{url, text,
+    fetch_status, fetch_ms, title, content_type, robots_decision}],
+    partial, ok_count, robots_blocked_count}. Results come back in INPUT
+    ORDER with one row per input URL -- title/snippet are re-attached
+    from the ORIGINAL hit (the service doesn't have our search-result
+    snippet), everything else maps straight through. fetch_status
+    vocabulary is a superset of the old one (adds "robots_disallowed",
+    "skipped_budget", "not_pdf") -- downstream code already treats
+    anything other than "ok" as unusable, so no caller-side change needed
+    for the new values.
+
+    A whole-batch failure (network down, service unreachable) degrades to
+    one _Passage per hit with fetch_status=f"error:{...}" -- same failure
+    shape every existing per-hit caller/test already expects, so a total
+    outage here doesn't crash the pipeline, it just yields zero usable
+    passages same as before.
     """
+    if not hits:
+        return []
     t_start = time.monotonic()
     try:
-        async with httpx.AsyncClient(
-            timeout=_FETCH_TIMEOUT_S,
-            follow_redirects=True,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
-                "Accept": (
-                    "text/html,application/xhtml+xml,application/xml;q=0.9,"
-                    "image/avif,image/webp,*/*;q=0.8"
-                ),
-                "Accept-Language": "en-US,en;q=0.9",
-            },
-        ) as client:
-            resp = await client.get(hit.url)
-            elapsed = int((time.monotonic() - t_start) * 1000)
-            if resp.status_code >= 400:
-                return _Passage(
-                    url=hit.url, title=hit.title, snippet=hit.snippet,
-                    text="", fetch_status=f"http_{resp.status_code}", fetch_ms=elapsed,
-                )
-            content_type = (resp.headers.get("content-type") or "").lower()
-            body_bytes = resp.content
-            html = resp.text
+        async with httpx.AsyncClient(timeout=_CRAWLER_FETCH_CLIENT_TIMEOUT_S) as client:
+            resp = await client.post(
+                _CRAWLER_FETCH_BATCH_URL,
+                json={
+                    "urls": [h.url for h in hits],
+                    "time_budget_s": _CRAWLER_FETCH_TIME_BUDGET_S,
+                    "max_chars": _MAX_PASSAGE_CHARS,
+                    "timeout_s": _CRAWLER_FETCH_TIMEOUT_S,
+                    "concurrency": _CRAWLER_FETCH_CONCURRENCY,
+                },
+            )
+            resp.raise_for_status()
+            payload = resp.json()
     except Exception as exc:
-        return _Passage(
-            url=hit.url, title=hit.title, snippet=hit.snippet,
-            text="", fetch_status=f"error:{type(exc).__name__}",
-            fetch_ms=int((time.monotonic() - t_start) * 1000),
-        )
-
-    is_pdf = (
-        "application/pdf" in content_type
-        or hit.url.lower().endswith(".pdf")
-        or body_bytes[:4] == b"%PDF"
-    )
-    if is_pdf:
-        try:
-            import fitz  # PyMuPDF
-
-            doc = fitz.open(stream=body_bytes, filetype="pdf")
-            page_texts: list[str] = []
-            char_total = 0
-            for page in doc:
-                pt = (page.get_text() or "").strip()
-                if not pt:
-                    continue
-                page_texts.append(pt)
-                char_total += len(pt)
-                if char_total >= _MAX_PASSAGE_CHARS:
-                    break
-            doc.close()
-            text = "\n\n".join(page_texts)[:_MAX_PASSAGE_CHARS]
-            elapsed = int((time.monotonic() - t_start) * 1000)
-            if not text:
-                return _Passage(
-                    url=hit.url, title=hit.title, snippet=hit.snippet,
-                    text=hit.snippet, fetch_status="pdf_empty", fetch_ms=elapsed,
-                )
-            return _Passage(
-                url=hit.url, title=hit.title, snippet=hit.snippet,
-                text=text, fetch_status="ok", fetch_ms=elapsed,
-            )
-        except Exception as exc:
-            return _Passage(
-                url=hit.url, title=hit.title, snippet=hit.snippet,
-                text=hit.snippet, fetch_status=f"pdf_extract_failed:{type(exc).__name__}",
-                fetch_ms=int((time.monotonic() - t_start) * 1000),
-            )
-
-    try:
-        from app.services.html_extractor import extract_sections
-
-        sections = extract_sections(html, source_url=hit.url)
-        bodies: list[str] = []
-        for s in sections:
-            body = (s.get("text") or "").strip()
-            if body:
-                bodies.append(body)
-        bodies.sort(key=lambda b: -len(b))
-        text = ""
-        for b in bodies:
-            if len(text) + len(b) + 2 > _MAX_PASSAGE_CHARS:
-                remaining = _MAX_PASSAGE_CHARS - len(text)
-                if remaining > 200:
-                    text += "\n\n" + b[:remaining]
-                break
-            text = (text + "\n\n" + b) if text else b
-        if not text:
-            text = re.sub(r"<[^>]+>", " ", html)
-            text = re.sub(r"\s+", " ", text).strip()[:_MAX_PASSAGE_CHARS]
         elapsed = int((time.monotonic() - t_start) * 1000)
-        return _Passage(
-            url=hit.url, title=hit.title, snippet=hit.snippet,
-            text=text, fetch_status="ok", fetch_ms=elapsed,
+        logger.warning(
+            "[filler_d] crawler fetch/batch call failed, degrading to zero "
+            "usable passages for %d hits: %s", len(hits), exc,
         )
-    except Exception as exc:
-        return _Passage(
-            url=hit.url, title=hit.title, snippet=hit.snippet,
-            text=hit.snippet, fetch_status=f"extract_failed:{type(exc).__name__}",
-            fetch_ms=int((time.monotonic() - t_start) * 1000),
+        return [
+            _Passage(
+                url=h.url, title=h.title, snippet=h.snippet,
+                text="", fetch_status=f"error:{type(exc).__name__}", fetch_ms=elapsed,
+            )
+            for h in hits
+        ]
+
+    results = payload.get("results", [])
+    if payload.get("robots_blocked_count"):
+        logger.info(
+            "[filler_d] crawler batch: %d/%d ok, %d robots-blocked, partial=%s",
+            payload.get("ok_count", 0), len(hits),
+            payload.get("robots_blocked_count", 0), payload.get("partial", False),
         )
+    # Defensive, not assumed: if the service ever returns a short/reordered
+    # list (contract violation), don't silently misattribute title/snippet
+    # to the wrong hit -- fall back to per-hit error rows for the tail.
+    passages: list[_Passage] = []
+    for i, h in enumerate(hits):
+        if i >= len(results):
+            passages.append(_Passage(
+                url=h.url, title=h.title, snippet=h.snippet,
+                text="", fetch_status="error:missing_from_batch_response", fetch_ms=0,
+            ))
+            continue
+        r = results[i]
+        passages.append(_Passage(
+            url=h.url, title=h.title, snippet=h.snippet,
+            text=r.get("text") or "", fetch_status=r.get("fetch_status") or "error:no_status",
+            fetch_ms=int(r.get("fetch_ms") or 0),
+        ))
+    return passages
 
 
 # ---------------------------------------------------------------------------
@@ -1013,10 +1003,7 @@ async def fill_shape_external(
     fetch_ms = 0
     if web_hits:
         t_fetch = time.monotonic()
-        passages = list(await asyncio.gather(
-            *[_fetch_and_extract(h) for h in web_hits[:n_fetch]],
-            return_exceptions=False,
-        ))
+        passages = await _fetch_via_crawler_batch(web_hits[:n_fetch])
         fetch_ms = int((time.monotonic() - t_fetch) * 1000)
 
     n_ok = sum(1 for p in passages if p.fetch_status == "ok" and p.text.strip())

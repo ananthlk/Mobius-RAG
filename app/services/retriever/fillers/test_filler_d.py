@@ -2,9 +2,10 @@
 
 Real behavior verification, not "it looks like the original" — pure-logic
 pieces (query enrichment, reranking, chunk mapping) are tested directly;
-network-touching pieces (_search_web_vertex/_search_web/_fetch_and_extract)
-are monkeypatched at the module level so the integration test exercises the
-real slot-assignment/emit logic without a live network call.
+network-touching pieces (_search_web_vertex/_search_web/
+_fetch_via_crawler_batch) are monkeypatched at the module level so the
+integration test exercises the real slot-assignment/emit logic without a
+live network call.
 """
 
 from __future__ import annotations
@@ -34,6 +35,18 @@ from app.services.retriever.fillers.filler_d import (
 from app.services.retriever.fillers.payer_context import PayerContext
 from app.services.retriever.pool.contracts import PoolResult
 from app.services.retriever.shape.slots import AnswerShapeResult, AnswerSlot
+
+
+def _as_batch(per_hit_fn):
+    """Adapts a per-hit fake (the shape every existing test already uses)
+    into the batched shape _fetch_via_crawler_batch actually has now
+    (2026-08-13 migration to Crawler's shared fetch service, Ananth's
+    directive: call the service, don't vendor it). Keeps every test's
+    real per-hit fake behavior/intent unchanged -- only the monkeypatch
+    TARGET name and call shape moved, not what each test is verifying."""
+    async def _batch(hits):
+        return [await per_hit_fn(h) for h in hits]
+    return _batch
 
 
 # ---------------------------------------------------------------------------
@@ -515,7 +528,7 @@ class TestPrescreenSearch:
 
         monkeypatch.setattr(filler_d, "_search_web_vertex", fake_vertex)
         monkeypatch.setattr(filler_d, "_search_web", _fake_ddg_empty)
-        monkeypatch.setattr(filler_d, "_fetch_and_extract", fake_fetch)
+        monkeypatch.setattr(filler_d, "_fetch_via_crawler_batch", _as_batch(fake_fetch))
         monkeypatch.setattr(filler_d, "_score_bm25", fake_bm25)
 
         await prescreen_search("test query")
@@ -544,7 +557,7 @@ class TestFillShapeExternalPrescreened:
 
         monkeypatch.setattr(filler_d, "_search_web_vertex", fake_vertex)
         monkeypatch.setattr(filler_d, "_search_web", fake_ddg)
-        monkeypatch.setattr(filler_d, "_fetch_and_extract", fake_fetch)
+        monkeypatch.setattr(filler_d, "_fetch_via_crawler_batch", _as_batch(fake_fetch))
 
         prescreened = filler_d.PrescreenedSearch(
             hits=[_SearchHit("t", "", "http://prescreened.com")],
@@ -575,7 +588,7 @@ class TestFillShapeExternalPrescreened:
 
         monkeypatch.setattr(filler_d, "_search_web_vertex", fake_vertex)
         monkeypatch.setattr(filler_d, "_search_web", _fake_ddg_empty)
-        monkeypatch.setattr(filler_d, "_fetch_and_extract", fake_fetch)
+        monkeypatch.setattr(filler_d, "_fetch_via_crawler_batch", _as_batch(fake_fetch))
 
         result = await fill_shape_external(
             PoolResult(), _shape(capacity=1), "test query", db=None,
@@ -598,7 +611,7 @@ class TestFillShapeExternal:
 
         monkeypatch.setattr(filler_d, "_search_web_vertex", fake_vertex)
         monkeypatch.setattr(filler_d, "_search_web", _fake_ddg_empty)
-        monkeypatch.setattr(filler_d, "_fetch_and_extract", fake_fetch)
+        monkeypatch.setattr(filler_d, "_fetch_via_crawler_batch", _as_batch(fake_fetch))
 
         result = await fill_shape_external(PoolResult(), _shape(), "test query", db=None)
 
@@ -617,7 +630,7 @@ class TestFillShapeExternal:
 
         monkeypatch.setattr(filler_d, "_search_web_vertex", fake_vertex)
         monkeypatch.setattr(filler_d, "_search_web", _fake_ddg_empty)
-        monkeypatch.setattr(filler_d, "_fetch_and_extract", fake_fetch)
+        monkeypatch.setattr(filler_d, "_fetch_via_crawler_batch", _as_batch(fake_fetch))
 
         result = await fill_shape_external(PoolResult(), _shape(), "test query", db=None)
 
@@ -634,7 +647,7 @@ class TestFillShapeExternal:
 
         monkeypatch.setattr(filler_d, "_search_web_vertex", fake_vertex)
         monkeypatch.setattr(filler_d, "_search_web", _fake_ddg_empty)
-        monkeypatch.setattr(filler_d, "_fetch_and_extract", fake_fetch)
+        monkeypatch.setattr(filler_d, "_fetch_via_crawler_batch", _as_batch(fake_fetch))
 
         result = await fill_shape_external(
             PoolResult(), _shape(capacity=3), "test query", db=None, tag_matches=[],
@@ -665,7 +678,7 @@ class TestFillShapeExternal:
 
         monkeypatch.setattr(filler_d, "_search_web_vertex", fake_vertex)
         monkeypatch.setattr(filler_d, "_search_web", _fake_ddg_empty)
-        monkeypatch.setattr(filler_d, "_fetch_and_extract", fake_fetch)
+        monkeypatch.setattr(filler_d, "_fetch_via_crawler_batch", _as_batch(fake_fetch))
         monkeypatch.setattr(filler_d, "_score_bm25", fake_bm25)
 
         result = await fill_shape_external(
@@ -697,7 +710,7 @@ class TestFillShapeExternal:
 
         monkeypatch.setattr(filler_d, "_search_web_vertex", fake_vertex)
         monkeypatch.setattr(filler_d, "_search_web", _fake_ddg_empty)
-        monkeypatch.setattr(filler_d, "_fetch_and_extract", fake_fetch)
+        monkeypatch.setattr(filler_d, "_fetch_via_crawler_batch", _as_batch(fake_fetch))
 
         result = await fill_shape_external(
             PoolResult(), _shape(capacity=2), "coverage question", db=None,
@@ -733,7 +746,7 @@ class TestFillShapeExternal:
 
         monkeypatch.setattr(filler_d, "_search_web_vertex", fake_vertex)
         monkeypatch.setattr(filler_d, "_search_web", fake_ddg)
-        monkeypatch.setattr(filler_d, "_fetch_and_extract", fake_fetch)
+        monkeypatch.setattr(filler_d, "_fetch_via_crawler_batch", _as_batch(fake_fetch))
 
         result = await fill_shape_external(
             PoolResult(), _shape(), "test query", db=None,
@@ -773,7 +786,7 @@ class TestFillShapeExternal:
 
         monkeypatch.setattr(filler_d, "_search_web_vertex", fake_vertex)
         monkeypatch.setattr(filler_d, "_search_web", _fake_ddg_empty)
-        monkeypatch.setattr(filler_d, "_fetch_and_extract", fake_fetch)
+        monkeypatch.setattr(filler_d, "_fetch_via_crawler_batch", _as_batch(fake_fetch))
 
         result = await fill_shape_external(PoolResult(), _shape(), "test query", db=None)
 
@@ -792,7 +805,7 @@ class TestFillShapeExternal:
 
         monkeypatch.setattr(filler_d, "_search_web_vertex", fake_vertex)
         monkeypatch.setattr(filler_d, "_search_web", _fake_ddg_empty)
-        monkeypatch.setattr(filler_d, "_fetch_and_extract", fake_fetch)
+        monkeypatch.setattr(filler_d, "_fetch_via_crawler_batch", _as_batch(fake_fetch))
 
         shape = AnswerShapeResult(slots=[
             AnswerSlot(slot_id="s0", slot_semantics="external_context", capacity=1, required=False),
@@ -892,9 +905,158 @@ class TestFillShapeExternal:
 
         monkeypatch.setattr(filler_d, "_search_web_vertex", fake_vertex)
         monkeypatch.setattr(filler_d, "_search_web", _fake_ddg_empty)
-        monkeypatch.setattr(filler_d, "_fetch_and_extract", fake_fetch)
+        monkeypatch.setattr(filler_d, "_fetch_via_crawler_batch", _as_batch(fake_fetch))
 
         r1 = await fill_shape_external(PoolResult(), _shape(), "q", db=None)
         r2 = await fill_shape_external(PoolResult(), _shape(), "q", db=None)
 
         assert r1.slots[0].chunks[0].chunk_id == r2.slots[0].chunks[0].chunk_id
+
+
+# ---------------------------------------------------------------------------
+# _fetch_via_crawler_batch -- the 2026-08-13 migration to Crawler's shared
+# fetch service (robots-gated, pooled). Real, new logic (not relocated),
+# so it gets its own direct tests, not just monkeypatched-away in the
+# fill_shape_external tests above.
+# ---------------------------------------------------------------------------
+
+
+class _FakeCrawlerResponse:
+    def __init__(self, status_code, data):
+        self.status_code = status_code
+        self._data = data
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"http_{self.status_code}")
+
+    def json(self):
+        return self._data
+
+
+class _FakeCrawlerClient:
+    """Stands in for httpx.AsyncClient -- async context manager whose
+    .post() returns a canned crawler-service response, so the batch-fetch
+    logic is exercised without a real network call. Records the last
+    payload posted so tests can assert on the request shape too."""
+
+    last_payload = None
+
+    def __init__(self, response=None, *, raises=None):
+        self._response = response
+        self._raises = raises
+
+    def __call__(self, *args, **kwargs):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, *, json):
+        type(self).last_payload = json
+        if self._raises:
+            raise self._raises
+        return self._response
+
+
+def _patch_crawler(monkeypatch, *, status_code=200, data=None, raises=None):
+    fake_client = _FakeCrawlerClient(
+        _FakeCrawlerResponse(status_code, data or {}), raises=raises,
+    )
+    monkeypatch.setattr(filler_d.httpx, "AsyncClient", fake_client)
+    return fake_client
+
+
+class TestFetchViaCrawlerBatch:
+    @pytest.mark.asyncio
+    async def test_empty_hits_returns_empty_without_a_call(self, monkeypatch):
+        fake_client = _patch_crawler(monkeypatch, data={"results": []})
+        result = await filler_d._fetch_via_crawler_batch([])
+        assert result == []
+        assert _FakeCrawlerClient.last_payload is None
+
+    @pytest.mark.asyncio
+    async def test_happy_path_maps_results_in_order_reattaching_title_snippet(self, monkeypatch):
+        """The service doesn't know our search-result title/snippet -- those
+        must come back from the ORIGINAL hit, matched by position, not from
+        the response body."""
+        _patch_crawler(monkeypatch, data={
+            "results": [
+                {"url": "http://a.com", "text": "text a", "fetch_status": "ok", "fetch_ms": 100},
+                {"url": "http://b.com", "text": "text b", "fetch_status": "ok", "fetch_ms": 200},
+            ],
+            "ok_count": 2, "robots_blocked_count": 0, "partial": False,
+        })
+        hits = [
+            _SearchHit("Title A", "snippet a", "http://a.com"),
+            _SearchHit("Title B", "snippet b", "http://b.com"),
+        ]
+        result = await filler_d._fetch_via_crawler_batch(hits)
+        assert [p.url for p in result] == ["http://a.com", "http://b.com"]
+        assert [p.title for p in result] == ["Title A", "Title B"]
+        assert [p.snippet for p in result] == ["snippet a", "snippet b"]
+        assert [p.text for p in result] == ["text a", "text b"]
+        assert [p.fetch_status for p in result] == ["ok", "ok"]
+        assert [p.fetch_ms for p in result] == [100, 200]
+
+    @pytest.mark.asyncio
+    async def test_request_payload_shape(self, monkeypatch):
+        fake_client = _patch_crawler(monkeypatch, data={"results": [
+            {"url": "http://a.com", "text": "t", "fetch_status": "ok", "fetch_ms": 5},
+        ]})
+        await filler_d._fetch_via_crawler_batch([_SearchHit("t", "s", "http://a.com")])
+        payload = _FakeCrawlerClient.last_payload
+        assert payload["urls"] == ["http://a.com"]
+        assert payload["time_budget_s"] == filler_d._CRAWLER_FETCH_TIME_BUDGET_S
+        assert payload["max_chars"] == filler_d._MAX_PASSAGE_CHARS
+        assert payload["timeout_s"] == filler_d._CRAWLER_FETCH_TIMEOUT_S
+        assert payload["concurrency"] == filler_d._CRAWLER_FETCH_CONCURRENCY
+
+    @pytest.mark.asyncio
+    async def test_new_fetch_status_values_pass_through_unmodified(self, monkeypatch):
+        """robots_disallowed/skipped_budget/not_pdf are new vocabulary the
+        service can return -- downstream already treats anything but "ok"
+        as unusable, so these must pass through as-is, not get coerced."""
+        _patch_crawler(monkeypatch, data={"results": [
+            {"url": "http://a.com", "text": "", "fetch_status": "robots_disallowed", "fetch_ms": 5},
+            {"url": "http://b.com", "text": "", "fetch_status": "skipped_budget", "fetch_ms": 0},
+            {"url": "http://c.com", "text": "", "fetch_status": "not_pdf", "fetch_ms": 5},
+        ]})
+        hits = [_SearchHit("t", "s", u) for u in ("http://a.com", "http://b.com", "http://c.com")]
+        result = await filler_d._fetch_via_crawler_batch(hits)
+        assert [p.fetch_status for p in result] == ["robots_disallowed", "skipped_budget", "not_pdf"]
+
+    @pytest.mark.asyncio
+    async def test_whole_batch_failure_degrades_to_per_hit_error_passages(self, monkeypatch):
+        """A total outage (service unreachable) must not crash the caller --
+        degrades to the same error-shape callers already handle for a
+        single failed fetch, just for every hit in the batch."""
+        _patch_crawler(monkeypatch, raises=RuntimeError("connection refused"))
+        hits = [_SearchHit("t", "s", "http://a.com"), _SearchHit("t2", "s2", "http://b.com")]
+        result = await filler_d._fetch_via_crawler_batch(hits)
+        assert len(result) == 2
+        assert all(p.fetch_status.startswith("error:") for p in result)
+        assert all(p.text == "" for p in result)
+        # title/snippet still correctly attached even on total failure
+        assert result[0].title == "t"
+        assert result[1].url == "http://b.com"
+
+    @pytest.mark.asyncio
+    async def test_short_response_does_not_misattribute_tail_hits(self, monkeypatch):
+        """Defensive, not assumed: if the service ever returns fewer rows
+        than requested URLs (contract violation), the tail must degrade to
+        error rows for the CORRECT hits, never silently shift title/snippet
+        from one URL onto another."""
+        _patch_crawler(monkeypatch, data={"results": [
+            {"url": "http://a.com", "text": "text a", "fetch_status": "ok", "fetch_ms": 50},
+        ]})
+        hits = [_SearchHit("A", "sa", "http://a.com"), _SearchHit("B", "sb", "http://b.com")]
+        result = await filler_d._fetch_via_crawler_batch(hits)
+        assert result[0].fetch_status == "ok"
+        assert result[0].url == "http://a.com"
+        assert result[1].fetch_status == "error:missing_from_batch_response"
+        assert result[1].url == "http://b.com"
+        assert result[1].title == "B"
