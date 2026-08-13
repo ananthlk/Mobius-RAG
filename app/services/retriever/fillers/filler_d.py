@@ -61,6 +61,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 import urllib.parse
@@ -493,7 +494,14 @@ async def _search_web(
 # reporting "extract_failed") that would have shipped invisibly if this
 # module had vendored their fetch code instead of calling their service.
 # Calling means every future fix like that lands here automatically.
-_CRAWLER_FETCH_BATCH_URL = "https://mobius-web-scraper-ortabkknqa-uc.a.run.app/fetch/batch"
+# Real gap Crawler caught in review (2026-08-13): this was a hardcoded
+# literal, fragile across environments (dev/staging/prod each have their
+# own mobius-web-scraper URL) -- same env-var-with-fallback pattern
+# payer_context.py/corpus_search_strategy_d.py already use for
+# MOBIUS_PAYOR_URL, not a new convention.
+_CRAWLER_FETCH_BATCH_URL = os.environ.get(
+    "CRAWLER_FETCH_BATCH_URL", "https://mobius-web-scraper-ortabkknqa-uc.a.run.app",
+).rstrip("/") + "/fetch/batch"
 _CRAWLER_FETCH_TIME_BUDGET_S = 20
 _CRAWLER_FETCH_TIMEOUT_S = 8
 _CRAWLER_FETCH_CONCURRENCY = 8
