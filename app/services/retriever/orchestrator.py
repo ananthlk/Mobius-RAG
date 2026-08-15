@@ -1119,6 +1119,7 @@ async def run_retriever_partial(
             rq = structure_result.rewritten_queries[0] if structure_result.rewritten_queries else query
             pool_results = [await run_pool_for_query(
                 db, rq, gate_result, structure_result.resource_posture, adapter,
+                original_query=query,
             )]
     # else: no-retrieval postures (CLARIFY/CLARIFY_REPHRASE/DECLINE) reach
     # here with an all-zero ResourcePosture -- same convention Pool itself

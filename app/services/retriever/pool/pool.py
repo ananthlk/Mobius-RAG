@@ -74,16 +74,24 @@ async def run_pool_for_query(
     gate: GateResult,
     resource_posture: ResourcePosture,
     adapter: SourceAdapter,
+    original_query: str | None = None,
 ) -> PoolResult:
-    """Build one pool for one rewritten_query."""
+    """Build one pool for one rewritten_query.
+
+    original_query (2026-08-15 fix): the caller's true, un-rewritten query
+    text with casing intact -- see PoolResult.original_query's docstring.
+    None (default) falls back to `query`, fully backward-compatible for
+    any caller that doesn't have or care about original casing.
+    """
     t_start = time.monotonic()
+    original_query = original_query if original_query is not None else query
 
     breadth = resource_posture.breadth
     if breadth <= 0:
         # No-retrieval postures (CLARIFY/CLARIFY_REPHRASE/DECLINE) reach
         # here with an all-zero ResourcePosture -- same convention
         # Structure uses (shape/structure.py), not an error case.
-        return PoolResult(query=query, fallback_triggered=True, pool_ms=0)
+        return PoolResult(query=query, original_query=original_query, fallback_triggered=True, pool_ms=0)
 
     tag_width = breadth * TAG_SELECT_WIDTH_MULTIPLIER
     vector_width = breadth * VECTOR_WIDTH_MULTIPLIER
@@ -197,6 +205,7 @@ async def run_pool_for_query(
 
     return PoolResult(
         query=query,
+        original_query=original_query,
         candidates=final_candidates,
         segment_ms=segment_ms,
         strategy_hint=strategy_hint,

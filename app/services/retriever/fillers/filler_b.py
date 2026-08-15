@@ -333,7 +333,8 @@ def fill_shape_vector(
     required_phrases = getattr(pool_result, "required_phrases", None) or []
     boosted_phrases = getattr(pool_result, "boosted_phrases", None) or []
     reranked, rerank_stats = _rerank_vector_candidates(
-        scorable_candidates, pool_result.query, required_phrases, boosted_phrases
+        scorable_candidates, getattr(pool_result, "original_query", None) or pool_result.query,
+        required_phrases, boosted_phrases
     )
     rerank_score_by_id = {c.chunk_id: score for c, score in reranked}
     scored_candidates = [c for c, _score in reranked]
