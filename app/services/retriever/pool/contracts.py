@@ -64,6 +64,20 @@ class PoolCandidate:
     # Authority level for reranking (Filler a reranking signal). Values:
     # "contract_source_of_truth" (1.0), "operational" (0.5), "fyi" (0.2), None (0.0)
     authority_level: str | None = None
+    # Coarse document-TYPE classification (2026-08-15, joint design with
+    # Curation/Lexicon -- see docs/rag-agents/j-doc-type-spec.md). Set ONCE
+    # at the document level (e.g. "um", "clinical_policy", "formulary",
+    # "provider_manual"...) and applied to every chunk in that document --
+    # deliberately coarser than document_tags.d_tags (which is per-domain,
+    # phrase-derived, and can miss a chunk that doesn't locally repeat the
+    # trigger phrase; see the Daraprim live case this was built to fix:
+    # utilization_management.prior_authorization existed at the DOCUMENT
+    # level but not on the specific clinical-criterion chunk that needed
+    # it). Same "None means not yet classified" convention authority_level
+    # already established -- populate here, plumb through
+    # public_adapter.py, ONLY once Lexicon's document_doc_type column is
+    # real; this field is additive/inert (never read yet) until then.
+    doc_type: str | None = None
     # REAL STRUCTURAL BUG found+fixed 2026-07-23 (Retriever's live-trace
     # report): dedup_candidates() is "first-arm-wins" on chunk_id collision
     # (union order tag_select -> vector -> inherited) -- if a chunk is found
