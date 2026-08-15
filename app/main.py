@@ -1204,16 +1204,18 @@ def sync_doc_metadata(body: dict = Body(default={})) -> dict:
             "SET document_authority_level = COALESCE(d.authority_level,''), "
             "    document_status = COALESCE(d.status,''), "
             "    document_review_status = COALESCE(d.review_status,''), "
+            "    document_doc_type = COALESCE(d.doc_type,''), "
             "    updated_at = NOW() "
             "FROM documents d WHERE d.id = e.document_id AND ("
             "     COALESCE(e.document_authority_level,'') IS DISTINCT FROM COALESCE(d.authority_level,'') "
             "  OR COALESCE(e.document_status,'')          IS DISTINCT FROM COALESCE(d.status,'') "
-            "  OR COALESCE(e.document_review_status,'')   IS DISTINCT FROM COALESCE(d.review_status,''))"
+            "  OR COALESCE(e.document_review_status,'')   IS DISTINCT FROM COALESCE(d.review_status,'') "
+            "  OR COALESCE(e.document_doc_type,'')        IS DISTINCT FROM COALESCE(d.doc_type,''))"
         )
         res["rag_index_rows"] = cur.rowcount
         cur.execute(
             "SELECT d.id::text, COALESCE(d.authority_level,''), COALESCE(d.status,''), "
-            "COALESCE(d.review_status,'') FROM documents d "
+            "COALESCE(d.review_status,''), COALESCE(d.doc_type,'') FROM documents d "
             "WHERE EXISTS (SELECT 1 FROM rag_published_embeddings e WHERE e.document_id = d.id)"
         )
         docs = cur.fetchall(); cur.close()
@@ -1232,12 +1234,14 @@ def sync_doc_metadata(body: dict = Body(default={})) -> dict:
             ccur = cc.cursor(); ccur.execute("SET statement_timeout = 600000")
             upd = (
                 "UPDATE published_rag_metadata p SET document_authority_level = v.auth, "
-                "document_status = v.stat, document_review_status = v.rev, updated_at = NOW() "
-                "FROM (VALUES %s) AS v(id, auth, stat, rev) "
+                "document_status = v.stat, document_review_status = v.rev, "
+                "document_doc_type = v.dtype, updated_at = NOW() "
+                "FROM (VALUES %s) AS v(id, auth, stat, rev, dtype) "
                 "WHERE p.document_id = v.id::uuid AND ("
                 "     COALESCE(p.document_authority_level,'') IS DISTINCT FROM v.auth "
                 "  OR COALESCE(p.document_status,'')          IS DISTINCT FROM v.stat "
-                "  OR COALESCE(p.document_review_status,'')   IS DISTINCT FROM v.rev)"
+                "  OR COALESCE(p.document_review_status,'')   IS DISTINCT FROM v.rev "
+                "  OR COALESCE(p.document_doc_type,'')        IS DISTINCT FROM v.dtype)"
             )
             for i in range(0, len(docs), 500):
                 _ev(ccur, upd, docs[i:i + 500]); res["chat_rows"] += ccur.rowcount; cc.commit()
