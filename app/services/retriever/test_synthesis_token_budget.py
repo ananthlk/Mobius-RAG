@@ -80,8 +80,16 @@ class TestTrimToTokenBudget:
         assert [c.index for c in citations] == list(range(1, len(citations) + 1))
 
     def test_never_drops_below_budget_when_impossible_keeps_cheapest(self):
-        """If every single citation alone exceeds budget, trimming still
-        terminates (doesn't infinite-loop) and keeps whatever's cheapest."""
+        """If the single remaining citation alone exceeds budget, it must
+        still survive -- a required slot with real evidence is never
+        trimmed down to literally nothing (mirrors mmr_select's own
+        "always keep at least one selection" guarantee in fusion.py).
+        Real bug fix 2026-08-14: the old loop dropped this last citation
+        too, and this test's own name/docstring claimed the opposite of
+        what its assertion (`dropped in (0, 1)`) actually enforced --
+        exactly how a live incident (portfolio dispatch synthesizing a
+        required slot down to zero citations despite fillers delivering
+        real content) went uncaught."""
         c1 = _citation(1, text="x" * 4000, is_neighbor=True, original_score=0.5)
         citations = [c1]
         slots = {"direct_answer": CompiledSlot(
@@ -89,7 +97,24 @@ class TestTrimToTokenBudget:
             required=True, citations=list(citations),
         )}
         dropped = _trim_to_token_budget(citations, slots, token_budget=10)
-        # Only one citation exists; dropping it would leave nothing to cite,
-        # but the function drops greedily until under budget or out of
-        # trimmable candidates -- confirm it terminates without raising.
-        assert dropped in (0, 1)
+        assert dropped == 0
+        assert citations == [c1]
+        assert slots["direct_answer"].citations == [c1]
+
+    def test_multiple_oversized_citations_keeps_at_least_the_strongest(self):
+        """Real incident shape: several citations that, even combined,
+        exceed budget -- e.g. one primary plus several neighbors added by
+        completion, all individually large. Must still keep at least the
+        single strongest (last-to-drop) survivor rather than trim to zero."""
+        weak_neighbor = _citation(1, text="a" * 4000, is_neighbor=True, original_score=0.2)
+        another_neighbor = _citation(2, text="b" * 4000, is_neighbor=True, original_score=0.3)
+        strongest_primary = _citation(3, text="c" * 4000, is_neighbor=False, original_score=0.9)
+        citations = [weak_neighbor, another_neighbor, strongest_primary]
+        slots = {"direct_answer": CompiledSlot(
+            slot_id="direct_answer", slot_semantics="direct_answer", capacity=5,
+            required=True, citations=list(citations),
+        )}
+        dropped = _trim_to_token_budget(citations, slots, token_budget=10)
+        assert dropped == 2
+        assert citations == [strongest_primary]
+        assert slots["direct_answer"].citations == [strongest_primary]

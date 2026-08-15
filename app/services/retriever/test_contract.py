@@ -178,6 +178,34 @@ class TestBuildContractHappyPath:
             {"slot_id": "direct_answer", "stage": "c", "model_id": "gpt-x", "call_id": "call-1"},
         ]
 
+    def test_authority_score_and_level_from_citation_mix(self):
+        """Real ask (2026-08-14, Ananth): expose an average authority score
+        over what was actually retrieved so Chat can render an indicator
+        and gate a "seek authoritative sources only" CTA when it's low."""
+        authoritative = _citation(1); authoritative.authority = "authoritative"
+        external = _citation(2); external.authority = "external"
+        envelope = build_contract(_partial_result(), _synthesis_result(citations=[authoritative, external]))
+        gm = envelope.grounding_markers
+        assert gm["authority_score"] == 0.5
+        assert gm["authority_level"] == "medium"
+        assert gm["authoritative_citation_count"] == 1
+        assert gm["total_citation_count"] == 2
+
+    def test_authority_level_high_when_all_authoritative(self):
+        c1 = _citation(1); c1.authority = "authoritative"
+        c2 = _citation(2); c2.authority = "authoritative"
+        envelope = build_contract(_partial_result(), _synthesis_result(citations=[c1, c2]))
+        assert envelope.grounding_markers["authority_score"] == 1.0
+        assert envelope.grounding_markers["authority_level"] == "high"
+
+    def test_authority_score_none_not_zero_when_no_citations(self):
+        """None (not 0.0) on an empty answer -- 0.0 would misleadingly read
+        as "checked and found nothing authoritative" rather than "nothing
+        to score"."""
+        envelope = build_contract(_partial_result(), _synthesis_result(citations=[]))
+        assert envelope.grounding_markers["authority_score"] is None
+        assert envelope.grounding_markers["authority_level"] is None
+
     def test_model_trace_empty_when_no_llm_call_was_made(self):
         envelope = build_contract(_partial_result(), _synthesis_result())
         assert envelope.routing_keys["model_trace"] == []

@@ -553,7 +553,20 @@ def _trim_to_token_budget(
         key=lambda c: (0 if c.is_neighbor else 1, _chunk_priority_score(c)),
     )
     to_drop: set[int] = set()
-    for c in trimmable_order:
+    # Real bug fix (2026-08-14): a required slot's real evidence must never
+    # be trimmed down to literally nothing -- mirrors mmr_select's own
+    # explicit "always keep at least one selection even if it alone exceeds
+    # budget" guarantee (fusion.py), which this function was silently NOT
+    # honoring. Traced to a live incident: portfolio dispatch (which alone
+    # feeds a real per-slot budget into MMR fusion -- greedy's slot_budget
+    # is effectively unbounded there) can hand this function a small set of
+    # oversized chunks (e.g. a giant PDF-table-extracted chunk) whose
+    # combined -- or even individual -- token estimate exceeds token_budget,
+    # and the old loop happily dropped every last one, leaving a REQUIRED
+    # slot with zero citations despite fillers having delivered real
+    # content (status="empty" on a query that had a genuine, if imperfect,
+    # answer). Stop one short of removing the final trimmable citation.
+    for c in trimmable_order[:-1]:
         if total <= token_budget:
             break
         total -= _estimate_tokens(c.text)

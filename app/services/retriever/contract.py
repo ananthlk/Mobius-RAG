@@ -150,6 +150,54 @@ def _derive_status(partial_result: RetrieverPartialResult, synthesis_result: Syn
     return "ok"
 
 
+# "authoritative" is CompiledCitation.authority's own vocabulary
+# (_infer_authority, synthesis.py) -- reused here, not reinvented, so this
+# stays byte-consistent with whatever a/b/c/d/s chunks were actually
+# threaded through as authoritative.
+_AUTHORITATIVE_AUTHORITY_VALUE = "authoritative"
+
+# Deterministic thresholds on the raw fraction (Retriever's starting point,
+# not Eval-calibrated -- same "directionally correct, not precisely fit"
+# posture as Structure's _ACCURACY_NEED interim cut). Chat renders the
+# "seek authoritative sources only" CTA off `authority_level == "low"`,
+# not a hardcoded number of its own, so recalibrating these two constants
+# is the only change needed once real usage data exists.
+_AUTHORITY_LEVEL_HIGH = 0.7
+_AUTHORITY_LEVEL_MEDIUM = 0.4
+
+
+def _authority_markers(citations: list) -> dict[str, Any]:
+    """Real ask (2026-08-14, Ananth): score what was actually retrieved by
+    how much of it is authoritative, expose a level Chat can render as an
+    indicator, and gate a "check authoritative sources only" CTA off it --
+    deterministic from CompiledCitation.authority (already computed per
+    chunk, no new LLM call needed for this), not a fabricated signal.
+    `authority_score` is the fraction of citations carrying "authoritative"
+    -- None (not 0.0) when there are no citations at all, since a 0.0 score
+    on an EMPTY answer reads as "we checked and found no authoritative
+    content" when the honest signal is "nothing to score."""
+    if not citations:
+        return {
+            "authority_score": None, "authority_level": None,
+            "authoritative_citation_count": 0, "total_citation_count": 0,
+        }
+    n_authoritative = sum(
+        1 for c in citations if getattr(c, "authority", None) == _AUTHORITATIVE_AUTHORITY_VALUE
+    )
+    score = n_authoritative / len(citations)
+    level = (
+        "high" if score >= _AUTHORITY_LEVEL_HIGH
+        else "medium" if score >= _AUTHORITY_LEVEL_MEDIUM
+        else "low"
+    )
+    return {
+        "authority_score": round(score, 4),
+        "authority_level": level,
+        "authoritative_citation_count": n_authoritative,
+        "total_citation_count": len(citations),
+    }
+
+
 def _build_module_trace(
     partial_result: RetrieverPartialResult,
     router_decision,
@@ -469,6 +517,7 @@ def build_contract(
             "planned_status_citations": synthesis_result.telemetry.planned_status_citations,
             "document_name_resolved": synthesis_result.telemetry.document_name_resolved,
             "document_name_fallback": synthesis_result.telemetry.document_name_fallback,
+            **_authority_markers(synthesis_result.citations),
         }
         if synthesis_result else {}
     )
