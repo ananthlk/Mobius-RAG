@@ -95,7 +95,20 @@ _SPEED_BUDGET = {
 _TOKEN_BUDGET = {
     "chat.copilot": 2000,
     "chat.default": 3000,
-    "chat.thinking": 6000,
+    # Bumped 6000 -> 16000 (2026-08-15, Ananth's call): a live comparison
+    # against Anthropic's own contextual-retrieval benchmarking (their
+    # cookbook -- top_k=20 @ ~800 tokens/chunk, their most performant
+    # tested config) put chat.thinking well below what Anthropic's own
+    # data showed working best, while chat.default/research already sit
+    # in-band with industry norms (72Technologies' 2000-4000 typical
+    # chat-turn range; research already ~matches Anthropic's ~16-18k
+    # figure). This ONLY affects Synthesis's per-slot MMR/trim ceiling
+    # (_resolve_resource_posture below, token_budget field) -- NOT
+    # retrieval breadth/pool width (driven by recall_demand/_BASE_K) or
+    # the speed_budget/latency allowance, so raising it lets more already-
+    # retrieved content survive synthesis for this mode without changing
+    # how much gets retrieved or how long retrieval itself takes.
+    "chat.thinking": 16000,
     "auth_agent": 2500,
     "research": 20000,
     "batch": 12000,
