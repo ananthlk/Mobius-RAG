@@ -142,17 +142,52 @@ def _compute_rerank_score(
     """
     Compose multiple signals into a unified rerank score [0, 1].
 
-    Weights (Filler a v0.5 — 2026-08-15, Ananth's live-trace diagnosis):
-      bm25 (0.51) + authority (0.13) + tag_coverage (0.05) + length (0.06)
-      + meta_boost (0.18) + misc (0.07)
+    Weights (Filler a v0.6 — 2026-08-15, Ananth's live-trace diagnosis):
+      bm25 (0.51, POWER-TRANSFORMED — see below) + authority (0.13)
+      + tag_coverage (0.05) + length (0.06) + meta_boost (0.18) + misc (0.07)
+      -- same weight split as v0.5 below, unchanged.
 
-    Real bug this rebalances (live query: "prior authorization criteria for
-    Daraprim at AHCA Florida"). tag_coverage_score is a raw tag-COUNT
+    v0.5 fixed the structural exclusion (see that changelog entry below)
+    but left the Daraprim case on a knife-edge: verified live it landed at
+    rank #6 of a 6-slot cutoff -- a coin flip against ordinary corpus
+    fluctuation elsewhere in the pool (confirmed live: a single new/shifted
+    competitor candidate was enough to push it to rank #7, excluded, with
+    the code UNCHANGED -- verified byte-exact via live-vs-local rerank_score
+    comparison, ruling out a deploy issue). Root cause of the thin margin,
+    per Ananth's own diagnosis: LINEAR weighting treats every point of raw
+    bm25 gap the same regardless of where it falls in the distribution --
+    Daraprim's chunk has the single BEST bm25 in the whole ~1157-candidate
+    pool (0.804, a real 0.13 gap over the next tier at ~0.67-0.75), but a
+    flat weight doesn't let that decisive a margin count for more than an
+    equally-sized gap anywhere else in the range. Two candidate fixes were
+    compared empirically (offline sweep against the same live pool
+    snapshot + the 22-query eval bank, not guessed): (a) nudge the weight
+    split further toward bm25/authority -- worked (rank #4, bank recall
+    held at 0.791) but is an ad hoc tweak that doesn't generalize past this
+    one weight point; (b) POWER-TRANSFORM bm25_sig (bm25_sig ** 1.5) before
+    weighting, keeping v0.5's ORIGINAL weight split -- also reached rank
+    #5 with bank recall held at 0.791, and is the more principled fix
+    (stretches genuine separation at the high end for every query, not
+    just this one; combining both (a)+(b) was tested and actually
+    REGRESSED the bank to 0.776 -- diminishing/negative returns from
+    stacking two corrections aimed at the same problem). Shipped (b),
+    Ananth's call ("logical and better fix").
+
+    Separately, real root cause behind WHY this specific chunk needed
+    rescuing at all: its lexicon tags don't include
+    utilization_management.prior_authorization -- that tag exists at the
+    DOCUMENT level (4 hits) but didn't propagate to this specific
+    clinical-criterion paragraph. A document-type tag (e.g. a UM_POLICY
+    classification) that Router/Fillers could weight directly, propagated
+    by Lexicon rather than inferred per-chunk, is the durable fix --
+    flagged to Curation/Lexicon separately, not built here.
+
+    v0.5's original changelog: tag_coverage_score is a raw tag-COUNT
     heuristic (unrelated to relevance -- a chunk with more tags scores
     higher regardless of topical precision) and meta_boost_score can only
     ever reward LEXICON-matched phrases (verified live: "daraprim" has zero
     rows in policy_lexicon_entries, so it structurally can't contribute).
-    At their PREVIOUS 0.20/0.20 combined weight, these two signals
+    At their ORIGINAL 0.20/0.20 combined weight, these two signals
     outvoted bm25 even when bm25 correctly ranked the answer chunk #1-9 of
     the entire ~1191-candidate pool (0.81 bm25, top authority) -- the
     boilerplate competitors won purely by repeating generic phrases
@@ -160,17 +195,11 @@ def _compute_rerank_score(
     neither of which reflects whether the chunk actually answers the
     query. Confirmed this is a WEIGHTING problem, not a signal-definition
     one: reproduced the exact same loss with both signals fully unmodified,
-    only varying weight (mobius-rag scratchpad, Retriever session
-    2026-08-15) -- two separate signal-redefinition attempts (tag-depth
-    instead of count; a lexicon-plus-specific-term meta_boost fallback)
-    each fixed this one case but introduced NEW regressions elsewhere in
-    the 22-query eval bank, so reverted in favor of this reweight, which
-    validated clean: a 2D grid sweep across (tag_coverage weight,
-    meta_boost weight) against the full bank found this point on the
-    Pareto frontier (mean recall 0.791 vs the previous weights' 0.776,
-    zero query regressions) AND separately confirmed it lifts the Daraprim
-    chunk from unranked (previously outside the top ~30 of 1165 pool
-    candidates) to rank #6 -- comfortably inside a 10-12 capacity slot.
+    only varying weight -- two separate signal-redefinition attempts
+    (tag-depth instead of count; a lexicon-plus-specific-term meta_boost
+    fallback) each fixed this one case but introduced NEW regressions
+    elsewhere in the 22-query eval bank, so reverted in favor of
+    reweighting instead (see git history: 45e64d7/c5a8671 revert those).
 
     Root cause ORIGINALLY diagnosed here (2026-07-29, cmhc003): ts_rank_cd
     (Pool's bm25_score) is a cover-density ranker, not a relevance judge --
@@ -188,7 +217,13 @@ def _compute_rerank_score(
     NOT do multi-signal fusion across all signals (gate b, read-only). Each
     Filler composes its own signal set for its own arm.
     """
-    bm25_sig = candidate.bm25_score or 0.0  # Already [0, 1]
+    # Power transform (2026-08-15, Ananth's call, see docstring): bm25_sig
+    # is already [0, 1], but a flat linear weight can't distinguish "this
+    # candidate decisively leads the pool" from "this candidate is
+    # marginally ahead" -- squaring (well, ^1.5) stretches genuine
+    # separation at the high end while staying monotonic and bounded.
+    _BM25_POWER = 1.5
+    bm25_sig = (candidate.bm25_score or 0.0) ** _BM25_POWER
     auth_sig = _compute_authority_score(candidate.authority_level)
     cov_sig = _compute_tag_coverage_score(candidate.tags)
     len_sig = _compute_length_score(candidate.text)
