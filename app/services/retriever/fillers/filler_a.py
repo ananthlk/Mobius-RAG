@@ -63,6 +63,27 @@ def _compute_tag_coverage_score(tags: dict) -> float:
     return min(1.0, tag_count / 10.0)
 
 
+def _compute_doc_type_score(doc_type: str | None) -> float:
+    """Coarse document-TYPE classification signal [0, 1] (2026-08-15, joint
+    build with Curation/Lexicon -- see docs/rag-agents/j-doc-type-spec.md,
+    PoolCandidate.doc_type's docstring). Deliberately simple, matching the
+    real corpus distribution: Lexicon's population run classified 3,334
+    docs (um=3,184, clinical_policy=68, fee_schedule=44, contract=38) --
+    ANY real classification, not the specific type, is the useful signal
+    here, since 'um' alone covers ~95% of classified docs in this corpus
+    and isn't itself query-discriminating (validated: an offline sweep
+    that instead matched doc_type against the query's own topic showed no
+    improvement over this simpler presence check, and this corpus doesn't
+    yet have enough non-'um' volume to calibrate a real per-type weight
+    table). Rewards "Lexicon's own classification pipeline reviewed and
+    typed this document" over unclassified/generic corpus content (empty
+    string '' -- see the docstring on PoolCandidate.doc_type for why '' is
+    the real value at this layer, not None) -- same spirit as
+    _compute_authority_score's "any real classification beats none."
+    """
+    return 1.0 if doc_type else 0.0
+
+
 def _compute_length_score(text: str) -> float:
     """Compute text quality [0, 1] based on length. Prefer 100-500 chars."""
     if not text:
@@ -246,15 +267,25 @@ def _compute_rerank_score(
     cov_sig = _compute_tag_coverage_score(candidate.tags)
     len_sig = _compute_length_score(candidate.text)
     meta_sig = _compute_meta_boost_score(candidate.text, candidate.tags, required_phrases, boosted_phrases)
+    doc_type_sig = _compute_doc_type_score(candidate.doc_type)
 
-    # Weighted sum (already normalized [0, 1]), sums to 1.00.
+    # Weighted sum (already normalized [0, 1]), sums to 1.00. doc_type
+    # (2026-08-15, joint Lexicon build) added at 0.02 -- validated via
+    # offline sweep against the 22-query eval bank (fresh live pool pulls,
+    # post-Lexicon's document_doc_type population): 0.02 was the sweet
+    # spot (bank recall 0.745 -> 0.791), while 0.04+ actually regressed
+    # (0.761) since ~87% of this corpus's candidates already share the
+    # SAME doc_type value ('um') -- too much weight on a signal that
+    # rarely discriminates just adds noise. Taken from cov/misc (0.05/0.07
+    # -> 0.04/0.06), the two smallest, least load-bearing weights.
     composite = (
         0.51 * bm25_sig +
         0.13 * auth_sig +
-        0.05 * cov_sig +
+        0.04 * cov_sig +
         0.06 * len_sig +
         0.18 * meta_sig +
-        0.07 * 0.5  # Misc (neutral baseline)
+        0.02 * doc_type_sig +
+        0.06 * 0.5  # Misc (neutral baseline)
     )
     return composite
 

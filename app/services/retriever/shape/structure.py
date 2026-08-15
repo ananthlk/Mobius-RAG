@@ -150,6 +150,29 @@ _BASELINE_RECALL_DEMAND = _RECALL_DEMAND[DEFAULT_CALLER_MODE]
 # what Router's own allocator already treats as generous-but-safe.
 _MAX_ATTEMPTS_CEILING = 6
 
+# MODE-based override (2026-08-15, Ananth's call), distinct from the
+# posture-based variation removed above -- this is caller_mode, not
+# ReformatPosture, and scoped to exactly one mode with live evidence
+# behind it, not a blanket reintroduction. Real gap found live the same
+# day as the token_budget bump: chat.thinking's own per_slot
+# latency_allowance_ms (16000ms, allocation.py's
+# CALLER_MODE_LATENCY_ALLOWANCE_OVERRIDE_MS) is generous enough that the
+# uniform ceiling=6 -- not the time budget -- became the actual binding
+# constraint. Confirmed directly against a live chat.thinking trace the
+# same session: routing_keys.per_slot_verdict returned
+# "EXHAUSTED_ATTEMPTS" (continuation.py's terminal "the strategy chain
+# had its shot" verdict, not "found enough evidence and stopped"), on a
+# turn that still had real latency budget headroom. Raised to 10 for
+# chat.thinking specifically -- matches the existing "agentic" round
+# budget already used elsewhere in this system for this same mode
+# (react_loop.py's Agentic=10 max reasoning rounds), not a new number
+# invented here. Every OTHER mode keeps the flat 6 -- Router's own
+# real_time-never-binds verification above still holds for them
+# unchanged.
+_MAX_ATTEMPTS_CEILING_OVERRIDE = {
+    "chat.thinking": 10,
+}
+
 # Postures that don't reach retrieval this turn. UX sign-off 2026-07-23:
 # resolve to an explicit all-zero ResourcePosture, not None — simpler for
 # Diagnostics/Chat to consume, no null-checking on the far side.
@@ -218,7 +241,7 @@ def _resolve_resource_posture(
     # through yet, not the source of truth going forward.
     token_budget = token_budget_for_retrieval if token_budget_for_retrieval is not None else _TOKEN_BUDGET[mode]
     recall_demand = _RECALL_DEMAND[mode]
-    max_attempts = _MAX_ATTEMPTS_CEILING
+    max_attempts = _MAX_ATTEMPTS_CEILING_OVERRIDE.get(mode, _MAX_ATTEMPTS_CEILING)
 
     if posture == ReformatPosture.PRECISE:
         breadth = round(_BASE_K * recall_demand / _BASELINE_RECALL_DEMAND)

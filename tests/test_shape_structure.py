@@ -15,6 +15,7 @@ from app.services.retriever.shape.structure import (
     DEFAULT_CALLER_MODE,
     _ACCURACY_NEED,
     _MAX_ATTEMPTS_CEILING,
+    _MAX_ATTEMPTS_CEILING_OVERRIDE,
     _SPEED_BUDGET,
     _TOKEN_BUDGET,
     run_structure,
@@ -131,19 +132,32 @@ class TestResourcePostureByPosture:
         # CORRECTED 2026-07-23 (Router caught): per-posture values were
         # amputating the fallback chain (min(time_derived, 1) == 1 always,
         # making the "soft ceiling" the actual plan). One uniform, generous
-        # ceiling now — time (speed_budget) is the real constraint.
+        # ceiling now — time (speed_budget) is the real constraint. Uses
+        # chat.default deliberately, NOT chat.thinking -- chat.thinking has
+        # its own real, live-evidence-backed override (see
+        # test_max_attempts_chat_thinking_override below); this test is
+        # about posture-uniformity for the flat-ceiling modes, unrelated.
         for posture in (ReformatPosture.PRECISE, ReformatPosture.FAN_OUT, ReformatPosture.RELY_ON_EXTERNAL):
-            result = run_structure(_reformat(posture), caller_mode="chat.thinking")
+            result = run_structure(_reformat(posture), caller_mode="chat.default")
             assert result.resource_posture.max_attempts == _MAX_ATTEMPTS_CEILING
 
-    def test_max_attempts_identical_across_caller_modes_v1(self):
-        # v1 explicitly does NOT modulate max_attempts by caller_mode (TECH
-        # sign-off: blocked on DB's caller_mode vocabulary fix). Same
-        # posture must give the same max_attempts regardless of mode.
+    def test_max_attempts_identical_across_caller_modes_except_chat_thinking(self):
+        # v1 (2026-07-23) explicitly did NOT modulate max_attempts by
+        # caller_mode at all. SUPERSEDED 2026-08-15 (Ananth's call, live
+        # evidence): chat.thinking's own generous latency_allowance_ms made
+        # the flat ceiling=6 the actual binding constraint (confirmed live:
+        # routing_keys.per_slot_verdict=="EXHAUSTED_ATTEMPTS" on a turn with
+        # real time budget still unspent) -- raised to 10 for that mode
+        # only. Every OTHER mode keeps the original v1 invariant: same
+        # posture must give the same (flat) max_attempts regardless of mode.
         modes = list(_ACCURACY_NEED)
         results = {m: run_structure(_reformat(ReformatPosture.FAN_OUT), caller_mode=m) for m in modes}
-        attempts = {r.resource_posture.max_attempts for r in results.values()}
-        assert attempts == {_MAX_ATTEMPTS_CEILING}
+        for mode, result in results.items():
+            expected = _MAX_ATTEMPTS_CEILING_OVERRIDE.get(mode, _MAX_ATTEMPTS_CEILING)
+            assert result.resource_posture.max_attempts == expected, mode
+        assert results["chat.thinking"].resource_posture.max_attempts == 10
+        non_thinking = {m: r.resource_posture.max_attempts for m, r in results.items() if m != "chat.thinking"}
+        assert set(non_thinking.values()) == {_MAX_ATTEMPTS_CEILING}
 
     def test_speed_budget_reused_as_is_from_caller_mode(self):
         for mode, expected in _SPEED_BUDGET.items():
