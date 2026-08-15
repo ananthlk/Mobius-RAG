@@ -142,35 +142,46 @@ def _compute_rerank_score(
     """
     Compose multiple signals into a unified rerank score [0, 1].
 
-    Weights (Filler a v0.4 — 2026-07-29, Ananth's live-trace diagnosis):
-      bm25 (0.40) + authority (0.10) + tag_coverage (0.20) + length (0.05)
-      + meta_boost (0.20) + misc (0.05)
+    Weights (Filler a v0.5 — 2026-08-15, Ananth's live-trace diagnosis):
+      bm25 (0.51) + authority (0.13) + tag_coverage (0.05) + length (0.06)
+      + meta_boost (0.18) + misc (0.07)
 
-    Previous weights (bm25 0.55/0.65 history, cov/meta at 0.10/0.15) actually
-    summed to 1.05, not 1.00 -- an unnoticed drift from the meta_boost bump
-    that was never offset elsewhere. Fixed here as part of the rebalance.
+    Real bug this rebalances (live query: "prior authorization criteria for
+    Daraprim at AHCA Florida"). tag_coverage_score is a raw tag-COUNT
+    heuristic (unrelated to relevance -- a chunk with more tags scores
+    higher regardless of topical precision) and meta_boost_score can only
+    ever reward LEXICON-matched phrases (verified live: "daraprim" has zero
+    rows in policy_lexicon_entries, so it structurally can't contribute).
+    At their PREVIOUS 0.20/0.20 combined weight, these two signals
+    outvoted bm25 even when bm25 correctly ranked the answer chunk #1-9 of
+    the entire ~1191-candidate pool (0.81 bm25, top authority) -- the
+    boilerplate competitors won purely by repeating generic phrases
+    ("prior authorization"/"AHCA"/"Florida") and carrying more tags,
+    neither of which reflects whether the chunk actually answers the
+    query. Confirmed this is a WEIGHTING problem, not a signal-definition
+    one: reproduced the exact same loss with both signals fully unmodified,
+    only varying weight (mobius-rag scratchpad, Retriever session
+    2026-08-15) -- two separate signal-redefinition attempts (tag-depth
+    instead of count; a lexicon-plus-specific-term meta_boost fallback)
+    each fixed this one case but introduced NEW regressions elsewhere in
+    the 22-query eval bank, so reverted in favor of this reweight, which
+    validated clean: a 2D grid sweep across (tag_coverage weight,
+    meta_boost weight) against the full bank found this point on the
+    Pareto frontier (mean recall 0.791 vs the previous weights' 0.776,
+    zero query regressions) AND separately confirmed it lifts the Daraprim
+    chunk from unranked (previously outside the top ~30 of 1165 pool
+    candidates) to rank #6 -- comfortably inside a 10-12 capacity slot.
 
-    Root cause this rebalances (confirmed live on cmhc003, Payor Policy's
-    trace-explorer investigation): ts_rank_cd (Pool's bm25_score) is a
-    cover-density ranker, not a relevance judge -- a chunk that repeats a
-    required phrase (e.g. the payer name) many times in OFF-TOPIC content
-    can out-score a chunk that states the actual answer once, clearly.
-    Verified directly: a correct "members may self-refer without a PCP
-    referral for...behavioral health" chunk scored LOWER (0.730) than an
-    unrelated "community program referrals" chunk (0.865) that just
-    repeated "Aetna Better Health of Florida" 8 times -- confirmed via raw
-    SQL that stripping payer/state terms from the query entirely did NOT
-    fix the ranking (ts_rank_cd's cover-density formula, not phrase
-    composition, is the actual mechanism). Tag-based signals got the
-    correct answer's relevance right in the same case (tag_coverage from
-    Pool's own count favored it 4-vs-3) but were too lightly weighted to
-    win. Known limitation NOT fixed here (found live, same investigation):
-    _compute_tag_coverage_score and _compute_meta_boost_score can both
-    saturate/tie between a genuinely on-topic chunk and an off-topic one
-    that merely shares surface tags/phrases -- rebalancing weights can't
-    help when the secondary signals don't discriminate at all between two
-    candidates; that's a separate, deeper fix to those two functions'
-    scoring logic, not a weights problem.
+    Root cause ORIGINALLY diagnosed here (2026-07-29, cmhc003): ts_rank_cd
+    (Pool's bm25_score) is a cover-density ranker, not a relevance judge --
+    a chunk that repeats a required phrase (e.g. the payer name) many
+    times in OFF-TOPIC content can out-score a chunk that states the
+    actual answer once, clearly. That diagnosis is still correct and is
+    exactly why bm25 alone isn't given 100% weight here -- tag_coverage/
+    meta_boost still catch real cases bm25 misses (e.g. cmhc005's H0015
+    HCPCS-code case, where bm25 alone only reaches 0.41-0.73, solidly
+    mid-pack). This reweight keeps both signals live at meaningful, just
+    smaller, weight -- not zeroed out.
 
     CRITICAL: This is Filler a's PRIMARY signal composition. Pool provides
     candidates pre-scored by arm (bm25_score, vector score, etc.) but does
@@ -185,12 +196,12 @@ def _compute_rerank_score(
 
     # Weighted sum (already normalized [0, 1]), sums to 1.00.
     composite = (
-        0.40 * bm25_sig +
-        0.10 * auth_sig +
-        0.20 * cov_sig +
-        0.05 * len_sig +
-        0.20 * meta_sig +
-        0.05 * 0.5  # Misc (neutral baseline)
+        0.51 * bm25_sig +
+        0.13 * auth_sig +
+        0.05 * cov_sig +
+        0.06 * len_sig +
+        0.18 * meta_sig +
+        0.07 * 0.5  # Misc (neutral baseline)
     )
     return composite
 
