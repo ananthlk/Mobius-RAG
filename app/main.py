@@ -1174,6 +1174,79 @@ async def block_junk_pending(
     }
 
 
+@app.post("/admin/sync-doc-metadata")
+def sync_doc_metadata(body: dict = Body(default={})) -> dict:
+    """Propagate ``documents.{authority_level,status,review_status}`` to the
+    published index (``rag_published_embeddings``) AND chat
+    (``published_rag_metadata``) for docs whose denormalized copy has drifted.
+
+    Metadata-only edits on ``documents`` (e.g. flipping authority to
+    ``contract_source_of_truth``, or a status change) only reach the index +
+    chat when a doc is (re)published — the writes live inside
+    ``publish_document``. A metadata-only edit doesn't trigger a republish, so
+    it silently drifts out of retrieval and chat. This reconciles it —
+    metadata columns only, NO re-tag / re-embed (so it's cheap; the RAG-index
+    UPDATE touches only drifted rows). Idempotent: only-drifted rows change.
+    Called by the nightly orchestrator after retag; also runnable standalone.
+    Bit us 2026-08-15: ~2k authority flips reached ``documents`` but not the
+    index (374 vs 2012) or chat (63 vs 2012).
+    """
+    import psycopg2 as _pg
+    from psycopg2.extras import execute_values as _ev
+    res: dict = {"rag_index_rows": 0, "chat_rows": 0}
+    # 1) RAG published index — set-based, only-drifted rows
+    conn = _pg.connect(_retag_inplace_dsn(), connect_timeout=15)
+    conn.autocommit = True
+    try:
+        cur = conn.cursor(); cur.execute("SET statement_timeout = 600000")
+        cur.execute(
+            "UPDATE rag_published_embeddings e "
+            "SET document_authority_level = COALESCE(d.authority_level,''), "
+            "    document_status = COALESCE(d.status,''), "
+            "    document_review_status = COALESCE(d.review_status,''), "
+            "    updated_at = NOW() "
+            "FROM documents d WHERE d.id = e.document_id AND ("
+            "     COALESCE(e.document_authority_level,'') IS DISTINCT FROM COALESCE(d.authority_level,'') "
+            "  OR COALESCE(e.document_status,'')          IS DISTINCT FROM COALESCE(d.status,'') "
+            "  OR COALESCE(e.document_review_status,'')   IS DISTINCT FROM COALESCE(d.review_status,''))"
+        )
+        res["rag_index_rows"] = cur.rowcount
+        cur.execute(
+            "SELECT d.id::text, COALESCE(d.authority_level,''), COALESCE(d.status,''), "
+            "COALESCE(d.review_status,'') FROM documents d "
+            "WHERE EXISTS (SELECT 1 FROM rag_published_embeddings e WHERE e.document_id = d.id)"
+        )
+        docs = cur.fetchall(); cur.close()
+    finally:
+        conn.close()
+    # 2) chat published_rag_metadata — cross-DB, batched, only-drifted rows
+    chat_dsn = _os.environ.get("CHAT_DATABASE_URL", "")
+    for pfx in ("postgresql+psycopg2://", "postgresql+asyncpg://"):
+        if chat_dsn.startswith(pfx):
+            chat_dsn = "postgresql://" + chat_dsn[len(pfx):]
+    if not chat_dsn:
+        res["chat_skipped"] = "CHAT_DATABASE_URL unset"
+    elif docs:
+        cc = _pg.connect(chat_dsn, connect_timeout=15); cc.autocommit = False
+        try:
+            ccur = cc.cursor(); ccur.execute("SET statement_timeout = 600000")
+            upd = (
+                "UPDATE published_rag_metadata p SET document_authority_level = v.auth, "
+                "document_status = v.stat, document_review_status = v.rev, updated_at = NOW() "
+                "FROM (VALUES %s) AS v(id, auth, stat, rev) "
+                "WHERE p.document_id = v.id::uuid AND ("
+                "     COALESCE(p.document_authority_level,'') IS DISTINCT FROM v.auth "
+                "  OR COALESCE(p.document_status,'')          IS DISTINCT FROM v.stat "
+                "  OR COALESCE(p.document_review_status,'')   IS DISTINCT FROM v.rev)"
+            )
+            for i in range(0, len(docs), 500):
+                _ev(ccur, upd, docs[i:i + 500]); res["chat_rows"] += ccur.rowcount; cc.commit()
+            ccur.close()
+        finally:
+            cc.close()
+    return res
+
+
 @app.post("/admin/backfill_metadata")
 async def backfill_metadata(
     dry_run: bool = Query(True, description="When true, only show what WOULD change"),

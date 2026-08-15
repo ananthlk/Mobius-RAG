@@ -36,6 +36,7 @@ _STEP_DEFS = [
     ("publish",       "Publish lexicon QA→RAG"),
     ("retag",         "Retag in place"),
     ("reconcile",     "Inheritance reconcile"),
+    ("sync_metadata", "Sync doc metadata"),
     ("chunk",         "Chunk new docs"),
     ("embed",         "Embed → publish"),
     ("gate",          "Integrity gate"),
@@ -401,6 +402,26 @@ def _run_nightly(opts: dict) -> None:
                 _step("reconcile", "done", f"{rows} docs stamped")
             except Exception as _exc:
                 _step("reconcile", "failed", str(_exc)[:80])
+        if _stopping():
+            raise RuntimeError("stopped")
+
+        # 2c — metadata sync: propagate documents.{authority_level,status,
+        # review_status} to the published index + chat for docs whose
+        # denormalized copy drifted. Metadata-only edits on `documents` don't
+        # trigger a republish, so without this they silently drift out of
+        # retrieval + chat (bit us 2026-08-15: ~2k authority flips to
+        # contract_source_of_truth reached `documents` but not the index/chat).
+        # Cheap: metadata columns only, only-drifted rows. Idempotent.
+        _step("sync_metadata", "running")
+        if dry_run:
+            _step("sync_metadata", "skipped", "dry run")
+        else:
+            try:
+                sm = _rag_post("/admin/sync-doc-metadata", {}, timeout=600)
+                _step("sync_metadata", "done",
+                      f"index {sm.get('rag_index_rows', '?')} · chat {sm.get('chat_rows', '?')}")
+            except Exception as _exc:
+                _step("sync_metadata", "failed", str(_exc)[:80])
         if _stopping():
             raise RuntimeError("stopped")
 
