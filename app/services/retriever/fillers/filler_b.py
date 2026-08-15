@@ -234,7 +234,7 @@ def _rerank_vector_candidates(
         length = _length_score(c.text)
         jpd, _jpd_tags = _jpd_signal(query_cats, c.text) if has_jpd else (0.0, [])
         meta = (
-            _compute_meta_boost_score(c.text, c.tags, required_phrases, boosted_phrases)
+            _compute_meta_boost_score(c.text, c.tags, required_phrases, boosted_phrases, query)
             if has_meta else 0.0
         )
 

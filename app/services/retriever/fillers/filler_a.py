@@ -55,7 +55,26 @@ def _compute_authority_score(authority_level: str | None) -> float:
 
 
 def _compute_tag_coverage_score(tags: dict) -> float:
-    """Compute tag coverage quality [0, 1]. More tags = more relevant."""
+    """Compute tag coverage quality [0, 1]. More tags = more relevant.
+
+    KNOWN LIMITATION, tried and reverted (2026-08-15, live trace: "prior
+    authorization criteria for Daraprim at AHCA Florida"): raw tag count
+    rewarded a boilerplate chunk (27-39 tags) over the specific, correct
+    Daraprim criterion chunk (4 tags, all precise). Tried replacing count
+    with average tag-code DEPTH (dot-separated path length) as a
+    specificity proxy -- fixed that one case, but a 22-query offline sweep
+    (script + results: mobius-rag scratchpad, Retriever session 2026-08-15)
+    showed it's a wash at best: it introduced a NEW regression on cmhc007
+    (corrected-claim submission), where genuinely-relevant chunks with many
+    but shallow tags lost to less-relevant chunks that merely had a higher
+    AVERAGE depth. Depth is just as arbitrary a relevance proxy as count --
+    reverted. A real fix needs genuine relevance measurement (e.g. overlap
+    against Gate's own matched domain/jurisdiction codes, not a structural
+    property of the tag dict alone) -- not built here, left as the next
+    real attempt. See _compute_meta_boost_score's specific-term fix
+    (shipped from the same investigation) for what DID hold up under the
+    same sweep.
+    """
     if not tags:
         return 0.0
     # Simple heuristic: normalize tag count (cap at 10 for saturation)
@@ -79,11 +98,62 @@ def _compute_length_score(text: str) -> float:
         return 1.0
 
 
+def _extract_uncovered_specific_terms(
+    query: str,
+    required_phrases: list[tuple[str, float]],
+    boosted_phrases: list[tuple[str, float]],
+) -> list[str]:
+    """Real bug fix (2026-08-15, live trace: "prior authorization criteria
+    for Daraprim at AHCA Florida"). meta_boost's phrase pool comes
+    exclusively from Gate's matched LEXICON codes -- a rare, specific query
+    term with zero lexicon representation (verified live: "daraprim" /
+    "pyrimethamine" / "toxoplasmosis" return 0 rows against
+    policy_lexicon_entries) structurally CANNOT ever generate a phrase, so
+    meta_boost scores 0 on it regardless of how correct/specific the
+    matching chunk actually is -- a missing signal, not a weighting
+    problem. bm25 (ts_rank_cd) already handles this correctly via its own
+    IDF-like weighting; this gives meta_boost an equivalent path.
+
+    Specificity signal: capitalization mid-query (not the first word --
+    sentence-initial capitalization is just English grammar, not a
+    specificity marker). A cheap, precise proxy for proper nouns/drug
+    names/product names/acronyms -- matches this exact case ("Daraprim"
+    capitalized mid-query; "prior"/"authorization"/"criteria" lowercase).
+    Deliberately NOT a raw length threshold -- too noisy (ordinary domain
+    words like "authorization"/"criteria" are already long).
+
+    A token already covered (as a substring, either direction -- "prior"
+    and "authorization" individually ARE covered by a "prior
+    authorization" lexicon phrase) by an existing required/boosted phrase
+    is excluded, so this only fills the genuine gap.
+    """
+    words = (query or "").split()
+    covered_text = (
+        " ".join(p.lower() for p, _ in required_phrases)
+        + " " + " ".join(p.lower() for p, _ in boosted_phrases)
+    )
+    specific: list[str] = []
+    seen: set[str] = set()
+    for i, w in enumerate(words):
+        cleaned = re.sub(r"[^a-zA-Z0-9\-]", "", w)
+        if i == 0 or len(cleaned) < 3 or not cleaned[0].isupper():
+            continue
+        tok_l = cleaned.lower()
+        if tok_l in seen:
+            continue
+        seen.add(tok_l)
+        if tok_l in covered_text:
+            continue
+        specific.append(tok_l)
+    return specific
+
+
 def _compute_meta_boost_score(
     text: str,
     tags: dict,
     required_phrases: list[tuple[str, float]] | None = None,
     boosted_phrases: list[tuple[str, float]] | None = None,
+    query: str = "",
 ) -> float:
     """Compute meta_boost as selectivity-weighted fraction of Gate's phrases present.
 
@@ -96,6 +166,8 @@ def _compute_meta_boost_score(
         tags: Chunk tags dict (keys are tag codes like "d:claims.timely_filing").
         required_phrases: [(phrase, selectivity_weight), ...] from Gate's REQUIRED bucket.
         boosted_phrases: [(phrase, selectivity_weight), ...] from Gate's BOOSTED bucket.
+        query: Raw query text (2026-08-15 fix) -- source for out-of-lexicon
+            specific-term detection, see _extract_uncovered_specific_terms.
 
     Returns:
         Float [0, 1]: fraction of total possible phrase weight present in chunk.
@@ -103,7 +175,13 @@ def _compute_meta_boost_score(
     required_phrases = required_phrases or []
     boosted_phrases = boosted_phrases or []
 
-    if not required_phrases and not boosted_phrases:
+    specific_terms = _extract_uncovered_specific_terms(query, required_phrases, boosted_phrases)
+    # Full REQUIRED-tier weight -- the user explicitly typed this term,
+    # which is at least as strong a relevance signal as an inferred lexicon
+    # match.
+    effective_required = list(required_phrases) + [(t, 1.0) for t in specific_terms]
+
+    if not effective_required and not boosted_phrases:
         return 0.0
 
     text_lower = text.lower()
@@ -116,7 +194,7 @@ def _compute_meta_boost_score(
 
     # Compute present weight (REQUIRED full, BOOSTED half)
     present_weight = 0.0
-    for phrase, selectivity in required_phrases:
+    for phrase, selectivity in effective_required:
         if phrase.lower() in text_lower or phrase.lower() in tags_str:
             present_weight += selectivity
 
@@ -126,7 +204,7 @@ def _compute_meta_boost_score(
 
     # Total possible weight
     total_weight = (
-        sum(s for _, s in required_phrases) +
+        sum(s for _, s in effective_required) +
         sum(s * 0.5 for _, s in boosted_phrases)
     )
 
@@ -181,7 +259,7 @@ def _compute_rerank_score(
     auth_sig = _compute_authority_score(candidate.authority_level)
     cov_sig = _compute_tag_coverage_score(candidate.tags)
     len_sig = _compute_length_score(candidate.text)
-    meta_sig = _compute_meta_boost_score(candidate.text, candidate.tags, required_phrases, boosted_phrases)
+    meta_sig = _compute_meta_boost_score(candidate.text, candidate.tags, required_phrases, boosted_phrases, query)
 
     # Weighted sum (already normalized [0, 1]), sums to 1.00.
     composite = (
