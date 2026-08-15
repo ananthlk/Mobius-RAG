@@ -14008,6 +14008,30 @@ async def trace_explorer_oracle_matrix(body: OracleMatrixRequest = Body(...)):
     return matrix
 
 
+@app.get("/curator", response_class=HTMLResponse)
+async def curator_page():
+    """Serves the Source Registry curator UI (static file, no build step).
+
+    Same precedent as /trace-explorer below: the page shell reveals no data,
+    so it is reachable without a token; its JS calls /sources/* for anything
+    real.
+
+    WHY THIS EXISTS: discovered_sources has shipped human-curation columns
+    since Phase 13.2 (curation_status, curated_by, curation_notes,
+    curated_authority_level) and POST /sources/{id}/curate has been live to
+    write them — scripts/curator/SCHEMA.md even describes those fields as
+    "mutable via curator UI". There was no such UI. The back half of a human
+    workflow existed with no front door while the registry kept growing into
+    it. Ananth ruled the surface mine 2026-08-15 after the UX seat did not
+    rule (their ask file was untracked and they run in a worktree, so they
+    could not see it).
+    """
+    import os as _os
+    path = _os.path.join(_os.path.dirname(__file__), "static_admin", "curator.html")
+    with open(path, encoding="utf-8") as f:
+        return HTMLResponse(content=f.read())
+
+
 @app.get("/trace-explorer", response_class=HTMLResponse)
 async def trace_explorer_page():
     """Serves the self-contained Trace Explorer UI (static file, no build

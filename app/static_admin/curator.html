@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Source Registry — Curator</title>
+<!--
+  The curator surface. Self-contained static page, same pattern as
+  trace_explorer.html: no build step, served from app/static_admin/.
+
+  WHY IT EXISTS
+    discovered_sources has shipped human-curation columns since Phase 13.2 —
+    curation_status, curated_by, curation_notes, curated_authority_level (an
+    explicit human override of the classifier) — and POST /sources/{id}/curate
+    has been live to write them. SCHEMA.md describes those fields as "mutable
+    via curator UI". No such UI existed. Somebody built the back half of a
+    human workflow and the registry kept growing into it: one Sunshine master
+    alone enumerates 33 hub pages + 13 files.
+
+    Asked the UX seat three times whether the surface was theirs, mine, or an
+    unowned gap (docs/rag-agents/crawler-signoff/04-ux-seat.md). No ruling —
+    and it later turned out UX runs in a worktree and literally could not see
+    the ask file, which was untracked. Ananth ruled it mine on 2026-08-15.
+
+  DESIGN
+    Tokens copied from mobius-design/tokens.css rather than linked, because
+    this page must stay a single file with no build step. If the brand moves,
+    re-copy — do not invent values here. Violet #7c3aed is the accent; Google
+    and GitHub blues are explicitly out per BRANDING.md.
+
+  AUTH
+    /sources/* is not behind the /admin/* middleware today, so this page works
+    without a key. It still sends X-Admin-Key when one is entered, so nothing
+    breaks the day that gate is added. The operator name is NOT decoration —
+    it lands in curated_by, which is the audit trail for who called a source
+    canonical.
+-->
+<style>
+  :root{
+    --mobius-text-primary:#1a1d21; --mobius-text-secondary:#374151;
+    --mobius-text-muted:#64748b; --mobius-bg-primary:#fafbfc;
+    --mobius-bg-secondary:#f8fafc; --mobius-bg-tertiary:#f1f5f9;
+    --mobius-bg-card:#ffffff; --mobius-bg-hover:#f9fafb;
+    --mobius-border:#e2e8f0; --mobius-border-medium:#d1d5db;
+    --mobius-violet:#7c3aed; --mobius-violet-hover:#6d28d9;
+    --ok:#047857; --ok-bg:#ecfdf5; --warn:#b45309; --warn-bg:#fffbeb;
+    --danger:#b91c1c; --danger-bg:#fef2f2; --muted-bg:#f1f5f9;
+    --radius:8px; --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+       color:var(--mobius-text-primary);background:var(--mobius-bg-primary)}
+  header{background:var(--mobius-bg-card);border-bottom:1px solid var(--mobius-border);
+         padding:14px 20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap;
+         position:sticky;top:0;z-index:20}
+  h1{font-size:16px;margin:0;font-weight:650;letter-spacing:-.01em}
+  h1 span{color:var(--mobius-violet)}
+  .sub{color:var(--mobius-text-muted);font-size:12px}
+  .spacer{flex:1}
+  input,select,textarea,button{font:inherit;color:inherit}
+  input,select,textarea{padding:7px 9px;border:1px solid var(--mobius-border-medium);
+    border-radius:6px;background:var(--mobius-bg-card)}
+  input:focus,select:focus,textarea:focus{outline:2px solid var(--mobius-violet);outline-offset:-1px}
+  button{padding:7px 12px;border-radius:6px;border:1px solid var(--mobius-border-medium);
+    background:var(--mobius-bg-card);cursor:pointer}
+  button:hover{background:var(--mobius-bg-hover)}
+  button.primary{background:var(--mobius-violet);border-color:var(--mobius-violet);color:#fff}
+  button.primary:hover{background:var(--mobius-violet-hover)}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .wrap{padding:16px 20px;max-width:1500px;margin:0 auto}
+  .stats{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+  .stat{background:var(--mobius-bg-card);border:1px solid var(--mobius-border);
+        border-radius:var(--radius);padding:9px 13px;min-width:96px}
+  .stat b{display:block;font-size:19px;font-weight:650}
+  .stat span{font-size:11px;color:var(--mobius-text-muted);text-transform:uppercase;letter-spacing:.04em}
+  .filters{background:var(--mobius-bg-card);border:1px solid var(--mobius-border);
+    border-radius:var(--radius);padding:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+  /* The registry table is dense and legitimately wide. It scrolls inside its
+     own box so the PAGE never scrolls sideways — on a narrow window the
+     filters and stats stay put while the table pans. */
+  .tablewrap{overflow-x:auto;border:1px solid var(--mobius-border);
+             border-radius:var(--radius);background:var(--mobius-bg-card)}
+  table{width:100%;border-collapse:collapse;min-width:900px}
+  th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;
+     color:var(--mobius-text-muted);padding:9px 10px;background:var(--mobius-bg-secondary);
+     border-bottom:1px solid var(--mobius-border);white-space:nowrap}
+  td{padding:9px 10px;border-bottom:1px solid var(--mobius-border);vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  tr.sel{background:#faf5ff}
+  .u{font-family:var(--mono);font-size:12px;word-break:break-all}
+  .u a{color:var(--mobius-violet);text-decoration:none}
+  .u a:hover{text-decoration:underline}
+  .pill{display:inline-block;padding:2px 7px;border-radius:999px;font-size:11px;font-weight:600;white-space:nowrap}
+  .p-canonical{background:var(--ok-bg);color:var(--ok)}
+  .p-auto{background:var(--muted-bg);color:var(--mobius-text-muted)}
+  .p-noise{background:var(--danger-bg);color:var(--danger)}
+  .p-stale{background:var(--warn-bg);color:var(--warn)}
+  .p-needs_auth{background:var(--warn-bg);color:var(--warn)}
+  .p-file{background:#eef2ff;color:#4338ca}
+  .p-page{background:var(--mobius-bg-tertiary);color:var(--mobius-text-secondary)}
+  .acts{display:flex;gap:4px;flex-wrap:wrap}
+  .acts button{padding:3px 8px;font-size:11px}
+  .drawer{position:fixed;right:0;top:0;bottom:0;width:420px;background:var(--mobius-bg-card);
+    border-left:1px solid var(--mobius-border);box-shadow:-8px 0 24px rgba(0,0,0,.06);
+    padding:18px;overflow:auto;transform:translateX(100%);transition:transform .16s ease;z-index:30}
+  .drawer.open{transform:none}
+  .drawer label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.04em;
+    color:var(--mobius-text-muted);margin:12px 0 4px}
+  .drawer input,.drawer select,.drawer textarea{width:100%}
+  .note{font-size:12px;color:var(--mobius-text-muted)}
+  .banner{padding:9px 12px;border-radius:6px;margin-bottom:12px;font-size:13px;display:none}
+  .banner.err{background:var(--danger-bg);color:var(--danger);display:block}
+  .banner.ok{background:var(--ok-bg);color:var(--ok);display:block}
+  .empty{padding:34px;text-align:center;color:var(--mobius-text-muted)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Source Registry <span>·</span> Curator</h1>
+  <span class="sub" id="who"></span>
+  <div class="spacer"></div>
+  <input id="op" placeholder="your name (recorded as curated_by)" style="width:230px">
+  <input id="key" type="password" placeholder="admin key (optional)" style="width:150px">
+  <button id="refresh" class="primary">Refresh</button>
+</header>
+
+<div class="wrap">
+  <div class="banner" id="banner"></div>
+  <div class="stats" id="stats"></div>
+
+  <div class="filters">
+    <input id="q" placeholder="search text (payer, host, path, notes…)" style="width:260px">
+    <input id="host" placeholder="host" style="width:170px">
+    <input id="payer" placeholder="payer" style="width:150px">
+    <input id="state" placeholder="ST" style="width:60px" maxlength="2">
+    <select id="status">
+      <option value="">any status</option>
+      <option>auto</option><option>canonical</option><option>noise</option>
+      <option>stale</option><option>needs_auth</option>
+    </select>
+    <select id="ingested">
+      <option value="">ingested: any</option>
+      <option value="true">ingested</option>
+      <option value="false">not ingested</option>
+    </select>
+    <label class="note"><input type="checkbox" id="reach" checked style="width:auto"> hide unreachable</label>
+    <select id="limit"><option>50</option><option>100</option><option selected>200</option><option>500</option></select>
+    <button id="go" class="primary">Search</button>
+  </div>
+
+  <div id="results"></div>
+</div>
+
+<div class="drawer" id="drawer">
+  <button id="close" style="float:right">✕</button>
+  <h3 style="margin:0 0 4px;font-size:14px">Curate source</h3>
+  <div class="u" id="d-url" style="margin-bottom:6px"></div>
+  <div class="note" id="d-meta"></div>
+
+  <label>Curation status</label>
+  <select id="d-status">
+    <option>auto</option><option>canonical</option><option>noise</option>
+    <option>stale</option><option>needs_auth</option>
+  </select>
+
+  <label>Authority level — human override</label>
+  <input id="d-auth" placeholder="leave blank to use the inferred value">
+  <div class="note" id="d-inferred"></div>
+
+  <label>Topic tags (comma separated)</label>
+  <input id="d-tags" placeholder="ECT, prior-auth, criteria">
+
+  <label>Notes</label>
+  <textarea id="d-notes" rows="4" placeholder="why this call was made — the next person reads this"></textarea>
+
+  <div style="margin-top:16px;display:flex;gap:8px">
+    <button class="primary" id="d-save">Save</button>
+    <button id="close2">Cancel</button>
+  </div>
+  <p class="note" style="margin-top:14px">
+    Saved values land in <code>curation_status</code>, <code>curated_authority_level</code>,
+    <code>topic_tags</code>, <code>curation_notes</code>, with <code>curated_by</code> set to
+    the name above. An upsert never overwrites these — only this form does.
+  </p>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let rows = [], current = null;
+
+// Operator identity and key persist per-tab. curated_by is an audit trail,
+// not a nicety — "who decided this was canonical" is the question it answers.
+const op = $("#op"), key = $("#key");
+op.value = sessionStorage.getItem("curator_op") || "";
+key.value = sessionStorage.getItem("curator_key") || "";
+op.onchange = () => sessionStorage.setItem("curator_op", op.value.trim());
+key.onchange = () => sessionStorage.setItem("curator_key", key.value.trim());
+
+function headers(){
+  const h = {"Content-Type":"application/json"};
+  const k = key.value.trim();
+  // Sent only when supplied. /sources/* is not gated today; this keeps the
+  // page working unchanged on the day it is.
+  if (k) { h["X-Admin-Key"] = k; h["X-Admin-Api-Key"] = k; }
+  return h;
+}
+function banner(msg, kind){
+  const b = $("#banner"); b.textContent = msg; b.className = "banner " + (kind||"ok");
+  if (kind !== "err") setTimeout(() => { b.className = "banner"; }, 3500);
+}
+const esc = s => (s==null?"":String(s)).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+async function loadStats(){
+  try {
+    const r = await fetch("/sources/stats", {headers: headers()});
+    if (!r.ok) throw new Error("stats " + r.status);
+    const s = await r.json();
+    const by = s.by_curation_status || {}, ing = s.by_ingested || {};
+    const total = Object.values(by).reduce((a,b)=>a+b,0);
+    const cells = [
+      ["total", total],
+      ["canonical", by.canonical||0],
+      ["auto", by.auto||0],
+      ["noise", by.noise||0],
+      ["stale", by.stale||0],
+      ["needs auth", by.needs_auth||0],
+      ["ingested", ing.true||0],
+    ];
+    $("#stats").innerHTML = cells.map(([l,v]) =>
+      `<div class="stat"><b>${v}</b><span>${l}</span></div>`).join("");
+  } catch(e){ banner("Could not load stats: " + e.message, "err"); }
+}
+
+async function search(){
+  const p = new URLSearchParams();
+  const add = (k,v) => { if (v !== "" && v != null) p.set(k,v); };
+  add("q", $("#q").value.trim());
+  add("host", $("#host").value.trim());
+  add("payer", $("#payer").value.trim());
+  add("state", $("#state").value.trim().toUpperCase());
+  add("curation_status", $("#status").value);
+  add("ingested", $("#ingested").value);
+  add("only_reachable", $("#reach").checked);
+  add("limit", $("#limit").value);
+  $("#results").innerHTML = `<div class="empty">Searching…</div>`;
+  try {
+    const r = await fetch("/sources/search?" + p, {headers: headers()});
+    if (!r.ok) throw new Error("search " + r.status);
+    rows = await r.json();
+    render();
+  } catch(e){
+    $("#results").innerHTML = `<div class="empty">Search failed: ${esc(e.message)}</div>`;
+  }
+}
+
+function fetchCell(r){
+  const s = r.last_fetch_status;
+  if (s == null) return `<span class="note">never fetched</span>`;
+  const cls = s >= 200 && s < 300 ? "p-canonical" : (s >= 400 ? "p-noise" : "p-stale");
+  const when = r.last_fetch_at ? String(r.last_fetch_at).slice(0,10) : "";
+  return `<span class="pill ${cls}">${s}</span> <span class="note">${when}</span>`;
+}
+
+function render(){
+  if (!rows.length){
+    $("#results").innerHTML = `<div class="empty">Nothing matched. Try clearing filters, or untick “hide unreachable”.</div>`;
+    return;
+  }
+  $("#results").innerHTML = `<div class="tablewrap"><table><thead><tr>
+      <th>URL</th><th>Payer / State</th><th>Kind</th><th>Authority</th>
+      <th>Status</th><th>Last fetch</th><th>Ingested</th><th></th></tr></thead><tbody>` +
+    rows.map((r,i) => `<tr id="r${i}">
+      <td class="u"><a href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">${esc(r.url)}</a>
+          <div class="note">${esc(r.host)}</div></td>
+      <td>${esc(r.payer||"—")}${r.state?" · "+esc(r.state):""}</td>
+      <td><span class="pill p-${esc(r.content_kind)}">${esc(r.content_kind)}</span>
+          ${r.extension?`<span class="note"> .${esc(r.extension)}</span>`:""}</td>
+      <td>${esc(r.effective_authority_level||"—")}
+          ${r.curated_authority_level?`<div class="note">human override</div>`:""}</td>
+      <td><span class="pill p-${esc(r.curation_status)}">${esc(r.curation_status)}</span></td>
+      <td>${fetchCell(r)}</td>
+      <td>${r.ingested?'<span class="pill p-canonical">yes</span>':'<span class="note">no</span>'}</td>
+      <td><div class="acts">
+        <button onclick="quick(${i},'canonical')">canonical</button>
+        <button onclick="quick(${i},'noise')">noise</button>
+        <button onclick="open_(${i})">edit…</button>
+      </div></td>
+    </tr>`).join("") + `</tbody></table></div>`;
+}
+
+// One-click for the two calls that dominate real curation. Everything else
+// goes through the drawer, where a note can be attached.
+async function quick(i, status){
+  await save(rows[i], {curation_status: status});
+}
+
+function open_(i){
+  current = rows[i];
+  document.querySelectorAll("tr.sel").forEach(t => t.classList.remove("sel"));
+  const tr = $("#r"+i); if (tr) tr.classList.add("sel");
+  $("#d-url").textContent = current.url;
+  $("#d-meta").textContent =
+    [current.host, current.payer, current.state, current.program].filter(Boolean).join(" · ");
+  $("#d-status").value = current.curation_status || "auto";
+  $("#d-auth").value = current.curated_authority_level || "";
+  $("#d-inferred").textContent = current.inferred_authority_level
+    ? "classifier inferred: " + current.inferred_authority_level : "classifier inferred nothing";
+  $("#d-tags").value = (current.topic_tags||[]).join(", ");
+  $("#d-notes").value = "";
+  $("#drawer").classList.add("open");
+}
+function close_(){ $("#drawer").classList.remove("open"); current = null; }
+$("#close").onclick = close_; $("#close2").onclick = close_;
+
+async function save(row, patch){
+  const by = op.value.trim();
+  if (!by){ banner("Enter your name first — it is recorded as curated_by.", "err"); op.focus(); return; }
+  const body = Object.assign({by}, patch);
+  try {
+    const r = await fetch(`/sources/${row.id}/curate`,
+      {method:"POST", headers: headers(), body: JSON.stringify(body)});
+    if (!r.ok){
+      const t = await r.text();
+      throw new Error(r.status + " " + t.slice(0,180));
+    }
+    const updated = await r.json();
+    const i = rows.findIndex(x => x.id === row.id);
+    if (i >= 0) rows[i] = updated;      // reflect the server's row, not our guess
+    render();
+    banner(`Saved — ${updated.url.slice(0,60)} is now “${updated.curation_status}”.`);
+    loadStats();
+  } catch(e){ banner("Save failed: " + e.message, "err"); }
+}
+
+$("#d-save").onclick = async () => {
+  if (!current) return;
+  const tags = $("#d-tags").value.split(",").map(s=>s.trim()).filter(Boolean);
+  const patch = {
+    curation_status: $("#d-status").value,
+    curated_authority_level: $("#d-auth").value.trim(),   // "" clears the override
+    topic_tags: tags,
+  };
+  const n = $("#d-notes").value.trim();
+  if (n) patch.notes = n;
+  const row = current;
+  close_();
+  await save(row, patch);
+};
+
+$("#go").onclick = search;
+$("#refresh").onclick = () => { loadStats(); search(); };
+$("#q").addEventListener("keydown", e => { if (e.key === "Enter") search(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape") close_(); });
+
+loadStats(); search();
+</script>
+</body>
+</html>
