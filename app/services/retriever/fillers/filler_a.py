@@ -258,11 +258,20 @@ def _compute_rerank_score(
     # pool's raw magnitudes happen to sit. bm25_bounds=None (no pool
     # context supplied) falls back to the raw value unchanged.
     raw_bm25 = candidate.bm25_score or 0.0
-    if bm25_bounds is not None:
-        bm25_lo, bm25_hi = bm25_bounds
-        bm25_sig = (raw_bm25 - bm25_lo) / (bm25_hi - bm25_lo) if bm25_hi > bm25_lo else 0.0
-    else:
-        bm25_sig = raw_bm25
+    # TEMPORARILY DISABLED (2026-08-15) for a controlled A/B against the
+    # real 22-query bank -- min-max deployment showed a real regression
+    # (bank recall 0.649 -> 0.551, recall_answer 0.305 -> ~0.28-0.30)
+    # that the offline proxy sweep used to validate it did NOT predict
+    # (proxy showed 0.745 -> 0.791, an apparent improvement). Suspected
+    # mechanism: min-max always promotes the POOL's best candidate to
+    # bm25_sig=1.0 regardless of whether that candidate is actually a
+    # strong absolute match -- for a query where the whole pool scores
+    # low (a hard/rare query), this artificially inflates a mediocre
+    # candidate's composite score instead of correctly leaving bm25_sig
+    # low and letting other signals discriminate. Testing this hypothesis
+    # directly against live judged recall before deciding whether to
+    # revert permanently or find a bounded variant.
+    bm25_sig = raw_bm25
     auth_sig = _compute_authority_score(candidate.authority_level)
     cov_sig = _compute_tag_coverage_score(candidate.tags)
     len_sig = _compute_length_score(candidate.text)
