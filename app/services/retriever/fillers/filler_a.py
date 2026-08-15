@@ -278,23 +278,31 @@ def _compute_rerank_score(
     meta_sig = _compute_meta_boost_score(candidate.text, candidate.tags, required_phrases, boosted_phrases)
     doc_type_sig = _compute_doc_type_score(candidate.doc_type)
 
-    # Weighted sum (already normalized [0, 1]), sums to 1.00. doc_type
-    # (2026-08-15, joint Lexicon build) added at 0.02 -- validated via
-    # offline sweep against the 22-query eval bank (fresh live pool pulls,
-    # post-Lexicon's document_doc_type population): 0.02 was the sweet
-    # spot (bank recall 0.745 -> 0.791), while 0.04+ actually regressed
-    # (0.761) since ~87% of this corpus's candidates already share the
-    # SAME doc_type value ('um') -- too much weight on a signal that
-    # rarely discriminates just adds noise. Taken from cov/misc (0.05/0.07
-    # -> 0.04/0.06), the two smallest, least load-bearing weights.
+    # DIAGNOSTIC REVERT (2026-08-15): today's reweight (0.40->0.51 bm25,
+    # 0.20->0.04 tag_coverage -- an 8x cut, the single biggest swing of
+    # any signal today) was validated only against the Daraprim case and
+    # an offline proxy metric, both of which turned out not to predict
+    # real judged bank recall. A per-query breakdown of the live bank
+    # (job 4140a468a7d2 vs the original baseline) showed 7 of 22 queries
+    # regressed in a way that PERSISTED even after separately disabling
+    # the min-max transform -- i.e. NOT explained by min-max, most likely
+    # explained by this tag_coverage cut specifically. Reverting to the
+    # ORIGINAL v0.4 weight split (bm25 .40/auth .10/cov .20/len .05/
+    # meta .20/misc .05) and adding doc_type as a small INCREMENT on top
+    # (0.02, taken from misc alone: .05 -> .03) rather than carving it out
+    # of tag_coverage again -- testing whether doc_type alone (without the
+    # big tag_coverage cut) recovers the Daraprim case without regressing
+    # the broader bank. bm25_sig stays RAW (min-max still disabled, see
+    # above -- confirmed to genuinely break 2/22 queries with no
+    # compensating broad benefit).
     composite = (
-        0.51 * bm25_sig +
-        0.13 * auth_sig +
-        0.04 * cov_sig +
-        0.06 * len_sig +
-        0.18 * meta_sig +
+        0.40 * bm25_sig +
+        0.10 * auth_sig +
+        0.20 * cov_sig +
+        0.05 * len_sig +
+        0.20 * meta_sig +
         0.02 * doc_type_sig +
-        0.06 * 0.5  # Misc (neutral baseline)
+        0.03 * 0.5  # Misc (neutral baseline)
     )
     return composite
 
