@@ -95,19 +95,6 @@ class PoolResult:
     """Everything Pool produced for one rewritten_query (Step 2 output)."""
 
     query: str = ""
-    # Real bug fix (2026-08-15): `query` above is the REWRITTEN query, which
-    # Reformat lowercases even in EXACT-contour passthrough mode (verified
-    # live: reformat.query "...Daraprim..." -> rewritten_queries
-    # "...daraprim..." -- confirmed via a live trace before this landed).
-    # Filler a/b's meta_boost specific-term fallback (_extract_uncovered_
-    # specific_terms, filler_a.py) needs the ORIGINAL casing to detect
-    # proper-noun-shaped terms (drug names, product names) -- reading
-    # `query` there silently disabled the fix in production even though it
-    # was verified correct offline against the bank's real-cased queries.
-    # None when the caller doesn't have/care about original casing (fully
-    # backward-compatible -- Fillers fall back to `query` when this is
-    # empty).
-    original_query: str = ""
     candidates: list[PoolCandidate] = field(default_factory=list)
     # doc_narrow_ms (S3.1 step 2 cascade), tag_select_ms (step 4 chunk query),
     # embed_ms, vector_ms, inherited_ms, dedup_ms, neighbor_ms -- every

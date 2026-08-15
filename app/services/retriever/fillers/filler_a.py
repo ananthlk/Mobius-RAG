@@ -252,10 +252,7 @@ def fill_shape_bm25(
 
     # Compute composite rerank score per candidate
     scored_candidates = [
-        (c, _compute_rerank_score(
-            c, getattr(pool_result, 'original_query', None) or pool_result.query,
-            required_phrases, boosted_phrases,
-        ))
+        (c, _compute_rerank_score(c, pool_result.query, required_phrases, boosted_phrases))
         for c in scored_candidates
     ]
     # Sort by composite score descending
