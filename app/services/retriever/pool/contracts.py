@@ -73,10 +73,19 @@ class PoolCandidate:
     # trigger phrase; see the Daraprim live case this was built to fix:
     # utilization_management.prior_authorization existed at the DOCUMENT
     # level but not on the specific clinical-criterion chunk that needed
-    # it). Same "None means not yet classified" convention authority_level
-    # already established -- populate here, plumb through
-    # public_adapter.py, ONLY once Lexicon's document_doc_type column is
-    # real; this field is additive/inert (never read yet) until then.
+    # it). Confirmed with Lexicon (2026-08-15): column is
+    # rag_published_embeddings.document_doc_type, and -- same as
+    # authority_level -- the real "not yet classified" value at THIS
+    # layer is EMPTY STRING '', not NULL (publish.py COALESCEs the
+    # nullable documents.doc_type -> '' before it reaches the index;
+    # verified against authority_level's own live data: 7,855 published
+    # docs carry document_authority_level=''). `str | None = None` here is
+    # still the right Python-level default (safe for direct construction/
+    # tests); any real value read off the DB is '' for unclassified, and
+    # any future scoring function should treat '' the same as falsy/None
+    # (`if not doc_type: ...`), exactly matching
+    # _compute_authority_score's existing handling. Additive/inert (never
+    # read yet) until the column and public_adapter.py's SELECT are real.
     doc_type: str | None = None
     # REAL STRUCTURAL BUG found+fixed 2026-07-23 (Retriever's live-trace
     # report): dedup_candidates() is "first-arm-wins" on chunk_id collision
