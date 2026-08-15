@@ -31,7 +31,8 @@ from app.services.retriever.pool.contracts import PoolCandidate, ScopeContext, S
 
 _CHUNK_COLS = """
     id, document_id, text, chunk_d_tags, chunk_p_tags, chunk_j_tags,
-    document_status, source_type, content_sha, page_number, paragraph_index, document_authority_level
+    document_status, source_type, content_sha, page_number, paragraph_index, document_authority_level,
+    document_doc_type
 """
 
 # Statement timeout for Pool's candidate-fetch queries (Ananth's live catch,
@@ -161,6 +162,12 @@ def _row_to_candidate(row, *, source_arm: str, score: float | None, is_neighbor:
         paragraph_index=row._mapping.get("paragraph_index"),
         bm25_score=float(bm25) if bm25 is not None else None,
         authority_level=row._mapping.get("document_authority_level"),
+        # Confirmed live with Lexicon (2026-08-15): document_doc_type
+        # column population complete (3,334/3,334 docs), '' (not NULL) is
+        # the real "unclassified" value at this layer, same convention as
+        # document_authority_level -- see PoolCandidate.doc_type's
+        # docstring in contracts.py.
+        doc_type=row._mapping.get("document_doc_type"),
     )
 
 
