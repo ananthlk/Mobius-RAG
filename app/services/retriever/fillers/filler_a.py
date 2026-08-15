@@ -138,14 +138,15 @@ def _compute_rerank_score(
     query: str = "",
     required_phrases: list[tuple[str, float]] | None = None,
     boosted_phrases: list[tuple[str, float]] | None = None,
+    bm25_bounds: tuple[float, float] | None = None,
 ) -> float:
     """
     Compose multiple signals into a unified rerank score [0, 1].
 
-    Weights (Filler a v0.6 — 2026-08-15, Ananth's live-trace diagnosis):
-      bm25 (0.51, POWER-TRANSFORMED — see below) + authority (0.13)
-      + tag_coverage (0.05) + length (0.06) + meta_boost (0.18) + misc (0.07)
-      -- same weight split as v0.5 below, unchanged.
+    Weights (Filler a v0.7 — 2026-08-15, Ananth's live-trace diagnosis):
+      bm25 (0.51, MIN-MAX NORMALIZED WITHIN THE POOL — see below) +
+      authority (0.13) + tag_coverage (0.05) + length (0.06) +
+      meta_boost (0.18) + misc (0.07) -- same weight split as v0.5, unchanged.
 
     v0.5 fixed the structural exclusion (see that changelog entry below)
     but left the Daraprim case on a knife-edge: verified live it landed at
@@ -159,19 +160,31 @@ def _compute_rerank_score(
     Daraprim's chunk has the single BEST bm25 in the whole ~1157-candidate
     pool (0.804, a real 0.13 gap over the next tier at ~0.67-0.75), but a
     flat weight doesn't let that decisive a margin count for more than an
-    equally-sized gap anywhere else in the range. Two candidate fixes were
-    compared empirically (offline sweep against the same live pool
-    snapshot + the 22-query eval bank, not guessed): (a) nudge the weight
-    split further toward bm25/authority -- worked (rank #4, bank recall
-    held at 0.791) but is an ad hoc tweak that doesn't generalize past this
-    one weight point; (b) POWER-TRANSFORM bm25_sig (bm25_sig ** 1.5) before
-    weighting, keeping v0.5's ORIGINAL weight split -- also reached rank
-    #5 with bank recall held at 0.791, and is the more principled fix
-    (stretches genuine separation at the high end for every query, not
-    just this one; combining both (a)+(b) was tested and actually
-    REGRESSED the bank to 0.776 -- diminishing/negative returns from
-    stacking two corrections aimed at the same problem). Shipped (b),
-    Ananth's call ("logical and better fix").
+    equally-sized gap anywhere else in the range.
+
+    v0.6 (same day) fixed this with a flat power transform (bm25_sig **
+    1.5) on the raw [0, 1] value -- validated (rank #5, bank recall held
+    at 0.791) but Ananth's own follow-up caught the real limitation:
+    ts_rank_cd's raw magnitude isn't comparable across different queries/
+    pools -- this pool happened to span nearly the full [0, 1] range
+    (0.000-0.846), so a flat exponent worked, but a query where every
+    candidate clusters in a narrow band (e.g. 0.4-0.5) would barely move
+    under x**1.5 even though the SAME relative gap (0.6 vs 0.4 "should"
+    count the same as 0.8 vs 0.6, Ananth's framing) is just as real.
+    v0.7 fixes this properly: min-max normalize bm25_score against the
+    POOL'S OWN min/max for this query BEFORE any further transform --
+    stretches whatever the actual competitive spread is to fill [0, 1],
+    so separation is measured relative to the field, not an absolute
+    scale. Verified empirically (same live pool snapshot + 22-query eval
+    bank) that min-max ALONE (no extra power on top) already matches
+    v0.6's result exactly -- rank #5, bank recall 0.791 -- and is the more
+    generalizable fix (adapts per-query instead of assuming one constant
+    fits every pool's spread). Also confirmed combining min-max WITH an
+    extra power transform regresses the bank (same "diminishing/negative
+    returns from stacking two corrections" pattern found when v0.6's
+    power was combined with a weight nudge) -- shipped min-max alone.
+    bm25_bounds=None (e.g. isolated unit tests) falls back to the raw
+    [0, 1] value unchanged, byte-identical to pre-v0.6 behavior.
 
     Separately, real root cause behind WHY this specific chunk needed
     rescuing at all: its lexicon tags don't include
@@ -217,13 +230,18 @@ def _compute_rerank_score(
     NOT do multi-signal fusion across all signals (gate b, read-only). Each
     Filler composes its own signal set for its own arm.
     """
-    # Power transform (2026-08-15, Ananth's call, see docstring): bm25_sig
-    # is already [0, 1], but a flat linear weight can't distinguish "this
-    # candidate decisively leads the pool" from "this candidate is
-    # marginally ahead" -- squaring (well, ^1.5) stretches genuine
-    # separation at the high end while staying monotonic and bounded.
-    _BM25_POWER = 1.5
-    bm25_sig = (candidate.bm25_score or 0.0) ** _BM25_POWER
+    # Min-max normalization (2026-08-15, Ananth's call, see docstring):
+    # rescale bm25_score against the POOL's own min/max for this query,
+    # not an assumed [0, 1] absolute scale -- a candidate that decisively
+    # leads its actual field gets close to 1.0 regardless of where the
+    # pool's raw magnitudes happen to sit. bm25_bounds=None (no pool
+    # context supplied) falls back to the raw value unchanged.
+    raw_bm25 = candidate.bm25_score or 0.0
+    if bm25_bounds is not None:
+        bm25_lo, bm25_hi = bm25_bounds
+        bm25_sig = (raw_bm25 - bm25_lo) / (bm25_hi - bm25_lo) if bm25_hi > bm25_lo else 0.0
+    else:
+        bm25_sig = raw_bm25
     auth_sig = _compute_authority_score(candidate.authority_level)
     cov_sig = _compute_tag_coverage_score(candidate.tags)
     len_sig = _compute_length_score(candidate.text)
@@ -296,9 +314,20 @@ def fill_shape_bm25(
     required_phrases = getattr(pool_result, 'required_phrases', None) or []
     boosted_phrases = getattr(pool_result, 'boosted_phrases', None) or []
 
+    # Pool-wide bm25 bounds for min-max normalization (2026-08-15) -- computed
+    # ONCE here (not per-candidate) since it's the same field for every
+    # candidate in this pool. None (empty pool, already filtered to
+    # bm25_score is not None above, so only possible when scored_candidates
+    # is empty) is handled by _compute_rerank_score's own bm25_bounds=None
+    # fallback.
+    bm25_bounds = (
+        (min(c.bm25_score for c in scored_candidates), max(c.bm25_score for c in scored_candidates))
+        if scored_candidates else None
+    )
+
     # Compute composite rerank score per candidate
     scored_candidates = [
-        (c, _compute_rerank_score(c, pool_result.query, required_phrases, boosted_phrases))
+        (c, _compute_rerank_score(c, pool_result.query, required_phrases, boosted_phrases, bm25_bounds))
         for c in scored_candidates
     ]
     # Sort by composite score descending

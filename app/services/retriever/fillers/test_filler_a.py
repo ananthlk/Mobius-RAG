@@ -550,3 +550,71 @@ class TestFillerAEdgeCases:
         # The phrase "timely filing" (0.93 weight) should contribute; "filing deadline" (0.88) won't match
         # So score should be approximately 0.93 / (0.93 + 0.88) ≈ 0.514
         assert 0.5 < score < 0.6, f"Score should be ~0.51 for one-of-two phrases (got {score})"
+
+
+class TestBm25MinMaxNormalization:
+    """Real fix (2026-08-15, live trace: "prior authorization criteria for
+    Daraprim at AHCA Florida", Ananth's own follow-up on an earlier
+    power-transform fix). A flat power transform on the raw [0, 1] bm25
+    value only helps when a pool's bm25 scores happen to span close to the
+    full range -- a pool where every candidate clusters in a narrow band
+    barely moves under x**1.5. Min-max normalizing against the POOL'S OWN
+    bm25 min/max first fixes this generally: whatever the actual
+    competitive spread is gets stretched to fill [0, 1], so "0.6 vs 0.4"
+    and "0.8 vs 0.6" (Ananth's framing) can both register as decisive
+    separation when they represent the same relative gap within their
+    own pool."""
+
+    def _candidate(self, bm25_score, **overrides):
+        defaults = dict(
+            chunk_id="c1", document_id="doc1", text="x" * 200,
+            bm25_score=bm25_score, tags={}, source_arm="tag_select",
+            is_neighbor=False, score=bm25_score,
+        )
+        defaults.update(overrides)
+        return PoolCandidate(**defaults)
+
+    def test_no_bounds_falls_back_to_raw_value(self):
+        """Backward-compat: bm25_bounds=None (omitted) must behave
+        byte-identically to before this fix -- every existing caller/test
+        that doesn't pass it stays unaffected. Isolate the bm25
+        contribution via a delta between two otherwise-identical
+        candidates, rather than hand-deriving the full composite (which
+        also depends on auth/cov/length defaults)."""
+        from app.services.retriever.fillers.filler_a import _compute_rerank_score
+
+        low = _compute_rerank_score(self._candidate(0.2))
+        high = _compute_rerank_score(self._candidate(0.8))
+        # Raw value used directly: delta should be exactly 0.51 * (0.8-0.2)
+        assert abs((high - low) - 0.51 * 0.6) < 1e-9
+
+    def test_top_of_narrow_band_reaches_full_bm25_credit(self):
+        """A candidate scoring 0.6 in a pool clustered 0.4-0.6 should get
+        the SAME bm25 credit as a candidate scoring 0.8 in a pool
+        clustered 0.6-0.8 -- both are the pool's maximum."""
+        from app.services.retriever.fillers.filler_a import _compute_rerank_score
+
+        narrow_top = self._candidate(0.6)
+        wide_top = self._candidate(0.8)
+        score_narrow = _compute_rerank_score(narrow_top, bm25_bounds=(0.4, 0.6))
+        score_wide = _compute_rerank_score(wide_top, bm25_bounds=(0.6, 0.8))
+        assert abs(score_narrow - score_wide) < 1e-9
+
+    def test_bottom_of_pool_gets_zero_bm25_credit(self):
+        """bm25_bounds is always derived from the real candidate set (see
+        fill_shape_bm25), so every candidate's raw score sits within
+        [lo, hi] by construction -- the pool floor normalizes to exactly
+        0.0 bm25 credit, matching a candidate with bm25_score=0.0 under
+        UNBOUNDED (raw-value) scoring."""
+        from app.services.retriever.fillers.filler_a import _compute_rerank_score
+
+        floor_of_pool = _compute_rerank_score(self._candidate(0.4), bm25_bounds=(0.4, 0.6))
+        zero_raw_unbounded = _compute_rerank_score(self._candidate(0.0))
+        assert abs(floor_of_pool - zero_raw_unbounded) < 1e-9
+
+    def test_degenerate_bounds_all_same_score_does_not_divide_by_zero(self):
+        from app.services.retriever.fillers.filler_a import _compute_rerank_score
+
+        c = self._candidate(0.5)
+        score = _compute_rerank_score(c, bm25_bounds=(0.5, 0.5))
+        assert score >= 0.0  # no ZeroDivisionError, degrades to 0 bm25 credit
