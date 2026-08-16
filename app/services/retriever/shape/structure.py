@@ -93,7 +93,14 @@ _SPEED_BUDGET = {
 # spec addendum §11, not resolved here). See docs/rag-agents/
 # shape-structure-schematic-spec.md §11.
 _TOKEN_BUDGET = {
-    "chat.copilot": 2000,
+    # Bumped 2000 -> 4000 (2026-08-16, Ananth's ask): paired with
+    # chat.copilot's CALLER_MODE_LATENCY_ALLOWANCE_OVERRIDE_MS bump
+    # (2000ms real_time -> 4000ms) in allocation.py -- EXPERIMENT #2,
+    # following the SAME pairing default just measured for free
+    # (+0.076 recall, ~0ms wall-time cost). Kept conservative (2x, not
+    # matching default's 3x) since copilot's identity is being the fast
+    # tier -- testing whether it also gets a free lift, not maximizing it.
+    "chat.copilot": 4000,
     # Bumped 3000 -> 6000 (2026-08-15, Ananth's ask): paired with the
     # matching CALLER_MODE_LATENCY_ALLOWANCE_OVERRIDE_MS bump for
     # chat.default (2000ms real_time -> 6000ms) in allocation.py --

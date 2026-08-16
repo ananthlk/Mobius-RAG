@@ -230,9 +230,24 @@ _SPEED_BUDGET_MS = {
 # latency land between copilot/default's ~0.63 and thinking's ~0.85.
 # Paired with a matching _TOKEN_BUDGET bump in structure.py so the extra
 # chunks this buys aren't immediately trimmed back out by Synthesis.
+# RESULT (measured, real 22-query bank, real portfolio dispatch): recall
+# 0.6265 -> 0.7022, wall_ms 55980 -> 55155 (NOT slower -- the 2000ms
+# allowance wasn't actually the binding constraint on observed total
+# turn time; something downstream, likely synthesis LLM call time,
+# dominates wall-clock regardless). Free recall lift at this measured
+# n=22 -- kept live.
+#
+# EXPERIMENT #2 (2026-08-16, Ananth's ask): if the allowance bump was
+# free for default, is chat.copilot also artificially capped at the same
+# 2000ms real_time floor for no real latency reason? Testing a more
+# conservative step (4000ms, 2x real_time, half of default's 6000ms) --
+# copilot's whole identity is being the fast tier, so intentionally NOT
+# matching default's bump even if this one also turns out "free."
+# Paired _TOKEN_BUDGET bump (2000->4000) in structure.py, same reasoning.
 CALLER_MODE_LATENCY_ALLOWANCE_OVERRIDE_MS = {
     "chat.thinking": 16000,  # clears cumulative-through-d (13832ms) with ~16% headroom
-    "chat.default": 6000,  # EXPERIMENT: intermediate step between real_time (2000) and thinking's 16000
+    "chat.default": 6000,  # measured: +0.076 recall, ~0ms latency cost -- kept
+    "chat.copilot": 4000,  # EXPERIMENT: conservative step, testing if also free
 }
 
 # Optional (required=False) slots are supplementary by design: they get ONE
