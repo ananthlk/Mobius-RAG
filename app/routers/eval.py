@@ -453,8 +453,13 @@ async def fact_compare(body: dict = Body(...)):
     tau_r = float(os.getenv("FACT_COMPARE_TAU_R", "0.5"))
 
     # retrieval grade: is the stored value supported by the live chunks?
+    # stage="rag_eval_adjudicate" pins the LOCKED ruler (gemini-2.5-pro,
+    # fact_check_v1) — cert grading MUST NOT run on the default bandit-routed
+    # rag_fact_check stage (pro/flash), which would certify a regulatory fact on
+    # a mixed ruler (the ruler-contamination class caught 2026-07-24). Eval fix.
     try:
-        fc = await check_facts(query=query, must_facts=[value], chunks=chunks)
+        fc = await check_facts(query=query, must_facts=[value], chunks=chunks,
+                               stage="rag_eval_adjudicate")
     except Exception as exc:  # noqa: BLE001
         return {"agree": None, "grades": {"retrieval": None, "synthesis": None},
                 "reason": f"comparator_error: {exc}", "error": True}
@@ -474,7 +479,8 @@ async def fact_compare(body: dict = Body(...)):
     if record_type == "qa" and stored.get("answer_text"):
         try:
             fcs = await check_facts(query=query, must_facts=[],
-                                    answer=str(stored["answer_text"]), chunks=chunks)
+                                    answer=str(stored["answer_text"]), chunks=chunks,
+                                    stage="rag_eval_adjudicate")  # locked ruler (cert path)
             if not fcs.error:
                 synthesis = round(float(fcs.score), 3)
         except Exception:  # noqa: BLE001
@@ -489,6 +495,83 @@ async def fact_compare(body: dict = Body(...)):
         "contradicted": contradicted,
         "reason": (fc.reasoning or "")[:300],
         "evidence": evidence,
+        "fact_checker_version": FACT_CHECKER_VERSION,
+        "tau_r": tau_r,
+    }
+
+
+@router.post("/eval/grade-claim")
+async def grade_claim(body: dict = Body(...)):
+    """EVAL-owned judge for the Download agent's ``verify_claim`` (§16 handshake).
+
+    The pluggable judge behind ``claim_verification.set_judge``: given a single
+    atomic CLAIM and the SOURCE TEXT the Download agent already resolved (hard
+    document_id → page text; resolution is THEIR lane), return whether the source
+    supports the claim, in the verify_claim §8.4 schema. Same ``check_facts``
+    primitive as ``/eval/fact_compare`` (one grader, no fork) so cert and
+    verify_claim agree by construction. Reads nothing, writes nothing.
+
+    Verdict:
+        agree        — source supports the claim (graded support ≥ τ, not contradicted)
+        contradict   — a passage asserts a CONFLICTING value
+        low_coverage — LOUD catch-all: thin/absent support, honest-abstain, OR a
+                       judge transient failure. NEVER a false ``agree``.
+    ``quote`` is the verbatim ``evidence`` span for the graded fact.
+
+    The locked ruler (stage="rag_eval_adjudicate", gemini-2.5-pro / fact_check_v1)
+    is pinned HERE, server-side — the caller cannot force a ruler, so the
+    fail-closed guarantee lives where Eval owns it.
+    """
+    claim = str(body.get("claim") or "").strip()
+    source_text = str(body.get("source_text") or "").strip()
+    page = body.get("page")
+    if not claim:
+        raise HTTPException(status_code=422, detail="claim required")
+    if not source_text:
+        # No source to grade against → cannot support the claim. Loud, not agree.
+        return {"verdict": "low_coverage", "quote": "", "page": page,
+                "reason": "no source_text provided", "status": "no_source"}
+
+    from app.services.fact_checker import check_facts, FACT_CHECKER_VERSION
+
+    tau_r = float(os.getenv("GRADE_CLAIM_TAU_R", "0.5"))
+    chunks = [{"text": source_text}]
+
+    try:
+        fc = await check_facts(query=claim, must_facts=[claim], chunks=chunks,
+                               stage="rag_eval_adjudicate")  # LOCKED ruler — cert-grade
+    except Exception as exc:  # noqa: BLE001
+        return {"verdict": "low_coverage", "quote": "", "page": page,
+                "reason": f"judge_error: {exc}", "status": "error",
+                "fact_checker_version": FACT_CHECKER_VERSION}
+    if fc.error:
+        # transient judge failure — cannot adjudicate; loud low_coverage, never agree.
+        return {"verdict": "low_coverage", "quote": "", "page": page,
+                "reason": "unable_to_verify (judge transient failure)",
+                "status": "error", "error_transient": fc.error_transient,
+                "fact_checker_version": FACT_CHECKER_VERSION}
+
+    contradicted = any(v.contradicted for v in fc.verdicts)
+    support = round(float(fc.coverage), 3)
+    if contradicted:
+        verdict = "contradict"
+    elif support >= tau_r:
+        verdict = "agree"
+    else:
+        verdict = "low_coverage"
+
+    # quote = the verbatim evidence span for the graded claim (present on any
+    # verdict scored > 0 or marked contradicted; "" when the judge found nothing).
+    quote = next((str(v.evidence) for v in fc.verdicts if v.evidence), "")
+
+    return {
+        "verdict": verdict,
+        "quote": quote,
+        "page": page,
+        "support": support,
+        "contradicted": contradicted,
+        "reason": (fc.reasoning or "")[:300],
+        "status": "ok",
         "fact_checker_version": FACT_CHECKER_VERSION,
         "tau_r": tau_r,
     }
