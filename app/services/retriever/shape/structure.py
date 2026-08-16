@@ -94,7 +94,14 @@ _SPEED_BUDGET = {
 # shape-structure-schematic-spec.md §11.
 _TOKEN_BUDGET = {
     "chat.copilot": 2000,
-    "chat.default": 3000,
+    # Bumped 3000 -> 6000 (2026-08-15, Ananth's ask): paired with the
+    # matching CALLER_MODE_LATENCY_ALLOWANCE_OVERRIDE_MS bump for
+    # chat.default (2000ms real_time -> 6000ms) in allocation.py --
+    # EXPERIMENT to see where recall/latency land between copilot/
+    # default's ~0.63 and chat.thinking's ~0.85. Without this pairing the
+    # extra chunks the latency bump buys would just get trimmed back out
+    # here, same as raising a pipe's flow without widening the valve.
+    "chat.default": 6000,
     # Bumped 6000 -> 16000 (2026-08-15, Ananth's call): a live comparison
     # against Anthropic's own contextual-retrieval benchmarking (their
     # cookbook -- top_k=20 @ ~800 tokens/chunk, their most performant

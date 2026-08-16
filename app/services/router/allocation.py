@@ -219,8 +219,20 @@ _SPEED_BUDGET_MS = {
 # further multiplier) — simplest way to hit a specific cumulative-latency
 # target without touching the shared formula's other callers. Reversible:
 # delete the chat.thinking entry, falls back to the standard formula.
+#
+# EXPERIMENT (2026-08-15, Ananth's ask): chat.default's real_time 2000ms
+# budget was found to be the actual binding constraint behind its bank
+# recall (0.6265) landing nearly identical to chat.copilot's (0.6264),
+# despite default's target breadth (Structure's _BASE_K*recall_demand)
+# being nominally equal to chat.thinking's -- default never got enough
+# time to act on that breadth. Testing an intermediate allowance (6000ms,
+# 3x real_time, well under thinking's 16000ms) to see where recall/
+# latency land between copilot/default's ~0.63 and thinking's ~0.85.
+# Paired with a matching _TOKEN_BUDGET bump in structure.py so the extra
+# chunks this buys aren't immediately trimmed back out by Synthesis.
 CALLER_MODE_LATENCY_ALLOWANCE_OVERRIDE_MS = {
     "chat.thinking": 16000,  # clears cumulative-through-d (13832ms) with ~16% headroom
+    "chat.default": 6000,  # EXPERIMENT: intermediate step between real_time (2000) and thinking's 16000
 }
 
 # Optional (required=False) slots are supplementary by design: they get ONE
