@@ -278,29 +278,43 @@ def _compute_rerank_score(
     meta_sig = _compute_meta_boost_score(candidate.text, candidate.tags, required_phrases, boosted_phrases)
     doc_type_sig = _compute_doc_type_score(candidate.doc_type)
 
-    # DIAGNOSTIC BISECTION, iteration D (2026-08-15): Point C (v0.4 weights
-    # + doc_type=.02) matched the ORIGINAL baseline's recall exactly
-    # (0.649 == 0.649) and beat it on recall_answer (0.380 vs 0.305, best
-    # of every point tested today) -- confirming the tag_coverage cut
-    # (0.20 -> 0.04, an 8x reduction) was the real driver of today's
-    # earlier regression, not doc_type or min-max. BUT Point C's exact
-    # config still loses the Daraprim case (doc_type=.02 isn't enough to
-    # overcome tag_coverage's full-strength .20 penalty on Daraprim's low
-    # tag count). This iteration keeps Point C's winning bank-wide weights
-    # (bm25 .40/auth .10/cov .20/len .05) UNCHANGED and raises doc_type's
-    # own weight instead (.02 -> .06, taken from meta .20->.18 and
-    # misc .03->.01) to test whether a STRONGER doc_type signal can rescue
-    # Daraprim without touching tag_coverage at all. bm25_sig stays RAW
-    # (min-max still disabled -- confirmed to genuinely break 2/22 queries
-    # with no compensating broad benefit).
+    # DIAGNOSTIC BISECTION, iteration E (2026-08-15): iteration D
+    # (bm25 .40/cov .20 unchanged, doc_type raised .02->.06 by taking from
+    # meta) still didn't resolve the Daraprim case (rank #37 -> still
+    # outside top 10) -- diagnosed why: doc_type is a BINARY signal and
+    # Daraprim's chunk already has doc_type='um' (confirmed: ALL 10
+    # winning competitor chunks have doc_type=None/unclassified), so more
+    # doc_type weight only helps up to the point its ceiling (1.0) is
+    # reached -- taking that extra weight FROM meta_boost partially
+    # cancelled itself out, since Daraprim's own meta_sig isn't 1.0
+    # either. Also checked authority_level: IDENTICAL
+    # ("contract_source_of_truth") for Daraprim AND every competitor --
+    # zero discriminating power there, so weight there is pure overhead
+    # for this case, but reallocating FROM auth alone also underperformed
+    # (rank got worse, #42) -- the real pool has other bm25-strong,
+    # non-Daraprim candidates that rise as auth's role shrinks. Local
+    # simulation across several combinations (mobius-rag scratchpad, using
+    # the real live pool snapshot) found the one that actually works:
+    # raise bm25 (Daraprim's genuine strength, already near-max at ~0.80)
+    # AND doc_type TOGETHER, while only moderately trimming cov/meta/auth
+    # rather than gutting any one of them -- bm25 .40->.50, doc_type
+    # .06->.20, cov .20->.10, meta .18->.13, auth .10->.03, len .05->.04,
+    # misc .01->.00. Verified locally: Daraprim reaches rank #9 (inside
+    # top 10) under this exact config. Testing against the real 22-query
+    # bank next to confirm this doesn't regress the broader corpus the
+    # way the earlier high-bm25/low-cov config (Point B) did -- the
+    # difference this time is doc_type is carrying real weight too
+    # (.20, not .02), and it's a genuine Lexicon-curated signal, not a
+    # proxy-invented one, so the hope is it holds up broadly where Point
+    # B's meta/cov-only cut didn't.
     composite = (
-        0.40 * bm25_sig +
-        0.10 * auth_sig +
-        0.20 * cov_sig +
-        0.05 * len_sig +
-        0.18 * meta_sig +
-        0.06 * doc_type_sig +
-        0.01 * 0.5  # Misc (neutral baseline)
+        0.50 * bm25_sig +
+        0.03 * auth_sig +
+        0.10 * cov_sig +
+        0.04 * len_sig +
+        0.13 * meta_sig +
+        0.20 * doc_type_sig +
+        0.00 * 0.5  # Misc (neutral baseline)
     )
     return composite
 
