@@ -292,29 +292,27 @@ def _compute_rerank_score(
     # zero discriminating power there, so weight there is pure overhead
     # for this case, but reallocating FROM auth alone also underperformed
     # (rank got worse, #42) -- the real pool has other bm25-strong,
-    # non-Daraprim candidates that rise as auth's role shrinks. Local
-    # simulation across several combinations (mobius-rag scratchpad, using
-    # the real live pool snapshot) found the one that actually works:
-    # raise bm25 (Daraprim's genuine strength, already near-max at ~0.80)
-    # AND doc_type TOGETHER, while only moderately trimming cov/meta/auth
-    # rather than gutting any one of them -- bm25 .40->.50, doc_type
-    # .06->.20, cov .20->.10, meta .18->.13, auth .10->.03, len .05->.04,
-    # misc .01->.00. Verified locally: Daraprim reaches rank #9 (inside
-    # top 10) under this exact config. Testing against the real 22-query
-    # bank next to confirm this doesn't regress the broader corpus the
-    # way the earlier high-bm25/low-cov config (Point B) did -- the
-    # difference this time is doc_type is carrying real weight too
-    # (.20, not .02), and it's a genuine Lexicon-curated signal, not a
-    # proxy-invented one, so the hope is it holds up broadly where Point
-    # B's meta/cov-only cut didn't.
+    # non-Daraprim candidates that rise as auth's role shrinks. Pushing
+    # bm25+doc_type up together (bm25 .50, doc_type .20) did get Daraprim
+    # to rank #9 in isolation, but tested against the REAL per-mode
+    # portfolio dispatch caps (copilot=4, default=6, thinking=10) it only
+    # resolved in chat.thinking, and cost real bank recall (0.649->0.596).
+    # This config (bm25=.40, doc_type=.02) is the best real bank-wide
+    # result found (recall=0.649, matches original baseline exactly;
+    # recall_answer=0.380, beats baseline) with zero regression -- it
+    # does NOT resolve Daraprim in any real dispatch mode (rank ~41), but
+    # per Ananth: don't trade broad recall for one rare-drug query: fix
+    # that via the real signal (chunk-level PA-criteria tag from
+    # Lexicon), not composite-weight pressure. Shipping this as the
+    # default; Daraprim tracked separately as a tagging gap.
     composite = (
-        0.50 * bm25_sig +
-        0.03 * auth_sig +
-        0.10 * cov_sig +
-        0.04 * len_sig +
-        0.13 * meta_sig +
-        0.20 * doc_type_sig +
-        0.00 * 0.5  # Misc (neutral baseline)
+        0.40 * bm25_sig +
+        0.10 * auth_sig +
+        0.20 * cov_sig +
+        0.05 * len_sig +
+        0.20 * meta_sig +
+        0.02 * doc_type_sig +
+        0.03 * 0.5  # Misc (neutral baseline)
     )
     return composite
 
