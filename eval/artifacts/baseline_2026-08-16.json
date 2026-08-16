@@ -1,0 +1,131 @@
+{
+  "generated_at": "2026-08-16",
+  "revision": "mobius-rag-00581-zjg",
+  "bank_path": "eval/queries_cmhc.yaml",
+  "dispatch": "unforced (real portfolio routing per authority_conditioned_routing)",
+  "config": {
+    "filler_a": "Point B (bm25=.51 auth=.13 cov=.04 len=.06 meta=.18 doc_type=.02 misc=.06)",
+    "chat.copilot": {
+      "latency_allowance_ms": 4000,
+      "token_budget": 4000
+    },
+    "chat.default": {
+      "latency_allowance_ms": 6000,
+      "token_budget": 6000
+    },
+    "chat.thinking": {
+      "latency_allowance_ms": 16000,
+      "token_budget": 16000
+    }
+  },
+  "results": [
+    {
+      "mode": "chat.copilot",
+      "call_number": 1,
+      "job_id": "8421094f638b",
+      "n_done": 22,
+      "n_total": 22,
+      "avg_recall": 0.6644,
+      "avg_recall_answer": 0.35,
+      "avg_chunks_out": 8.5,
+      "avg_retrieval_ms": 7759.3182,
+      "avg_wall_ms": 58190.9545
+    },
+    {
+      "mode": "chat.copilot",
+      "call_number": 2,
+      "job_id": "cb8efe753145",
+      "n_done": 22,
+      "n_total": 22,
+      "avg_recall": 0.7341,
+      "avg_recall_answer": 0.4879,
+      "avg_chunks_out": 8.8182,
+      "avg_retrieval_ms": 18764.2727,
+      "avg_wall_ms": 72436.0455
+    },
+    {
+      "mode": "chat.copilot",
+      "call_number": 3,
+      "job_id": "2b70a1d2f25c",
+      "n_done": 22,
+      "n_total": 22,
+      "avg_recall": 0.7947,
+      "avg_recall_answer": 0.5485,
+      "avg_chunks_out": 9.6364,
+      "avg_retrieval_ms": 20804.3182,
+      "avg_wall_ms": 74217.0455
+    },
+    {
+      "mode": "chat.default",
+      "call_number": 1,
+      "job_id": "f4b88e4aea16",
+      "n_done": 22,
+      "n_total": 22,
+      "avg_recall": 0.7174,
+      "avg_recall_answer": 0.447,
+      "avg_chunks_out": 13.7273,
+      "avg_retrieval_ms": 8462.0,
+      "avg_wall_ms": 62037.5909
+    },
+    {
+      "mode": "chat.default",
+      "call_number": 2,
+      "job_id": "8d46f4b0cc65",
+      "n_done": 22,
+      "n_total": 22,
+      "avg_recall": 0.7492,
+      "avg_recall_answer": 0.5787,
+      "avg_chunks_out": 12.2727,
+      "avg_retrieval_ms": 20858.4545,
+      "avg_wall_ms": 81371.3636
+    },
+    {
+      "mode": "chat.default",
+      "call_number": 3,
+      "job_id": "d2657f71a6be",
+      "n_done": 22,
+      "n_total": 22,
+      "avg_recall": 0.7796,
+      "avg_recall_answer": 0.547,
+      "avg_chunks_out": 13.8636,
+      "avg_retrieval_ms": 22747.0909,
+      "avg_wall_ms": 83092.4091
+    },
+    {
+      "mode": "chat.thinking",
+      "call_number": 1,
+      "job_id": "7430aa2e0dc5",
+      "n_done": 22,
+      "n_total": 22,
+      "avg_recall": 0.8553,
+      "avg_recall_answer": 0.5242,
+      "avg_chunks_out": 39.6364,
+      "avg_retrieval_ms": 19721.9545,
+      "avg_wall_ms": 81304.5455
+    },
+    {
+      "mode": "chat.thinking",
+      "call_number": 2,
+      "job_id": "a0f0cb7c168f",
+      "n_done": 22,
+      "n_total": 22,
+      "avg_recall": 0.8629,
+      "avg_recall_answer": 0.4955,
+      "avg_chunks_out": 39.4545,
+      "avg_retrieval_ms": 18319.1818,
+      "avg_wall_ms": 75519.3182
+    },
+    {
+      "mode": "chat.thinking",
+      "call_number": 3,
+      "job_id": "e35dc55f0695",
+      "n_done": 22,
+      "n_total": 22,
+      "avg_recall": 0.8894,
+      "avg_recall_answer": 0.5712,
+      "avg_chunks_out": 41.0455,
+      "avg_retrieval_ms": 21364.1364,
+      "avg_wall_ms": 75946.2727
+    }
+  ]
+}

@@ -50,10 +50,14 @@ def test_prepare_resources_loads_phrase_map():
     from app.worker.path_b import prepare_resources
     snapshot = [{"phrase": "test", "p_tag": "t1"}]
 
-    with patch("app.services.policy_path_b.get_phrase_to_tag_map", return_value={"test": "t1"}):
+    with patch(
+        "app.services.policy_path_b.get_phrase_to_tag_map",
+        return_value=({"test": "t1"}, {}),
+    ):
         res = prepare_resources(snapshot)
 
     assert res.phrase_map == {"test": "t1"}
+    assert res.refuted_map == {}
     assert res.lexicon_snapshot is snapshot
 
 
@@ -125,7 +129,7 @@ async def test_process_paragraph_writes_embeddable_units():
     )
 
     with patch("app.worker.path_b.db_handler") as mock_db:
-        mock_db.write_embeddable_unit = AsyncMock()
+        mock_db.write_embeddable_units_bulk = AsyncMock()
         mock_db.safe_commit = AsyncMock()
 
         await process_paragraph(
@@ -134,7 +138,11 @@ async def test_process_paragraph_writes_embeddable_units():
             path_b_resources=res,
         )
 
-    assert mock_db.write_embeddable_unit.await_count == 2
+    # process_paragraph batches both lines into a single bulk insert
+    # rather than writing one embeddable_unit row at a time.
+    mock_db.write_embeddable_units_bulk.assert_awaited_once()
+    bulk_rows = mock_db.write_embeddable_units_bulk.call_args.args[1]
+    assert len(bulk_rows) == 2
 
 
 @pytest.mark.asyncio

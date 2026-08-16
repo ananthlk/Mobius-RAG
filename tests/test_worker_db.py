@@ -47,23 +47,36 @@ def _mock_db(
 
 @pytest.mark.asyncio
 async def test_write_event_adds_and_commits():
+    # write_event opens its OWN fresh session (via AsyncSessionLocal) rather
+    # than using the passed-in `db`, so the passed-in session's mock has no
+    # baring: patch AsyncSessionLocal itself and assert against the session
+    # it hands back. See the "FRESH session" rationale in app/worker/db.py.
     from app.worker.db import write_event
 
-    db = _mock_db()
-    doc = uuid4()
-    await write_event(db, doc, "test_event", {"key": "val"})
-    db.add.assert_called_once()
-    db.commit.assert_awaited_once()
+    event_db = _mock_db()
+    with patch("app.database.AsyncSessionLocal") as mock_session_local:
+        mock_session_local.return_value.__aenter__.return_value = event_db
+        mock_session_local.return_value.__aexit__.return_value = False
+        await write_event(_mock_db(), uuid4(), "test_event", {"key": "val"})
+
+    event_db.add.assert_called_once()
+    event_db.commit.assert_awaited()
 
 
 @pytest.mark.asyncio
 async def test_write_event_rolls_back_on_error():
+    # write_event swallows any failure from the fresh session (logs it,
+    # never raises) instead of calling an explicit .rollback() — the
+    # session context manager handles releasing the failed transaction.
     from app.worker.db import write_event
 
-    db = _mock_db()
-    db.commit = AsyncMock(side_effect=RuntimeError("boom"))
-    await write_event(db, uuid4(), "fail", {})
-    db.rollback.assert_awaited_once()
+    event_db = _mock_db()
+    event_db.commit = AsyncMock(side_effect=RuntimeError("boom"))
+    with patch("app.database.AsyncSessionLocal") as mock_session_local:
+        mock_session_local.return_value.__aenter__.return_value = event_db
+        mock_session_local.return_value.__aexit__.return_value = False
+        # Should not raise.
+        await write_event(_mock_db(), uuid4(), "fail", {})
 
 
 # ---------------------------------------------------------------------------

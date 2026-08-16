@@ -157,6 +157,7 @@ sources:
       - https://ahca.myflorida.com/medicaid/recipient
       - https://ahca.myflorida.com/medicaid/recent_presentations
       - https://ahca.myflorida.com/content/dam
+      - https://ahca.myflorida.com/medicaid/rules/rule-59g-4.002-provider-reimbursement-schedules-and-billing-codes.html
     notes: |
       The single highest-leverage source for FL Medicaid behavioral
       health. Mirrors Sunshine + Aetna + Molina policies via 59G-*
@@ -164,6 +165,27 @@ sources:
       (commit dba72756 batch). robots.txt explicitly allows search/RAG
       indexing while forbidding AI training — Mobius is RAG, not
       training, so we're in the clean lane.
+
+      2026-08-05: corpus had ~0 fee-schedule/rate coverage (flagged by
+      Chat Master live-test; confirmed no fee_schedule tag hits in
+      corpus_search_lexicon). Added the Rule 59G-4.002 subtree above
+      to close it — that page links every current AHCA fee schedule
+      PDF/XLS. Priority docs for this gap specifically (CPT/HCPCS
+      payment rates, not coverage policy):
+        - Practitioner Fee Schedule (eff. Jan 1 2026) — general
+          CPT/HCPCS incl. telehealth: /content/download/28192/file/
+          2026%20Practitioner%20Fee%20Schedule.pdf
+        - Community Behavioral Health Services (CBH) Fee Schedule
+          (eff. 2026) — BH CPT/HCPCS: /content/download/28099/file/
+          2026%20CBH%20Fee%20Schedule.pdf
+        - Behavioral Health Overlay Services (BHOS) Fee Schedule
+          (eff. 2026): /content/download/28097/file/
+          2026%20BHOS%20Fee%20Schedule.pdf
+        - Practitioner Laboratory Fee Schedule (eff. Jan 1 2026):
+          /file/medicaid/2026%20Practitioner%20Laboratory%20Fee%20
+          Schedule.pdf
+      Distinct from the already-queued BH-telehealth *policy* text
+      gap (task_088d67da) — that's coverage criteria, this is rates.
 
   - id: dcf
     name: Florida Department of Children and Families

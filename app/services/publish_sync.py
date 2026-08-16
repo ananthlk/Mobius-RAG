@@ -356,6 +356,7 @@ ON CONFLICT (id) DO UPDATE SET
     document_program = EXCLUDED.document_program,
     document_authority_level = EXCLUDED.document_authority_level,
     document_status = EXCLUDED.document_status,
+    document_display_name = EXCLUDED.document_display_name,
     source_type = EXCLUDED.source_type,
     content_sha = EXCLUDED.content_sha,
     updated_at = EXCLUDED.updated_at

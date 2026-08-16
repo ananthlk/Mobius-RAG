@@ -74,6 +74,7 @@ class PriorsCell:
     k0: Optional[int]
     latency_p50_ms: Optional[int]
     reconciliation_ok: bool  # recall_lift * accuracy_estimate ~= mean(answer_recall over n, zeros for None)
+    reconciliation_delta: Optional[float] = None  # abs(recall_lift*accuracy_estimate - mean_answer_recall); display-enrichment, gates nothing (the bool gates). None when reconciliation can't be assessed (recall_lift 0/None).
     warnings: list[str] = field(default_factory=list)
 
     def to_priors_dict(self) -> dict:
@@ -151,9 +152,18 @@ def compute_cell(
     mean_answer_recall = _mean(answer_recall_zeroed)
     accuracy_estimate = None
     reconciliation_ok = False
+    reconciliation_delta = None
     if mean_answer_recall is not None and recall_lift:
         accuracy_estimate = min(1.0, max(0.0, mean_answer_recall / recall_lift))
-        reconciliation_ok = abs(recall_lift * accuracy_estimate - mean_answer_recall) < 1e-6
+        # Gate on the RAW delta (unchanged 1e-6 threshold, no behavior shift);
+        # store a ROUNDED copy for display. When the clamp doesn't bite, the raw
+        # product == mean_answer_recall to float precision (~1e-16); when it bites
+        # (mean_answer_recall > recall_lift), the delta is the real gap. Rounding
+        # the stored value must NOT feed the bool — a borderline raw delta just
+        # under 1e-6 could round up to 1e-6 and wrongly flip reconciliation_ok.
+        raw_delta = abs(recall_lift * accuracy_estimate - mean_answer_recall)
+        reconciliation_delta = round(raw_delta, 6)
+        reconciliation_ok = raw_delta < 1e-6
     elif mean_answer_recall is not None and not recall_lift:
         warnings.append("recall_lift is 0 or missing -- accuracy_estimate undefined (would divide by zero)")
 
@@ -190,7 +200,8 @@ def compute_cell(
         authority=round(authority, 4) if authority is not None else None,
         authority_n=authority_n,
         k0=k0, latency_p50_ms=latency_p50_ms,
-        reconciliation_ok=reconciliation_ok, warnings=warnings,
+        reconciliation_ok=reconciliation_ok, reconciliation_delta=reconciliation_delta,
+        warnings=warnings,
     )
 
 
@@ -252,23 +263,60 @@ def compute_priors_table(
 # decision -- this function only ever writes what it's explicitly told to.
 # ---------------------------------------------------------------------------
 
+# The applied identity of a cell = exactly the fields apply_cell_to_yaml_text can
+# WRITE. latency_p50_ms is deliberately EXCLUDED: it is computed-and-surfaced but
+# HUMAN-CURATED on write (apply refuses to overwrite its methodology comments), so
+# it never lands from the cell and is NOT part of the applied identity. Governance
+# class: "curated / out-of-sha-governance". Do NOT add it back — the sha must change
+# iff a LANDED value changed, else §102 recompute-and-compare fires false drift on a
+# field the file-write doesn't touch. (Ruled by Eval-RAG 2026-08-12; supersedes the
+# proposal-doc's aspirational 6-field set.) A latency-drift canary, if wanted, belongs
+# as a separate run-level check on bank_run metadata, never smuggled into this sha.
 _APPLIABLE_FIELDS = ("recall_lift", "accuracy_estimate", "authority", "n", "k0")
+_SHA_FLOAT_FIELDS = frozenset({"recall_lift", "accuracy_estimate", "authority"})
+_SHA_INT_FIELDS = frozenset({"depth_bucket", "n", "k0"})
 
 
 class PriorsApplyError(Exception):
     pass
 
 
+def _sha_value_token(key: str, value) -> str:
+    """Canonical byte token for one field (Eval-RAG serialization contract,
+    2026-08-12): None -> literal null; float fields -> fixed 4dp with -0.0
+    normalized to 0.0; int fields -> bare integer; strings -> JSON-quoted.
+    Fixed 4dp (not json.dumps float repr) makes the bytes deterministic across
+    processes/versions -- json.dumps(round(x,4)) loses trailing zeros and hits
+    float-repr edge cases, defeating §102 recompute-and-compare."""
+    if value is None:
+        return "null"
+    if key in _SHA_FLOAT_FIELDS:
+        v = float(value) + 0.0        # -0.0 + 0.0 -> +0.0
+        if v == 0:
+            v = 0.0                   # belt-and-suspenders: no -0.0000 token
+        return f"{v:.4f}"
+    if key in _SHA_INT_FIELDS:
+        return str(int(value))
+    return json.dumps(value)          # strategy + any string: proper JSON quoting
+
+
 def cell_sha256(depth_bucket: int, strategy: str, cell: dict) -> str:
-    """Canonical hash over exactly the fields this module can apply, so the
-    hash changes if and only if a field that matters actually changed --
-    not affected by dict key order or by fields this module never touches."""
-    canonical = {
+    """Canonical hash over exactly the fields apply can write (the applied
+    identity), deterministic across processes/versions.
+
+    WRITTEN == HASHED invariant (Eval-RAG, 2026-08-12): the value hashed here
+    MUST be the same round-to-4dp value apply_cell_to_yaml_text writes to the
+    file. compute_cell rounds every appliable float to 4dp once (round(v,4));
+    that single canonical value feeds BOTH the file-write and this hash, so a
+    published file value always reconciles to its own sha. Do not round
+    differently in either path or the spine self-contradicts."""
+    fields = {
         "depth_bucket": depth_bucket, "strategy": strategy,
         **{k: cell.get(k) for k in _APPLIABLE_FIELDS},
     }
-    blob = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(blob.encode()).hexdigest()
+    parts = [f"{json.dumps(k)}:{_sha_value_token(k, fields[k])}" for k in sorted(fields)]
+    blob = "{" + ",".join(parts) + "}"
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 def _find_block_span(lines: list[str], header_pattern: str, indent: str) -> tuple[int, int]:

@@ -1,0 +1,42 @@
+{
+  "_note": "Eval's oracle-vs-Router-selection pilot pairs. Score formula (v0.1, Eval owned): contra_r=min(n_contradicted/G,1); hallu_r=min(n_hallucinated/G,1); q_adj=clamp(ar - w_c*contra_r - w_h*hallu_r, 0, 1); SCORE=au*q_adj. Default weights w_c=1.0, w_h=0.5, pending Router's concurrence on exact form.",
+  "pilots": [
+    {
+      "query_id": "cmhc001",
+      "query": "What is the timely filing deadline for Sunshine Health FL Medicaid claims?",
+      "caller_mode": "chat.default",
+      "G": 3,
+      "per_strategy": {
+        "a": {"ar": 1.0, "au": 1.0, "contra": 0, "halluc": 0, "SCORE": 1.0},
+        "b": {"ar": 0.5, "au": 0.6667, "contra": 0, "halluc": 0, "SCORE": 0.3334},
+        "c": {"ar": 0.667, "au": 1.0, "contra": 0, "halluc": 0, "SCORE": 0.667},
+        "d": {"ar": 0.0, "au": 0.0, "contra": 0, "halluc": 0, "SCORE": 0.0}
+      },
+      "oracle_strategy": "a",
+      "oracle_score": 1.0,
+      "router_blind_pick": "a",
+      "gap_realized_over_oracle": 1.0,
+      "status": "closed",
+      "note": "Router's own ranking a>d>c>b -- agrees on #1 by coincidence (a was both seed's global favorite AND this query's oracle), does NOT validate calibration. d ranked 2nd by seed despite being the oracle's worst (0.0) on this query."
+    },
+    {
+      "query_id": "cmhc009",
+      "query": "What is the deadline to file a claim payment appeal with Sunshine Health Florida?",
+      "caller_mode": "chat.default",
+      "G": 3,
+      "per_strategy": {
+        "a": {"ar": 0.5, "au": 1.0, "contra": 1, "halluc": 0, "SCORE": 0.167},
+        "b": {"ar": 0.667, "au": 0.9091, "contra": 0, "halluc": 0, "SCORE": 0.6064},
+        "c": {"ar": 1.0, "au": 0.8333, "contra": 2, "halluc": 0, "SCORE": 0.2778},
+        "d": {"ar": 0.667, "au": 0.3333, "contra": 0, "halluc": 0, "SCORE": 0.2223}
+      },
+      "oracle_strategy": "b",
+      "oracle_score": 0.6064,
+      "router_blind_pick": "a",
+      "router_blind_pick_score": 0.167,
+      "gap_realized_over_oracle": 0.2754,
+      "status": "closed",
+      "note": "w_c-diagnostic query: oracle FLIPS on penalty weight. w_c=1.0 -> b wins (0.606); w_c=0.5 -> b still wins (0.606) vs c (0.555, close); w_c=0 -> c wins (0.833). c has best raw ar=1.0 but 2 contradictions; b is clean-but-partial (ar=0.667). Pins whether a contradiction should ~fully cancel (w_c=1.0) or be near-free (w_c=0) in payer-answer scoring -- a real domain judgment, not just a data question. Flagged to Ananth alongside the authority-gate A/B. Router's real pick MISSED (picked a, 0.167, only 27.5% of oracle) -- but Router flagged this is not really a live discrimination test: cmhc001 and cmhc009 both resolve to the SAME depth_bucket=2 fallback + query_class=tight_pool under current seed data, and depth_bucket+strategy is the ONLY axis Router's priors lookup reads today -- query content never touches ranking. Router's allocator produced byte-identical output (a>d>c>b, same LB) for both pilots because it genuinely cannot distinguish them yet, not because it reasoned its way to a wrong answer on this specific query. A real discrimination test needs a query that differs on depth_bucket, not just query text."
+    }
+  ]
+}

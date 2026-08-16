@@ -3735,15 +3735,16 @@ def _observe_async(
                         await sess.execute(
                             sql_text("""
                                 INSERT INTO rag_query_traces
-                                    (decision_id, full_response, is_prod,
+                                    (decision_id, correlation_id, full_response, is_prod,
                                      corpus_version, phi_flag, evidence_categories)
                                 VALUES
-                                    (:did, CAST(:fr AS jsonb), :is_prod,
+                                    (:did, :corr_id, CAST(:fr AS jsonb), :is_prod,
                                      :cv, :phi_flag, :ev_cats)
                                 ON CONFLICT (decision_id) DO NOTHING
                             """),
                             {
                                 "did": _decision_id,
+                                "corr_id": agent_id,
                                 "fr": _qt_json.dumps(_full_resp_scrubbed),
                                 "is_prod": is_prod,
                                 "cv": _corpus_version,

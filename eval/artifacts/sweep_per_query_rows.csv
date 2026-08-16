@@ -1,0 +1,265 @@
+strategy,caller_mode,job_id,query_id,query,status,recall,recall_answer,authority,pool_size,chunks_out,n_contradicted,n_hallucinated_claims,n_facts_total,top_score_percentile,distinct_content_topk,n_slots
+a,chat.copilot,c8816a53ae9d,cmhc001,What is the timely filing deadline for Sunshine Health FL Medicaid claims?,ok,1.0,0.333,1.0,929,5,0,0,3,,,0
+a,chat.copilot,c8816a53ae9d,cmhc002,Does Sunshine Health require prior authorization for residential substance use treatment under code H0019?,ok,0.75,0.5,1.0,767,3,0,0,2,,,0
+a,chat.copilot,c8816a53ae9d,cmhc003,Does Aetna Better Health Florida require a referral for outpatient behavioral health therapy?,ok,0.833,0.167,1.0,893,3,0,0,3,,,0
+a,chat.copilot,c8816a53ae9d,cmhc004,Is telehealth covered for behavioral health intake assessments under Florida Medicaid?,ok,0.667,0.333,1.0,859,3,1,0,3,,,0
+a,chat.copilot,c8816a53ae9d,cmhc005,What modifier should I use when billing H0015 IOP services for Florida Medicaid?,ok,0.2,0.2,1.0,839,2,0,1,5,,,0
+a,chat.copilot,c8816a53ae9d,cmhc006,What is the standard prior authorization decision timeframe for Sunshine Health Florida?,ok,0.333,0.0,1.0,906,3,0,0,3,,,0
+a,chat.copilot,c8816a53ae9d,cmhc007,How do I submit a corrected claim to Sunshine Health Florida?,ok,0.5,0.0,1.0,905,4,0,0,3,,,0
+a,chat.copilot,c8816a53ae9d,cmhc008,Does Sunshine Health require prior authorization for psychological testing under CPT codes 96130-96139?,ok,0.333,0.0,1.0,758,2,0,0,3,,,0
+a,chat.copilot,c8816a53ae9d,cmhc009,What is the deadline to file a claim payment appeal with Sunshine Health Florida?,ok,1.0,1.0,1.0,813,5,0,0,3,,,0
+a,chat.copilot,c8816a53ae9d,cmhc010,How do I verify member eligibility for a Sunshine Health Florida member?,ok,0.833,1.0,1.0,951,5,0,0,3,,,0
+a,chat.copilot,c8816a53ae9d,cmhc011,What is Sunshine Health's prior authorization process for inpatient psychiatric admission?,ok,1.0,0.667,1.0,823,4,0,0,3,,,0
+a,chat.copilot,c8816a53ae9d,cmhc012,What HCPCS code do I bill for Applied Behavior Analysis (ABA) therapy under FL Medicaid?,ok,0.667,0.0,0.0,584,2,0,0,3,,,0
+a,chat.copilot,c8816a53ae9d,cmhc013,Does Sunshine Health cover dental services for adults?,ok,0.333,0.0,1.0,425,4,0,0,3,,,0
+a,chat.copilot,c8816a53ae9d,cmhc014,Which pharmacy benefit manager processes Sunshine Health prescription claims?,ok,1.0,0.667,1.0,808,4,0,0,3,,,0
+a,chat.copilot,c8816a53ae9d,cmhc015,What is Sunshine Health's member appeals process and how do I file a grievance?,ok,0.333,0.0,1.0,832,3,0,0,3,,,0
+a,chat.copilot,c8816a53ae9d,cmhc016,How do I get credentialed with Sunshine Health?,ok,0.833,0.333,1.0,709,3,0,0,3,,,0
+a,chat.copilot,c8816a53ae9d,cmhc017,What modifier is required for telehealth services under FL Medicaid managed care?,ok,0.333,0.0,1.0,850,2,0,0,3,,,0
+a,chat.copilot,c8816a53ae9d,cmhc018,Does Sunshine Health require prior authorization for outpatient electroconvulsive therapy (ECT)?,ok,0.5,0.0,1.0,763,3,0,0,3,,,0
+a,chat.copilot,c8816a53ae9d,cmhc019,What is the timely filing deadline for Aetna Better Health Florida Medicaid claims?,ok,0.5,0.0,1.0,908,2,0,0,2,,,0
+a,chat.copilot,c8816a53ae9d,cmhc020,What is Simply Healthcare Florida Medicaid's prior authorization decision timeframe?,ok,0.333,0.0,1.0,850,3,0,0,3,,,0
+a,chat.copilot,c8816a53ae9d,cmhc021,What documentation is required to enroll a new pediatric patient with Sunshine Health?,ok,0.333,0.0,1.0,747,3,0,0,3,,,0
+a,chat.copilot,c8816a53ae9d,cmhc022,How are EPSDT (Early Periodic Screening Diagnostic Treatment) services billed under FL Medicaid?,ok,0.667,0.167,1.0,854,2,0,0,3,,,0
+a,chat.default,6f0fbd13ee4f,cmhc001,What is the timely filing deadline for Sunshine Health FL Medicaid claims?,ok,1.0,1.0,1.0,1328,7,0,0,3,,,0
+a,chat.default,6f0fbd13ee4f,cmhc002,Does Sunshine Health require prior authorization for residential substance use treatment under code H0019?,ok,0.75,0.5,1.0,1076,4,0,0,2,,,0
+a,chat.default,6f0fbd13ee4f,cmhc003,Does Aetna Better Health Florida require a referral for outpatient behavioral health therapy?,ok,0.833,0.167,1.0,1278,4,0,0,3,,,0
+a,chat.default,6f0fbd13ee4f,cmhc004,Is telehealth covered for behavioral health intake assessments under Florida Medicaid?,ok,0.833,0.333,1.0,1214,4,0,0,3,,,0
+a,chat.default,6f0fbd13ee4f,cmhc005,What modifier should I use when billing H0015 IOP services for Florida Medicaid?,ok,0.2,0.0,1.0,1197,4,0,0,5,,,0
+a,chat.default,6f0fbd13ee4f,cmhc006,What is the standard prior authorization decision timeframe for Sunshine Health Florida?,ok,0.333,0.0,1.0,1300,6,0,0,3,,,0
+a,chat.default,6f0fbd13ee4f,cmhc007,How do I submit a corrected claim to Sunshine Health Florida?,ok,0.5,0.0,1.0,1310,6,0,0,3,,,0
+a,chat.default,6f0fbd13ee4f,cmhc008,Does Sunshine Health require prior authorization for psychological testing under CPT codes 96130-96139?,ok,0.333,0.0,1.0,1052,5,0,0,3,,,0
+a,chat.default,6f0fbd13ee4f,cmhc009,What is the deadline to file a claim payment appeal with Sunshine Health Florida?,ok,1.0,0.5,1.0,1196,7,1,0,3,,,0
+a,chat.default,6f0fbd13ee4f,cmhc010,How do I verify member eligibility for a Sunshine Health Florida member?,ok,0.833,0.0,1.0,1355,8,0,0,3,,,0
+a,chat.default,6f0fbd13ee4f,cmhc011,What is Sunshine Health's prior authorization process for inpatient psychiatric admission?,ok,1.0,0.667,1.0,1127,6,0,0,3,,,0
+a,chat.default,6f0fbd13ee4f,cmhc012,What HCPCS code do I bill for Applied Behavior Analysis (ABA) therapy under FL Medicaid?,ok,0.667,0.0,0.0,643,4,0,0,3,,,0
+a,chat.default,6f0fbd13ee4f,cmhc013,Does Sunshine Health cover dental services for adults?,ok,0.333,0.0,1.0,536,5,0,0,3,,,0
+a,chat.default,6f0fbd13ee4f,cmhc014,Which pharmacy benefit manager processes Sunshine Health prescription claims?,ok,1.0,0.667,1.0,1113,6,0,0,3,,,0
+a,chat.default,6f0fbd13ee4f,cmhc015,What is Sunshine Health's member appeals process and how do I file a grievance?,ok,0.5,0.333,1.0,1217,5,0,0,3,,,0
+a,chat.default,6f0fbd13ee4f,cmhc016,How do I get credentialed with Sunshine Health?,ok,0.833,0.167,1.0,997,6,0,0,3,,,0
+a,chat.default,6f0fbd13ee4f,cmhc017,What modifier is required for telehealth services under FL Medicaid managed care?,ok,0.333,0.0,1.0,1203,4,0,0,3,,,0
+a,chat.default,6f0fbd13ee4f,cmhc018,Does Sunshine Health require prior authorization for outpatient electroconvulsive therapy (ECT)?,ok,0.5,0.167,1.0,1051,5,0,0,3,,,0
+a,chat.default,6f0fbd13ee4f,cmhc019,What is the timely filing deadline for Aetna Better Health Florida Medicaid claims?,ok,0.5,0.0,1.0,1308,3,0,2,2,,,0
+a,chat.default,6f0fbd13ee4f,cmhc020,What is Simply Healthcare Florida Medicaid's prior authorization decision timeframe?,ok,0.333,0.333,1.0,1202,4,0,1,3,,,0
+a,chat.default,6f0fbd13ee4f,cmhc021,What documentation is required to enroll a new pediatric patient with Sunshine Health?,ok,0.5,0.0,1.0,1042,5,0,0,3,,,0
+a,chat.default,6f0fbd13ee4f,cmhc022,How are EPSDT (Early Periodic Screening Diagnostic Treatment) services billed under FL Medicaid?,ok,0.667,0.667,1.0,1204,4,0,0,3,,,0
+a,chat.thinking,38d4391472e5,cmhc001,What is the timely filing deadline for Sunshine Health FL Medicaid claims?,ok,1.0,1.0,1.0,1328,17,0,0,3,,,0
+a,chat.thinking,38d4391472e5,cmhc002,Does Sunshine Health require prior authorization for residential substance use treatment under code H0019?,ok,0.75,0.5,1.0,1076,20,0,0,2,,,0
+a,chat.thinking,38d4391472e5,cmhc003,Does Aetna Better Health Florida require a referral for outpatient behavioral health therapy?,ok,1.0,0.167,1.0,1278,7,0,1,3,,,0
+a,chat.thinking,38d4391472e5,cmhc004,Is telehealth covered for behavioral health intake assessments under Florida Medicaid?,ok,0.833,0.5,1.0,1214,8,1,1,3,,,0
+a,chat.thinking,38d4391472e5,cmhc005,What modifier should I use when billing H0015 IOP services for Florida Medicaid?,ok,0.2,0.0,1.0,1197,9,0,1,5,,,0
+a,chat.thinking,38d4391472e5,cmhc006,What is the standard prior authorization decision timeframe for Sunshine Health Florida?,ok,0.333,0.0,1.0,1300,19,0,0,3,,,0
+a,chat.thinking,38d4391472e5,cmhc007,How do I submit a corrected claim to Sunshine Health Florida?,ok,0.5,0.0,1.0,1310,23,0,0,3,,,0
+a,chat.thinking,38d4391472e5,cmhc008,Does Sunshine Health require prior authorization for psychological testing under CPT codes 96130-96139?,ok,0.333,0.0,1.0,1052,15,0,0,3,,,0
+a,chat.thinking,38d4391472e5,cmhc009,What is the deadline to file a claim payment appeal with Sunshine Health Florida?,ok,1.0,0.833,1.0,1196,22,0,0,3,,,0
+a,chat.thinking,38d4391472e5,cmhc010,How do I verify member eligibility for a Sunshine Health Florida member?,ok,0.833,0.833,1.0,1355,21,0,0,3,,,0
+a,chat.thinking,38d4391472e5,cmhc011,What is Sunshine Health's prior authorization process for inpatient psychiatric admission?,ok,1.0,0.5,1.0,1127,20,0,0,3,,,0
+a,chat.thinking,38d4391472e5,cmhc012,What HCPCS code do I bill for Applied Behavior Analysis (ABA) therapy under FL Medicaid?,ok,0.667,0.0,0.1111,643,9,0,0,3,,,0
+a,chat.thinking,38d4391472e5,cmhc013,Does Sunshine Health cover dental services for adults?,ok,0.5,0.0,1.0,536,14,0,0,3,,,0
+a,chat.thinking,38d4391472e5,cmhc014,Which pharmacy benefit manager processes Sunshine Health prescription claims?,ok,1.0,0.667,1.0,1113,19,0,0,3,,,0
+a,chat.thinking,38d4391472e5,cmhc015,What is Sunshine Health's member appeals process and how do I file a grievance?,ok,1.0,0.167,0.9167,1217,12,0,2,3,,,0
+a,chat.thinking,38d4391472e5,cmhc016,How do I get credentialed with Sunshine Health?,ok,0.833,0.0,1.0,997,19,0,0,3,,,0
+a,chat.thinking,38d4391472e5,cmhc017,What modifier is required for telehealth services under FL Medicaid managed care?,ok,0.333,0.333,1.0,1203,8,0,0,3,,,0
+a,chat.thinking,38d4391472e5,cmhc018,Does Sunshine Health require prior authorization for outpatient electroconvulsive therapy (ECT)?,ok,0.5,0.167,1.0,1051,16,0,0,3,,,0
+a,chat.thinking,38d4391472e5,cmhc019,What is the timely filing deadline for Aetna Better Health Florida Medicaid claims?,ok,1.0,1.0,1.0,1308,8,0,0,2,,,0
+a,chat.thinking,38d4391472e5,cmhc020,What is Simply Healthcare Florida Medicaid's prior authorization decision timeframe?,ok,0.333,0.0,1.0,1202,9,0,1,3,,,0
+a,chat.thinking,38d4391472e5,cmhc021,What documentation is required to enroll a new pediatric patient with Sunshine Health?,ok,0.833,0.0,1.0,1042,20,0,0,3,,,0
+a,chat.thinking,38d4391472e5,cmhc022,How are EPSDT (Early Periodic Screening Diagnostic Treatment) services billed under FL Medicaid?,ok,0.667,0.333,1.0,1204,8,0,3,3,,,0
+b,chat.copilot,5a8d30f4b072,cmhc001,What is the timely filing deadline for Sunshine Health FL Medicaid claims?,ok,1.0,0.5,0.8333,929,6,0,0,3,,,0
+b,chat.copilot,5a8d30f4b072,cmhc002,Does Sunshine Health require prior authorization for residential substance use treatment under code H0019?,ok,0.5,0.0,1.0,767,10,0,0,2,,,0
+b,chat.copilot,5a8d30f4b072,cmhc003,Does Aetna Better Health Florida require a referral for outpatient behavioral health therapy?,ok,1.0,0.167,1.0,893,3,0,0,3,,,0
+b,chat.copilot,5a8d30f4b072,cmhc004,Is telehealth covered for behavioral health intake assessments under Florida Medicaid?,ok,0.833,0.667,1.0,859,3,0,0,3,,,0
+b,chat.copilot,5a8d30f4b072,cmhc005,What modifier should I use when billing H0015 IOP services for Florida Medicaid?,ok,0.3,0.0,1.0,839,3,0,0,5,,,0
+b,chat.copilot,5a8d30f4b072,cmhc006,What is the standard prior authorization decision timeframe for Sunshine Health Florida?,ok,0.667,0.667,1.0,906,9,0,0,3,,,0
+b,chat.copilot,5a8d30f4b072,cmhc007,How do I submit a corrected claim to Sunshine Health Florida?,ok,0.667,0.5,1.0,905,5,0,0,3,,,0
+b,chat.copilot,5a8d30f4b072,cmhc008,Does Sunshine Health require prior authorization for psychological testing under CPT codes 96130-96139?,ok,0.333,0.0,1.0,758,4,1,0,3,,,0
+b,chat.copilot,5a8d30f4b072,cmhc009,What is the deadline to file a claim payment appeal with Sunshine Health Florida?,ok,1.0,0.833,1.0,813,8,0,0,3,,,0
+b,chat.copilot,5a8d30f4b072,cmhc010,How do I verify member eligibility for a Sunshine Health Florida member?,ok,1.0,0.667,1.0,951,8,0,1,3,,,0
+b,chat.copilot,5a8d30f4b072,cmhc011,What is Sunshine Health's prior authorization process for inpatient psychiatric admission?,ok,1.0,1.0,1.0,823,7,0,0,3,,,0
+b,chat.copilot,5a8d30f4b072,cmhc012,What HCPCS code do I bill for Applied Behavior Analysis (ABA) therapy under FL Medicaid?,ok,0.667,0.167,0.9167,584,12,0,0,3,,,0
+b,chat.copilot,5a8d30f4b072,cmhc013,Does Sunshine Health cover dental services for adults?,ok,0.333,0.0,1.0,425,6,0,0,3,,,0
+b,chat.copilot,5a8d30f4b072,cmhc014,Which pharmacy benefit manager processes Sunshine Health prescription claims?,ok,1.0,0.667,1.0,808,5,0,0,3,,,0
+b,chat.copilot,5a8d30f4b072,cmhc015,What is Sunshine Health's member appeals process and how do I file a grievance?,ok,1.0,0.5,0.8,832,5,0,2,3,,,0
+b,chat.copilot,5a8d30f4b072,cmhc016,How do I get credentialed with Sunshine Health?,ok,0.833,0.333,1.0,709,5,0,0,3,,,0
+b,chat.copilot,5a8d30f4b072,cmhc017,What modifier is required for telehealth services under FL Medicaid managed care?,ok,0.5,0.167,1.0,850,3,0,0,3,,,0
+b,chat.copilot,5a8d30f4b072,cmhc018,Does Sunshine Health require prior authorization for outpatient electroconvulsive therapy (ECT)?,ok,0.5,0.333,1.0,763,6,0,0,3,,,0
+b,chat.copilot,5a8d30f4b072,cmhc019,What is the timely filing deadline for Aetna Better Health Florida Medicaid claims?,ok,1.0,0.5,1.0,908,3,0,0,2,,,0
+b,chat.copilot,5a8d30f4b072,cmhc020,What is Simply Healthcare Florida Medicaid's prior authorization decision timeframe?,ok,0.0,0.0,1.0,850,2,1,1,3,,,0
+b,chat.copilot,5a8d30f4b072,cmhc021,What documentation is required to enroll a new pediatric patient with Sunshine Health?,ok,0.5,0.0,1.0,747,4,0,0,3,,,0
+b,chat.copilot,5a8d30f4b072,cmhc022,How are EPSDT (Early Periodic Screening Diagnostic Treatment) services billed under FL Medicaid?,ok,0.667,0.667,1.0,854,3,0,0,3,,,0
+b,chat.default,9d4cb1a1f74e,cmhc001,What is the timely filing deadline for Sunshine Health FL Medicaid claims?,ok,1.0,0.5,0.6667,1328,9,0,0,3,,,0
+b,chat.default,9d4cb1a1f74e,cmhc002,Does Sunshine Health require prior authorization for residential substance use treatment under code H0019?,ok,0.75,0.5,1.0,1076,9,0,0,2,,,0
+b,chat.default,9d4cb1a1f74e,cmhc003,Does Aetna Better Health Florida require a referral for outpatient behavioral health therapy?,ok,1.0,0.0,1.0,1278,4,0,0,3,,,0
+b,chat.default,9d4cb1a1f74e,cmhc004,Is telehealth covered for behavioral health intake assessments under Florida Medicaid?,ok,0.833,0.5,1.0,1214,5,0,0,3,,,0
+b,chat.default,9d4cb1a1f74e,cmhc005,What modifier should I use when billing H0015 IOP services for Florida Medicaid?,ok,0.2,0.2,1.0,1197,5,0,0,5,,,0
+b,chat.default,9d4cb1a1f74e,cmhc006,What is the standard prior authorization decision timeframe for Sunshine Health Florida?,ok,0.667,0.333,1.0,1300,12,0,0,3,,,0
+b,chat.default,9d4cb1a1f74e,cmhc007,How do I submit a corrected claim to Sunshine Health Florida?,ok,0.833,0.833,1.0,1310,9,0,0,3,,,0
+b,chat.default,9d4cb1a1f74e,cmhc008,Does Sunshine Health require prior authorization for psychological testing under CPT codes 96130-96139?,ok,0.333,0.0,1.0,1052,6,1,0,3,,,0
+b,chat.default,9d4cb1a1f74e,cmhc009,What is the deadline to file a claim payment appeal with Sunshine Health Florida?,ok,1.0,0.667,0.9091,1196,11,0,0,3,,,0
+b,chat.default,9d4cb1a1f74e,cmhc010,How do I verify member eligibility for a Sunshine Health Florida member?,ok,1.0,0.667,1.0,1355,9,0,0,3,,,0
+b,chat.default,9d4cb1a1f74e,cmhc011,What is Sunshine Health's prior authorization process for inpatient psychiatric admission?,ok,1.0,0.667,1.0,1127,16,0,0,3,,,0
+b,chat.default,9d4cb1a1f74e,cmhc012,What HCPCS code do I bill for Applied Behavior Analysis (ABA) therapy under FL Medicaid?,ok,0.667,0.0,0.96,643,25,0,0,3,,,0
+b,chat.default,9d4cb1a1f74e,cmhc013,Does Sunshine Health cover dental services for adults?,ok,0.333,0.0,1.0,536,8,0,0,3,,,0
+b,chat.default,9d4cb1a1f74e,cmhc014,Which pharmacy benefit manager processes Sunshine Health prescription claims?,ok,1.0,0.667,1.0,1113,8,0,0,3,,,0
+b,chat.default,9d4cb1a1f74e,cmhc015,What is Sunshine Health's member appeals process and how do I file a grievance?,ok,1.0,0.0,0.875,1217,8,0,0,3,,,0
+b,chat.default,9d4cb1a1f74e,cmhc016,How do I get credentialed with Sunshine Health?,ok,0.833,0.333,1.0,997,7,0,0,3,,,0
+b,chat.default,9d4cb1a1f74e,cmhc017,What modifier is required for telehealth services under FL Medicaid managed care?,ok,0.5,0.333,1.0,1203,5,0,0,3,,,0
+b,chat.default,9d4cb1a1f74e,cmhc018,Does Sunshine Health require prior authorization for outpatient electroconvulsive therapy (ECT)?,ok,1.0,0.333,1.0,1051,11,0,0,3,,,0
+b,chat.default,9d4cb1a1f74e,cmhc019,What is the timely filing deadline for Aetna Better Health Florida Medicaid claims?,ok,1.0,1.0,1.0,1308,4,0,0,2,,,0
+b,chat.default,9d4cb1a1f74e,cmhc020,What is Simply Healthcare Florida Medicaid's prior authorization decision timeframe?,ok,0.0,0.0,1.0,1202,4,1,1,3,,,0
+b,chat.default,9d4cb1a1f74e,cmhc021,What documentation is required to enroll a new pediatric patient with Sunshine Health?,ok,0.667,0.0,1.0,1042,6,0,0,3,,,0
+b,chat.default,9d4cb1a1f74e,cmhc022,How are EPSDT (Early Periodic Screening Diagnostic Treatment) services billed under FL Medicaid?,ok,0.667,0.667,1.0,1204,5,0,0,3,,,0
+b,chat.thinking,95fdf5509b88,cmhc001,What is the timely filing deadline for Sunshine Health FL Medicaid claims?,ok,1.0,0.5,0.875,1328,24,0,0,3,,,0
+b,chat.thinking,95fdf5509b88,cmhc002,Does Sunshine Health require prior authorization for residential substance use treatment under code H0019?,ok,0.75,0.5,1.0,1076,24,0,0,2,,,0
+b,chat.thinking,95fdf5509b88,cmhc003,Does Aetna Better Health Florida require a referral for outpatient behavioral health therapy?,ok,1.0,0.167,1.0,1278,8,0,0,3,,,0
+b,chat.thinking,95fdf5509b88,cmhc004,Is telehealth covered for behavioral health intake assessments under Florida Medicaid?,ok,0.0,1.0,1.0,1214,11,0,0,0,,,0
+b,chat.thinking,95fdf5509b88,cmhc005,What modifier should I use when billing H0015 IOP services for Florida Medicaid?,ok,0.2,0.0,1.0,1197,15,0,1,5,,,0
+b,chat.thinking,95fdf5509b88,cmhc006,What is the standard prior authorization decision timeframe for Sunshine Health Florida?,ok,0.667,0.333,1.0,1300,24,0,0,3,,,0
+b,chat.thinking,95fdf5509b88,cmhc007,How do I submit a corrected claim to Sunshine Health Florida?,ok,0.833,0.833,1.0,1310,23,0,0,3,,,0
+b,chat.thinking,95fdf5509b88,cmhc008,Does Sunshine Health require prior authorization for psychological testing under CPT codes 96130-96139?,ok,0.333,0.0,1.0,1052,14,1,0,3,,,0
+b,chat.thinking,95fdf5509b88,cmhc009,What is the deadline to file a claim payment appeal with Sunshine Health Florida?,ok,1.0,0.667,0.96,1196,25,0,0,3,,,0
+b,chat.thinking,95fdf5509b88,cmhc010,How do I verify member eligibility for a Sunshine Health Florida member?,ok,1.0,1.0,1.0,1355,37,0,0,3,,,0
+b,chat.thinking,95fdf5509b88,cmhc011,What is Sunshine Health's prior authorization process for inpatient psychiatric admission?,ok,1.0,1.0,1.0,1127,28,0,0,3,,,0
+b,chat.thinking,95fdf5509b88,cmhc012,What HCPCS code do I bill for Applied Behavior Analysis (ABA) therapy under FL Medicaid?,ok,0.667,0.0,0.9688,643,32,0,0,3,,,0
+b,chat.thinking,95fdf5509b88,cmhc013,Does Sunshine Health cover dental services for adults?,ok,0.667,0.0,1.0,536,24,0,0,3,,,0
+b,chat.thinking,95fdf5509b88,cmhc014,Which pharmacy benefit manager processes Sunshine Health prescription claims?,ok,1.0,0.667,1.0,1113,23,0,0,3,,,0
+b,chat.thinking,95fdf5509b88,cmhc015,What is Sunshine Health's member appeals process and how do I file a grievance?,ok,1.0,1.0,0.9583,1217,24,0,0,3,,,0
+b,chat.thinking,95fdf5509b88,cmhc016,How do I get credentialed with Sunshine Health?,ok,0.833,0.333,1.0,997,21,0,0,3,,,0
+b,chat.thinking,95fdf5509b88,cmhc017,What modifier is required for telehealth services under FL Medicaid managed care?,ok,0.5,0.5,1.0,1203,11,0,0,3,,,0
+b,chat.thinking,95fdf5509b88,cmhc018,Does Sunshine Health require prior authorization for outpatient electroconvulsive therapy (ECT)?,ok,0.833,0.333,1.0,1051,24,0,0,3,,,0
+b,chat.thinking,95fdf5509b88,cmhc019,What is the timely filing deadline for Aetna Better Health Florida Medicaid claims?,ok,1.0,1.0,1.0,1308,9,0,0,2,,,0
+b,chat.thinking,95fdf5509b88,cmhc020,What is Simply Healthcare Florida Medicaid's prior authorization decision timeframe?,ok,0.0,0.0,1.0,1202,8,1,1,3,,,0
+b,chat.thinking,95fdf5509b88,cmhc021,What documentation is required to enroll a new pediatric patient with Sunshine Health?,ok,0.5,0.0,1.0,1042,12,0,0,3,,,0
+b,chat.thinking,95fdf5509b88,cmhc022,How are EPSDT (Early Periodic Screening Diagnostic Treatment) services billed under FL Medicaid?,ok,0.667,0.667,1.0,1204,10,0,0,3,,,0
+c,chat.copilot,0090afeac66b,cmhc001,What is the timely filing deadline for Sunshine Health FL Medicaid claims?,ok,0.667,0.667,1.0,929,5,0,0,3,,,0
+c,chat.copilot,0090afeac66b,cmhc002,Does Sunshine Health require prior authorization for residential substance use treatment under code H0019?,ok,1.0,0.25,1.0,767,3,0,0,2,,,0
+c,chat.copilot,0090afeac66b,cmhc003,Does Aetna Better Health Florida require a referral for outpatient behavioral health therapy?,ok,0.667,0.333,0.0,893,5,0,0,3,,,0
+c,chat.copilot,0090afeac66b,cmhc004,Is telehealth covered for behavioral health intake assessments under Florida Medicaid?,ok,0.5,0.667,0.0,859,7,0,0,3,,,0
+c,chat.copilot,0090afeac66b,cmhc005,What modifier should I use when billing H0015 IOP services for Florida Medicaid?,ok,0.0,,,839,0,0,0,5,,,0
+c,chat.copilot,0090afeac66b,cmhc006,What is the standard prior authorization decision timeframe for Sunshine Health Florida?,ok,1.0,1.0,1.0,906,4,2,0,3,,,0
+c,chat.copilot,0090afeac66b,cmhc007,How do I submit a corrected claim to Sunshine Health Florida?,ok,0.833,0.833,0.0,905,7,0,0,3,,,0
+c,chat.copilot,0090afeac66b,cmhc008,Does Sunshine Health require prior authorization for psychological testing under CPT codes 96130-96139?,ok,0.5,0.5,1.0,758,4,0,0,3,,,0
+c,chat.copilot,0090afeac66b,cmhc009,What is the deadline to file a claim payment appeal with Sunshine Health Florida?,ok,1.0,1.0,1.0,813,5,0,0,3,,,0
+c,chat.copilot,0090afeac66b,cmhc010,How do I verify member eligibility for a Sunshine Health Florida member?,ok,0.667,0.333,0.1429,951,7,0,0,3,,,0
+c,chat.copilot,0090afeac66b,cmhc011,What is Sunshine Health's prior authorization process for inpatient psychiatric admission?,ok,1.0,1.0,1.0,823,7,0,0,3,,,0
+c,chat.copilot,0090afeac66b,cmhc012,What HCPCS code do I bill for Applied Behavior Analysis (ABA) therapy under FL Medicaid?,ok,0.667,0.667,0.0,584,7,0,0,3,,,0
+c,chat.copilot,0090afeac66b,cmhc013,Does Sunshine Health cover dental services for adults?,ok,1.0,1.0,0.0,425,7,0,0,3,,,0
+c,chat.copilot,0090afeac66b,cmhc014,Which pharmacy benefit manager processes Sunshine Health prescription claims?,ok,1.0,1.0,0.5,808,2,0,0,3,,,0
+c,chat.copilot,0090afeac66b,cmhc015,What is Sunshine Health's member appeals process and how do I file a grievance?,ok,1.0,1.0,0.7143,832,7,0,0,3,,,0
+c,chat.copilot,0090afeac66b,cmhc016,How do I get credentialed with Sunshine Health?,ok,0.5,0.0,1.0,709,7,0,0,3,,,0
+c,chat.copilot,0090afeac66b,cmhc017,What modifier is required for telehealth services under FL Medicaid managed care?,ok,0.833,0.667,0.0,850,6,0,0,3,,,0
+c,chat.copilot,0090afeac66b,cmhc018,Does Sunshine Health require prior authorization for outpatient electroconvulsive therapy (ECT)?,ok,0.5,0.333,1.0,763,7,1,0,3,,,0
+c,chat.copilot,0090afeac66b,cmhc019,What is the timely filing deadline for Aetna Better Health Florida Medicaid claims?,ok,1.0,1.0,0.0,908,7,0,0,2,,,0
+c,chat.copilot,0090afeac66b,cmhc020,What is Simply Healthcare Florida Medicaid's prior authorization decision timeframe?,ok,0.0,,,850,0,0,0,3,,,0
+c,chat.copilot,0090afeac66b,cmhc021,What documentation is required to enroll a new pediatric patient with Sunshine Health?,ok,0.0,,,747,0,0,0,3,,,0
+c,chat.copilot,0090afeac66b,cmhc022,How are EPSDT (Early Periodic Screening Diagnostic Treatment) services billed under FL Medicaid?,ok,0.0,,,854,0,0,0,3,,,0
+c,chat.default,e427e377812e,cmhc001,What is the timely filing deadline for Sunshine Health FL Medicaid claims?,ok,0.667,0.667,1.0,1328,6,0,0,3,,,0
+c,chat.default,e427e377812e,cmhc002,Does Sunshine Health require prior authorization for residential substance use treatment under code H0019?,ok,0.75,1.0,1.0,1076,2,0,0,2,,,0
+c,chat.default,e427e377812e,cmhc003,Does Aetna Better Health Florida require a referral for outpatient behavioral health therapy?,ok,0.667,0.333,0.0,1278,4,0,0,3,,,0
+c,chat.default,e427e377812e,cmhc004,Is telehealth covered for behavioral health intake assessments under Florida Medicaid?,ok,0.5,0.5,0.0,1214,10,0,0,3,,,0
+c,chat.default,e427e377812e,cmhc005,What modifier should I use when billing H0015 IOP services for Florida Medicaid?,ok,0.0,,,1197,0,0,0,5,,,0
+c,chat.default,e427e377812e,cmhc006,What is the standard prior authorization decision timeframe for Sunshine Health Florida?,ok,1.0,0.667,0.0,1300,7,2,0,3,,,0
+c,chat.default,e427e377812e,cmhc007,How do I submit a corrected claim to Sunshine Health Florida?,ok,0.333,0.0,1.0,1310,4,0,0,3,,,0
+c,chat.default,e427e377812e,cmhc008,Does Sunshine Health require prior authorization for psychological testing under CPT codes 96130-96139?,ok,0.5,0.333,1.0,1052,2,0,0,3,,,0
+c,chat.default,e427e377812e,cmhc009,What is the deadline to file a claim payment appeal with Sunshine Health Florida?,ok,1.0,1.0,0.8333,1196,6,2,0,3,,,0
+c,chat.default,e427e377812e,cmhc010,How do I verify member eligibility for a Sunshine Health Florida member?,ok,1.0,1.0,0.4,1355,10,0,0,3,,,0
+c,chat.default,e427e377812e,cmhc011,What is Sunshine Health's prior authorization process for inpatient psychiatric admission?,ok,1.0,0.667,1.0,1127,10,0,0,3,,,0
+c,chat.default,e427e377812e,cmhc012,What HCPCS code do I bill for Applied Behavior Analysis (ABA) therapy under FL Medicaid?,ok,0.667,0.333,0.0,643,8,0,0,3,,,0
+c,chat.default,e427e377812e,cmhc013,Does Sunshine Health cover dental services for adults?,ok,1.0,1.0,0.0,536,5,0,0,3,,,0
+c,chat.default,e427e377812e,cmhc014,Which pharmacy benefit manager processes Sunshine Health prescription claims?,ok,0.833,0.667,0.5,1113,2,0,0,3,,,0
+c,chat.default,e427e377812e,cmhc015,What is Sunshine Health's member appeals process and how do I file a grievance?,ok,0.833,1.0,0.7778,1217,9,0,0,3,,,0
+c,chat.default,e427e377812e,cmhc016,How do I get credentialed with Sunshine Health?,ok,0.5,0.0,1.0,997,8,0,0,3,,,0
+c,chat.default,e427e377812e,cmhc017,What modifier is required for telehealth services under FL Medicaid managed care?,ok,0.833,0.667,0.0,1203,10,0,0,3,,,0
+c,chat.default,e427e377812e,cmhc018,Does Sunshine Health require prior authorization for outpatient electroconvulsive therapy (ECT)?,ok,0.5,0.5,1.0,1051,4,0,0,3,,,0
+c,chat.default,e427e377812e,cmhc019,What is the timely filing deadline for Aetna Better Health Florida Medicaid claims?,ok,0.75,1.0,0.0,1308,8,0,0,2,,,0
+c,chat.default,e427e377812e,cmhc020,What is Simply Healthcare Florida Medicaid's prior authorization decision timeframe?,ok,0.667,0.333,0.0,1202,4,1,0,3,,,0
+c,chat.default,e427e377812e,cmhc021,What documentation is required to enroll a new pediatric patient with Sunshine Health?,ok,0.0,,,1042,0,0,0,3,,,0
+c,chat.default,e427e377812e,cmhc022,How are EPSDT (Early Periodic Screening Diagnostic Treatment) services billed under FL Medicaid?,ok,0.0,,,1204,0,0,0,3,,,0
+c,chat.thinking,461655e65135,cmhc001,What is the timely filing deadline for Sunshine Health FL Medicaid claims?,ok,0.667,0.667,1.0,1328,7,0,0,3,,,0
+c,chat.thinking,461655e65135,cmhc002,Does Sunshine Health require prior authorization for residential substance use treatment under code H0019?,ok,1.0,0.5,1.0,1076,2,0,0,2,,,0
+c,chat.thinking,461655e65135,cmhc003,Does Aetna Better Health Florida require a referral for outpatient behavioral health therapy?,ok,0.667,0.667,0.0,1278,4,0,0,3,,,0
+c,chat.thinking,461655e65135,cmhc004,Is telehealth covered for behavioral health intake assessments under Florida Medicaid?,ok,0.5,0.667,0.0,1214,9,0,0,3,,,0
+c,chat.thinking,461655e65135,cmhc005,What modifier should I use when billing H0015 IOP services for Florida Medicaid?,ok,0.0,,,1197,0,0,0,5,,,0
+c,chat.thinking,461655e65135,cmhc006,What is the standard prior authorization decision timeframe for Sunshine Health Florida?,ok,0.667,0.0,0.0,1300,4,2,0,3,,,0
+c,chat.thinking,461655e65135,cmhc007,How do I submit a corrected claim to Sunshine Health Florida?,ok,0.833,0.833,0.7,1310,10,0,0,3,,,0
+c,chat.thinking,461655e65135,cmhc008,Does Sunshine Health require prior authorization for psychological testing under CPT codes 96130-96139?,ok,0.5,0.167,1.0,1052,2,0,0,3,,,0
+c,chat.thinking,461655e65135,cmhc009,What is the deadline to file a claim payment appeal with Sunshine Health Florida?,ok,1.0,0.333,1.0,1196,5,1,0,3,,,0
+c,chat.thinking,461655e65135,cmhc010,How do I verify member eligibility for a Sunshine Health Florida member?,ok,1.0,0.333,0.4,1355,10,0,0,3,,,0
+c,chat.thinking,461655e65135,cmhc011,What is Sunshine Health's prior authorization process for inpatient psychiatric admission?,ok,0.833,1.0,1.0,1127,8,0,0,3,,,0
+c,chat.thinking,461655e65135,cmhc012,What HCPCS code do I bill for Applied Behavior Analysis (ABA) therapy under FL Medicaid?,ok,0.833,0.5,0.0,643,3,0,0,3,,,0
+c,chat.thinking,461655e65135,cmhc013,Does Sunshine Health cover dental services for adults?,ok,1.0,1.0,0.0,536,6,0,0,3,,,0
+c,chat.thinking,461655e65135,cmhc014,Which pharmacy benefit manager processes Sunshine Health prescription claims?,ok,1.0,1.0,0.6667,1113,3,0,0,3,,,0
+c,chat.thinking,461655e65135,cmhc015,What is Sunshine Health's member appeals process and how do I file a grievance?,ok,1.0,1.0,0.9,1217,10,0,0,3,,,0
+c,chat.thinking,461655e65135,cmhc016,How do I get credentialed with Sunshine Health?,ok,0.5,0.333,1.0,997,10,0,0,3,,,0
+c,chat.thinking,461655e65135,cmhc017,What modifier is required for telehealth services under FL Medicaid managed care?,ok,0.833,0.667,0.0,1203,8,0,0,3,,,0
+c,chat.thinking,461655e65135,cmhc018,Does Sunshine Health require prior authorization for outpatient electroconvulsive therapy (ECT)?,ok,0.5,0.167,1.0,1051,2,1,0,3,,,0
+c,chat.thinking,461655e65135,cmhc019,What is the timely filing deadline for Aetna Better Health Florida Medicaid claims?,ok,1.0,1.0,0.0,1308,8,0,0,2,,,0
+c,chat.thinking,461655e65135,cmhc020,What is Simply Healthcare Florida Medicaid's prior authorization decision timeframe?,ok,0.667,0.667,0.0,1202,5,1,0,3,,,0
+c,chat.thinking,461655e65135,cmhc021,What documentation is required to enroll a new pediatric patient with Sunshine Health?,ok,0.0,,,1042,0,0,0,3,,,0
+c,chat.thinking,461655e65135,cmhc022,How are EPSDT (Early Periodic Screening Diagnostic Treatment) services billed under FL Medicaid?,ok,0.5,0.0,0.0,1204,6,0,0,3,,,0
+d,chat.copilot,0043e8e3e386,cmhc001,What is the timely filing deadline for Sunshine Health FL Medicaid claims?,ok,1.0,1.0,0.0,929,4,0,0,3,,,0
+d,chat.copilot,0043e8e3e386,cmhc002,Does Sunshine Health require prior authorization for residential substance use treatment under code H0019?,ok,0.5,0.0,0.0,767,4,0,0,2,,,0
+d,chat.copilot,0043e8e3e386,cmhc003,Does Aetna Better Health Florida require a referral for outpatient behavioral health therapy?,ok,0.5,0.0,0.0,893,4,0,0,3,,,0
+d,chat.copilot,0043e8e3e386,cmhc004,Is telehealth covered for behavioral health intake assessments under Florida Medicaid?,ok,0.833,1.0,0.0,859,4,0,0,3,,,0
+d,chat.copilot,0043e8e3e386,cmhc005,What modifier should I use when billing H0015 IOP services for Florida Medicaid?,ok,0.4,0.4,0.0,839,4,0,0,5,,,0
+d,chat.copilot,0043e8e3e386,cmhc006,What is the standard prior authorization decision timeframe for Sunshine Health Florida?,ok,0.667,0.667,0.0,906,4,1,0,3,,,0
+d,chat.copilot,0043e8e3e386,cmhc007,How do I submit a corrected claim to Sunshine Health Florida?,ok,0.333,0.0,0.0,905,4,0,0,3,,,0
+d,chat.copilot,0043e8e3e386,cmhc008,Does Sunshine Health require prior authorization for psychological testing under CPT codes 96130-96139?,ok,0.333,0.333,0.25,758,4,1,0,3,,,0
+d,chat.copilot,0043e8e3e386,cmhc009,What is the deadline to file a claim payment appeal with Sunshine Health Florida?,ok,1.0,0.667,0.0,813,4,0,0,3,,,0
+d,chat.copilot,0043e8e3e386,cmhc010,How do I verify member eligibility for a Sunshine Health Florida member?,ok,0.667,0.333,0.75,951,4,0,0,3,,,0
+d,chat.copilot,0043e8e3e386,cmhc011,What is Sunshine Health's prior authorization process for inpatient psychiatric admission?,ok,0.833,0.667,0.75,823,4,0,0,3,,,0
+d,chat.copilot,0043e8e3e386,cmhc012,What HCPCS code do I bill for Applied Behavior Analysis (ABA) therapy under FL Medicaid?,ok,0.667,0.333,0.0,584,4,0,0,3,,,0
+d,chat.copilot,0043e8e3e386,cmhc013,Does Sunshine Health cover dental services for adults?,ok,1.0,1.0,0.0,425,4,0,0,3,,,0
+d,chat.copilot,0043e8e3e386,cmhc014,Which pharmacy benefit manager processes Sunshine Health prescription claims?,ok,0.5,0.0,1.0,808,2,0,0,3,,,0
+d,chat.copilot,0043e8e3e386,cmhc015,What is Sunshine Health's member appeals process and how do I file a grievance?,ok,1.0,0.667,0.5,832,4,0,0,3,,,0
+d,chat.copilot,0043e8e3e386,cmhc016,How do I get credentialed with Sunshine Health?,ok,0.833,0.333,0.25,709,4,0,0,3,,,0
+d,chat.copilot,0043e8e3e386,cmhc017,What modifier is required for telehealth services under FL Medicaid managed care?,ok,0.5,0.5,0.0,850,4,0,0,3,,,0
+d,chat.copilot,0043e8e3e386,cmhc018,Does Sunshine Health require prior authorization for outpatient electroconvulsive therapy (ECT)?,ok,0.5,0.333,0.0,763,4,1,0,3,,,0
+d,chat.copilot,0043e8e3e386,cmhc019,What is the timely filing deadline for Aetna Better Health Florida Medicaid claims?,ok,1.0,1.0,0.0,908,4,0,0,2,,,0
+d,chat.copilot,0043e8e3e386,cmhc020,What is Simply Healthcare Florida Medicaid's prior authorization decision timeframe?,ok,1.0,0.667,0.0,850,4,1,1,3,,,0
+d,chat.copilot,0043e8e3e386,cmhc021,What documentation is required to enroll a new pediatric patient with Sunshine Health?,ok,0.667,0.0,0.25,747,4,0,0,3,,,0
+d,chat.copilot,0043e8e3e386,cmhc022,How are EPSDT (Early Periodic Screening Diagnostic Treatment) services billed under FL Medicaid?,ok,0.667,0.667,0.0,854,4,0,0,3,,,0
+d,chat.default,7ec57aa6143d,cmhc001,What is the timely filing deadline for Sunshine Health FL Medicaid claims?,ok,0.0,0.0,0.0,1328,5,0,0,3,,,0
+d,chat.default,7ec57aa6143d,cmhc002,Does Sunshine Health require prior authorization for residential substance use treatment under code H0019?,ok,0.5,0.5,0.5,1076,6,0,0,2,,,0
+d,chat.default,7ec57aa6143d,cmhc003,Does Aetna Better Health Florida require a referral for outpatient behavioral health therapy?,ok,0.5,0.0,0.0,1278,6,0,0,3,,,0
+d,chat.default,7ec57aa6143d,cmhc004,Is telehealth covered for behavioral health intake assessments under Florida Medicaid?,ok,0.833,0.833,0.0,1214,6,0,0,3,,,0
+d,chat.default,7ec57aa6143d,cmhc005,What modifier should I use when billing H0015 IOP services for Florida Medicaid?,ok,0.4,0.4,0.0,1197,6,0,0,5,,,0
+d,chat.default,7ec57aa6143d,cmhc006,What is the standard prior authorization decision timeframe for Sunshine Health Florida?,ok,1.0,0.667,0.0,1300,6,2,0,3,,,0
+d,chat.default,7ec57aa6143d,cmhc007,How do I submit a corrected claim to Sunshine Health Florida?,ok,0.333,0.167,0.0,1310,6,0,0,3,,,0
+d,chat.default,7ec57aa6143d,cmhc008,Does Sunshine Health require prior authorization for psychological testing under CPT codes 96130-96139?,ok,0.333,0.333,0.3333,1052,6,1,0,3,,,0
+d,chat.default,7ec57aa6143d,cmhc009,What is the deadline to file a claim payment appeal with Sunshine Health Florida?,ok,0.833,0.667,0.3333,1196,6,0,0,3,,,0
+d,chat.default,7ec57aa6143d,cmhc010,How do I verify member eligibility for a Sunshine Health Florida member?,ok,1.0,0.667,0.0,1355,6,0,0,3,,,0
+d,chat.default,7ec57aa6143d,cmhc011,What is Sunshine Health's prior authorization process for inpatient psychiatric admission?,ok,0.833,0.667,0.0,1127,6,0,0,3,,,0
+d,chat.default,7ec57aa6143d,cmhc012,What HCPCS code do I bill for Applied Behavior Analysis (ABA) therapy under FL Medicaid?,ok,0.667,0.333,0.0,643,6,0,0,3,,,0
+d,chat.default,7ec57aa6143d,cmhc013,Does Sunshine Health cover dental services for adults?,ok,1.0,0.833,0.0,536,6,0,0,3,,,0
+d,chat.default,7ec57aa6143d,cmhc014,Which pharmacy benefit manager processes Sunshine Health prescription claims?,ok,0.667,0.0,0.6667,1113,3,0,0,3,,,0
+d,chat.default,7ec57aa6143d,cmhc015,What is Sunshine Health's member appeals process and how do I file a grievance?,ok,1.0,0.5,0.5,1217,6,0,0,3,,,0
+d,chat.default,7ec57aa6143d,cmhc016,How do I get credentialed with Sunshine Health?,ok,0.667,0.333,0.0,997,6,0,0,3,,,0
+d,chat.default,7ec57aa6143d,cmhc017,What modifier is required for telehealth services under FL Medicaid managed care?,ok,0.833,0.667,0.0,1203,6,0,0,3,,,0
+d,chat.default,7ec57aa6143d,cmhc018,Does Sunshine Health require prior authorization for outpatient electroconvulsive therapy (ECT)?,ok,0.833,0.667,0.5,1051,6,0,0,3,,,0
+d,chat.default,7ec57aa6143d,cmhc019,What is the timely filing deadline for Aetna Better Health Florida Medicaid claims?,ok,1.0,0.75,0.0,1308,6,0,0,2,,,0
+d,chat.default,7ec57aa6143d,cmhc020,What is Simply Healthcare Florida Medicaid's prior authorization decision timeframe?,ok,1.0,0.333,0.0,1202,6,1,0,3,,,0
+d,chat.default,7ec57aa6143d,cmhc021,What documentation is required to enroll a new pediatric patient with Sunshine Health?,ok,0.5,0.333,0.0,1042,6,0,0,3,,,0
+d,chat.default,7ec57aa6143d,cmhc022,How are EPSDT (Early Periodic Screening Diagnostic Treatment) services billed under FL Medicaid?,ok,0.667,0.333,0.0,1204,7,0,0,3,,,0
+d,chat.thinking,bb133ad071b0,cmhc001,What is the timely filing deadline for Sunshine Health FL Medicaid claims?,ok,1.0,1.0,0.0,1328,10,0,0,3,,,0
+d,chat.thinking,bb133ad071b0,cmhc002,Does Sunshine Health require prior authorization for residential substance use treatment under code H0019?,ok,0.75,0.5,0.0,1076,10,0,0,2,,,0
+d,chat.thinking,bb133ad071b0,cmhc003,Does Aetna Better Health Florida require a referral for outpatient behavioral health therapy?,ok,0.667,0.667,0.0,1278,6,0,0,3,,,0
+d,chat.thinking,bb133ad071b0,cmhc004,Is telehealth covered for behavioral health intake assessments under Florida Medicaid?,ok,1.0,0.667,0.0,1214,8,0,0,3,,,0
+d,chat.thinking,bb133ad071b0,cmhc005,What modifier should I use when billing H0015 IOP services for Florida Medicaid?,ok,0.4,0.4,0.0,1197,10,0,0,5,,,0
+d,chat.thinking,bb133ad071b0,cmhc006,What is the standard prior authorization decision timeframe for Sunshine Health Florida?,ok,1.0,0.667,0.3333,1300,9,1,0,3,,,0
+d,chat.thinking,bb133ad071b0,cmhc007,How do I submit a corrected claim to Sunshine Health Florida?,ok,0.333,0.0,0.0,1310,8,0,0,3,,,0
+d,chat.thinking,bb133ad071b0,cmhc008,Does Sunshine Health require prior authorization for psychological testing under CPT codes 96130-96139?,ok,0.333,0.0,0.5,1052,8,1,0,3,,,0
+d,chat.thinking,bb133ad071b0,cmhc009,What is the deadline to file a claim payment appeal with Sunshine Health Florida?,ok,1.0,0.667,0.625,1196,8,0,0,3,,,0
+d,chat.thinking,bb133ad071b0,cmhc010,How do I verify member eligibility for a Sunshine Health Florida member?,ok,1.0,1.0,0.4444,1355,9,0,0,3,,,0
+d,chat.thinking,bb133ad071b0,cmhc011,What is Sunshine Health's prior authorization process for inpatient psychiatric admission?,ok,1.0,1.0,0.4,1127,10,1,0,3,,,0
+d,chat.thinking,bb133ad071b0,cmhc012,What HCPCS code do I bill for Applied Behavior Analysis (ABA) therapy under FL Medicaid?,ok,0.667,0.333,0.0,643,8,0,0,3,,,0
+d,chat.thinking,bb133ad071b0,cmhc013,Does Sunshine Health cover dental services for adults?,ok,1.0,1.0,0.3,536,10,0,0,3,,,0
+d,chat.thinking,bb133ad071b0,cmhc014,Which pharmacy benefit manager processes Sunshine Health prescription claims?,ok,1.0,0.5,0.6667,1113,3,0,0,3,,,0
+d,chat.thinking,bb133ad071b0,cmhc015,What is Sunshine Health's member appeals process and how do I file a grievance?,ok,1.0,0.167,0.0,1217,10,0,0,3,,,0
+d,chat.thinking,bb133ad071b0,cmhc016,How do I get credentialed with Sunshine Health?,ok,0.833,0.333,0.0,997,10,0,0,3,,,0
+d,chat.thinking,bb133ad071b0,cmhc017,What modifier is required for telehealth services under FL Medicaid managed care?,ok,0.5,0.5,0.0,1203,9,0,0,3,,,0
+d,chat.thinking,bb133ad071b0,cmhc018,Does Sunshine Health require prior authorization for outpatient electroconvulsive therapy (ECT)?,ok,0.833,0.667,0.5,1051,10,1,0,3,,,0
+d,chat.thinking,bb133ad071b0,cmhc019,What is the timely filing deadline for Aetna Better Health Florida Medicaid claims?,ok,1.0,1.0,0.0,1308,7,1,0,2,,,0
+d,chat.thinking,bb133ad071b0,cmhc020,What is Simply Healthcare Florida Medicaid's prior authorization decision timeframe?,ok,1.0,0.667,0.0,1202,8,1,0,3,,,0
+d,chat.thinking,bb133ad071b0,cmhc021,What documentation is required to enroll a new pediatric patient with Sunshine Health?,ok,0.667,0.0,0.3333,1042,9,0,0,3,,,0
+d,chat.thinking,bb133ad071b0,cmhc022,How are EPSDT (Early Periodic Screening Diagnostic Treatment) services billed under FL Medicaid?,ok,0.667,0.333,0.0,1204,7,0,0,3,,,0
