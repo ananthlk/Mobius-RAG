@@ -376,9 +376,9 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
       const body: Record<string, unknown> = {
         url: scrapeUrl.trim(),
         mode: scrapeMode,
-        content_mode: scrapeContentMode,
-        download_documents: scrapeDownloadDocuments,
-        summarize: scrapeIncludeSummary,
+        include_content: true,
+        include_summary: scrapeIncludeSummary,
+        document_types: scrapeDownloadDocuments ? ['pdf'] : [],
       }
       if (scrapeMode === 'tree') {
         body.max_depth = scrapeMaxDepth

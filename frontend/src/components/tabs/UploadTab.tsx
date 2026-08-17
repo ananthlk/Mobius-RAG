@@ -826,9 +826,6 @@ function UrlPanel({ onDocumentAdded }: { onDocumentAdded: () => void }) {
     }
   }
 
-  const contentMode: 'text' | 'html' | 'both' =
-    includeHtml && includePdfs ? 'both' : includeHtml ? 'html' : 'text'
-
   const handleSubmit = async () => {
     if (!url.trim() || submitting || !probe) return
     setSubmitting(true)
@@ -845,10 +842,9 @@ function UrlPanel({ onDocumentAdded }: { onDocumentAdded: () => void }) {
             max_depth: maxDepth,
             max_pages: maxPages,
             scope_mode: 'same_domain',
-            include_content: true,
+            include_content: includeHtml,
             include_summary: false,
-            content_mode: contentMode,
-            download_documents: includePdfs,
+            document_types: includePdfs ? ['pdf'] : [],
           }),
         })
         const data = await resp.json()
