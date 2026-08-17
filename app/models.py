@@ -1,4 +1,4 @@
-from sqlalchemy import BigInteger, Boolean, Column, String, DateTime, Integer, Text, ForeignKey, Float
+from sqlalchemy import BigInteger, Boolean, Column, String, DateTime, Integer, Text, ForeignKey, Float, Date
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 # NOTE: Embeddings are stored as JSONB arrays in this DB (for Vertex sync).
 # pgvector may be installed, but the current schema uses JSONB for embedding columns.
@@ -19,8 +19,8 @@ class Document(Base):
     state = Column(String(2))
     program = Column(String(100))
     authority_level = Column(String(100), nullable=True)
-    effective_date = Column(String(20), nullable=True)   # ISO date or free text, e.g. 2024-01-15
-    termination_date = Column(String(20), nullable=True)  # ISO date or free text
+    effective_date = Column(Date, nullable=True)   # Synced with DB migration 020
+    termination_date = Column(Date, nullable=True)  # Synced with DB migration 020
     status = Column(String(20), default="uploaded", nullable=False)  # uploaded, extracting, completed, failed, completed_with_errors
     has_errors = Column(String(10), default="false", nullable=False)  # 'true', 'false'
     error_count = Column(Integer, default=0, nullable=False)

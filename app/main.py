@@ -13,7 +13,7 @@ from sqlalchemy import select, delete, update, func, text, bindparam, and_, or_,
 from sqlalchemy.orm import defer
 from google.cloud import storage
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from collections import deque
 from asyncio import Lock
 import asyncio
@@ -5454,6 +5454,7 @@ async def upload_file(
             source_metadata_value = {"agent_scope": str(agent_scope)}
 
         # Save to database with status "uploaded"
+        termination_date_obj = date.fromisoformat(default_termination_date())
         document = Document(
             filename=file.filename,
             file_hash=file_hash,
@@ -5461,7 +5462,7 @@ async def upload_file(
             payer=payer,
             state=state,
             program=program,
-            termination_date=default_termination_date(),
+            termination_date=termination_date_obj,
             status="uploaded",
             expires_at=expires_at_value,
             source_metadata=source_metadata_value,
@@ -5911,6 +5912,7 @@ async def import_document_from_gcs(
         if body_source_url:
             meta_dict = {"source_url": body_source_url}
 
+        termination_date_obj = date.fromisoformat(default_termination_date())
         document = Document(
             filename=filename,
             file_hash=file_hash,
@@ -5919,7 +5921,7 @@ async def import_document_from_gcs(
             state=state_val,
             program=program_val,
             authority_level=body.authority_level,
-            termination_date=default_termination_date(),
+            termination_date=termination_date_obj,
             status="uploaded",
             source_metadata=meta_dict,
         )
@@ -6159,6 +6161,7 @@ async def import_document_from_html(
         )
 
     # ── Create Document row ─────────────────────────────────────────
+    termination_date_obj = date.fromisoformat(default_termination_date())
     document = Document(
         filename=title[:240],
         file_hash=file_hash,
@@ -6167,7 +6170,7 @@ async def import_document_from_html(
         state=state_val,
         program=program_val,
         authority_level=authority_val,
-        termination_date=default_termination_date(),
+        termination_date=termination_date_obj,
         status="uploaded",
     )
     db.add(document)
@@ -6593,6 +6596,7 @@ async def import_from_drive(
             results.append({"file_id": file_id, "filename": name, "status": "failed", "error": str(e)})
             continue
 
+        termination_date_obj = date.fromisoformat(default_termination_date())
         doc = Document(
             filename=name,
             file_hash=file_hash,
@@ -6601,7 +6605,7 @@ async def import_from_drive(
             state=body.state,
             program=body.program,
             authority_level=body.authority_level,
-            termination_date=default_termination_date(),
+            termination_date=termination_date_obj,
             status="uploaded",
         )
         db.add(doc)
@@ -6832,6 +6836,7 @@ async def drive_import_folder(
             results.append({"file_id": file_id, "filename": name, "status": "failed", "error": str(e)})
             continue
 
+        termination_date_obj = date.fromisoformat(default_termination_date())
         doc = Document(
             filename=name,
             file_hash=file_hash,
@@ -6840,7 +6845,7 @@ async def drive_import_folder(
             state=state,
             program=program,
             authority_level=authority_level,
-            termination_date=default_termination_date(),
+            termination_date=termination_date_obj,
             status="uploaded",
         )
         db.add(doc)
@@ -7334,6 +7339,10 @@ async def import_scraped_pages(
     }
     term_date = body.termination_date if body.termination_date else default_termination_date()
 
+    # Convert ISO date strings to date objects (migration 020 retyped these columns to DATE)
+    effective_date_obj = date.fromisoformat(body.effective_date) if body.effective_date else None
+    termination_date_obj = date.fromisoformat(term_date) if term_date else None
+
     # Scraped pages already have text/text_markdown per page — no separate extraction job. Use "completed" so chunking can start.
     document = Document(
         filename=filename,
@@ -7344,8 +7353,8 @@ async def import_scraped_pages(
         state=body.state,
         program=body.program,
         authority_level=body.authority_level,
-        effective_date=body.effective_date,
-        termination_date=term_date,
+        effective_date=effective_date_obj,
+        termination_date=termination_date_obj,
         source_metadata=source_metadata,
         status="completed",
     )
