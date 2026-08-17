@@ -618,3 +618,78 @@ class TestBm25MinMaxNormalization:
         c = self._candidate(0.5)
         score = _compute_rerank_score(c, bm25_bounds=(0.5, 0.5))
         assert score >= 0.0  # no ZeroDivisionError, degrades to 0 bm25 credit
+
+
+class TestRecencyTiebreak:
+    """2026-08-17, Crawler's §31 request off the live AHCA pilot: two real
+    documents for rule 59G-4.130, 8 years apart, ranked 0.0003 apart in
+    rerank_score -- a measured coin-flip in production."""
+
+    @staticmethod
+    def _doc(document_id, filename, effective_date, score):
+        c = PoolCandidate(
+            chunk_id=f"chunk_{document_id}", document_id=document_id, text="x",
+            is_neighbor=False, source_arm="tag_select", score=1.0,
+            document_filename=filename, effective_date=effective_date,
+        )
+        return (c, score)
+
+    def test_identifier_extraction_matches_real_pilot_filenames(self):
+        from app.services.retriever.fillers.filler_a import _extract_rule_identifier
+
+        assert _extract_rule_identifier(
+            "59G-4.130 Home Health Visit Services Coverage Policy_FINAL.pdf"
+        ) == "59G-4.130"
+        assert _extract_rule_identifier(
+            "59G-4.130 Home Health Visit Services Coverage Policy.pdf"
+        ) == "59G-4.130"
+        assert _extract_rule_identifier("PPE_Norms_and_Weights.xlsx") is None
+        assert _extract_rule_identifier(None) is None
+        assert _extract_rule_identifier("") is None
+
+    def test_older_document_penalized_when_identifiers_collide(self):
+        from app.services.retriever.fillers.filler_a import _apply_recency_tiebreak
+
+        newer = self._doc("130cd808", "59G-4.130 …Coverage Policy_FINAL.pdf", "2024-09-01", 0.9586)
+        older = self._doc("54016b15", "59G-4.130 …Coverage Policy.pdf", "2016-11-01", 0.9589)
+        result = _apply_recency_tiebreak([older, newer])
+        by_id = {c.document_id: s for c, s in result}
+        assert by_id["130cd808"] > by_id["54016b15"], "2024 must now decisively outrank 2016"
+        assert by_id["130cd808"] == 0.9586, "the newer document's score is untouched"
+        assert by_id["54016b15"] < 0.9589, "only the older document is penalized"
+
+    def test_no_collision_no_change(self):
+        """Different rule numbers, or no rule number at all -- nothing moves."""
+        from app.services.retriever.fillers.filler_a import _apply_recency_tiebreak
+
+        a = self._doc("doc_a", "59G-4.130 Coverage Policy.pdf", "2020-01-01", 0.80)
+        b = self._doc("doc_b", "59G-4.052 Different Rule.pdf", "2019-01-01", 0.79)
+        c = self._doc("doc_c", "PPE_Norms_and_Weights.xlsx", None, 0.78)
+        result = _apply_recency_tiebreak([a, b, c])
+        assert result == [a, b, c]
+
+    def test_missing_effective_date_on_both_sides_does_not_penalize(self):
+        """No date to prefer WITH -- don't guess which one is current."""
+        from app.services.retriever.fillers.filler_a import _apply_recency_tiebreak
+
+        x = self._doc("doc_x", "59G-4.130 A.pdf", None, 0.90)
+        y = self._doc("doc_y", "59G-4.130 B.pdf", None, 0.89)
+        result = _apply_recency_tiebreak([x, y])
+        assert result == [x, y]
+
+    def test_single_document_no_collision_possible(self):
+        """Only one document carries this identifier in the pool -- a group
+        of one is not a collision, regardless of chunk count."""
+        from app.services.retriever.fillers.filler_a import _apply_recency_tiebreak
+
+        chunk1 = self._doc("doc_z", "59G-4.130 Solo.pdf", "2022-01-01", 0.85)
+        chunk2 = (
+            PoolCandidate(
+                chunk_id="chunk_z2", document_id="doc_z", text="y", is_neighbor=False,
+                source_arm="tag_select", score=1.0,
+                document_filename="59G-4.130 Solo.pdf", effective_date="2022-01-01",
+            ),
+            0.84,
+        )
+        result = _apply_recency_tiebreak([chunk1, chunk2])
+        assert result == [chunk1, chunk2]

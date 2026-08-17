@@ -32,7 +32,7 @@ from app.services.retriever.pool.contracts import PoolCandidate, ScopeContext, S
 _CHUNK_COLS = """
     id, document_id, text, chunk_d_tags, chunk_p_tags, chunk_j_tags,
     document_status, source_type, content_sha, page_number, paragraph_index, document_authority_level,
-    document_doc_type
+    document_doc_type, document_effective_date, document_filename
 """
 
 # Statement timeout for Pool's candidate-fetch queries (Ananth's live catch,
@@ -168,6 +168,14 @@ def _row_to_candidate(row, *, source_arm: str, score: float | None, is_neighbor:
         # document_authority_level -- see PoolCandidate.doc_type's
         # docstring in contracts.py.
         doc_type=row._mapping.get("document_doc_type"),
+        # 2026-08-17, same-rule-number recency tiebreak (Crawler's §31
+        # request, live off the AHCA pilot's 2016/2024 collision --
+        # document_effective_date is varchar ISO-or-empty at this layer
+        # (publish.py's convention, confirmed in §23a), same as
+        # authority_level; NOT re-parsed to a date here, filler_a does
+        # that only when a tiebreak actually needs comparing two values.
+        effective_date=row._mapping.get("document_effective_date"),
+        document_filename=row._mapping.get("document_filename"),
     )
 
 

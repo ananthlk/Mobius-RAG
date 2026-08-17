@@ -87,6 +87,19 @@ class PoolCandidate:
     # _compute_authority_score's existing handling. Additive/inert (never
     # read yet) until the column and public_adapter.py's SELECT are real.
     doc_type: str | None = None
+    # Same-rule-number recency tiebreak (2026-08-17, Crawler's §31 request
+    # off the AHCA pilot -- two live documents for the same rule, 8 years
+    # apart, ranked 0.0003 apart in rerank_score: a measured coin-flip).
+    # document_effective_date is varchar ISO-or-'' at this layer (same
+    # convention as authority_level/doc_type -- publish.py's COALESCE
+    # pattern). document_filename carries the identifier this tiebreak
+    # groups candidates BY (e.g. "59G-4.130" appears in both documents'
+    # filenames) -- see filler_a.py's _extract_rule_identifier. Both
+    # None-safe: a document with no effective_date or an unextractable
+    # filename simply never enters a tiebreak group, no different from
+    # today's behavior.
+    effective_date: str | None = None
+    document_filename: str | None = None
     # REAL STRUCTURAL BUG found+fixed 2026-07-23 (Retriever's live-trace
     # report): dedup_candidates() is "first-arm-wins" on chunk_id collision
     # (union order tag_select -> vector -> inherited) -- if a chunk is found

@@ -84,6 +84,97 @@ def _compute_doc_type_score(doc_type: str | None) -> float:
     return 1.0 if doc_type else 0.0
 
 
+# Same-rule-number recency tiebreak (2026-08-17, Crawler's §31 request off
+# the AHCA pilot: two live documents for the same rule (59G-4.130), 8 years
+# apart in effective_date, ranked 0.0003 apart in rerank_score -- measured,
+# not estimated, a real coin-flip in production). Crawler's own framing:
+# "superseded" and "should not be retrievable" are different claims -- a
+# 2016 policy is still the right answer for a 2016 date of service, so this
+# is deliberately a TIEBREAK among near-identical scores, not a demotion or
+# an index-membership decision (that's version-selection's `compare`,
+# not_implemented, a different, bigger design this doesn't substitute for).
+#
+# Mirrors the same digits+letters+dash+digits shape as gate.py's
+# _looks_like_identifier (2026-08-17, same investigation) -- kept as its
+# own small copy rather than a cross-module import: Shape's gate.py and
+# Fillers' filler_a.py are different pipeline stages with no existing
+# dependency between them, and this pattern is genuinely tiny.
+_RULE_IDENTIFIER_RE = re.compile(r"\b([0-9]{1,3}[A-Za-z]{1,3}-[0-9]{1,3}(?:\.[0-9]{1,4})?)\b")
+
+# Bounded, deliberately small relative to the 0-1 composite range -- sized
+# to decisively separate the measured 0.0003 near-tie without acting as a
+# de-facto authority reweight for documents that happen to share a rule
+# number for unrelated reasons (a fee schedule referencing a rule it isn't
+# a version of, for instance).
+_RECENCY_TIEBREAK_PENALTY = 0.03
+
+
+def _extract_rule_identifier(filename: str | None) -> str | None:
+    """First rule-number-shaped token in a document's filename, uppercased
+    for group-key stability ("59g-4.130" and "59G-4.130" must group
+    together). None when no such token is present -- most documents never
+    enter a tiebreak group, which is the correct default."""
+    if not filename:
+        return None
+    m = _RULE_IDENTIFIER_RE.search(filename)
+    return m.group(1).upper() if m else None
+
+
+def _apply_recency_tiebreak(
+    scored: list[tuple[PoolCandidate, float]],
+) -> list[tuple[PoolCandidate, float]]:
+    """Among candidates from DIFFERENT documents that share the same
+    rule-number identifier, apply a flat penalty to every document except
+    the one with the latest ``effective_date``. No-ops (returns input
+    unchanged) unless a real collision exists in this pool -- most queries
+    never touch this function's effect at all.
+
+    effective_date is a varchar ISO-or-'' string at this layer (same
+    convention as authority_level) -- string comparison is safe because
+    ISO 8601 dates sort correctly as strings; ties or missing dates on
+    one side simply don't move (no penalty applied without a strictly
+    greater sibling date to lose to).
+    """
+    # Group document_ids by rule identifier -- one entry per distinct doc
+    # (a doc has many chunks in `scored`; the group only needs to compare
+    # across DOCUMENTS, not per chunk).
+    doc_identifier: dict[str, str] = {}
+    doc_effective_date: dict[str, str] = {}
+    for c, _ in scored:
+        if c.document_id in doc_identifier:
+            continue
+        ident = _extract_rule_identifier(c.document_filename)
+        if ident:
+            doc_identifier[c.document_id] = ident
+            doc_effective_date[c.document_id] = c.effective_date or ""
+
+    groups: dict[str, set[str]] = {}
+    for doc_id, ident in doc_identifier.items():
+        groups.setdefault(ident, set()).add(doc_id)
+
+    # Which documents lose the tiebreak: same identifier, NOT holding the
+    # max effective_date in that group. A group of 1 (no real collision)
+    # or a group where every member ties on date never penalizes anyone.
+    penalized_docs: set[str] = set()
+    for ident, doc_ids in groups.items():
+        if len(doc_ids) < 2:
+            continue
+        best_date = max(doc_effective_date[d] for d in doc_ids)
+        if not best_date:
+            continue  # nothing to prefer -- all blank, don't guess
+        for d in doc_ids:
+            if doc_effective_date[d] != best_date:
+                penalized_docs.add(d)
+
+    if not penalized_docs:
+        return scored
+
+    return [
+        (c, score - _RECENCY_TIEBREAK_PENALTY if c.document_id in penalized_docs else score)
+        for c, score in scored
+    ]
+
+
 def _compute_length_score(text: str) -> float:
     """Compute text quality [0, 1] based on length. Prefer 100-500 chars."""
     if not text:
@@ -377,6 +468,12 @@ def fill_shape_bm25(
         (c, _compute_rerank_score(c, pool_result.query, required_phrases, boosted_phrases, bm25_bounds))
         for c in scored_candidates
     ]
+    # Same-rule-number recency tiebreak -- see _apply_recency_tiebreak's
+    # docstring. No-ops unless two documents sharing a rule identifier are
+    # both actually in this pool, which is rare; applied AFTER the
+    # composite (a document-level signal, not a per-chunk one) and BEFORE
+    # sorting so it participates in the same ordering everything else does.
+    scored_candidates = _apply_recency_tiebreak(scored_candidates)
     # Sort by composite score descending
     scored_candidates.sort(key=lambda pair: pair[1], reverse=True)
     # Keep the composite alongside chunk_id -- FilledChunk.rerank_score needs
