@@ -3,6 +3,14 @@ import { API_BASE, SCRAPER_API_BASE } from '../../config'
 import { STATE_OPTIONS, AUTHORITY_LEVEL_OPTIONS } from '../../lib/documentMetadata'
 import './DocumentInputTab.css'
 
+function coerceErrorString(val: unknown, fallback: string): string {
+  if (!val) return fallback
+  if (typeof val === 'string') return val
+  if (Array.isArray(val)) return val.map((e: unknown) => (e as {msg?: string; message?: string}).msg || (e as {message?: string}).message || JSON.stringify(e)).join('; ')
+  if (typeof val === 'object') return (val as {message?: string; msg?: string}).message || (val as {msg?: string}).msg || JSON.stringify(val)
+  return String(val)
+}
+
 function extractErrorMessage(err: Record<string, unknown>, fallback: string): string {
   if (!err) return fallback
   const d = err.detail
@@ -419,7 +427,7 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
       setScrapeDocuments(data.documents || [])
       setScrapePages(data.pages || [])
       setScrapeSummary(data.summary || null)
-      if (data.error) setScrapeError(data.error)
+      if (data.error) setScrapeError(coerceErrorString(data.error, 'Scrape failed'))
       if (data.status === 'completed' || data.status === 'failed') {
         setScraping(false)
       }
@@ -445,7 +453,7 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
           setScraping(false)
           const status = evt.payload?.status as string
           setScrapeStatus(status === 'failed' ? 'failed' : 'completed')
-          if (evt.payload?.error) setScrapeError(String(evt.payload.error))
+          if (evt.payload?.error) setScrapeError(coerceErrorString(evt.payload.error, 'Scrape failed'))
           es.close()
           eventSourceRef.current = null
           // Refresh pages/documents/summary from poll so displayPages has full content for "Add to RAG"
