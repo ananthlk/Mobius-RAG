@@ -65,8 +65,13 @@ def _build_text_for_fact(fact: ExtractedFact) -> str:
     return "\n".join(parts).strip() or ""
 
 
-def _str_or_empty(val: str | None) -> str:
-    return (val or "").strip() if val is not None else ""
+def _str_or_empty(val) -> str:
+    if val is None:
+        return ""
+    from datetime import date as _date
+    if isinstance(val, _date):
+        return val.isoformat()
+    return str(val).strip()
 
 
 def _content_sha(document_id: UUID, source_id: UUID, text: str) -> str:

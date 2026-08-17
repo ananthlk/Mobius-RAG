@@ -4382,6 +4382,7 @@ async def update_document_metadata(
         "authority_level": canonical_authority_level,
     }
 
+    _DATE_FIELDS = {"effective_date", "termination_date"}
     for key in ("display_name", "payer", "state", "program", "authority_level", "effective_date", "termination_date"):
         if key in body:
             val = body[key]
@@ -4391,7 +4392,10 @@ async def update_document_metadata(
                 str_val = val if isinstance(val, str) else str(val)
                 if key in _CANON:
                     str_val = _CANON[key](str_val)
-                setattr(doc, key, str_val)
+                if key in _DATE_FIELDS:
+                    setattr(doc, key, date.fromisoformat(str_val))
+                else:
+                    setattr(doc, key, str_val)
     # Allow setting status to "completed" for uploaded docs (e.g. scraped pages) so chunking can start
     if body.get("status") == "completed" and doc.status == "uploaded":
         pages_result = await db.execute(select(DocumentPage).where(DocumentPage.document_id == doc_uuid))
