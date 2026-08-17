@@ -51,11 +51,47 @@ needed and neither substitutes for the other.
 
 Rollback
 --------
-    ALTER TABLE documents ALTER COLUMN effective_date   TYPE varchar USING effective_date::text;
-    ALTER TABLE documents ALTER COLUMN termination_date TYPE varchar USING termination_date::text;
+Use ``to_char``, **not** ``::text``::
 
-Lossless in this direction: every ``date`` renders as ``YYYY-MM-DD``, which is
-exactly what the column held before.
+    ALTER TABLE documents ALTER COLUMN effective_date   TYPE varchar
+      USING to_char(effective_date, 'YYYY-MM-DD');
+    ALTER TABLE documents ALTER COLUMN termination_date TYPE varchar
+      USING to_char(termination_date, 'YYYY-MM-DD');
+
+**This form is load-bearing, and the obvious one is wrong.** An earlier draft
+used ``::text`` and claimed losslessness because "every ``date`` renders as
+``YYYY-MM-DD``". That is false — ``date::text`` renders according to the
+``DateStyle`` GUC, which is a session/server setting, not a property of the
+column. Crawler caught it in review (§18) and I verified it directly:
+
+======================  ================  ==========================
+DateStyle               ``::text`` gives  outcome
+======================  ================  ==========================
+``ISO, MDY`` (current)  ``2024-09-01``    ok — but only by configuration
+``SQL, MDY``            ``09/01/2024``    reintroduces the bug
+``German, DMY``         ``01.09.2024``    reintroduces the bug
+``Postgres, DMY``       ``01-09-2024``    reintroduces the bug
+======================  ================  ==========================
+
+So a rollback run in a session with a non-default ``DateStyle`` would write the
+exact non-ISO strings this migration exists to eliminate — into a varchar
+column with no enforcement. The undo would restore the original failure mode.
+``to_char`` is explicit and ``DateStyle``-independent; verified ISO under all
+four settings above.
+
+Known consequence — month-precision dates
+-----------------------------------------
+A ``date`` column cannot hold month precision. Crawler measured (§12) that
+roughly half the corpus dates itself in text as e.g. ``"September 2024"``.
+After this migration those can only be stored as a **synthesised day**
+(``-01``, an invention recorded as if it were source data) or as **NULL** (the
+state this sprint exists to eliminate).
+
+That is not an argument against the migration — the column should be a date.
+But it *closes* the option of representing the precision we actually have, so
+if a ``date_precision`` companion column is ever wanted, adding it alongside
+this change is far cheaper than retrofitting it. Flagging for DB rather than
+deciding it here.
 
 Usage::
 
