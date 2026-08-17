@@ -1,6 +1,6 @@
 # REQ · Ingestion classification contract (Payor Platform → Master RAG)
 
-**From:** Fact Store / Payor Platform · **Date:** 2026-08-17 · **Status:** endpoint live in dev, awaiting RAG wiring
+**From:** Fact Store / Payor Platform · **Date:** 2026-08-17 · **Status:** contract **v2** live in dev, awaiting RAG wiring · ⚠️ v1 shape in circulation earlier today is superseded — see the banner below
 
 Ananth 2026-08-17:
 
@@ -13,83 +13,95 @@ Ananth 2026-08-17:
 
 ---
 
-## The ask, in one line
+## ⚠️ CONTRACT v2 — supersedes the v1 shape first sent (2026-08-17, same day)
 
-**Before chunking a document, call us; then emit what we said.**
+**If you started against `decision: admit|hold|reject` and withholding chunking, stop — that was
+v1 and it is wrong.** Ananth corrected it:
 
-Two halves. The first is a gate, the second is visibility — and the second is the part that keeps
-this from becoming another silent step.
+> "i think RAG will still chunk even in this case, just the authority of the doc will be really
+> low.. and we will not monitor that doc"
+> "this will not hold the RAG pipeline.. it will just allow us to claim the doc for us to
+> monitor.. if a low importance job fails that is okay, but if the doc is high important we want
+> to know and act"
+
+**The contract is not a gate. It is a claim.** v1 put our judgement in the critical path of your
+pipeline and treated "not worth citing" as "not worth storing". Chunking is cheap and reversible;
+deciding what to *watch* is the expensive judgement, and it is ours.
+
+### What this means for you
+
+**You chunk everything, always. You never branch on our answer.** The integration is: call us,
+store what we say, emit it. That is the whole change.
 
 ---
 
-## Half 1 · Call us before you index
+## The ask, in one line
+
+**Call us at ingest; store and emit what we say. Keep chunking regardless.**
 
 ```
 POST https://mobius-payor-ortabkknqa-uc.a.run.app/api/registry/ingest/classify
 ```
 
-Either shape works:
-
 ```jsonc
-{ "document_id": "130cd808-9ccd-4f49-b6c2-f802d0c8f6bf" }        // post-ingest
-{ "payor": "AHCA", "filename": "59G-4.130 …pdf",                  // pre-ingest
-  "source_url": "https://ahca.myflorida.com/…", "text_sample": "…" }
+{ "document_id": "130cd808-…" }                      // post-ingest
+{ "payor": "AHCA", "filename": "59G-4.130 …pdf",     // or pre-ingest
+  "source_url": "https://ahca.myflorida.com/…", "text_sample": "…",
+  "ingest_mode": "scrape",                           // "scrape" | "upload"
+  "uploaded_by": "ananth",                           // upload only — see below
+  "caller": "mobius-rag:import-scraped-pages" }
 ```
 
 Response — **always `200`**:
 
 ```jsonc
-{ "decision": "admit",          // admit | hold | reject
-  "may_index": true,            // the only field you must branch on
+{ "importance": "critical",                  // critical | standard | low | none
+  "claimed": true,                           // do we monitor this document
+  "authority_level": "contract_source_of_truth",
   "needs_human": false,
+  "may_index": true,                         // see "the one exception" below
+  "monitor": { "alert_on_failure": true, "reverify": true, "in_working_queue": false },
   "why": "medicaid_policy_rule from ahca.myflorida.com",
-  "stages": {
-    "source_authority": { "verdict": "authoritative", "host": "ahca.myflorida.com" },
-    "junk":             { "excluded": false },
-    "bucket":           { "asset_type": "medicaid_policy_rule", "confidence": "high" },
-    "authority":        { "authority_level": "contract_source_of_truth" },
-    "relevance":        { "service_lines": ["CMHC/FQHC", "Behavioral health"] }
-  },
-  "review_url": "/#/payor/AHCA/working-queue?doc=130cd808…",
-  "contract_version": "1" }
+  "stages": { "source_authority": …, "junk": …, "bucket": …, "authority": …, "relevance": … },
+  "contract_version": "2" }
 ```
 
-| decision | what you do |
+| field | what it is for |
 |---|---|
-| `admit` | chunk, embed, publish — exactly as today |
-| `hold` | store it, **don't chunk**. It waits in our Working Queue for a human |
-| `reject` | store it, **don't chunk**, we mark it excluded. Reversible from our console |
+| `authority_level` | **store this on the document.** Junk and non-authoritative sources land on the ratified floor (`fyi_not_citable`) so they rank last instead of disappearing |
+| `importance` | how much *we* care — decides whether a failure is worth acting on |
+| `claimed` | whether the document enters our monitoring surface |
+| `monitor.alert_on_failure` | true only for `critical`. **If a claimed document's chunk/embed job fails, tell us** — that is the point of the claim |
 
-`hold` and `reject` differ only in what *we believe* — never in what you do with the bytes.
-**Nothing is ever deleted on either side.**
+### Why importance is the useful output
 
-### Where to put the call
+It makes pipeline failures actionable. Right now every chunking failure looks alike — 151 stale
+`blocked` jobs sat unexamined and happened not to matter (all 151 already had embeddings). That
+is luck, not a system. With a claim: a **critical** document failing is an alert; a **low** one is
+noise.
 
-Between "document and pages are committed" and "queue the chunking job", at:
+### The one exception — `may_index`
 
-- `POST /documents/import-scraped-pages`
-- `POST /documents/import-from-gcs`
-- `POST /documents/import-from-drive`
-- `POST /documents/import-from-html`
-- the chat / instant-RAG upload path
+`may_index` is **advisory for you and binding only for us**. It is `false` only when *we*
+initiated the ingestion (`initiated_by` in our own set) **and** the document is important **and**
+it needs a human. That is our own AHCA corpus scan refusing to swallow something important
+unreviewed — Ananth: *"we will not let a doc which requires a human intervention go through
+without us looking at it when the doc is important"*.
 
-The mechanism already exists on your side — `auto_chunk=false` on `import-scraped-pages` does
-exactly this deferral today. This makes it the default rule rather than a per-caller courtesy,
-and attaches a *reason* a human can act on.
+**A user scraping a retailer is never gated by our opinion.** If you did not set
+`initiated_by`, `may_index` is always `true`. You can ignore the field entirely.
 
-**Your call, not ours:** synchronous inside the import request (simple, one extra round trip), or
-fired just before the chunking worker claims the job (no latency in the import path, more moving
-parts). We accept a descriptor before the row exists and a `document_id` after, so both work.
+### Two modes
 
-### Three guarantees so this cannot break your pipeline
+| `ingest_mode` | meaning |
+|---|---|
+| `scrape` | authority comes from the canonical-domain registry for that payor |
+| `upload` | **the upload IS the attestation** — pass `uploaded_by`. A person choosing to upload a document is them vouching for it; asking them to separately attest what they just handed us is the same question twice |
 
-1. **We never return an error for a document we cannot classify.** An HTTP error tells a caller to
-   retry, and retrying cannot help — it would either block ingestion or be ignored. Unknown
-   document, unknown payor, even an unknown `document_id` → `200` + `decision: "hold"`.
-   *Verified live against a nonexistent id.*
-2. **If we are unreachable, treat it as `hold` and carry on.** Do not fail ingestion. The only cost
-   is a document waiting for a human instead of entering the index unreviewed.
-3. **Contract is versioned** (`contract_version`). We will not change response shape under you.
+An upload with **no** `uploaded_by` vouches for nothing and falls back to normal origin checks —
+please send the user identifier.
+
+Drive is deliberately not modelled yet.
 
 ---
 
@@ -105,7 +117,7 @@ and chunking already are:
 
 ### a) Persist it on the document
 
-Store `decision`, `why`, `asset_type`, `authority_level`, `needs_human` and the timestamp, so
+Store `importance`, `claimed`, `authority_level`, `why`, `needs_human` and the timestamp, so
 `documents` can answer "was this classified, and what did it say" without calling us again.
 
 ### b) Emit an event
@@ -113,21 +125,21 @@ Store `decision`, `why`, `asset_type`, `authority_level`, `needs_human` and the 
 Alongside your existing ingestion events — something a human or a trace can read:
 
 ```
-payor_classification · document_id=… decision=hold
+payor_classification · document_id=… importance=standard claimed=true
     why="provenance unestablished — uploaded document with a placeholder origin (ahca.local)"
     needs_human=true  contract_version=1
 ```
 
 ### c) Show it in the RAG document view
 
-A status line on the document — `admit` / `hold` / `reject`, the `why`, and a link to
+A status line on the document — importance + authority + the `why`, and a link to
 `review_url` so someone looking at the document in RAG can jump straight to where it's fixable.
-A held document should be visibly held, not just quietly un-chunked.
+A document we flagged for human review should be visibly flagged, not just quietly classified.
 
 ### d) Make it queryable
 
-"Show me every document currently held" should be answerable from RAG's own data. That number is
-the backlog, and a backlog nobody can count is a backlog nobody clears.
+"Show me every document needing human review" should be answerable from RAG's own data. That
+number is the backlog, and a backlog nobody can count is a backlog nobody clears.
 
 ### e) Send us a `caller`
 
@@ -218,3 +230,37 @@ Visual walkthrough: see the ingestion-contract schematic shared alongside this d
 
 **Nothing here changes your schema or asks you to deploy anything of ours.** Happy to pair on the
 call sites, or to take a PR review — whichever is less disruptive.
+
+
+---
+
+## End-to-end acceptance — what "done" looks like
+
+Ananth 2026-08-17: *"i want to user system to upload a doc, scrape a page and want to see those
+work through their system to yours and back."*
+
+Two user journeys, both driven from RAG's own UI, both round-tripping:
+
+### Journey 1 — a user uploads a document
+1. User uploads a PDF in RAG, tagged to a payor.
+2. RAG calls us with `ingest_mode: "upload"` and `uploaded_by: <that user>`.
+3. We answer: authority, importance, claim. The upload is its own attestation, so a recognisable
+   policy comes back `critical` / `contract_source_of_truth`.
+4. **RAG shows the verdict on the document** — importance, authority, why.
+5. The call appears in our Classifications log (platform menu → Classifications), with
+   `caller` naming the RAG entry point it came from.
+
+### Journey 2 — a user scrapes a page
+1. User scrapes a URL in RAG, tagged to a payor.
+2. RAG calls us with `ingest_mode: "scrape"` and the real `source_url`.
+3. We answer from the canonical-domain registry: a page from `ahca.myflorida.com` is
+   `critical`; the same content from a search-engine mirror lands on the floor and unclaimed.
+4. **RAG shows the verdict**, same as above.
+5. Same row appears in our log.
+
+**The round trip is the deliverable** — RAG UI → our contract → RAG UI, plus a durable row on our
+side. Not just a 200.
+
+Worth testing deliberately: scrape the *same* document from a canonical domain and from somewhere
+else. The verdicts should differ, because authority is a property of origin, not of content. If
+they come back the same, the wiring is passing the wrong `source_url`.
