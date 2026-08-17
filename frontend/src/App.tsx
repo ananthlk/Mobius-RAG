@@ -1223,7 +1223,7 @@ function App() {
     }
   }, [selectedJobId, chunkingActive, processingParagraphId, paragraphs])
 
-  const handleUpload = async (file: File, meta?: { payer?: string; state?: string; program?: string }) => {
+  const handleUpload = async (file: File, meta?: { payer?: string; state?: string; program?: string; source_url?: string; attested?: boolean }) => {
     setFile(file)
     setError(null)
     setUploading(true)
@@ -1233,6 +1233,8 @@ function App() {
     if (meta?.payer) formData.append('payer', meta.payer)
     if (meta?.state) formData.append('state', meta.state)
     if (meta?.program) formData.append('program', meta.program)
+    if (meta?.source_url) formData.append('source_url', meta.source_url)
+    if (meta?.attested) formData.append('attested', 'true')
 
     try {
       const response = await fetch(`${API_BASE}/upload`, {

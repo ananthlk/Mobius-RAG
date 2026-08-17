@@ -3,8 +3,16 @@ import { API_BASE, SCRAPER_API_BASE } from '../../config'
 import { STATE_OPTIONS, AUTHORITY_LEVEL_OPTIONS } from '../../lib/documentMetadata'
 import './DocumentInputTab.css'
 
+interface UploadMeta {
+  payer?: string
+  state?: string
+  program?: string
+  source_url?: string
+  attested?: boolean
+}
+
 interface DocumentInputTabProps {
-  onUpload: (file: File) => Promise<void>
+  onUpload: (file: File, meta?: UploadMeta) => Promise<void>
   uploading: boolean
   error: string | null
   onDocumentAdded?: () => void
@@ -50,6 +58,8 @@ interface DriveFolder {
 export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }: DocumentInputTabProps) {
   const [file, setFile] = useState<File | null>(null)
   const [dragActive, setDragActive] = useState(false)
+  const [uploadSourceUrl, setUploadSourceUrl] = useState('')
+  const [uploadAttested, setUploadAttested] = useState(false)
 
   // Scrape from URL state
   const [scrapeUrl, setScrapeUrl] = useState('')
@@ -320,8 +330,13 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
 
   const handleUpload = async () => {
     if (file) {
-      await onUpload(file)
+      await onUpload(file, {
+        source_url: uploadSourceUrl.trim() || undefined,
+        attested: uploadAttested,
+      })
       setFile(null)
+      setUploadSourceUrl('')
+      setUploadAttested(false)
       // Reset file input
       const fileInput = document.getElementById('file-input') as HTMLInputElement
       if (fileInput) {
@@ -746,6 +761,33 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
             </button>
           </div>
           
+          <div className="upload-provenance">
+            <label className="provenance-label">
+              <span>Source URL <span className="provenance-optional">(where did you get this file?)</span></span>
+              <input
+                type="url"
+                className="provenance-url-input"
+                placeholder="https://ahca.myflorida.com/…"
+                value={uploadSourceUrl}
+                onChange={e => setUploadSourceUrl(e.target.value)}
+                disabled={uploading}
+              />
+            </label>
+            <label className="provenance-attest-label">
+              <input
+                type="checkbox"
+                className="provenance-attest-checkbox"
+                checked={uploadAttested}
+                onChange={e => setUploadAttested(e.target.checked)}
+                disabled={uploading}
+              />
+              <span>
+                I confirm this document was sourced from an authoritative payer source
+                <span className="provenance-attest-note"> — Payor Platform will use this attestation to admit provenance-unknown documents</span>
+              </span>
+            </label>
+          </div>
+
           {error && (
             <div className="error-message" role="alert">
               {error}

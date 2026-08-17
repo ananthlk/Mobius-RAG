@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse, RedirectResponse, JSONResponse,
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete, update, func, text, bindparam, and_, or_, cast, Text as SAText
 from sqlalchemy.orm import defer
+from sqlalchemy.orm.attributes import flag_modified
 from google.cloud import storage
 import json
 from datetime import datetime, timedelta, date
@@ -36,6 +37,7 @@ from app.services.extraction import stream_extract_facts
 from app.services.critique import stream_critique, critique_extraction, normalize_critique_result
 from app.services.utils import parse_json_response, default_termination_date, sanitize_text_for_db
 from app.services.publish import publish_document, PublishResult
+from app.services.ingest_classifier import classify_for_ingest
 
 # Set up logging (JSON to stderr in hosted; pretty in dev)
 from app.logging_setup import configure_logging
@@ -87,6 +89,42 @@ async def run_startup_migrations():
 
     asyncio.create_task(_run_startup_migrations_background())
     asyncio.create_task(_warm_embed_provider())
+
+
+async def _persist_classification(db, doc, clf: dict) -> None:
+    """Merge Payor Platform classification into source_metadata and emit a ChunkingEvent.
+
+    Called at all import call sites after doc+pages are committed and before
+    the chunking gate.  ``clf`` is the raw response from classify_for_ingest().
+    """
+    existing = doc.source_metadata or {}
+    doc.source_metadata = {
+        **existing,
+        "payor_classification": {
+            "decision": clf.get("decision"),
+            "may_index": clf.get("may_index"),
+            "needs_human": clf.get("needs_human"),
+            "why": clf.get("why"),
+            "review_url": clf.get("review_url"),
+            "contract_version": clf.get("contract_version"),
+            "attributed_to": "payor_platform",
+            "stages": clf.get("stages"),
+        },
+    }
+    flag_modified(doc, "source_metadata")
+    db.add(ChunkingEvent(
+        document_id=doc.id,
+        event_type="payor_classification",
+        event_data={
+            "decision": clf.get("decision"),
+            "may_index": clf.get("may_index"),
+            "needs_human": clf.get("needs_human"),
+            "why": clf.get("why"),
+            "review_url": clf.get("review_url"),
+            "attributed_to": "payor_platform",
+        },
+    ))
+    await db.commit()
 
 
 async def _warm_embed_provider() -> None:
@@ -2754,6 +2792,7 @@ async def list_documents(
     skip: int = 0,
     limit: int = 100,
     payer: str | None = None,
+    classification_decision: str | None = None,
     db: AsyncSession = Depends(get_db)
 ):
     """List all documents with extraction and chunking status. Chunking status is derived from the latest chunking_event when present to avoid fluctuation."""
@@ -2773,6 +2812,10 @@ async def list_documents(
         else:
             base_query = base_query.where(Document.payer == payer)
             count_query = count_query.where(Document.payer == payer)
+    if classification_decision is not None:
+        _clf_filter = Document.source_metadata[("payor_classification", "decision")].as_string() == classification_decision
+        base_query = base_query.where(_clf_filter)
+        count_query = count_query.where(_clf_filter)
 
     # Real total count (cheap COUNT(*) — no JOIN needed)
     total_count = (await db.execute(count_query)).scalar_one()
@@ -2979,6 +3022,7 @@ async def list_documents(
             "effective_date": getattr(doc, "effective_date", None),
             "termination_date": getattr(doc, "termination_date", None),
             "source_metadata": getattr(doc, "source_metadata", None),
+            "payor_classification": (getattr(doc, "source_metadata", None) or {}).get("payor_classification"),
         }
         if processing_stage is not None:
             doc_item["chunking_processing_stage"] = processing_stage
@@ -5304,6 +5348,8 @@ async def upload_file(
     program: str = None,
     ttl_days: int | None = None,
     agent_scope: str | None = None,
+    source_url: str | None = None,
+    attested: bool = False,
     db: AsyncSession = Depends(get_db)
 ):
     # ``ttl_days`` / ``agent_scope`` (2026-04-27): added so mobius-chat
@@ -5454,8 +5500,14 @@ async def upload_file(
         if ttl_days is not None and ttl_days > 0:
             expires_at_value = datetime.utcnow() + _timedelta(days=int(ttl_days))
         source_metadata_value: dict | None = None
-        if agent_scope:
-            source_metadata_value = {"agent_scope": str(agent_scope)}
+        if agent_scope or source_url or attested:
+            source_metadata_value = {}
+            if agent_scope:
+                source_metadata_value["agent_scope"] = str(agent_scope)
+            if source_url:
+                source_metadata_value["source_url"] = source_url
+            if attested:
+                source_metadata_value["attested"] = True
 
         # Save to database with status "uploaded"
         termination_date_obj = date.fromisoformat(default_termination_date())
@@ -5548,6 +5600,20 @@ async def upload_file(
         #
         #   ASYNC (everything else):
         #     Enqueue ChunkingJob(status=pending) as before; worker claims it.
+        if document.status == "completed":
+            clf = await classify_for_ingest(
+                document_id=str(document.id),
+                caller="mobius-rag:upload",
+            )
+            await _persist_classification(db, document, clf)
+            if not clf.get("may_index", True):
+                return {
+                    "document_id": str(document.id),
+                    "filename": file.filename,
+                    "status": "completed",
+                    "payor_classification": document.source_metadata.get("payor_classification"),
+                }
+
         if document.status == "completed":
             try:
                 from datetime import datetime as _dt
@@ -5958,6 +6024,23 @@ async def import_document_from_gcs(
             await db.commit()
             logger.warning("Extraction failed for import-from-gcs %s: %s", gcs_path, e)
 
+        # Classification gate: call Payor Platform before indexing
+        if document.status == "completed":
+            _src_url = (document.source_metadata or {}).get("source_url") or body_source_url
+            clf = await classify_for_ingest(
+                document_id=str(document.id),
+                source_url=_src_url,
+                caller="mobius-rag:import-from-gcs",
+            )
+            await _persist_classification(db, document, clf)
+            if not clf.get("may_index", True):
+                return {
+                    "document_id": str(document.id),
+                    "filename": filename,
+                    "status": "completed",
+                    "payor_classification": document.source_metadata.get("payor_classification"),
+                }
+
         # Auto-chunk when extraction succeeded: queue Path B so chunk → embed run automatically
         if document.status == "completed":
             try:
@@ -6214,6 +6297,22 @@ async def import_document_from_html(
         document.status = "failed"
         await db.commit()
         logger.warning("HTML extraction failed for %s: %s", url, extract_err)
+
+    # ── Classification gate ─────────────────────────────────────────
+    if document.status in ("completed", "completed_with_errors"):
+        clf = await classify_for_ingest(
+            document_id=str(document.id),
+            source_url=url,
+            caller="mobius-rag:import-from-html",
+        )
+        await _persist_classification(db, document, clf)
+        if not clf.get("may_index", True):
+            return {
+                "document_id": str(document.id),
+                "filename": document.filename,
+                "status": document.status,
+                "payor_classification": document.source_metadata.get("payor_classification"),
+            }
 
     # ── Auto-queue chunking (Path B) ───────────────────────────────
     if document.status in ("completed", "completed_with_errors"):
@@ -6642,6 +6741,21 @@ async def import_from_drive(
             logger.warning("Extraction failed for Drive import %s: %s", name, e)
 
         if doc.status == "completed":
+            clf = await classify_for_ingest(
+                document_id=str(doc.id),
+                caller="mobius-rag:import-from-drive",
+            )
+            await _persist_classification(db, doc, clf)
+            if not clf.get("may_index", True):
+                results.append({
+                    "file_id": file_id,
+                    "filename": name,
+                    "status": "held",
+                    "payor_classification": doc.source_metadata.get("payor_classification"),
+                })
+                continue
+
+        if doc.status == "completed":
             try:
                 existing = await db.execute(
                     select(ChunkingJob).where(
@@ -6881,6 +6995,21 @@ async def drive_import_folder(
             doc.status = "failed"
             await db.commit()
             logger.warning("Extraction failed for drive import %s: %s", name, e)
+
+        if doc.status == "completed":
+            clf = await classify_for_ingest(
+                document_id=str(doc.id),
+                caller="mobius-rag:import-from-drive",
+            )
+            await _persist_classification(db, doc, clf)
+            if not clf.get("may_index", True):
+                results.append({
+                    "file_id": file_id,
+                    "filename": name,
+                    "status": "held",
+                    "payor_classification": doc.source_metadata.get("payor_classification"),
+                })
+                continue
 
         if doc.status == "completed":
             try:
@@ -7382,6 +7511,23 @@ async def import_scraped_pages(
         db.add(page)
 
     await db.commit()
+
+    # Classification gate — call Payor Platform before indexing
+    _first_source_url = body.pages[0].url if body.pages else None
+    clf = await classify_for_ingest(
+        document_id=str(document.id),
+        source_url=_first_source_url,
+        caller="mobius-rag:import-scraped-pages",
+    )
+    await _persist_classification(db, document, clf)
+    if not clf.get("may_index", True):
+        return {
+            "document_id": str(document.id),
+            "filename": filename,
+            "pages_count": len(body.pages),
+            "status": "completed",
+            "payor_classification": document.source_metadata.get("payor_classification"),
+        }
 
     # Auto-chunk: queue Path B chunking job so worker runs chunk → (embed auto-enqueued)
     if not body.auto_chunk:
