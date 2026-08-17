@@ -378,7 +378,8 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
         mode: scrapeMode,
         include_content: true,
         include_summary: scrapeIncludeSummary,
-        document_types: scrapeDownloadDocuments ? ['pdf'] : [],
+        // document_types deliberately unset — see UploadTab note. Omitted ==
+        // scraper default type list == today's actual behaviour.
       }
       if (scrapeMode === 'tree') {
         body.max_depth = scrapeMaxDepth

@@ -844,7 +844,11 @@ function UrlPanel({ onDocumentAdded }: { onDocumentAdded: () => void }) {
             scope_mode: 'same_domain',
             include_content: includeHtml,
             include_summary: false,
-            document_types: includePdfs ? ['pdf'] : [],
+            // document_types deliberately unset: omitted == scraper's default
+            // type list, which is what every scrape has actually been doing.
+            // The PDFs checkbox stays inert until Crawler rules on [] semantics
+            // — scraper.py:123/201 use `document_types or DOCUMENT_TYPES`, so
+            // an explicit [] means "download all 7 types", not "none".
           }),
         })
         const data = await resp.json()
