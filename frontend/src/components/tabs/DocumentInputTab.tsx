@@ -3,6 +3,15 @@ import { API_BASE, SCRAPER_API_BASE } from '../../config'
 import { STATE_OPTIONS, AUTHORITY_LEVEL_OPTIONS } from '../../lib/documentMetadata'
 import './DocumentInputTab.css'
 
+function extractErrorMessage(err: Record<string, unknown>, fallback: string): string {
+  if (!err) return fallback
+  const d = err.detail
+  if (Array.isArray(d)) return d.map((e: unknown) => (e as {msg?: string}).msg || JSON.stringify(e)).join('; ')
+  if (typeof d === 'string') return d
+  if (d && typeof d === 'object') return (d as {message?: string}).message || JSON.stringify(d)
+  return fallback
+}
+
 interface UploadMeta {
   payer?: string
   state?: string
@@ -159,8 +168,7 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
       const r = await fetch(`${API_BASE}/drive/auth-url`, driveFetchOpts)
       if (!r.ok) {
         const err = await r.json().catch(() => ({}))
-        const msg = typeof err.detail === 'string' ? err.detail : (err.detail?.message || 'Failed to get auth URL')
-        throw new Error(msg)
+        throw new Error(extractErrorMessage(err, 'Failed to get auth URL'))
       }
       const { url, session_id } = await r.json()
       if (session_id) driveSessionIdRef.current = session_id
@@ -205,7 +213,7 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
       if (!r.ok) {
         if (r.status === 401) throw new Error('Connect Google Drive first')
         const err = await r.json().catch(() => ({}))
-        throw new Error(err.detail || 'Failed to list folder')
+        throw new Error(extractErrorMessage(err, 'Failed to list folder'))
       }
       const data = await r.json()
       const folderName = data.folder_name || (folderId === 'root' ? 'My Drive' : '')
@@ -276,7 +284,7 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
       if (!r.ok) {
         if (r.status === 401) throw new Error('Connect Google Drive first')
         const err = await r.json().catch(() => ({}))
-        throw new Error(err.detail || 'Import failed')
+        throw new Error(extractErrorMessage(err, 'Import failed'))
       }
       const data = await r.json()
       const ok = (data.results || []).filter((x: { status: string }) => x.status === 'completed').length
@@ -390,7 +398,7 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
       })
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({}))
-        throw new Error(err.detail || resp.statusText || 'Scrape request failed')
+        throw new Error(extractErrorMessage(err, resp.statusText || 'Scrape request failed'))
       }
       const { job_id } = await resp.json()
       setScrapeJobId(job_id)
@@ -473,7 +481,7 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
       })
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({}))
-        throw new Error(err.detail?.message || err.detail || 'Import failed')
+        throw new Error(extractErrorMessage(err, 'Import failed'))
       }
       onDocumentAdded?.()
     } catch (e) {
@@ -503,7 +511,7 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
       })
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({}))
-        throw new Error(err.detail?.message || err.detail || 'Import failed')
+        throw new Error(extractErrorMessage(err, 'Import failed'))
       }
       onDocumentAdded?.()
     } catch (e) {
@@ -537,7 +545,7 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
         })
         if (!resp.ok) {
           const err = await resp.json().catch(() => ({}))
-          throw new Error(err.detail?.message || err.detail || 'Import pages failed')
+          throw new Error(extractErrorMessage(err, 'Import pages failed'))
         }
         onDocumentAdded?.()
       }
@@ -556,7 +564,7 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
           })
           if (!resp.ok) {
             const err = await resp.json().catch(() => ({}))
-            throw new Error(err.detail?.message || err.detail || 'Import document failed')
+            throw new Error(extractErrorMessage(err, 'Import document failed'))
           }
           onDocumentAdded?.()
         } finally {
@@ -613,7 +621,7 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
         })
         if (!resp.ok) {
           const err = await resp.json().catch(() => ({}))
-          throw new Error(err.detail?.message || err.detail || 'Import pages failed')
+          throw new Error(extractErrorMessage(err, 'Import pages failed'))
         }
         onDocumentAdded?.()
       }
@@ -632,7 +640,7 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
           })
           if (!resp.ok) {
             const err = await resp.json().catch(() => ({}))
-            throw new Error(err.detail?.message || err.detail || 'Import document failed')
+            throw new Error(extractErrorMessage(err, 'Import document failed'))
           }
           onDocumentAdded?.()
         } finally {
