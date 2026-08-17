@@ -270,6 +270,11 @@ async def _run_startup_migrations_background():
             except Exception as migrate_err:
                 logger.warning(f"Startup migration (extracted_facts reader fields) skipped: {migrate_err}")
             try:
+                from app.migrations.add_scrape_provenance import migrate as migrate_scrape_provenance
+                await migrate_scrape_provenance()
+            except Exception as migrate_err:
+                logger.warning(f"Startup migration (scrape_provenance) skipped: {migrate_err}")
+            try:
                 from app.migrations.add_chunk_start_offset_in_page import migrate as migrate_chunk_offset
                 await migrate_chunk_offset()
             except Exception as migrate_err:
@@ -2575,6 +2580,92 @@ def _search_tokenize(s: str) -> list[str]:
             if c and c not in _SEARCH_STOPWORDS and len(c) > 1:
                 out[c] = None
     return list(out)
+
+
+class _ScrapeProvenanceRow(BaseModel):
+    url: str
+    final_url: Optional[str] = None
+    robots_decision: Optional[str] = None
+    fetch_status: Optional[str] = None
+    content_type: Optional[str] = None
+
+
+class ScrapeProvenanceBatch(BaseModel):
+    """Caller-agnostic web-fetch provenance from the scraper (2026-08-17).
+
+    The scraper posts one batch per fetch call, tagged with WHO asked
+    (caller_id) and the caller's turn/run id (correlation_id). Every
+    caller's web fetches land in one store — chat Diagnostics, RAG's own
+    view, and robots audits all read scrape_provenance.
+    """
+    caller_id: Optional[str] = None
+    correlation_id: Optional[str] = None
+    seed_url: Optional[str] = None
+    mode: Optional[str] = None
+    rows: list[_ScrapeProvenanceRow]
+
+
+@app.post("/scrape-provenance")
+async def record_scrape_provenance(
+    body: ScrapeProvenanceBatch,
+    db: AsyncSession = Depends(get_db),
+):
+    """Persist a batch of per-URL scrape provenance. Best-effort sink:
+    the scraper fire-and-forgets here, so this must never be the reason a
+    fetch fails — it just records what already happened."""
+    rows = [r for r in (body.rows or []) if r.url]
+    if not rows:
+        return {"recorded": 0}
+    stmt = text(
+        "INSERT INTO scrape_provenance "
+        "(caller_id, correlation_id, seed_url, url, final_url, robots_decision, fetch_status, content_type, mode) "
+        "VALUES (:caller_id, :correlation_id, :seed_url, :url, :final_url, :robots_decision, :fetch_status, :content_type, :mode)"
+    )
+    params = [
+        {
+            "caller_id": (body.caller_id or "")[:200] or None,
+            "correlation_id": (body.correlation_id or "")[:200] or None,
+            "seed_url": (body.seed_url or "")[:2000] or None,
+            "url": r.url[:2000],
+            "final_url": (r.final_url or "")[:2000] or None,
+            "robots_decision": (r.robots_decision or "")[:32] or None,
+            "fetch_status": (r.fetch_status or "")[:64] or None,
+            "content_type": (r.content_type or "")[:128] or None,
+            "mode": (body.mode or "")[:32] or None,
+        }
+        for r in rows[:500]
+    ]
+    try:
+        await db.execute(stmt, params)
+        await db.commit()
+    except Exception as e:
+        logger.warning("record_scrape_provenance insert failed: %s", e)
+        raise HTTPException(status_code=500, detail="provenance insert failed")
+    return {"recorded": len(params)}
+
+
+@app.get("/scrape-provenance")
+async def get_scrape_provenance(
+    correlation_id: str,
+    limit: int = 200,
+    db: AsyncSession = Depends(get_db),
+):
+    """Read provenance for one correlation_id — chat's Diagnostics tab (or
+    any surface) fetches the pages a given turn/run visited + robots
+    decisions, caller-agnostic."""
+    limit = max(1, min(1000, limit))
+    result = await db.execute(
+        text(
+            "SELECT caller_id, seed_url, url, final_url, robots_decision, fetch_status, content_type, mode, created_at "
+            "FROM scrape_provenance WHERE correlation_id = :cid ORDER BY created_at ASC LIMIT :lim"
+        ),
+        {"cid": correlation_id, "lim": limit},
+    )
+    rows = [dict(r._mapping) for r in result]
+    for r in rows:
+        if r.get("created_at") is not None:
+            r["created_at"] = r["created_at"].isoformat()
+    return {"correlation_id": correlation_id, "count": len(rows), "provenance": rows}
 
 
 @app.get("/documents/search")
