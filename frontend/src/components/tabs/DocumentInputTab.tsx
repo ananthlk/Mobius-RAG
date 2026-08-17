@@ -74,12 +74,15 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
   const [selectedPageUrls, setSelectedPageUrls] = useState<Set<string>>(new Set())
   const [selectedDocPaths, setSelectedDocPaths] = useState<Set<string>>(new Set())
   // Optional metadata when adding scraped pages/docs to RAG (carries forward to document)
-  const [importMetadata, setImportMetadata] = useState<{ display_name: string; payer: string; state: string; program: string; authority_level: string }>({
+  const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
+  const [importMetadata, setImportMetadata] = useState<{ display_name: string; payer: string; state: string; program: string; authority_level: string; effective_date: string; termination_date: string }>({
     display_name: '',
     payer: '',
     state: '',
     program: '',
     authority_level: '',
+    effective_date: '',
+    termination_date: '',
   })
   const [importingPages, setImportingPages] = useState(false)
   const [readerPage, setReaderPage] = useState<ScrapedPage | null>(null)
@@ -476,6 +479,8 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
       if (importMetadata.state?.trim()) body.state = importMetadata.state.trim()
       if (importMetadata.program?.trim()) body.program = importMetadata.program.trim()
       if (importMetadata.authority_level?.trim()) body.authority_level = importMetadata.authority_level.trim()
+      if (importMetadata.effective_date?.trim() && ISO_DATE_RE.test(importMetadata.effective_date.trim())) body.effective_date = importMetadata.effective_date.trim()
+      if (importMetadata.termination_date?.trim() && ISO_DATE_RE.test(importMetadata.termination_date.trim())) body.termination_date = importMetadata.termination_date.trim()
       const resp = await fetch(`${API_BASE}/documents/import-scraped-pages`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -508,6 +513,8 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
         if (importMetadata.state?.trim()) body.state = importMetadata.state.trim()
         if (importMetadata.program?.trim()) body.program = importMetadata.program.trim()
         if (importMetadata.authority_level?.trim()) body.authority_level = importMetadata.authority_level.trim()
+        if (importMetadata.effective_date?.trim() && ISO_DATE_RE.test(importMetadata.effective_date.trim())) body.effective_date = importMetadata.effective_date.trim()
+        if (importMetadata.termination_date?.trim() && ISO_DATE_RE.test(importMetadata.termination_date.trim())) body.termination_date = importMetadata.termination_date.trim()
         const resp = await fetch(`${API_BASE}/documents/import-scraped-pages`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -582,6 +589,8 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
         if (importMetadata.state?.trim()) body.state = importMetadata.state.trim()
         if (importMetadata.program?.trim()) body.program = importMetadata.program.trim()
         if (importMetadata.authority_level?.trim()) body.authority_level = importMetadata.authority_level.trim()
+        if (importMetadata.effective_date?.trim() && ISO_DATE_RE.test(importMetadata.effective_date.trim())) body.effective_date = importMetadata.effective_date.trim()
+        if (importMetadata.termination_date?.trim() && ISO_DATE_RE.test(importMetadata.termination_date.trim())) body.termination_date = importMetadata.termination_date.trim()
         const resp = await fetch(`${API_BASE}/documents/import-scraped-pages`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -949,7 +958,7 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
                   </button>
                 </div>
                 <details className="scrape-import-metadata" open={false}>
-                  <summary>Metadata (optional) — Payor, State, Program, Authority level</summary>
+                  <summary>Metadata (optional) — Payor, State, Program, Authority level, Dates</summary>
                   <p className="scrape-metadata-hint">Set these when adding pages or documents to RAG so the document carries this metadata for filtering and display.</p>
                   <div className="scrape-metadata-fields">
                     <label className="scrape-metadata-label">
@@ -1007,6 +1016,32 @@ export function DocumentInputTab({ onUpload, uploading, error, onDocumentAdded }
                         value={importMetadata.display_name}
                         onChange={e => setImportMetadata(prev => ({ ...prev, display_name: e.target.value }))}
                       />
+                    </label>
+                    <label className="scrape-metadata-label">
+                      <span>Effective date</span>
+                      <input
+                        type="text"
+                        className={`scrape-metadata-input${importMetadata.effective_date && !ISO_DATE_RE.test(importMetadata.effective_date) ? ' scrape-metadata-input--error' : ''}`}
+                        placeholder="YYYY-MM-DD"
+                        value={importMetadata.effective_date}
+                        onChange={e => setImportMetadata(prev => ({ ...prev, effective_date: e.target.value }))}
+                      />
+                      {importMetadata.effective_date && !ISO_DATE_RE.test(importMetadata.effective_date) && (
+                        <span className="scrape-metadata-error">Must be YYYY-MM-DD</span>
+                      )}
+                    </label>
+                    <label className="scrape-metadata-label">
+                      <span>Termination date</span>
+                      <input
+                        type="text"
+                        className={`scrape-metadata-input${importMetadata.termination_date && !ISO_DATE_RE.test(importMetadata.termination_date) ? ' scrape-metadata-input--error' : ''}`}
+                        placeholder="YYYY-MM-DD (optional)"
+                        value={importMetadata.termination_date}
+                        onChange={e => setImportMetadata(prev => ({ ...prev, termination_date: e.target.value }))}
+                      />
+                      {importMetadata.termination_date && !ISO_DATE_RE.test(importMetadata.termination_date) && (
+                        <span className="scrape-metadata-error">Must be YYYY-MM-DD</span>
+                      )}
                     </label>
                   </div>
                 </details>

@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Optional, List, Any
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Body, Query, Request, Header
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, RedirectResponse, JSONResponse, HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -7256,6 +7256,8 @@ class ScrapedPageItem(BaseModel):
 
 class ImportScrapedPagesRequest(BaseModel):
     """Request to import scraped pages as one RAG document."""
+    model_config = ConfigDict(extra="forbid")
+
     pages: List[ScrapedPageItem]
     display_name: Optional[str] = None
     authority_level: Optional[str] = None
@@ -7264,6 +7266,7 @@ class ImportScrapedPagesRequest(BaseModel):
     payer: Optional[str] = None
     state: Optional[str] = None
     program: Optional[str] = None
+    auto_chunk: bool = True
 
 
 @app.post("/documents/import-scraped-pages")
@@ -7368,6 +7371,13 @@ async def import_scraped_pages(
     await db.commit()
 
     # Auto-chunk: queue Path B chunking job so worker runs chunk → (embed auto-enqueued)
+    if not body.auto_chunk:
+        return {
+            "document_id": str(document.id),
+            "filename": filename,
+            "pages_count": len(body.pages),
+            "status": "completed",
+        }
     try:
         where_gen = ChunkingJob.generator_id == "B"
         existing = await db.execute(
