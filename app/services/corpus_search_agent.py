@@ -96,6 +96,16 @@ _LITERAL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b[0-9]{5}\b"),
     # Form/document IDs that include a dash:  FL-UM-87, AHCA-2122-02-A
     re.compile(r"\b[A-Z]{2,5}-[A-Z0-9]{2,8}(?:-[A-Z0-9]+)*\b", re.I),
+    # State administrative code rule numbers:  59G-4.370, 59G-4.028, 65C-30.001
+    # (2026-08-17, Fact Store's request/REQ_IDENTIFIER_LOOKUP_CORPUS_SEARCH.md) --
+    # the FIRST segment is digits-then-letters (chapter + agency code), which
+    # the dash-form pattern above never matches (it requires the first segment
+    # to be ALL letters). This is the exact shape a human uses to name a
+    # Florida Medicaid rule ("59G-4.370") and it previously matched NONE of
+    # the existing patterns -- confirmed live before this fix (query
+    # "59G-4.370" returned a confident WRONG doc at score 0.875, not the rule
+    # itself, because it was never classified as a literal anchor at all).
+    re.compile(r"\b[0-9]{1,3}[A-Z]{1,3}-[0-9]{1,3}(?:\.[0-9]{1,4})?\b", re.I),
 )
 
 # Tokens that have no information value for retrieval — dropped from the
