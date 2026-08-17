@@ -108,6 +108,16 @@ _RULE_IDENTIFIER_RE = re.compile(r"\b([0-9]{1,3}[A-Za-z]{1,3}-[0-9]{1,3}(?:\.[0-
 # a version of, for instance).
 _RECENCY_TIEBREAK_PENALTY = 0.03
 
+# Explicit year in the query = the user cares about a specific point in
+# time, so the tiebreak stands down and lets raw content relevance decide.
+# 1900-2099 range to avoid false positives on other 4-digit numerics
+# (HCPCS-adjacent codes, page numbers) that aren't years.
+_QUERY_YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
+
+
+def _query_carries_a_year(query: str | None) -> bool:
+    return bool(query and _QUERY_YEAR_RE.search(query))
+
 
 def _extract_rule_identifier(filename: str | None) -> str | None:
     """First rule-number-shaped token in a document's filename, uppercased
@@ -122,6 +132,7 @@ def _extract_rule_identifier(filename: str | None) -> str | None:
 
 def _apply_recency_tiebreak(
     scored: list[tuple[PoolCandidate, float]],
+    query: str | None = None,
 ) -> list[tuple[PoolCandidate, float]]:
     """Among candidates from DIFFERENT documents that share the same
     rule-number identifier, apply a flat penalty to every document except
@@ -129,12 +140,27 @@ def _apply_recency_tiebreak(
     unchanged) unless a real collision exists in this pool -- most queries
     never touch this function's effect at all.
 
+    STANDS DOWN when the query carries an explicit year (2026-08-17,
+    Crawler's §33 catch, verified before shipping this revision): a flat,
+    query-blind penalty is a filter wearing a ranking's clothes -- for
+    query "…coverage policy 2017" the 2016 document must still be
+    reachable, since it's the correct authority for a 2017 date of
+    service. Verified live BEFORE this fix that the un-gated version
+    returned the exact same zero 2016 chunks for both a dated and an
+    undated query -- i.e. it wasn't actually responding to the date at
+    all. "Prefer current by default, still reach historical when the
+    query carries a date" (Crawler's §31 framing) requires the query to
+    actually gate the tiebreak, not just exist as commentary next to it.
+
     effective_date is a varchar ISO-or-'' string at this layer (same
     convention as authority_level) -- string comparison is safe because
     ISO 8601 dates sort correctly as strings; ties or missing dates on
     one side simply don't move (no penalty applied without a strictly
     greater sibling date to lose to).
     """
+    if _query_carries_a_year(query):
+        return scored
+
     # Group document_ids by rule identifier -- one entry per distinct doc
     # (a doc has many chunks in `scored`; the group only needs to compare
     # across DOCUMENTS, not per chunk).
@@ -473,7 +499,7 @@ def fill_shape_bm25(
     # both actually in this pool, which is rare; applied AFTER the
     # composite (a document-level signal, not a per-chunk one) and BEFORE
     # sorting so it participates in the same ordering everything else does.
-    scored_candidates = _apply_recency_tiebreak(scored_candidates)
+    scored_candidates = _apply_recency_tiebreak(scored_candidates, pool_result.query)
     # Sort by composite score descending
     scored_candidates.sort(key=lambda pair: pair[1], reverse=True)
     # Keep the composite alongside chunk_id -- FilledChunk.rerank_score needs

@@ -693,3 +693,40 @@ class TestRecencyTiebreak:
         )
         result = _apply_recency_tiebreak([chunk1, chunk2])
         assert result == [chunk1, chunk2]
+
+    def test_query_with_explicit_year_stands_down(self):
+        """Crawler's §33 catch: a flat, query-blind penalty is a filter
+        wearing a ranking's clothes. 'coverage policy 2017' must still be
+        able to reach the 2016 document -- verified live that the
+        un-gated version returned identical zero-2016-chunks results for
+        both a dated and undated query, i.e. it wasn't responding to the
+        query at all."""
+        from app.services.retriever.fillers.filler_a import _apply_recency_tiebreak
+
+        newer = self._doc("130cd808", "59G-4.130 …_FINAL.pdf", "2024-09-01", 0.9586)
+        older = self._doc("54016b15", "59G-4.130 …plain.pdf", "2016-11-01", 0.9589)
+        result = _apply_recency_tiebreak(
+            [older, newer], query="home health visit services coverage policy 2017"
+        )
+        assert result == [older, newer], "explicit year in query must disable the tiebreak entirely"
+
+    def test_query_without_a_year_still_applies_the_tiebreak(self):
+        from app.services.retriever.fillers.filler_a import _apply_recency_tiebreak
+
+        newer = self._doc("130cd808", "59G-4.130 …_FINAL.pdf", "2024-09-01", 0.9586)
+        older = self._doc("54016b15", "59G-4.130 …plain.pdf", "2016-11-01", 0.9589)
+        result = _apply_recency_tiebreak(
+            [older, newer], query="home health visit services coverage policy"
+        )
+        by_id = {c.document_id: s for c, s in result}
+        assert by_id["130cd808"] > by_id["54016b15"]
+
+    def test_year_detection_does_not_false_positive_on_hcpcs_or_page_numbers(self):
+        from app.services.retriever.fillers.filler_a import _query_carries_a_year
+
+        assert _query_carries_a_year("what is H0019") is False
+        assert _query_carries_a_year("59G-4.130 coverage policy") is False
+        assert _query_carries_a_year("coverage policy 2017") is True
+        assert _query_carries_a_year("what applied in 1998") is True
+        assert _query_carries_a_year(None) is False
+        assert _query_carries_a_year("") is False
