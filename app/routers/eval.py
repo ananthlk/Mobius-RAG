@@ -521,6 +521,21 @@ async def grade_claim(body: dict = Body(...)):
     The locked ruler (stage="rag_eval_adjudicate", gemini-2.5-pro / fact_check_v1)
     is pinned HERE, server-side — the caller cannot force a ruler, so the
     fail-closed guarantee lives where Eval owns it.
+
+    POPULATION CAVEAT (calibrated for claim-vs-SOURCE-DOCUMENT text). This grades
+    a claim against reference text; it is cert-validated on source-document pages,
+    where a passage either supports the claim or doesn't. If you pass SYNTHESIZED
+    prose as ``source_text`` (e.g. a chat/LLM reply, for a re-verification loop),
+    two things differ: (1) an ``agree`` means "that answer is consistent with the
+    claim," NOT "the regulatory source still says this" — do not treat it as
+    cert-grade; (2) an ABSTENTION in the reply ("I'm not confident / I don't know")
+    grades as ``contradict``, not ``low_coverage`` — a faithfulness grader sees no
+    positive support and reads the hedge as denial. It cannot distinguish "the
+    source disagrees" from "the source doesn't know," because a source document
+    can't abstain. Callers grading against answer-text MUST pre-filter abstentions
+    upstream (emit an explicit no-answer marker and short-circuit before calling
+    here) rather than expecting this endpoint to model them. Verified w/ Payor
+    Fact Store's reverify loop 2026-08-17.
     """
     claim = str(body.get("claim") or "").strip()
     source_text = str(body.get("source_text") or "").strip()
