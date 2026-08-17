@@ -1977,6 +1977,59 @@ async def _inherited_authority_doc_ids(
         return []
 
 
+async def _identifier_matched_doc_ids(
+    db: AsyncSession,
+    literal_anchors: list[str],
+) -> list[str]:
+    """Return document IDs whose filename/display_name contains a literal
+    anchor (2026-08-17, Fact Store's request — docs/
+    REQ_IDENTIFIER_LOOKUP_CORPUS_SEARCH.md).
+
+    Why this exists: BM25/vector retrieval matches document CONTENT, not
+    document NAMES. A bare identifier query ("59G-4.370") is a weak BM25
+    signal against ~202k chunks — the rule number appears in *other*
+    documents (rulemaking notices, fee schedules) more often than in the
+    policy it names, so content search alone returns a confident WRONG
+    answer rather than the document the identifier actually names.
+    Measured live before this fix: query "59G-4.370" returned
+    PPE_Norms_and_Weights.xlsx at score 0.875, not the target policy.
+
+    ``profile.literal_anchors``/``queries.phrase_strict`` (classify_query's
+    own literal detection) do NOT reach this problem — phrase_strict is
+    computed but never consumed by any retrieval call (dead code, verified
+    2026-08-17), and even if it were, it would still be a CONTENT search,
+    not a NAME search. This is a separate, name-matching pre-pass.
+
+    Cheap: filename/display_name ILIKE over ~9-10k documents measured
+    ~114ms in the now-reverted mobius-payor implementation this mirrors
+    (Ananth's call: document lookup belongs with the corpus, not bolted
+    onto a different service — see REQ doc §4). Returns [] on no match or
+    any DB error — this must never be the reason a real retrieval fails,
+    same fail-open contract as ``_inherited_authority_doc_ids``.
+    """
+    from sqlalchemy import text as _text
+    anchors = [a for a in (literal_anchors or []) if a and len(a) >= 3]
+    if not anchors:
+        return []
+    # Cap at 5 anchors — a query with more than that is not realistically
+    # an identifier lookup, and an unbounded OR list risks a slow plan.
+    anchors = anchors[:5]
+    patterns = [f"%{a}%" for a in anchors]
+    try:
+        result = await db.execute(
+            _text(
+                "SELECT DISTINCT id FROM documents "
+                "WHERE filename ILIKE ANY(:patterns) OR display_name ILIKE ANY(:patterns) "
+                "LIMIT 20"
+            ),
+            {"patterns": patterns},
+        )
+        return [str(row[0]) for row in result.fetchall()]
+    except Exception as exc:
+        logger.warning("[identifier_lookup] filename/display_name query failed: %s", exc)
+        return []
+
+
 def _augment_pool_with_inheritance(
     pool: "CandidatePool",
     inherited_ids: list[str],
@@ -4837,6 +4890,23 @@ async def _corpus_search_agent_impl(
             if _inh_ids:
                 _all_inherited_doc_ids = _inh_ids
                 pool = _augment_pool_with_inheritance(pool, _inh_ids)
+    # Identifier-match force-retrieve (2026-08-17, Fact Store's request --
+    # REQ_IDENTIFIER_LOOKUP_CORPUS_SEARCH.md, §5 suggested shape). A literal
+    # anchor (rule number, policy code, HCPCS) that names a document by
+    # filename/display_name is a NAME match, not a content match -- BM25/
+    # vector search the wrong signal for it (measured: "59G-4.370" returned
+    # a confident wrong doc via content search alone). Reuses the same
+    # force-retrieve mechanism as inherited-authority docs: union the
+    # matched doc_id(s) into _all_inherited_doc_ids so the existing
+    # supplemental pass below (with its required_phrases/reranker credit)
+    # picks them up automatically -- no new pool/response plumbing needed.
+    # Runs independently of payor-tag detection above (an identifier query
+    # may or may not also carry a payor tag).
+    if profile.literal_anchors:
+        _id_matched = await _identifier_matched_doc_ids(db, profile.literal_anchors)
+        if _id_matched:
+            _all_inherited_doc_ids = list(dict.fromkeys(_all_inherited_doc_ids + _id_matched))
+            pool = _augment_pool_with_inheritance(pool, _id_matched)
     logger.info(
         "[%s] [trace:pool] cascade_level=%s pool_size=%d intersect=%s "
         "cascade_steps=%s",
