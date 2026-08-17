@@ -3,6 +3,15 @@ import { API_BASE, SCRAPER_API_BASE } from '../../config'
 import { AUTHORITY_LEVEL_OPTIONS } from '../../lib/documentMetadata'
 import './UploadTab.css'
 
+function extractDetail(data: Record<string, unknown>, fallback: string): string {
+  const d = data?.detail
+  if (!d) return fallback
+  if (Array.isArray(d)) return d.map((e: unknown) => (e as {msg?: string}).msg || JSON.stringify(e)).join('; ')
+  if (typeof d === 'string') return d
+  if (typeof d === 'object') return (d as {message?: string}).message || JSON.stringify(d)
+  return fallback
+}
+
 interface DocLike {
   id: string
   filename: string
@@ -843,7 +852,7 @@ function UrlPanel({ onDocumentAdded }: { onDocumentAdded: () => void }) {
           }),
         })
         const data = await resp.json()
-        if (!resp.ok) throw new Error(data?.detail || `scrape ${resp.status}`)
+        if (!resp.ok) throw new Error(extractDetail(data, `scrape ${resp.status}`))
         msg = `Scrape queued (job ${String(data.job_id || '').slice(0, 8)}). URLs land in Repository as the scraper crawls.`
       } else if (strategy === 'state_mirror') {
         // State mirror: the original URL is bot-walled; register the
@@ -892,7 +901,7 @@ function UrlPanel({ onDocumentAdded }: { onDocumentAdded: () => void }) {
       setSubmitMsg({ ok: true, msg })
       onDocumentAdded()
     } catch (e) {
-      setSubmitMsg({ ok: false, msg: String(e) })
+      setSubmitMsg({ ok: false, msg: e instanceof Error ? e.message : String(e) })
     } finally {
       setSubmitting(false)
     }
