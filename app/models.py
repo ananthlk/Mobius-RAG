@@ -47,6 +47,7 @@ class DocumentPage(Base):
     page_number = Column(Integer, nullable=False)
     text = Column(Text, nullable=True)  # Raw extracted text
     text_markdown = Column(Text, nullable=True)  # Structured markdown for reader
+    source_url = Column(Text, nullable=True)  # Per-page provenance (which URL the page came from)
     extraction_status = Column(String(20), default="success", nullable=False)  # success, failed, empty
     extraction_error = Column(Text, nullable=True)  # Error message if extraction failed
     text_length = Column(Integer, default=0, nullable=False)  # Length of extracted text
