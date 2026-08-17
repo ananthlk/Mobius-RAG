@@ -64,6 +64,42 @@ def _detect_process_intent(normalized_query: str) -> bool:
     return bool(_PROCESS_INTENT_RE.search(normalized_query))
 
 
+# A bare identifier ("59G-4.370", "FL.UM.51", "H0019") is a legitimate,
+# well-formed query -- the natural way a human names a regulation, policy,
+# or code -- but it will NEVER satisfy w.isalpha() below (identifiers mix
+# letters/digits/punctuation by definition). Before this fix, every such
+# query fell through to "no real words" -> UNCLEAR -> clarify_rephrase,
+# never reaching Pool/Router/Fillers at all (2026-08-17, Fact Store's
+# request: docs/REQ_IDENTIFIER_LOOKUP_CORPUS_SEARCH.md -- confirmed live,
+# "59G-4.370" returned a CLARIFY_REPHRASE posture, not even an attempt at
+# retrieval). This is a narrower, Gate-local check than corpus_search_
+# agent.py's own _LITERAL_PATTERNS (which also handles ICD-10/bare-CPT
+# ambiguity that needs full lexicon context) -- here we only need "does
+# this token look like a structured identifier," not classify its exact
+# type.
+_IDENTIFIER_SHAPE_RE = re.compile(
+    r"^[0-9]{0,3}[A-Za-z]{1,5}[.\-][A-Za-z0-9]{1,8}(?:[.\-][A-Za-z0-9]+)*$"
+)
+# No-separator shape: HCPCS/CPT-style codes (H0019, T1015) -- letter(s)
+# then digits, no dot/dash. Bounded length so it doesn't swallow a normal
+# alphanumeric word.
+_IDENTIFIER_SHAPE_NOSEP_RE = re.compile(r"^[A-Za-z]{1,2}[0-9]{3,6}$")
+
+
+def _looks_like_identifier(token: str) -> bool:
+    """A single token with the shape of a code/rule-number/policy-ID:
+    mixes letters and digits, either with a dot/dash separator
+    (59G-4.370, FL.UM.51) or the compact HCPCS/CPT shape (H0019). Length
+    bounded so it doesn't accidentally swallow a URL or long garbage
+    string. Not trying to classify WHICH kind of identifier -- just
+    whether this token could plausibly be one, cheaply, with no DB call."""
+    if not (3 <= len(token) <= 20):
+        return False
+    if _IDENTIFIER_SHAPE_RE.match(token):
+        return any(c.isdigit() for c in token) and any(c.isalpha() for c in token)
+    return bool(_IDENTIFIER_SHAPE_NOSEP_RE.match(token))
+
+
 def _is_malformed(normalized_query: str) -> bool:
     """Cheap, deterministic, no DB/LLM: true gibberish/fragment vs a
     well-formed-but-off-domain question. "What's the weather tomorrow?" has
@@ -84,8 +120,17 @@ def _is_malformed(normalized_query: str) -> bool:
     """
     if not normalized_query:
         return True
-    words = [w for w in normalized_query.split() if w.isalpha()]
+    all_tokens = normalized_query.split()
+    # An identifier-shaped token counts as a "real word" for this check --
+    # see _looks_like_identifier above.
+    words = [w for w in all_tokens if w.isalpha() or _looks_like_identifier(w)]
     if len(words) < 2:
+        # A single bare identifier ("59G-4.370" alone) is still well-formed
+        # on its own -- the len(words)<2 floor exists to catch true
+        # one-token gibberish, not to demand a second word from a query
+        # that's already fully specified by its one identifier.
+        if len(all_tokens) == 1 and _looks_like_identifier(all_tokens[0]):
+            return False
         return True
     # Mostly-non-alphabetic content (e.g. stray codes/numbers with no real words).
     if len(words) < len(normalized_query.split()) / 2:

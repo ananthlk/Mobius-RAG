@@ -226,7 +226,11 @@ class TestTokenBudgetForRetrieval:
 
     def test_defaults_to_static_table_when_not_supplied(self):
         result = run_structure(_reformat(ReformatPosture.PRECISE))
-        assert result.resource_posture.token_budget == 3000  # chat.default table value
+        # chat.default table value -- bumped 3000->6000 2026-08-16 (Ananth's
+        # ask), paired with a matching latency-allowance bump; verified via
+        # a real 22-query bank sweep (recall 0.6265->0.7022, ~0ms latency
+        # cost) before deploy. Test was left stale until now.
+        assert result.resource_posture.token_budget == 6000
 
     def test_caller_supplied_value_overrides_table(self):
         result = run_structure(_reformat(ReformatPosture.PRECISE), token_budget_for_retrieval=10_000)
