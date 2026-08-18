@@ -4348,10 +4348,22 @@ def corpus_health(payer: str | None = None,
                 -- kept is the canonical — it is the ANSWER, not an open question.
                 -- Counting it as pending overstated unmanaged work by 148 and
                 -- made a resolved pair look like two unresolved documents.
+                -- Documents still genuinely pending a duplicate decision.
+                -- EXCLUDES two things, both of which are answers rather than
+                -- questions: the survivor of a resolved group (it IS the
+                -- canonical), and any document a person has already ruled on.
+                -- Without the second exclusion a "keep this one" decision would
+                -- evaporate and the same row would be back in the queue tomorrow —
+                -- the fastest way to teach someone their decisions do not count.
                 dp AS (SELECT DISTINCT g.document_id FROM gate_decisions g
                        WHERE g.run_id = %s
                          AND NOT EXISTS (SELECT 1 FROM corpus_cleanup_actions a
-                                         WHERE a.canonical_id = g.document_id))
+                                         WHERE a.canonical_id = g.document_id)
+                         AND NOT EXISTS (SELECT 1 FROM corpus_cleanup_actions a2
+                                         WHERE a2.document_id = g.document_id
+                                           AND a2.action IN ('retired_unpublished',
+                                                             'kept_not_duplicate',
+                                                             'shelved')))
                 SELECT CASE
                          WHEN v.decision = 'unpublishable'      THEN 'unpublishable'
                          WHEN dp.document_id IS NOT NULL        THEN 'awaiting_duplicate'
@@ -4792,6 +4804,382 @@ def corpus_duplicate_action(body: DuplicateAction):
         conn.rollback()
         logger.exception("duplicate action failed")
         raise HTTPException(status_code=500, detail=f"action failed, nothing changed: {e}")
+    finally:
+        conn.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Bucket drill-down and bulk resolution
+#
+# Every number in the cleanup queue is a way IN, not a statistic. At 20 payers
+# and 50 sites these counts are unworkable one document at a time, so the list
+# supports search, multi-select and a mass action — and each action is DURABLE:
+# a decision removes the document from its bucket permanently rather than until
+# the next gate run.
+#
+# Actions are per-bucket because the question is per-bucket. "Which copy
+# survives" is meaningless for a document that never chunked.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# The verdict registry. Each duplicate_kind is really a RULE that fired, and every
+# rule reached one of three verdicts. Presenting the kinds directly showed the
+# reader our taxonomy; presenting the verdict with its rule shows them the
+# decision — which is the thing they may want to overturn.
+#
+# Every rule carries `why` (what the rule looked at) and `overturn` (what the
+# opposite decision would mean), because a person overruling a machine needs to
+# see the reasoning, not just the label. A panel that says "period_series" invites
+# a rubber stamp; one that says "these differ by reporting period — SFY2024-25 vs
+# SFY2025-26, so both are the record for their own year" invites a judgement.
+_DUP_RULES: dict[str, dict] = {
+    "duplicate": {
+        "verdict": "duplicate", "rule": "every signal agreed",
+        "why": "identical normalized text, same character length, same page count, "
+               "same reporting period, same product — nothing distinguishes the two",
+        "overturn": "mark NOT a duplicate — the copies stay separate and both keep serving",
+    },
+    "period_series": {
+        "verdict": "not_duplicate", "rule": "reporting periods differ",
+        "why": "the text is identical BY DESIGN — a blank annual form is the same every "
+               "year. Each edition is the record for its own period, so identical text "
+               "is evidence they are different documents, not the same one",
+        "overturn": "mark as a duplicate — one period's copy would be unpublished",
+    },
+    "product_variant": {
+        "verdict": "not_duplicate", "rule": "products differ",
+        "why": "same template issued for two products under Medicaid (LTC / CMS / MMA). "
+               "Retiring either removes a product's own copy of its policy",
+        "overturn": "mark as a duplicate — one product loses its copy",
+    },
+    "near_duplicate": {
+        "verdict": "not_duplicate", "rule": "dated overlap — a version pair",
+        "why": "high overlap WITH a date relationship, so this is an edition chain. "
+               "Versions belong to versioning, where the prior stays published as history",
+        "overturn": "mark as a duplicate — the prior edition would be unpublished, "
+                    "not merely superseded",
+    },
+    "ordering_unknown": {
+        "verdict": "undecided", "rule": "no usable edition date",
+        "why": "the text is identical but neither document carries a date, so there is "
+               "no basis to choose which copy survives. This needs evidence, not an opinion",
+        "overturn": "decide it anyway — pick the survivor by hand",
+    },
+    "product_unknown": {
+        "verdict": "undecided", "rule": "product not declared",
+        "why": "names hint at different products but neither document says so on the page. "
+               "The CMS- prefix means Children's Medical Services on 8 documents and the "
+               "federal agency on 4, so the name alone cannot decide it",
+        "overturn": "decide it anyway — assign the product or call it a duplicate",
+    },
+    "near_identical_review": {
+        "verdict": "undecided", "rule": "text matches, shape does not",
+        "why": "the words match but length or page count differ, so something is present "
+               "in one copy and not the other",
+        "overturn": "decide it anyway",
+    },
+}
+
+_VERDICT_ORDER = ["duplicate", "not_duplicate", "undecided"]
+_VERDICT_LABEL = {
+    "duplicate": "Decided: duplicate",
+    "not_duplicate": "Decided: NOT a duplicate",
+    "undecided": "Could not decide",
+}
+
+
+@app.get("/corpus/health/duplicate-decisions")
+def corpus_duplicate_decisions(payer: str | None = None, since: str | None = None,
+                               until: str | None = None):
+    """The duplicate run as DECISIONS, grouped by verdict then by the rule that
+    produced it — with how many were acted on, how many are held, and how many
+    are waiting on a person."""
+    import psycopg2 as _pg
+    conn = _pg.connect(_retag_inplace_dsn(), connect_timeout=15)
+    try:
+        cur = conn.cursor()
+        cur.execute("SET statement_timeout = 45000")
+        w, args_l = "", []
+        if payer:
+            w += " AND d.payer = %s"; args_l.append(payer)
+        if since:
+            w += " AND d.created_at >= %s"; args_l.append(since)
+        if until:
+            w += " AND d.created_at < (%s::date + 1)"; args_l.append(until)
+        cur.execute("SELECT run_id FROM gate_decisions WHERE mode='duplicates' "
+                    "GROUP BY run_id ORDER BY max(decided_at) DESC LIMIT 1")
+        r = cur.fetchone()
+        if not r:
+            return {"measured": False}
+        drun = r[0]
+        cur.execute(f"""
+            SELECT g.duplicate_kind,
+                   count(DISTINCT g.document_id) FILTER (WHERE m.managed),
+                   count(DISTINCT g.document_id) FILTER (WHERE NOT m.managed),
+                   count(DISTINCT g.document_id) FILTER (WHERE d.lifecycle_state='retired'),
+                   count(DISTINCT g.document_id) FILTER (
+                     WHERE EXISTS (SELECT 1 FROM corpus_cleanup_actions a
+                                   WHERE a.document_id=g.document_id
+                                     AND a.action IN ('kept_not_duplicate','held_for_human')))
+            FROM gate_decisions g
+            JOIN documents d ON d.id = g.document_id
+            JOIN LATERAL (SELECT COALESCE(jsonb_typeof(d.source_metadata)='object'
+                          AND d.source_metadata ? 'payor_classification', false) AS managed) m ON true
+            WHERE g.run_id = %s AND g.duplicate_kind IS NOT NULL {w}
+            GROUP BY 1""", (drun,) + tuple(args_l))
+        groups: dict[str, list] = {v: [] for v in _VERDICT_ORDER}
+        for kind, mng, unm, retired, decided in cur.fetchall():
+            meta = _DUP_RULES.get(kind)
+            if not meta:
+                continue
+            groups[meta["verdict"]].append({
+                "kind": kind, "rule": meta["rule"], "why": meta["why"],
+                "overturn": meta["overturn"], "verdict": meta["verdict"],
+                "managed": int(mng or 0), "unmanaged": int(unm or 0),
+                "acted": int(retired or 0), "human_decided": int(decided or 0),
+                "total": int((mng or 0) + (unm or 0)),
+            })
+        for v in groups:
+            groups[v].sort(key=lambda x: -x["total"])
+        return {"measured": True, "run_id": str(drun),
+                "verdicts": [{"verdict": v, "label": _VERDICT_LABEL[v],
+                              "total": sum(x["total"] for x in groups[v]),
+                              "rules": groups[v]} for v in _VERDICT_ORDER]}
+    finally:
+        conn.close()
+
+
+_BUCKET_ACTIONS: dict[str, list[dict]] = {
+    "awaiting_duplicate": [
+        {"key": "keep", "label": "Keep — not a duplicate", "tone": "good",
+         "what": "records the decision and removes it from this queue for good; "
+                 "nothing is unpublished"},
+        {"key": "remove", "label": "Remove — it is a duplicate", "tone": "bad",
+         "what": "unpublishes chunks, embeddings and vectors; the document, its GCS "
+                 "object and the full trace stay, so it can be restored by re-chunking"},
+    ],
+    "awaiting_versioning": [
+        {"key": "keep", "label": "Keep — not a version", "tone": "good",
+         "what": "records the decision; both editions stay published"},
+    ],
+    # A version is evidence, so nothing here ever unpublishes.
+    "unpublishable": [
+        {"key": "rechunk", "label": "Re-chunk", "tone": "good",
+         "what": "queues chunking in the batch lane; only works where extracted "
+                 "pages survive — no pages means nothing to chunk"},
+        {"key": "shelve", "label": "Shelve", "tone": "warn",
+         "what": "marks it shelved and out of the working corpus; reversible, and "
+                 "the raw file is untouched in GCS"},
+    ],
+    "clean": [],
+}
+
+
+@app.get("/corpus/health/bucket/{bucket}")
+def corpus_bucket_documents(bucket: str, payer: str | None = None,
+                            since: str | None = None, until: str | None = None,
+                            managed: str | None = None, q: str | None = None,
+                            kind: str | None = None, limit: int = 500):
+    """Documents behind one queue number, with the evidence needed to decide.
+
+    Returns the counterpart and overlap for duplicate rows — a person cannot rule
+    on "is this a duplicate" from a filename alone, and asking them to is how you
+    get rubber-stamping."""
+    if bucket not in _BUCKET_ACTIONS:
+        raise HTTPException(400, f"unknown bucket '{bucket}'. "
+                                 f"Known: {sorted(_BUCKET_ACTIONS)}")
+    import psycopg2 as _pg
+    conn = _pg.connect(_retag_inplace_dsn(), connect_timeout=15)
+    try:
+        cur = conn.cursor()
+        cur.execute("SET statement_timeout = 45000")
+        w, args_l = "", []
+        if payer:
+            w += " AND d.payer = %s"; args_l.append(payer)
+        if since:
+            w += " AND d.created_at >= %s"; args_l.append(since)
+        if until:
+            w += " AND d.created_at < (%s::date + 1)"; args_l.append(until)
+        if managed == "true":
+            w += (" AND COALESCE(jsonb_typeof(d.source_metadata)='object'"
+                  " AND d.source_metadata ? 'payor_classification', false)")
+        elif managed == "false":
+            w += (" AND NOT COALESCE(jsonb_typeof(d.source_metadata)='object'"
+                  " AND d.source_metadata ? 'payor_classification', false)")
+        if q:
+            w += " AND (d.filename ILIKE %s OR d.display_name ILIKE %s)"
+            args_l += [f"%{q}%", f"%{q}%"]
+
+        cur.execute("SELECT run_id FROM gate_decisions WHERE mode <> 'duplicates' "
+                    "GROUP BY run_id ORDER BY max(decided_at) DESC LIMIT 1")
+        vr = cur.fetchone()
+        cur.execute("SELECT run_id FROM gate_decisions WHERE mode = 'duplicates' "
+                    "GROUP BY run_id ORDER BY max(decided_at) DESC LIMIT 1")
+        dr = cur.fetchone()
+        if not vr:
+            return {"bucket": bucket, "documents": [], "actions": _BUCKET_ACTIONS[bucket]}
+        vrun = vr[0]
+        drun = dr[0] if dr else None
+
+        resolved = """NOT EXISTS (SELECT 1 FROM corpus_cleanup_actions a
+                      WHERE a.canonical_id = g.document_id)
+                      AND NOT EXISTS (SELECT 1 FROM corpus_cleanup_actions a2
+                      WHERE a2.document_id = g.document_id
+                        AND a2.action IN ('retired_unpublished','kept_not_duplicate','shelved'))"""
+
+        kw = ""
+        if kind and bucket == "awaiting_duplicate":
+            kw = " AND g.duplicate_kind = %s"
+        if bucket == "awaiting_duplicate" and drun:
+            sql = f"""
+                SELECT DISTINCT ON (d.id) d.id::text, d.filename, d.display_name, d.payer,
+                       d.created_at, g.duplicate_kind, g.overlap_ratio,
+                       g.prior_document_id::text, d2.filename AS counterpart,
+                       (SELECT count(*) FROM rag_published_embeddings e
+                        WHERE e.document_id = d.id) AS vectors,
+                       COALESCE(jsonb_typeof(d.source_metadata)='object'
+                                AND d.source_metadata ? 'payor_classification', false) AS managed
+                FROM gate_decisions g
+                JOIN documents d ON d.id = g.document_id
+                LEFT JOIN documents d2 ON d2.id = g.prior_document_id
+                WHERE g.run_id = %s {kw} AND {resolved}
+                  AND d.lifecycle_state IS DISTINCT FROM 'retired' {w}
+                ORDER BY d.id, g.overlap_ratio DESC NULLS LAST
+                LIMIT %s"""
+            pre = (drun, kind) if kw else (drun,)
+            cur.execute(sql, pre + tuple(args_l) + (limit,))
+        else:
+            dec = {"unpublishable": "g.decision = 'unpublishable'",
+                   "awaiting_versioning": "g.adjudication_target IS NOT NULL",
+                   "clean": "g.decision <> 'unpublishable' AND g.adjudication_target IS NULL"}[bucket]
+            sql = f"""
+                SELECT DISTINCT ON (d.id) d.id::text, d.filename, d.display_name, d.payer,
+                       d.created_at, g.decision, NULL::numeric, NULL::text, g.reason,
+                       (SELECT count(*) FROM document_pages p WHERE p.document_id = d.id) AS pages,
+                       COALESCE(jsonb_typeof(d.source_metadata)='object'
+                                AND d.source_metadata ? 'payor_classification', false) AS managed
+                FROM gate_decisions g
+                JOIN documents d ON d.id = g.document_id
+                WHERE g.run_id = %s AND {dec}
+                  AND d.lifecycle_state IS DISTINCT FROM 'retired' {w}
+                ORDER BY d.id
+                LIMIT %s"""
+            cur.execute(sql, (vrun,) + tuple(args_l) + (limit,))
+
+        docs = [{
+            "id": r[0], "filename": r[1], "display_name": r[2], "payer": r[3],
+            "created_at": r[4].isoformat() if r[4] else None,
+            "verdict": r[5], "overlap": float(r[6]) if r[6] is not None else None,
+            "counterpart_id": r[7], "detail": r[8],
+            "metric": int(r[9] or 0), "managed": bool(r[10]),
+        } for r in cur.fetchall()]
+        return {"bucket": bucket, "documents": docs, "truncated": len(docs) >= limit,
+                "actions": _BUCKET_ACTIONS[bucket]}
+    finally:
+        conn.close()
+
+
+class BulkBucketAction(BaseModel):
+    bucket: str
+    action: str
+    document_ids: list[str]
+    reason: str | None = None
+    actor: str | None = None
+
+
+@app.post("/corpus/health/bucket/action")
+def corpus_bucket_bulk_action(body: BulkBucketAction):
+    """Apply one decision to many documents.
+
+    Per-document transactions rather than one big one: a mass action over 200
+    documents that fails on number 173 should leave 172 decided, not zero. Each
+    result is reported individually so a partial run is legible instead of being
+    summarised as 'failed'."""
+    allowed = {a["key"] for a in _BUCKET_ACTIONS.get(body.bucket, [])}
+    if body.action not in allowed:
+        raise HTTPException(400, f"action '{body.action}' is not available for bucket "
+                                 f"'{body.bucket}'. Allowed: {sorted(allowed)}")
+    if not body.document_ids:
+        raise HTTPException(400, "no documents selected")
+    if len(body.document_ids) > 1000:
+        raise HTTPException(400, f"{len(body.document_ids)} documents in one call — "
+                                 "cap is 1000 so a misclick cannot rewrite the corpus")
+
+    import psycopg2 as _pg
+    conn = _pg.connect(_retag_inplace_dsn(), connect_timeout=15)
+    conn.autocommit = False
+    results, ok, failed = [], 0, 0
+    try:
+        for did in body.document_ids:
+            cur = conn.cursor()
+            try:
+                cur.execute("""SELECT lifecycle_state, file_path,
+                                 (SELECT count(*) FROM document_pages p WHERE p.document_id=d.id)
+                               FROM documents d WHERE d.id = %s""", (did,))
+                row = cur.fetchone()
+                if not row:
+                    raise ValueError("document not found")
+                _, gcs, pages = row
+                removed = {}
+                note = ""
+
+                if body.action == "remove":
+                    for t in _DERIVED_TABLES:
+                        cur.execute(f"SELECT count(*) FROM {t} WHERE document_id=%s", (did,))
+                        removed[t] = int(cur.fetchone()[0] or 0)
+                        cur.execute(f"DELETE FROM {t} WHERE document_id=%s", (did,))
+                    cur.execute("UPDATE documents SET lifecycle_state='retired' WHERE id=%s", (did,))
+                    ledger_action, note = "retired_unpublished", "unpublished and retired"
+
+                elif body.action == "keep":
+                    ledger_action = "kept_not_duplicate"
+                    note = "kept; will not return to this queue"
+
+                elif body.action == "shelve":
+                    cur.execute("UPDATE documents SET lifecycle_state='shelved' WHERE id=%s", (did,))
+                    ledger_action, note = "shelved", "out of the working corpus, file untouched"
+
+                elif body.action == "rechunk":
+                    if not pages:
+                        raise ValueError("no extracted pages — nothing to chunk. "
+                                         "This document needs re-extraction, not re-chunking.")
+                    cur.execute("""INSERT INTO chunking_jobs
+                          (id, document_id, status, threshold, priority, created_at, updated_at)
+                        SELECT gen_random_uuid(), %s, 'pending', '0.6', 20, now(), now()
+                        WHERE NOT EXISTS (SELECT 1 FROM chunking_jobs
+                                          WHERE document_id=%s AND status IN ('pending','processing'))
+                        RETURNING id""", (did, did))
+                    j = cur.fetchone()
+                    ledger_action = "rechunk_queued"
+                    note = f"queued (job {j[0]})" if j else "already queued — not duplicated"
+                else:
+                    raise ValueError(f"unhandled action {body.action}")
+
+                cur.execute("""
+                    INSERT INTO corpus_cleanup_actions
+                      (run_id, document_id, duplicate_kind, managed, action, reason, confidence,
+                       published_embeddings_removed, chunk_embeddings_removed,
+                       hierarchical_chunks_removed, embeddable_units_removed,
+                       pages_retained, gcs_path, reversible, actor, action_source, request)
+                    VALUES (gen_random_uuid(), %s, %s, false, %s, %s, 'human bulk decision',
+                            %s, %s, %s, %s, %s, %s, true, %s, 'corpus_health_bulk', %s)""",
+                    (did, body.bucket, ledger_action,
+                     body.reason or f"bulk {body.action} from Corpus Health",
+                     removed.get("rag_published_embeddings", 0),
+                     removed.get("chunk_embeddings", 0),
+                     removed.get("hierarchical_chunks", 0),
+                     removed.get("embeddable_units", 0),
+                     pages, gcs, body.actor,
+                     json.dumps({"bucket": body.bucket, "action": body.action})))
+                conn.commit()
+                ok += 1
+                results.append({"document_id": did, "status": "ok", "note": note,
+                                "vectors_removed": removed.get("rag_published_embeddings", 0)})
+            except Exception as e:
+                conn.rollback()
+                failed += 1
+                results.append({"document_id": did, "status": "failed", "note": str(e)[:200]})
+        return {"bucket": body.bucket, "action": body.action,
+                "succeeded": ok, "failed": failed, "results": results}
     finally:
         conn.close()
 

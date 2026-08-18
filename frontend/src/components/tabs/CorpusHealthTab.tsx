@@ -67,6 +67,16 @@ interface Health {
     buckets?: Record<string, { managed: number; unmanaged: number }>
   }
 }
+interface DupRule {
+  kind: string; rule: string; why: string; overturn: string; verdict: string
+  managed: number; unmanaged: number; acted: number; human_decided: number; total: number
+}
+interface DupVerdict { verdict: string; label: string; total: number; rules: DupRule[] }
+interface BucketDoc {
+  id: string; filename: string; display_name: string | null; payer: string | null
+  created_at: string | null; verdict: string; overlap: number | null
+  counterpart_id: string | null; detail: string | null; metric: number; managed: boolean
+}
 interface StageLat {
   step: string; label: string; kind: 'wait' | 'work'
   p50_min: number; p90_min: number; documents: number; share_pct: number
@@ -155,6 +165,53 @@ export function CorpusHealthTab() {
 
   useEffect(() => { load() }, [load])
 
+  useEffect(() => {
+    let dead = false
+    fetch(`${API_BASE}/corpus/health/duplicate-decisions${scopeQS()}`)
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { if (!dead && d?.measured) setDecisions(d) })
+      .catch(() => { })
+    return () => { dead = true }
+  }, [scopeQS])
+
+  const openReview = async (rule: DupRule) => {
+    setReview(rule); setRevDocs(null); setSel(new Set()); setRevQ(''); setOutcome(null)
+    const qs = scopeQS()
+    const r = await fetch(
+      `${API_BASE}/corpus/health/bucket/awaiting_duplicate${qs || '?'}${qs ? '&' : ''}kind=${rule.kind}&limit=500`)
+    setRevDocs(r.ok ? (await r.json()).documents || [] : [])
+  }
+
+  // Overturning is the whole point of the panel: mark duplicates as not, or the
+  // reverse. `remove` unpublishes; `keep` records the decision so the document
+  // never returns to this queue.
+  const applyDecision = async (action: 'keep' | 'remove') => {
+    if (!sel.size) return
+    setBusy(true); setOutcome(null)
+    try {
+      const r = await fetch(`${API_BASE}/corpus/health/bucket/action`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bucket: 'awaiting_duplicate', action, document_ids: [...sel],
+          actor: 'corpus-health', reason: `overturned from rule "${review?.rule}"`,
+        }),
+      })
+      const j = await r.json()
+      setOutcome(r.ok
+        ? `${j.succeeded} applied${j.failed ? `, ${j.failed} failed` : ''}`
+        : `failed: ${j.detail || r.status}`)
+      if (r.ok) {
+        setRevDocs(docs => (docs || []).filter(d => !sel.has(d.id)))
+        setSel(new Set()); load()
+        fetch(`${API_BASE}/corpus/health/duplicate-decisions${scopeQS()}`)
+          .then(x => (x.ok ? x.json() : null)).then(x => { if (x?.measured) setDecisions(x) })
+      }
+    } catch (e) {
+      setOutcome(e instanceof Error ? e.message : 'failed')
+    } finally { setBusy(false) }
+  }
+
+
   // Time to serve is the one genuinely slow query left; fetched separately so
   // the rest of the page renders without waiting for it.
   useEffect(() => {
@@ -193,9 +250,16 @@ export function CorpusHealthTab() {
   }
 
   const g = health?.gate
-  const d = health?.duplicates
   const qq = health?.queue
   const cl = health?.cleanup
+  const [decisions, setDecisions] = useState<{ verdicts: DupVerdict[] } | null>(null)
+  // The review panel: a rule the user opened, and the documents behind it.
+  const [review, setReview] = useState<DupRule | null>(null)
+  const [revDocs, setRevDocs] = useState<BucketDoc[] | null>(null)
+  const [revQ, setRevQ] = useState('')
+  const [sel, setSel] = useState<Set<string>>(new Set())
+  const [busy, setBusy] = useState(false)
+  const [outcome, setOutcome] = useState<string | null>(null)
   const asOf = health?.as_of ? new Date(health.as_of).toLocaleString() : null
 
   // Which preset is active is DERIVED from the dates rather than stored, so it
@@ -563,34 +627,46 @@ export function CorpusHealthTab() {
                 Decide the managed ones in the Payor work queue <span className="ch-out">↗</span>
               </a>
 
-              {/* ── 2. what kind of thing they are ───────────────────── */}
-              {d?.measured && (
+              {/* ── 2. what was decided, and by which rule ───────────── */}
+              {decisions && (
                 <>
-                  <h4 className="ch-sub">What kind they are</h4>
+                  <h4 className="ch-sub">What was decided, and why</h4>
                   <p className="ch-note">
-                    <b>A pair counts as a duplicate only when every signal agrees</b> — identical
-                    text, length, page count, reporting period and product. Everything else is
-                    held rather than retired, because a blank annual form is identical every year
-                    and one product's copy of a policy is identical to another's. Both are
-                    legitimately separate documents.
+                    Every candidate pair was judged by one rule, and each rule reached one of
+                    three verdicts. <b>Open any rule to see the documents it decided and
+                    overturn it</b> — mark duplicates as separate, or separates as duplicates.
+                    The rule is shown so you can disagree with the reasoning, not just the label.
                   </p>
-                  <div className="ch-chips">
-                    {Object.entries(d.by_kind || {}).sort((a, b) => b[1] - a[1]).map(([k, v]) => (
-                      <span key={k} className={`ch-chip ch-chip-${k}`}>
-                        {k.replace(/_/g, ' ')} <b>{n(v)}</b>
-                        {d.managed_by_kind?.[k] != null && (
-                          <i className="ch-chip-sub">{n(d.managed_by_kind[k])} managed</i>
-                        )}
-                      </span>
-                    ))}
-                  </div>
+                  {decisions.verdicts.filter(v => v.total > 0).map(v => (
+                    <div key={v.verdict} className={`ch-verdict ch-verdict-${v.verdict}`}>
+                      <div className="ch-verdict-head">
+                        <span className="ch-verdict-label">{v.label}</span>
+                        <span className="ch-verdict-n">{n(v.total)}</span>
+                      </div>
+                      {v.rules.map(r => (
+                        <button key={r.kind} className="ch-rule" onClick={() => openReview(r)}>
+                          <div className="ch-rule-main">
+                            <div className="ch-rule-title">
+                              {r.rule}
+                              <span className="ch-rule-n">{n(r.total)}</span>
+                            </div>
+                            <div className="ch-rule-why">{r.why}</div>
+                          </div>
+                          <div className="ch-rule-side">
+                            {r.acted > 0 && <span className="ch-tag done">{n(r.acted)} acted</span>}
+                            {r.managed > 0 && <span className="ch-tag">{n(r.managed)} managed</span>}
+                            {r.unmanaged > 0 && <span className="ch-tag">{n(r.unmanaged)} unmanaged</span>}
+                            <span className="ch-rule-go">review →</span>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  ))}
                   <p className="ch-note ch-note-dim">
-                    <b>duplicate</b> = every signal agreed · <b>period series</b> = same form,
-                    different reporting period · <b>product variant</b> = same template, different
-                    product under Medicaid · <b>ordering unknown</b> = no usable edition date on
-                    either side · <b>product unknown</b> = neither document declares its product.
-                    Only the first is a duplicate; nothing in the others is ever retired
-                    automatically.
+                    Managed documents in the <b>duplicate</b> verdict are the ones handed to the
+                    Payor work queue — a person there picks which copy survives. Everything under
+                    <b> not a duplicate</b> needs nothing; it is shown so a decision made on your
+                    behalf is auditable rather than invisible.
                   </p>
                 </>
               )}
@@ -675,6 +751,98 @@ export function CorpusHealthTab() {
           </Section>
         </>
       )}
+
+      {review && (() => {
+        const shown = (revDocs || []).filter(d =>
+          !revQ || (d.filename || '').toLowerCase().includes(revQ.toLowerCase())
+                || (d.payer || '').toLowerCase().includes(revQ.toLowerCase()))
+        const allSel = shown.length > 0 && shown.every(d => sel.has(d.id))
+        const isDup = review.verdict === 'duplicate'
+        return (
+          <div className="ch-drill-backdrop" onClick={() => setReview(null)}>
+            <div className="ch-drill ch-review" onClick={e => e.stopPropagation()}>
+              <header>
+                <div>
+                  <h4>{review.rule}</h4>
+                  <div className="ch-rule-why">{review.why}</div>
+                </div>
+                <button className="ch-close" onClick={() => setReview(null)}>✕</button>
+              </header>
+
+              <div className="ch-review-bar">
+                <input className="ch-review-search" placeholder="Search document or payer…"
+                       value={revQ} onChange={e => setRevQ(e.target.value)} />
+                <label className="ch-selall">
+                  <input type="checkbox" checked={allSel}
+                         onChange={e => setSel(e.target.checked
+                           ? new Set(shown.map(d => d.id)) : new Set())} />
+                  Select all {shown.length ? `(${shown.length})` : ''}
+                </label>
+                <span className="ch-selcount">{sel.size ? `${sel.size} selected` : ''}</span>
+              </div>
+
+              {!revDocs && <div className="ch-empty">Loading…</div>}
+              {revDocs && shown.length === 0 && (
+                <div className="ch-empty">
+                  {revQ ? 'Nothing matches that search.' : 'Every document under this rule is resolved.'}
+                </div>
+              )}
+              {revDocs && shown.length > 0 && (
+                <div className="ch-tablewrap">
+                  <table className="ch-table ch-reviewtable">
+                    <thead><tr>
+                      <th className="ch-cb"></th><th>Document</th><th>Compared with</th>
+                      <th className="num">Overlap</th><th>Payer</th><th></th>
+                    </tr></thead>
+                    <tbody>
+                      {shown.map(d => (
+                        <tr key={d.id} className={sel.has(d.id) ? 'is-sel' : ''}
+                            onClick={() => setSel(p => {
+                              const c = new Set(p); c.has(d.id) ? c.delete(d.id) : c.add(d.id); return c })}>
+                          <td className="ch-cb"><input type="checkbox" readOnly checked={sel.has(d.id)} /></td>
+                          <td className="ch-fn">{d.display_name || d.filename}</td>
+                          <td className="ch-fn ch-dim">{d.detail || '—'}</td>
+                          <td className="num">{d.overlap != null ? d.overlap.toFixed(3) : '—'}</td>
+                          <td>{d.payer || '—'}</td>
+                          <td>{d.managed
+                            ? <span className="ch-tag">managed</span>
+                            : <span className="ch-tag dim">unmanaged</span>}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              <footer className="ch-review-foot">
+                <div className="ch-overturn">
+                  <b>Overturn:</b> {review.overturn}
+                </div>
+                <div className="ch-review-actions">
+                  {outcome && <span className="ch-outcome">{outcome}</span>}
+                  {isDup ? (
+                    <button className="ch-btn good" disabled={!sel.size || busy}
+                            onClick={() => applyDecision('keep')}>
+                      Not duplicates — keep both{sel.size ? ` (${sel.size})` : ''}
+                    </button>
+                  ) : (
+                    <>
+                      <button className="ch-btn good" disabled={!sel.size || busy}
+                              onClick={() => applyDecision('keep')}>
+                        Confirm — keep{sel.size ? ` (${sel.size})` : ''}
+                      </button>
+                      <button className="ch-btn bad" disabled={!sel.size || busy}
+                              onClick={() => applyDecision('remove')}>
+                        Mark duplicate — unpublish{sel.size ? ` (${sel.size})` : ''}
+                      </button>
+                    </>
+                  )}
+                </div>
+              </footer>
+            </div>
+          </div>
+        )
+      })()}
 
       {drill && (
         <div className="ch-drill-backdrop" onClick={() => setDrill(null)}>
