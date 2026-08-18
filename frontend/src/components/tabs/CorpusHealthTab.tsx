@@ -49,6 +49,8 @@ interface Health {
     by_kind?: Record<string, number>
     retirable?: number; held_no_date?: number
     documents?: number; high_value_documents?: number; high_value_basis?: string
+    managed_documents?: number; unmanaged_documents?: number
+    managed_by_kind?: Record<string, number>; managed_basis?: string
   }
 }
 interface StageLat {
@@ -531,14 +533,29 @@ export function CorpusHealthTab() {
                 <div className="ch-card"><div className="ch-card-n amber">{n(d.held_no_date || 0)}</div>
                   <div className="ch-card-l">held, needs a human</div>
                   <div className="ch-card-s">identical but undated — picking a winner would be a coin flip</div></div>
-                <div className="ch-card"><div className="ch-card-n">{n(d.high_value_documents || 0)}</div>
-                  <div className="ch-card-l">high-value documents</div>
-                  <div className="ch-card-s">{d.high_value_basis}</div></div>
+                <a className="ch-card ch-card-link"
+                   href={`${PAYOR_BASE}${PAYOR_QUEUE_PATH}`}
+                   target="_blank" rel="noopener noreferrer">
+                  <div className="ch-card-n amber">{n(d.managed_documents || 0)}</div>
+                  <div className="ch-card-l">managed — actionable <span className="ch-out">↗</span></div>
+                  <div className="ch-card-s">
+                    resolved in the Payor platform's Deduplicate queue, which is scoped to
+                    documents it manages. Only these are actionable there.
+                  </div></a>
+                <div className="ch-card"><div className="ch-card-n">{n(d.unmanaged_documents || 0)}</div>
+                  <div className="ch-card-l">unmanaged</div>
+                  <div className="ch-card-s">
+                    scraped nav pages, bulk sources and uploads nobody manages — the long tail,
+                    and the reason this page's totals exceed the Payor queue's
+                  </div></div>
               </div>
               <div className="ch-chips">
                 {Object.entries(d.by_kind || {}).sort((a, b) => b[1] - a[1]).map(([k, v]) => (
                   <span key={k} className={`ch-chip ch-chip-${k}`}>
                     {k.replace(/_/g, ' ')} <b>{n(v)}</b>
+                    {d.managed_by_kind?.[k] != null && (
+                      <i className="ch-chip-sub">{n(d.managed_by_kind[k])} managed</i>
+                    )}
                   </span>
                 ))}
               </div>

@@ -460,3 +460,15 @@ a.ch-card-link:focus-visible { outline: 2px solid var(--mobius-accent); outline-
   line-height: 1.55;
   margin-top: var(--mobius-space-base);
 }
+
+/* Managed subcount inside a duplicate-kind chip. The whole-corpus number and the
+   managed number sit together because the gap between them IS the finding: the
+   Payor queue only ever sees the managed half. */
+.ch-chip .ch-chip-sub {
+  font-style: normal;
+  margin-left: 0.4rem;
+  padding-left: 0.4rem;
+  border-left: 1px solid var(--mobius-border, rgba(0,0,0,.14));
+  color: var(--mobius-text-tertiary, var(--mobius-text-secondary));
+  font-size: 0.72rem;
+}

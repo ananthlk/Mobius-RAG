@@ -4153,7 +4153,14 @@ def corpus_health(payer: str | None = None,
             r = cur.fetchone()
             return int(r[0] or 0) if r else 0
 
+        # mode MATTERS here. gate_decisions now carries two kinds of run: the
+        # versioning gate (mode='corpus_wide') and duplicate determination
+        # (mode='duplicates'). Picking "the latest run" without filtering let the
+        # dedup run hijack this panel — the deployed page showed 467 documents
+        # scored and a `duplicate 467` chip inside VERSIONING, which is a
+        # different pass over a different candidate set entirely.
         cur.execute("SELECT run_id, max(decided_at) FROM gate_decisions "
+                    "WHERE mode <> 'duplicates' "
                     "GROUP BY run_id ORDER BY 2 DESC LIMIT 1")
         row = cur.fetchone()
         if not row:
@@ -4250,6 +4257,29 @@ def corpus_health(payer: str | None = None,
                 FROM gate_decisions g JOIN documents d ON d.id = g.document_id
                 WHERE g.run_id = %s {pw}""", (drun,) + args)
             crit, alld = cur.fetchone()
+            # MANAGED vs UNMANAGED — the reason this page and the Payor work
+            # queue disagree on how many duplicates exist. The Payor platform
+            # manages the documents it has classified; its Deduplicate queue is
+            # scoped to those. This page scans the whole corpus, most of which
+            # nobody manages (scraped nav pages, SAMHSA/GovInfo bulk, uploads).
+            # Both counts were right about different populations, which reads as
+            # a contradiction until the split is shown. Only the managed half is
+            # actionable in their queue, so only that half is deep-linked.
+            cur.execute(f"""SELECT
+                  count(DISTINCT g.document_id) FILTER (
+                    WHERE jsonb_typeof(d.source_metadata) = 'object'
+                      AND d.source_metadata ? 'payor_classification'),
+                  count(DISTINCT g.document_id)
+                FROM gate_decisions g JOIN documents d ON d.id = g.document_id
+                WHERE g.run_id = %s {pw}""", (drun,) + args)
+            managed, total_docs = cur.fetchone()
+            cur.execute(f"""SELECT g.duplicate_kind, count(DISTINCT g.document_id)
+                FROM gate_decisions g JOIN documents d ON d.id = g.document_id
+                WHERE g.run_id = %s {pw}
+                  AND jsonb_typeof(d.source_metadata) = 'object'
+                  AND d.source_metadata ? 'payor_classification'
+                GROUP BY 1""", (drun,) + args)
+            managed_by_kind = {k: int(v) for k, v in cur.fetchall() if k}
             dup_block = {
                 "measured": True, "run_id": str(drun),
                 "measured_at": dat.isoformat() if dat else None,
@@ -4258,6 +4288,12 @@ def corpus_health(payer: str | None = None,
                 "documents": int(alld or 0), "high_value_documents": int(crit or 0),
                 "high_value_basis": "importance=critical (proxy — facts.payor_fact "
                                     "has no document id to join on)",
+                "managed_documents": int(managed or 0),
+                "unmanaged_documents": int((total_docs or 0) - (managed or 0)),
+                "managed_by_kind": managed_by_kind,
+                "managed_basis": "has payor_classification — the Payor platform's "
+                                 "Deduplicate queue is scoped to these; the rest of "
+                                 "the corpus is nobody's managed set",
             }
 
         # ── sources of entry — "how did it get here", nothing more ────────
