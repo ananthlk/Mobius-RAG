@@ -494,71 +494,21 @@ export function CorpusHealthTab() {
 
           </Section>
 
-          <Section title="Duplicate cleanup"
-                   badge={cl?.measured ? (cl.actions?.retired_unpublished?.documents || null) : null}
-                   tone="good">
-          {!cl?.measured ? <div className="ch-empty">No cleanup has run.</div> : (
-            <>
-              <p className="ch-note">
-                Unmanaged duplicates are cleaned without waiting for a person; managed ones are
-                held for adjudication. Cleaning removes the <b>chunks, embeddings and vector
-                writes</b> — the document row, the GCS object, the extracted pages and the full
-                process log stay, so restoring one is a re-chunk, not a re-download.
-                These numbers come from the cleanup ledger, recorded as each removal happened:
-                once the rows are gone the corpus itself can no longer tell a cleaned document
-                from one that never chunked.
-              </p>
-              {(() => {
-                const r = cl.actions?.retired_unpublished
-                const h = cl.actions?.held_for_human
-                return (
-                  <>
-                    <div className="ch-cards">
-                      <div className="ch-card"><div className="ch-card-n green">{n(r?.documents || 0)}</div>
-                        <div className="ch-card-l">retired &amp; unpublished</div>
-                        <div className="ch-card-s">{n(r?.unmanaged || 0)} unmanaged · auto-cleaned</div></div>
-                      <div className="ch-card"><div className="ch-card-n green">{n(r?.vectors_removed || 0)}</div>
-                        <div className="ch-card-l">vectors out of the index</div>
-                        <div className="ch-card-s">
-                          {cl.index_share_removed_pct}% of the index · {n(cl.index_rows_now)} rows now live
-                        </div></div>
-                      <div className="ch-card"><div className="ch-card-n amber">{n(h?.documents || 0)}</div>
-                        <div className="ch-card-l">held for a human</div>
-                        <div className="ch-card-s">managed — withheld from publishing, not retired</div></div>
-                      <div className="ch-card"><div className="ch-card-n">{n(r?.reversible || 0)}</div>
-                        <div className="ch-card-l">reversible</div>
-                        <div className="ch-card-s">{n(r?.pages_retained || 0)} pages retained as reversal fuel</div></div>
-                    </div>
-                    <div className="ch-tablewrap">
-                      <table className="ch-table ch-queue">
-                        <thead><tr><th>Removed</th><th className="num">Rows</th><th>Kept</th></tr></thead>
-                        <tbody>
-                          <tr><td>Published vectors <span className="ch-card-s">live retrieval index</span></td>
-                            <td className="num">{n(r?.vectors_removed || 0)}</td>
-                            <td>GCS object <span className="ch-card-s">untouched at file_path</span></td></tr>
-                          <tr><td>Chunk embeddings</td><td className="num">{n(r?.embeddings_removed || 0)}</td>
-                            <td>Extracted pages <span className="ch-card-s">{n(r?.pages_retained || 0)} rows — enables re-chunk</span></td></tr>
-                          <tr><td>Hierarchical chunks</td><td className="num">{n(r?.chunks_removed || 0)}</td>
-                            <td>Process log <span className="ch-card-s">chunking jobs, publish events, status</span></td></tr>
-                          <tr><td>&nbsp;</td><td className="num">&nbsp;</td>
-                            <td>Decision trace <span className="ch-card-s">why each was retired, and against which copy</span></td></tr>
-                        </tbody>
-                      </table>
-                    </div>
-                  </>
-                )
-              })()}
-            </>
-          )}
-          </Section>
-
-          <Section title="Cleanup queue"
+          {/* ONE section, not four. This started as "Duplicate cleanup",
+              "Cleanup queue", "Versioning & deduplication" and "Duplicates" —
+              four accordions answering one question badly, because each was
+              added as it was built rather than designed alongside the others.
+              Read top to bottom it is now a sequence: what is waiting, what kind
+              of thing it is, what has already been done about it. */}
+          <Section title="Duplicates &amp; versioning"
                    badge={qq?.measured
                      ? ((qq.buckets?.awaiting_duplicate?.managed || 0)
                         + (qq.buckets?.awaiting_versioning?.managed || 0)) || null
                      : null} tone="warn">
           {!qq?.measured ? <div className="ch-empty">Nothing scored yet.</div> : (
             <>
+              {/* ── 1. what is waiting ───────────────────────────────── */}
+              <h4 className="ch-sub">What is waiting</h4>
               <p className="ch-note">
                 Every scored document sits in exactly one bucket, so these sum to the total —
                 that is what makes <b>clean</b> a number worth trusting. A document waiting on
@@ -601,102 +551,118 @@ export function CorpusHealthTab() {
                   </tbody>
                 </table>
               </div>
-            </>
-          )}
-          </Section>
+              <a className="ch-actionlink" href={`${PAYOR_BASE}${PAYOR_QUEUE_PATH}`}
+                 target="_blank" rel="noopener noreferrer">
+                Decide the managed ones in the Payor work queue <span className="ch-out">↗</span>
+              </a>
 
-          <Section title="Versioning &amp; deduplication"
-                   badge={g?.awaiting_adjudication || null} tone="warn">
-          {!g?.measured ? <div className="ch-empty">The gate has not run yet.</div> : (
-            <>
-              <div className="ch-cards">
-                <div className="ch-card"><div className="ch-card-n">{n(g.documents_scored)}</div>
-                  <div className="ch-card-l">documents scored</div></div>
-                <a className="ch-card ch-card-link"
-                   href={`${PAYOR_BASE}${PAYOR_QUEUE_PATH}`}
-                   target="_blank" rel="noopener noreferrer">
-                  <div className="ch-card-n amber">{n(g.awaiting_adjudication)}</div>
-                  <div className="ch-card-l">awaiting a human <span className="ch-out">↗</span></div>
-                  <div className="ch-card-s">
-                    decided in Fact Store's working queue, not here — each pending one is an
-                    extra active version competing in retrieval
+              {/* ── 2. what kind of thing they are ───────────────────── */}
+              {d?.measured && (
+                <>
+                  <h4 className="ch-sub">What kind they are</h4>
+                  <p className="ch-note">
+                    <b>A pair counts as a duplicate only when every signal agrees</b> — identical
+                    text, length, page count, reporting period and product. Everything else is
+                    held rather than retired, because a blank annual form is identical every year
+                    and one product's copy of a policy is identical to another's. Both are
+                    legitimately separate documents.
+                  </p>
+                  <div className="ch-chips">
+                    {Object.entries(d.by_kind || {}).sort((a, b) => b[1] - a[1]).map(([k, v]) => (
+                      <span key={k} className={`ch-chip ch-chip-${k}`}>
+                        {k.replace(/_/g, ' ')} <b>{n(v)}</b>
+                        {d.managed_by_kind?.[k] != null && (
+                          <i className="ch-chip-sub">{n(d.managed_by_kind[k])} managed</i>
+                        )}
+                      </span>
+                    ))}
                   </div>
-                </a>
-                <div className="ch-card"><div className="ch-card-n green">{n(g.chunks_carried)}</div>
-                  <div className="ch-card-l">chunks carried forward</div>
-                  <div className="ch-card-s">embeddings reused, not recomputed</div></div>
-                <div className="ch-card"><div className="ch-card-n">{n(g.chunks_reembedded)}</div>
-                  <div className="ch-card-l">chunks re-embedded</div></div>
-              </div>
-              <div className="ch-chips">
-                {Object.entries(g.by_decision || {}).sort((a, b) => b[1] - a[1]).map(([k, v]) => (
-                  <span key={k} className={`ch-chip ch-chip-${k}`}>
-                    {k.replace(/_/g, ' ')} <b>{n(v)}</b>
-                  </span>
-                ))}
-              </div>
-            </>
-          )}
-          </Section>
+                  <p className="ch-note ch-note-dim">
+                    <b>duplicate</b> = every signal agreed · <b>period series</b> = same form,
+                    different reporting period · <b>product variant</b> = same template, different
+                    product under Medicaid · <b>ordering unknown</b> = no usable edition date on
+                    either side · <b>product unknown</b> = neither document declares its product.
+                    Only the first is a duplicate; nothing in the others is ever retired
+                    automatically.
+                  </p>
+                </>
+              )}
 
-          <Section title="Duplicates"
-                   badge={d?.measured ? (d.by_kind?.duplicate || null) : null} tone="warn">
-          {!d?.measured ? <div className="ch-empty">Duplicate determination has not run yet.</div> : (
-            <>
-              <p className="ch-note">
-                Duplication is not lineage — the versioning gate only compares documents that
-                share a doc_key, and most of the corpus has none, so copies never met inside it.
-                This is a separate pass over normalized page text.
-                <b> A pair counts as a duplicate only when every signal agrees</b> — identical
-                text, length, page count, reporting period and product. Everything else is held,
-                because a blank annual form is identical every year and one product's copy of a
-                policy is identical to another's; both are legitimately separate documents.
-              </p>
-              <div className="ch-cards">
-                <div className="ch-card"><div className="ch-card-n">{n(d.by_kind?.duplicate || 0)}</div>
-                  <div className="ch-card-l">true duplicates</div>
-                  <div className="ch-card-s">every signal agreed</div></div>
-                <div className="ch-card"><div className="ch-card-n green">{n(d.retirable || 0)}</div>
-                  <div className="ch-card-l">safe to retire now</div>
-                  <div className="ch-card-s">
-                    {d.retirable ? 'canonical rests on a real edition date'
-                                 : 'none — every duplicate pair lacks the dates to pick a canonical'}
-                  </div></div>
-                <div className="ch-card"><div className="ch-card-n amber">{n(d.held_no_date || 0)}</div>
-                  <div className="ch-card-l">held, needs a human</div>
-                  <div className="ch-card-s">identical but undated — picking a winner would be a coin flip</div></div>
-                <a className="ch-card ch-card-link"
-                   href={`${PAYOR_BASE}${PAYOR_QUEUE_PATH}`}
-                   target="_blank" rel="noopener noreferrer">
-                  <div className="ch-card-n amber">{n(d.managed_documents || 0)}</div>
-                  <div className="ch-card-l">managed — actionable <span className="ch-out">↗</span></div>
-                  <div className="ch-card-s">
-                    resolved in the Payor platform's Deduplicate queue, which is scoped to
-                    documents it manages. Only these are actionable there.
-                  </div></a>
-                <div className="ch-card"><div className="ch-card-n">{n(d.unmanaged_documents || 0)}</div>
-                  <div className="ch-card-l">unmanaged</div>
-                  <div className="ch-card-s">
-                    scraped nav pages, bulk sources and uploads nobody manages — the long tail,
-                    and the reason this page's totals exceed the Payor queue's
-                  </div></div>
-              </div>
-              <div className="ch-chips">
-                {Object.entries(d.by_kind || {}).sort((a, b) => b[1] - a[1]).map(([k, v]) => (
-                  <span key={k} className={`ch-chip ch-chip-${k}`}>
-                    {k.replace(/_/g, ' ')} <b>{n(v)}</b>
-                    {d.managed_by_kind?.[k] != null && (
-                      <i className="ch-chip-sub">{n(d.managed_by_kind[k])} managed</i>
+              {/* ── 3. what has already been done ────────────────────── */}
+              {cl?.measured && (() => {
+                const r = cl.actions?.retired_unpublished
+                const h = cl.actions?.held_for_human
+                return (
+                  <>
+                    <h4 className="ch-sub">What has been cleaned</h4>
+                    <p className="ch-note">
+                      Unmanaged duplicates are cleaned without waiting for a person; managed ones
+                      are held for adjudication. Cleaning removes the <b>chunks, embeddings and
+                      vector writes</b> — the document row, the GCS object, the extracted pages and
+                      the process log stay, so restoring one is a re-chunk, not a re-download.
+                      These come from the cleanup ledger, recorded as each removal happened: once
+                      the rows are gone the corpus cannot tell a cleaned document from one that
+                      never chunked.
+                    </p>
+                    <div className="ch-cards">
+                      <div className="ch-card"><div className="ch-card-n green">{n(r?.documents || 0)}</div>
+                        <div className="ch-card-l">retired &amp; unpublished</div>
+                        <div className="ch-card-s">{n(r?.unmanaged || 0)} unmanaged · auto-cleaned</div></div>
+                      <div className="ch-card"><div className="ch-card-n green">{n(r?.vectors_removed || 0)}</div>
+                        <div className="ch-card-l">vectors out of the index</div>
+                        <div className="ch-card-s">
+                          {cl.index_share_removed_pct}% · {n(cl.index_rows_now)} rows live now
+                        </div></div>
+                      <div className="ch-card"><div className="ch-card-n amber">{n(h?.documents || 0)}</div>
+                        <div className="ch-card-l">held for a human</div>
+                        <div className="ch-card-s">managed — withheld from cleanup, still published</div></div>
+                      <div className="ch-card"><div className="ch-card-n">{n(r?.reversible || 0)}</div>
+                        <div className="ch-card-l">reversible</div>
+                        <div className="ch-card-s">{n(r?.pages_retained || 0)} pages retained as reversal fuel</div></div>
+                    </div>
+                    <div className="ch-tablewrap">
+                      <table className="ch-table ch-queue">
+                        <thead><tr><th>Removed</th><th className="num">Rows</th><th>Kept</th></tr></thead>
+                        <tbody>
+                          <tr><td>Published vectors <span className="ch-card-s">live retrieval index</span></td>
+                            <td className="num">{n(r?.vectors_removed || 0)}</td>
+                            <td>GCS object <span className="ch-card-s">untouched at file_path</span></td></tr>
+                          <tr><td>Chunk embeddings</td><td className="num">{n(r?.embeddings_removed || 0)}</td>
+                            <td>Extracted pages <span className="ch-card-s">{n(r?.pages_retained || 0)} rows — enables re-chunk</span></td></tr>
+                          <tr><td>Hierarchical chunks</td><td className="num">{n(r?.chunks_removed || 0)}</td>
+                            <td>Process log <span className="ch-card-s">chunking jobs, publish events, status</span></td></tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                )
+              })()}
+
+              {/* ── versioning gate, folded in rather than given its own box ── */}
+              {g?.measured && (
+                <>
+                  <h4 className="ch-sub">Versioning gate</h4>
+                  <p className="ch-note">
+                    Versions are not duplicates: a superseded edition stays <b>published</b> and
+                    retrievable as history, retired by date only. Duplicates are unpublished.
+                    {(g.successors || 0) + (g.awaiting_adjudication || 0) < 50 && (
+                      <> This is quiet by construction — a second edition only exists once a URL
+                      is re-fetched, so versioning stays near-empty until the next scrape.</>
                     )}
-                  </span>
-                ))}
-              </div>
-              <p className="ch-note ch-note-dim">
-                period series = same form, different reporting period · product variant = same
-                template, different product under Medicaid · ordering unknown = no usable edition
-                date on either side · product unknown = neither document declares its product.
-                None of these are duplicates and nothing in them is ever retired automatically.
-              </p>
+                  </p>
+                  <div className="ch-chips">
+                    {Object.entries(g.by_decision || {}).sort((a, b) => b[1] - a[1]).map(([k, v]) => (
+                      <span key={k} className={`ch-chip ch-chip-${k}`}>
+                        {k.replace(/_/g, ' ')} <b>{n(v)}</b>
+                      </span>
+                    ))}
+                  </div>
+                  <p className="ch-note ch-note-dim">
+                    {n(g.chunks_carried)} chunks carried forward (embeddings reused, not
+                    recomputed) · {n(g.chunks_reembedded)} re-embedded.
+                  </p>
+                </>
+              )}
             </>
           )}
           </Section>

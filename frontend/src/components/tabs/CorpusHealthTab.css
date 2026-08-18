@@ -478,3 +478,24 @@ a.ch-card-link:focus-visible { outline: 2px solid var(--mobius-accent); outline-
 .ch-queue td.num, .ch-queue th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .ch-queue tr.is-total td { border-top: 2px solid var(--mobius-border, rgba(0,0,0,.16)); font-weight: 600; }
 .ch-queue tr.is-clean td { color: var(--mobius-text-secondary); }
+
+/* Sub-headings inside a combined section. The section is a sequence — what is
+   waiting, what kind, what was cleaned — and these are its steps. */
+.ch-sub {
+  margin: var(--mobius-space-lg) 0 var(--mobius-space-sm);
+  font-size: 0.82rem;
+  font-weight: 650;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--mobius-text-secondary);
+}
+.ch-acc-body > .ch-sub:first-child { margin-top: 0; }
+.ch-actionlink {
+  display: inline-block;
+  margin-top: var(--mobius-space-sm);
+  font-size: .82rem;
+  font-weight: 600;
+  color: var(--mobius-violet, #7c3aed);
+  text-decoration: none;
+}
+.ch-actionlink:hover { text-decoration: underline; }
