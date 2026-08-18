@@ -472,3 +472,9 @@ a.ch-card-link:focus-visible { outline: 2px solid var(--mobius-accent); outline-
   color: var(--mobius-text-tertiary, var(--mobius-text-secondary));
   font-size: 0.72rem;
 }
+
+/* Cleanup queue. The buckets partition the corpus, so the total row is a real
+   check the reader can do by eye — it should always add up. */
+.ch-queue td.num, .ch-queue th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.ch-queue tr.is-total td { border-top: 2px solid var(--mobius-border, rgba(0,0,0,.16)); font-weight: 600; }
+.ch-queue tr.is-clean td { color: var(--mobius-text-secondary); }

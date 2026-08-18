@@ -52,6 +52,11 @@ interface Health {
     managed_documents?: number; unmanaged_documents?: number
     managed_by_kind?: Record<string, number>; managed_basis?: string
   }
+  queue: {
+    measured: boolean
+    scored?: { managed: number; unmanaged: number }
+    buckets?: Record<string, { managed: number; unmanaged: number }>
+  }
 }
 interface StageLat {
   step: string; label: string; kind: 'wait' | 'work'
@@ -175,6 +180,7 @@ export function CorpusHealthTab() {
 
   const g = health?.gate
   const d = health?.duplicates
+  const qq = health?.queue
   const asOf = health?.as_of ? new Date(health.as_of).toLocaleString() : null
 
   // Which preset is active is DERIVED from the dates rather than stored, so it
@@ -471,6 +477,59 @@ export function CorpusHealthTab() {
             </table>
           </div>
 
+          </Section>
+
+          <Section title="Cleanup queue"
+                   badge={qq?.measured
+                     ? ((qq.buckets?.awaiting_duplicate?.managed || 0)
+                        + (qq.buckets?.awaiting_versioning?.managed || 0)) || null
+                     : null} tone="warn">
+          {!qq?.measured ? <div className="ch-empty">Nothing scored yet.</div> : (
+            <>
+              <p className="ch-note">
+                Every scored document sits in exactly one bucket, so these sum to the total —
+                that is what makes <b>clean</b> a number worth trusting. A document waiting on
+                both determinations is counted once, in the one that must clear first.
+                <b> Managed</b> documents are the ones the Payor platform classified and can act
+                on; the rest are the long tail nobody owns.
+              </p>
+              <div className="ch-tablewrap">
+                <table className="ch-table ch-queue">
+                  <thead><tr>
+                    <th>Queue</th><th className="num">Managed</th>
+                    <th className="num">Unmanaged</th><th className="num">Total</th>
+                  </tr></thead>
+                  <tbody>
+                    {([
+                      ['awaiting_duplicate', 'Awaiting duplicate determination',
+                       'in a candidate pair — held until a person decides, none auto-retired'],
+                      ['awaiting_versioning', 'Awaiting versioning determination',
+                       'overlap or ordering the gate would not call on its own'],
+                      ['unpublishable', 'Unpublishable',
+                       'no pages or no chunks — neither determination is possible until fixed'],
+                      ['clean', 'Clean', 'scored, unambiguous, nothing pending'],
+                    ] as const).map(([k, label, why]) => {
+                      const b = qq.buckets?.[k] || { managed: 0, unmanaged: 0 }
+                      return (
+                        <tr key={k} className={k === 'clean' ? 'is-clean' : ''}>
+                          <td><b>{label}</b><div className="ch-card-s">{why}</div></td>
+                          <td className="num">{n(b.managed)}</td>
+                          <td className="num">{n(b.unmanaged)}</td>
+                          <td className="num">{n(b.managed + b.unmanaged)}</td>
+                        </tr>
+                      )
+                    })}
+                    <tr className="is-total">
+                      <td><b>Documents scored</b></td>
+                      <td className="num">{n(qq.scored?.managed)}</td>
+                      <td className="num">{n(qq.scored?.unmanaged)}</td>
+                      <td className="num">{n((qq.scored?.managed || 0) + (qq.scored?.unmanaged || 0))}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
           </Section>
 
           <Section title="Versioning &amp; deduplication"

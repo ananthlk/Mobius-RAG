@@ -4296,6 +4296,56 @@ def corpus_health(payer: str | None = None,
                                  "the corpus is nobody's managed set",
             }
 
+        # ── the cleanup queue ─────────────────────────────────────────────
+        #
+        # One row per document, one bucket each, split managed vs unmanaged.
+        # The buckets partition the scored corpus exactly — they must sum to
+        # documents_scored, which is the only property that makes "clean" a
+        # number worth trusting rather than a leftover.
+        #
+        # Precedence is deliberate: unpublishable outranks everything (it has no
+        # text to compare, so neither determination is even possible), then
+        # duplicate, then versioning. A document waiting on both is counted once,
+        # in the queue that must clear first.
+        #
+        # COALESCE on the managed test matters: jsonb_typeof(NULL) is NULL, not
+        # false, so without it 1,965 documents with NULL source_metadata fall out
+        # of the split entirely and the buckets silently stop summing.
+        if not drow:
+            queue_block = {"measured": False}
+        else:
+            cur.execute(f"""
+                WITH m AS (
+                  SELECT id, COALESCE(jsonb_typeof(source_metadata) = 'object'
+                                      AND source_metadata ? 'payor_classification',
+                                      false) AS managed
+                  FROM documents),
+                v AS (SELECT document_id, decision, adjudication_target
+                      FROM gate_decisions WHERE run_id = %s),
+                dp AS (SELECT DISTINCT document_id FROM gate_decisions WHERE run_id = %s)
+                SELECT CASE
+                         WHEN v.decision = 'unpublishable'      THEN 'unpublishable'
+                         WHEN dp.document_id IS NOT NULL        THEN 'awaiting_duplicate'
+                         WHEN v.adjudication_target IS NOT NULL THEN 'awaiting_versioning'
+                         ELSE 'clean' END AS bucket,
+                       m.managed, count(*)
+                FROM v JOIN m ON m.id = v.document_id
+                LEFT JOIN dp ON dp.document_id = v.document_id
+                JOIN documents d ON d.id = v.document_id
+                WHERE TRUE {pw}
+                GROUP BY 1, 2""", (run_id, drun) + args)
+            buckets: dict = {}
+            for b, mg, cnt in cur.fetchall():
+                slot = buckets.setdefault(b, {"managed": 0, "unmanaged": 0})
+                slot["managed" if mg else "unmanaged"] += int(cnt)
+            for b in ("awaiting_duplicate", "awaiting_versioning", "unpublishable", "clean"):
+                buckets.setdefault(b, {"managed": 0, "unmanaged": 0})
+            scored = {
+                "managed": sum(v["managed"] for v in buckets.values()),
+                "unmanaged": sum(v["unmanaged"] for v in buckets.values()),
+            }
+            queue_block = {"measured": True, "scored": scored, "buckets": buckets}
+
         # ── sources of entry — "how did it get here", nothing more ────────
         sources = []
         for src in _SOURCES:
@@ -4407,6 +4457,7 @@ def corpus_health(payer: str | None = None,
                 "tracked": int(tracked), "unpublishable": int(unpublishable),
             },
             "duplicates": dup_block,
+            "queue": queue_block,
         }
     finally:
         conn.close()
