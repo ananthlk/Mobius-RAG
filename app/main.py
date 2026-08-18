@@ -4357,13 +4357,11 @@ def corpus_health(payer: str | None = None,
                 -- the fastest way to teach someone their decisions do not count.
                 dp AS (SELECT DISTINCT g.document_id FROM gate_decisions g
                        WHERE g.run_id = %s
-                         AND NOT EXISTS (SELECT 1 FROM corpus_cleanup_actions a
-                                         WHERE a.canonical_id = g.document_id)
-                         AND NOT EXISTS (SELECT 1 FROM corpus_cleanup_actions a2
-                                         WHERE a2.document_id = g.document_id
-                                           AND a2.action IN ('retired_unpublished',
-                                                             'kept_not_duplicate',
-                                                             'shelved')))
+                         AND NOT EXISTS (
+                           SELECT 1 FROM corpus_cleanup_actions a
+                           WHERE (a.document_id = g.document_id
+                                  OR a.canonical_id = g.document_id)
+                             AND a.action IN %s))
                 SELECT CASE
                          WHEN v.decision = 'unpublishable'      THEN 'unpublishable'
                          WHEN dp.document_id IS NOT NULL        THEN 'awaiting_duplicate'
@@ -4374,7 +4372,7 @@ def corpus_health(payer: str | None = None,
                 LEFT JOIN dp ON dp.document_id = v.document_id
                 JOIN documents d ON d.id = v.document_id
                 WHERE TRUE {pw}
-                GROUP BY 1, 2""", (run_id, drun) + args)
+                GROUP BY 1, 2""", (run_id, drun, _RESOLVING_ACTIONS) + args)
             buckets: dict = {}
             for b, mg, cnt in cur.fetchall():
                 slot = buckets.setdefault(b, {"managed": 0, "unmanaged": 0})
@@ -4918,8 +4916,9 @@ def corpus_duplicate_decisions(payer: str | None = None, since: str | None = Non
                    count(DISTINCT g.document_id) FILTER (WHERE d.lifecycle_state='retired'),
                    count(DISTINCT g.document_id) FILTER (
                      WHERE EXISTS (SELECT 1 FROM corpus_cleanup_actions a
-                                   WHERE a.document_id=g.document_id
-                                     AND a.action IN ('kept_not_duplicate','held_for_human')))
+                                   WHERE (a.document_id = g.document_id
+                                          OR a.canonical_id = g.document_id)
+                                     AND a.action_source <> 'rag_batch'))
             FROM gate_decisions g
             JOIN documents d ON d.id = g.document_id
             JOIN LATERAL (SELECT COALESCE(jsonb_typeof(d.source_metadata)='object'
@@ -4946,6 +4945,33 @@ def corpus_duplicate_decisions(payer: str | None = None, since: str | None = Non
                               "rules": groups[v]} for v in _VERDICT_ORDER]}
     finally:
         conn.close()
+
+
+# Actions that RESOLVE a pair. A decision must clear BOTH documents: a human who
+# ruled "these are two products" has answered the question for the pair, not for
+# one filename. Cytogam.pdf came back into the queue after exactly that decision
+# because only `document_id` was excluded, while CMS-Cytogam.pdf dropped out for
+# an unrelated reason (it happened to be the row's canonical_id) — so the pair was
+# half-resolved by accident in one direction and not at all in the other.
+#
+# Being asked the same question twice is how a person learns their decisions do
+# not count, so this list is deliberately broad: every action that constitutes an
+# answer belongs here, whether or not it changed the corpus.
+_RESOLVING_ACTIONS = (
+    'retired_unpublished',    # it was a duplicate; the loser is unpublished
+    'kept_not_duplicate',     # it was not
+    'shelved',
+    'mark_product_variant',   # two products — both stay, question answered
+    'mark_period_series',     # two periods — both stay, question answered
+    'keep_both',
+    'reclassify_as_version',  # handed to versioning; no longer a dedup question
+    'held_for_human',         # explicitly parked for the Payor queue
+)
+
+_RESOLVED_SQL = """NOT EXISTS (
+    SELECT 1 FROM corpus_cleanup_actions a
+    WHERE (a.document_id = {col} OR a.canonical_id = {col})
+      AND a.action IN %s)"""
 
 
 _BUCKET_ACTIONS: dict[str, list[dict]] = {
@@ -5020,11 +5046,7 @@ def corpus_bucket_documents(bucket: str, payer: str | None = None,
         vrun = vr[0]
         drun = dr[0] if dr else None
 
-        resolved = """NOT EXISTS (SELECT 1 FROM corpus_cleanup_actions a
-                      WHERE a.canonical_id = g.document_id)
-                      AND NOT EXISTS (SELECT 1 FROM corpus_cleanup_actions a2
-                      WHERE a2.document_id = g.document_id
-                        AND a2.action IN ('retired_unpublished','kept_not_duplicate','shelved'))"""
+        resolved = _RESOLVED_SQL.format(col="g.document_id")
 
         kw = ""
         if kind and bucket == "awaiting_duplicate":
@@ -5045,7 +5067,7 @@ def corpus_bucket_documents(bucket: str, payer: str | None = None,
                   AND d.lifecycle_state IS DISTINCT FROM 'retired' {w}
                 ORDER BY d.id, g.overlap_ratio DESC NULLS LAST
                 LIMIT %s"""
-            pre = (drun, kind) if kw else (drun,)
+            pre = (drun, kind, _RESOLVING_ACTIONS) if kw else (drun, _RESOLVING_ACTIONS)
             cur.execute(sql, pre + tuple(args_l) + (limit,))
         else:
             dec = {"unpublishable": "g.decision = 'unpublishable'",
