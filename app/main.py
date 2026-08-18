@@ -4712,6 +4712,44 @@ def corpus_duplicate_action(body: DuplicateAction):
             rechunk_required = life == "retired"
             effects.append("canonical retired and unpublished; this document restored to active")
 
+        elif act == "mark_product_variant":
+            # ENFORCED, not requested. A product variant pair is only resolved when
+            # BOTH documents carry a product. Tagging one side leaves the other
+            # "product undeclared" forever: the product_unknown rule keeps firing
+            # on it, and the next pair it lands in is undecidable again. The
+            # asymmetry compounds — the tagged side improves every time a human
+            # touches it, the untagged side never does.
+            #
+            # Failing loudly here is the point. Accepting a half-tagged pair would
+            # record a decision that looks complete and silently is not, which is
+            # the defect class this whole seam has been chasing.
+            if not body.canonical_id:
+                conn.rollback()
+                raise HTTPException(400, "mark_product_variant requires canonical_id — "
+                                         "the other document in the pair")
+            missing = []
+            for _id, _role in ((body.document_id, "document"), (body.canonical_id, "counterpart")):
+                cur.execute("""SELECT filename, source_metadata->'product_line'->>'value'
+                               FROM documents WHERE id = %s""", (_id,))
+                _r = cur.fetchone()
+                if not _r:
+                    conn.rollback()
+                    raise HTTPException(404, f"{_role} {_id} not found")
+                if not _r[1]:
+                    missing.append(f"{_r[0]} ({_role})")
+            if missing:
+                conn.rollback()
+                raise HTTPException(
+                    409,
+                    "product_line is not set on: " + "; ".join(missing) +
+                    ". Both sides of a product-variant pair must carry a product before the "
+                    "decision can be recorded — otherwise the untagged document stays "
+                    "'product undeclared' and the same pair becomes undecidable again. "
+                    "Any explicit value works ('base', 'all_products', LTC/CMS/MMA); what "
+                    "cannot be accepted is silence, because silence and a decision look "
+                    "identical afterwards.")
+            effects.append("both documents carry a product; pair resolved, nothing unpublished")
+
         elif act == "reclassify_as_version":
             # NOT dedup. The prior edition stays PUBLISHED and retrievable as
             # history, retired by DATE only. Retiring editions out of the index
@@ -4785,11 +4823,26 @@ def corpus_duplicate_action(body: DuplicateAction):
         action_id, acted_at = cur.fetchone()
         conn.commit()
 
+        # The caller has its own queue to close. Telling it only what happened in
+        # prose means it has to parse English to know whether the item is done, so
+        # the resolution is explicit and machine-readable: which documents this
+        # decision clears, and whether the pair is finished.
+        _resolving = act in ("retire_duplicate", "keep_both", "mark_product_variant",
+                             "mark_period_series", "reclassify_as_version",
+                             "swap_canonical", "quarantine_both")
+        _cleared = [x for x in (body.document_id, body.canonical_id) if x] if _resolving else []
         return {
             "status": "executed", "action": act, "action_id": str(action_id),
             "document_id": body.document_id, "canonical_id": body.canonical_id,
             "acted_at": acted_at.isoformat() if acted_at else None,
             "effects": effects,
+            "resolved": _resolving,
+            "resolves_documents": _cleared,
+            "queue_state": "resolved" if _resolving else "still_open",
+            "user_message": (
+                f"Resolved — {len(_cleared)} document(s) cleared from the duplicate queue."
+                if _resolving else
+                "Recorded. This does not resolve the pair; it stays in the queue."),
             "vectors_removed": removed.get("rag_published_embeddings", 0),
             "chunks_removed": removed.get("hierarchical_chunks", 0),
             "rechunk_required": rechunk_required,
