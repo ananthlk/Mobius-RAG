@@ -118,3 +118,7 @@
   background: var(--bg-card, #fff); }
 .ch-owner { color: var(--text-secondary); font-size: .78125rem; }
 .ch-ext-row td { opacity: .68; }
+.ch-gate-tag { font-size: .5625rem; text-transform: uppercase; letter-spacing: .07em;
+  color: #b91c1c; border: 1px solid currentColor; border-radius: 3px; padding: 0 .28em;
+  margin-left: .45rem; vertical-align: middle; }
+.ch-blocked { color: #b91c1c; font-weight: 550; }

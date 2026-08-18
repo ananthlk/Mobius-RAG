@@ -4032,6 +4032,12 @@ def _source_sql(key: str) -> str | None:
 # already run (lexicon tagging, policy lines) and more will follow. Same rule as
 # sources: adding one is a SINGLE entry, and a classifier whose results live in
 # another store is listed with its owner rather than silently counted as absent.
+# ``gating`` marks a classifier that can HALT the pipeline rather than merely
+# enrich. PHI is the only one today (`phi_blocked` is a real document status —
+# app/main.py:4751, :5745). The distinction matters: a document missing lexicon
+# tags is under-enriched and still servable; a document missing a PHI verdict has
+# not been cleared to proceed at all. Reporting both as "unclassified" would flatten
+# a compliance gate into a coverage gap.
 _CLASSIFIERS: list[dict] = [
     {"key": "payor", "label": "Payor Platform", "owner": "Fact Store",
      "what": "importance, authority, claim",
@@ -4043,7 +4049,8 @@ _CLASSIFIERS: list[dict] = [
      "what": "extracted policy statements",
      "predicate": "EXISTS (SELECT 1 FROM policy_lines pl WHERE pl.document_id=d.id)"},
     {"key": "phi", "label": "PHI / HIPAA", "owner": "PHI classifier",
-     "what": "protected-health-information gate",
+     "what": "protected-health-information gate — CAN BLOCK ingestion",
+     "gating": True, "blocked_status": "phi_blocked",
      "predicate": None, "why": "runs out of process; verdicts are not stored in this corpus"},
 ]
 
@@ -4158,15 +4165,20 @@ def corpus_health(payer: str | None = None) -> dict:
         # ── CLASSIFIERS — coverage per classifier, not one lumped stage ────
         classifiers = []
         for cf in _CLASSIFIERS:
+            gating = bool(cf.get("gating"))
+            blocked = (one("SELECT count(*) FROM documents d WHERE d.status = %s "
+                           + pw, (cf["blocked_status"],) + args)
+                       if gating and cf.get("blocked_status") else None)
             if not cf.get("predicate"):
                 classifiers.append({**{k: cf[k] for k in ("key", "label", "owner", "what")},
                                     "external": True, "why": cf.get("why"),
+                                    "gating": gating, "blocked": blocked,
                                     "scored": None, "coverage_pct": None})
                 continue
             scored = one(f"SELECT count(*) FROM documents d WHERE {cf['predicate']} {pw}", args)
             classifiers.append({
                 **{k: cf[k] for k in ("key", "label", "owner", "what")},
-                "external": False, "scored": scored,
+                "external": False, "gating": gating, "blocked": blocked, "scored": scored,
                 "coverage_pct": round((scored / total * 100) if total else 0.0, 1),
             })
 

@@ -50,6 +50,9 @@ interface Classifier {
   why?: string
   scored: number | null
   coverage_pct: number | null
+  /** A gating classifier can halt the pipeline, not just enrich it. */
+  gating?: boolean
+  blocked?: number | null
 }
 
 interface Health {
@@ -275,8 +278,14 @@ export function CorpusHealthTab() {
                       <span className={`ch-pip ${cf.external ? '' :
                         (cf.coverage_pct! > 90 ? 'tone-good' : cf.coverage_pct! > 10 ? 'tone-warn' : 'tone-bad')}`} />
                       {cf.label}
+                      {cf.gating && <span className="ch-gate-tag">gate</span>}
                     </td>
-                    <td className="ch-reason">{cf.what}</td>
+                    <td className="ch-reason">
+                      {cf.what}
+                      {cf.gating && (cf.blocked ?? 0) > 0 && (
+                        <span className="ch-blocked"> · {n(cf.blocked!)} blocked</span>
+                      )}
+                    </td>
                     <td className="ch-owner">{cf.owner}</td>
                     <td className="num">{cf.external ? '—' : n(cf.scored!)}</td>
                     <td className="num">
