@@ -1255,3 +1255,73 @@ human rather than be silently resolved.
    the embedding layer. That strengthens Case A well beyond what §16.3 proved.
 4. **Add `source_created_at` / `source_modified_at` / `first_seen_at`** to §9's column set, with a
    `edition_date_confidence` enum recording which rung of the ladder supplied it.
+
+
+---
+
+## 19. §18 retested after the backfill — the ladder was in the wrong order
+
+Backfill complete: **6,200 documents now carry a publication date, up from 949.** 5,313 extracted,
+30 files genuinely had no date, 86 errors (mostly files stored as `.pdf` that are HTML).
+
+### 19.1 Coverage — a 10x improvement
+
+| Ladder rung | Docs | Share |
+|---|---|---|
+| `source_modified` | 3,935 | 71.6% |
+| `source_created` | 57 | 1.0% |
+| `filename` | 17 | 0.3% |
+| `first_seen` *(weak)* | 1,487 | 27.1% |
+| none | 0 | 0% |
+
+**Trustworthy ordering went from 6.9% to 72.9% of AHCA.** Every document now has *some* ordering date;
+the question is only how much to trust it.
+
+### 19.2 Ground truth — 7 of 8, and the failure is instructive
+
+Against the `Attachment II` chain, whose true order is known from filename dates:
+
+```
+true 2019-02-01   published 2019-03-08    +35d
+true 2020-02-01   published 2020-02-20    +19d
+true 2020-07-01   published 2020-08-20    +50d
+true 2020-10-01   published 2021-01-11   +102d
+true 2021-10-01   published 2021-10-20    +19d
+true 2022-02-01   published 2022-05-06    +94d
+true 2022-10-01   published 2023-02-17   +139d
+true 2022-11-04   published 2022-10-26     -9d   ← INVERSION
+```
+
+Seven of eight order correctly. The inversion is **not** the re-export failure mode predicted in §18.3 —
+the `/Producer` is Microsoft Word throughout, and there is no bulk converter in sight.
+
+The real mechanism is **lag variance**. Publication runs anywhere from **9 days before** to **139 days
+after** the stated edition date. When the lag spread between two editions exceeds the gap between them,
+they swap: these two are 34 days apart, and their lags differ by 148 days.
+
+### 19.3 The ladder was wrong — filename outranks publication
+
+§18.3 put `source_modified` first and `filename` third. The evidence inverts that.
+
+A filename date is the **stated edition date** — semantically the thing we want ("which edition is
+this"). A publication date is **when the file was produced**, a proxy that carries ±150 days of noise.
+Where both exist, the filename is the better answer, and in this chain it *is* the ground truth.
+
+```
+edition_date := filename_date          -- stated edition; high precision, ~12% coverage
+             ?? source_modified_at     -- publication; ~72% coverage, +-150d noise
+             ?? source_created_at
+             ?? first_seen_at          -- weak, flag it
+             ?? NULL                   -- degenerate -> human
+```
+
+**Cross-check, not just precedence:** when both a filename and a publication date exist and disagree by
+more than ~180 days, the ordering is suspect and the cluster should route to a human rather than resolve
+silently. That single rule would have caught this inversion.
+
+### 19.4 Effect
+
+Chains orderable without a human went from **1 to 3 of 7**. The remaining four lack any per-edition date —
+they are the undated `Attachment_II_-_Core_Contract_Provisions.pdf` style filenames, where neither the
+name nor the file metadata distinguishes editions. Those are genuinely a human's call, which is the
+correct outcome rather than a gap.
