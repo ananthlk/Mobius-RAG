@@ -95,6 +95,76 @@ normalized chunk hashes, and a re-chunk with identical normalized text must prod
 If the chunker changes, `content_digest` is recomputed for all documents in one migration and compared
 against the stored value — a corpus-wide no-op, not a corpus-wide version event.
 
+### 2.2 `doc_key` — redesigned after step 0 (2026-08-17)
+
+The original key (payer + jurisdiction + doc_type + rule number) **failed on measurement**: 2.3% coverage,
+and the title fallback produced a 590-document cluster. Diagnosis below; the 590 was not a normalization
+bug.
+
+#### What step 0 actually found
+
+**a. `display_name` is a category label, not a title, for 49.4% of AHCA documents.** 590 documents share
+the literal string *"AHCA — state Medicaid managed-care contract (model/plan)"*; 574 share the policy-rule
+label; 484 share the forms label. 2,701 documents share a `display_name` with at least one other. That
+*is* the 590 cluster — no normalization collapsed anything, the field simply holds a classification.
+`filename` is far cleaner: only 200 documents share one.
+
+**b. A rule number in the body is a CITATION, not an identity.** Reading content lifts rule-number coverage
+2.3% → 8.3%, but the additional 6% are documents that merely *cite* a rule. The `59G-4.200` cluster built
+this way contains `Chatsworth_at_PGA_National_-_Redacted.pdf` and
+`Subgroup_Assignments_December_2024_Revised.pdf` — unrelated documents that mention the rule. Keying on
+body text would have superseded live documents against each other. **Filename/title occurrence means the
+document IS the rule; body occurrence means it references one.**
+
+**c. 83.3% of the corpus is EPISODIC and needs no key at all.** Meeting minutes, notices, quarterly LIP
+reports, monthly county data, dated presentations — issued once, never revised. `January_16_2013_Minutes.pdf`
+will never have a version 2. Only ~16.7% is *revisable*: policies, handbooks, fee schedules, manuals —
+normative documents replaced by later editions.
+
+This is why the naive title key over-merged in the specific way it did: **stripping period tokens is
+correct for revisable documents and catastrophic for episodic ones.** For a coverage policy the year marks
+*which edition*; for a quarterly report the year marks *which document*. Same operation, opposite
+correctness — so the revisable/episodic call must come **before** keying, not after.
+
+**d. `source_url` is an identity, not a lineage key.** 4,092 documents carry one and all 4,092 are
+distinct — zero repeats. Keying on URL yields all singletons and no version chains. It is the right signal
+for *"is this the same document re-fetched"* (the §4 `last_validated_at` path), and useless for *"is this
+the successor of that."*
+
+#### The governing principle
+
+**No key is better than a wrong key.** A NULL `doc_key` makes a document a permanent singleton — still
+retrievable, simply never superseding anything. A *wrong* `doc_key` causes false supersession, which
+silently removes a valid document from retrieval and leaves no gap to find. The two failure modes are not
+comparable, so a key is assigned **only on positive evidence of a revisable identity**.
+
+#### The key, in precedence order
+
+| Tier | Evidence required | Key | AHCA coverage |
+|---|---|---|---|
+| 1 | rule number in **filename or title** | `(payer, jurisdiction, rule_no)` | ~2.3% |
+| 2 | `asset_type` is revisable **and** filename is distinctive | `(payer, jurisdiction, asset_type, norm(filename))` — period tokens stripped | ~14% |
+| 3 | linkage asserted by a human in Fact Store | explicit pair | the tail |
+| — | no tier matched | **NULL — episodic**, `version_no` 1 forever, never superseded | ~83% |
+
+**Never a key source**, each for a measured reason:
+- rule number found **only** in body text → citation (finding b)
+- `display_name` matching a known category label → not a title (finding a)
+- `source_url` → identity without lineage (finding d)
+
+#### The seam this creates
+
+Tier 2 turns on **`asset_type`** — is this document normative-and-replaceable, or a record of a moment?
+That is a classification call, and classification belongs to **Fact Store / Payor Platform**, who already
+return `asset_type` in the contract. I should not be re-deriving it from filename regexes on my side; the
+regex used in step 0 was a measurement instrument, not a proposed implementation. **Ask added to §11.2.**
+
+#### Consequence for the design
+
+Version tracking covers roughly a sixth of this corpus, and that is the correct answer rather than a
+shortfall — most of these documents genuinely have no successors. It also sharply reduces the human queue:
+adjudication is only ever requested for revisable documents, which is hundreds, not thousands.
+
 ---
 
 ## 3. Normalization spec (load-bearing)
@@ -483,7 +553,15 @@ Contract v2 states junk and non-authoritative sources land on the ratified floor
 *"so they rank last instead of disappearing."* This spec states untracked documents never enter the index.
 **These conflict** — one is a ranking penalty, the other is exclusion. Joint ruling needed.
 
-### 11.2 Payor Platform — is `importance` a property of the document or the version?
+### 11.2 Fact Store / Payor Platform — `importance` grain, and `asset_type` for revisability
+
+**New ask (§2.2):** `doc_key` tier 2 depends on knowing whether a document is **revisable** (a policy or
+handbook that gets replaced by a later edition) or **episodic** (minutes, a notice, a quarterly report —
+issued once, never revised). 83.3% of AHCA is episodic and must never be version-linked. You already
+return `asset_type`; can it carry this distinction, or should it be a separate field? I do not want to
+re-derive it from filename regexes on the RAG side.
+
+**Original question —** is `importance` a property of the document or the version?
 
 A page that is `low` today can become a policy landing page tomorrow, arriving with no history. Acceptable,
 but it should be decided rather than discovered.
