@@ -44,6 +44,12 @@ interface Health {
     successors?: number; chunks_carried?: number; chunks_reembedded?: number
     tracked?: number; unpublishable?: number
   }
+  duplicates: {
+    measured: boolean; measured_at?: string; run_id?: string
+    by_kind?: Record<string, number>
+    retirable?: number; held_no_date?: number
+    documents?: number; high_value_documents?: number; high_value_basis?: string
+  }
 }
 interface StageLat {
   step: string; label: string; kind: 'wait' | 'work'
@@ -166,6 +172,7 @@ export function CorpusHealthTab() {
   }
 
   const g = health?.gate
+  const d = health?.duplicates
   const asOf = health?.as_of ? new Date(health.as_of).toLocaleString() : null
 
   // Which preset is active is DERIVED from the dates rather than stored, so it
@@ -494,6 +501,53 @@ export function CorpusHealthTab() {
                   </span>
                 ))}
               </div>
+            </>
+          )}
+          </Section>
+
+          <Section title="Duplicates"
+                   badge={d?.measured ? (d.by_kind?.duplicate || null) : null} tone="warn">
+          {!d?.measured ? <div className="ch-empty">Duplicate determination has not run yet.</div> : (
+            <>
+              <p className="ch-note">
+                Duplication is not lineage — the versioning gate only compares documents that
+                share a doc_key, and most of the corpus has none, so copies never met inside it.
+                This is a separate pass over normalized page text.
+                <b> A pair counts as a duplicate only when every signal agrees</b> — identical
+                text, length, page count, reporting period and product. Everything else is held,
+                because a blank annual form is identical every year and one product's copy of a
+                policy is identical to another's; both are legitimately separate documents.
+              </p>
+              <div className="ch-cards">
+                <div className="ch-card"><div className="ch-card-n">{n(d.by_kind?.duplicate || 0)}</div>
+                  <div className="ch-card-l">true duplicates</div>
+                  <div className="ch-card-s">every signal agreed</div></div>
+                <div className="ch-card"><div className="ch-card-n green">{n(d.retirable || 0)}</div>
+                  <div className="ch-card-l">safe to retire now</div>
+                  <div className="ch-card-s">
+                    {d.retirable ? 'canonical rests on a real edition date'
+                                 : 'none — every duplicate pair lacks the dates to pick a canonical'}
+                  </div></div>
+                <div className="ch-card"><div className="ch-card-n amber">{n(d.held_no_date || 0)}</div>
+                  <div className="ch-card-l">held, needs a human</div>
+                  <div className="ch-card-s">identical but undated — picking a winner would be a coin flip</div></div>
+                <div className="ch-card"><div className="ch-card-n">{n(d.high_value_documents || 0)}</div>
+                  <div className="ch-card-l">high-value documents</div>
+                  <div className="ch-card-s">{d.high_value_basis}</div></div>
+              </div>
+              <div className="ch-chips">
+                {Object.entries(d.by_kind || {}).sort((a, b) => b[1] - a[1]).map(([k, v]) => (
+                  <span key={k} className={`ch-chip ch-chip-${k}`}>
+                    {k.replace(/_/g, ' ')} <b>{n(v)}</b>
+                  </span>
+                ))}
+              </div>
+              <p className="ch-note ch-note-dim">
+                period series = same form, different reporting period · product variant = same
+                template, different product under Medicaid · ordering unknown = no usable edition
+                date on either side · product unknown = neither document declares its product.
+                None of these are duplicates and nothing in them is ever retired automatically.
+              </p>
             </>
           )}
           </Section>

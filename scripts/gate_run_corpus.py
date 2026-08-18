@@ -20,6 +20,7 @@ Usage:  python3 scripts/gate_run_corpus.py [--dry-run]
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import sys
 import time
@@ -110,6 +111,12 @@ async def main():
     t0 = time.time()
     c = await asyncpg.connect(DSN, timeout=300)
     await c.execute("SET statement_timeout = 0")
+    # asyncpg returns jsonb as str unless told otherwise. Without this codec the
+    # `isinstance(pdf_meta, dict)` guard in the date ladder is ALWAYS False, so the
+    # publication-date rung silently never fires and every document falls through
+    # to filename-or-nothing. Same silent-inert class as the \b(oct)\b fix.
+    await c.set_type_codec("jsonb", encoder=json.dumps, decoder=json.loads,
+                           schema="pg_catalog")
 
     docs = await c.fetch("""
         SELECT d.id, d.filename, d.display_name, d.payer, d.state, d.status,

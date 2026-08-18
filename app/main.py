@@ -4201,6 +4201,65 @@ def corpus_health(payer: str | None = None,
             WHERE g.run_id = %s {pw} GROUP BY 1""", (run_id,) + args)
         by_decision = {k: int(v) for k, v in cur.fetchall()}
 
+        # ── duplicate determination (mode='duplicates', its own run) ──────
+        #
+        # Separate from the versioning gate above because duplication is not
+        # lineage: the versioning gate only compares documents that share a
+        # doc_key, and doc_key is NULL for most of the corpus, so two copies of
+        # one PDF never met inside it. Rows are per-DOCUMENT-per-pair, so pair
+        # counts are halved for display.
+        #
+        # `duplicate` here means EVERY signal agreed — identical text, same
+        # length, same page count, same reporting period, same product. Every
+        # other kind is a holding bucket, not a soft duplicate: a blank annual
+        # form is identical every year and one product's copy of a policy is
+        # identical to another's, so text alone would retire documents that are
+        # legitimately distinct.
+        cur.execute("""SELECT run_id, max(decided_at) FROM gate_decisions
+                       WHERE mode = 'duplicates' GROUP BY run_id
+                       ORDER BY 2 DESC LIMIT 1""")
+        drow = cur.fetchone()
+        if not drow:
+            dup_block = {"measured": False}
+        else:
+            drun, dat = drow
+            cur.execute(f"""SELECT g.duplicate_kind, count(*) FROM gate_decisions g
+                JOIN documents d ON d.id = g.document_id
+                WHERE g.run_id = %s {pw} GROUP BY 1""", (drun,) + args)
+            by_kind = {k: int(v) // 2 or 1 for k, v in cur.fetchall() if k}
+            # Retirable = every signal agreed AND the canonical pick rests on a
+            # real edition date. Where dates are absent the canonical choice is
+            # arbitrary, so the pair is held rather than resolved by coin-flip.
+            cur.execute(f"""SELECT
+                  count(*) FILTER (WHERE g.lifecycle_state = 'superseded'
+                                     AND g.reason NOT LIKE '%%arbitrary%%'),
+                  count(*) FILTER (WHERE g.reason LIKE '%%arbitrary%%')
+                FROM gate_decisions g JOIN documents d ON d.id = g.document_id
+                WHERE g.run_id = %s AND g.duplicate_kind = 'duplicate' {pw}""",
+                        (drun,) + args)
+            act, held = cur.fetchone()
+            # Tier split. Ananth's three-tier model: fact-store-owned documents
+            # and hot-cached payor documents are the product; everything else is
+            # the long tail. `facts.payor_fact.source_ref` is free text with no
+            # document id, so tier (a) cannot be joined — importance='critical'
+            # is the closest available proxy and is labelled as such.
+            cur.execute(f"""SELECT
+                  count(DISTINCT g.document_id) FILTER (WHERE
+                    d.source_metadata->'payor_classification'->>'importance' = 'critical'),
+                  count(DISTINCT g.document_id)
+                FROM gate_decisions g JOIN documents d ON d.id = g.document_id
+                WHERE g.run_id = %s {pw}""", (drun,) + args)
+            crit, alld = cur.fetchone()
+            dup_block = {
+                "measured": True, "run_id": str(drun),
+                "measured_at": dat.isoformat() if dat else None,
+                "by_kind": by_kind,
+                "retirable": int(act or 0), "held_no_date": int(held or 0),
+                "documents": int(alld or 0), "high_value_documents": int(crit or 0),
+                "high_value_basis": "importance=critical (proxy — facts.payor_fact "
+                                    "has no document id to join on)",
+            }
+
         # ── sources of entry — "how did it get here", nothing more ────────
         sources = []
         for src in _SOURCES:
@@ -4311,6 +4370,7 @@ def corpus_health(payer: str | None = None,
                 "chunks_carried": int(carried), "chunks_reembedded": int(reembed),
                 "tracked": int(tracked), "unpublishable": int(unpublishable),
             },
+            "duplicates": dup_block,
         }
     finally:
         conn.close()

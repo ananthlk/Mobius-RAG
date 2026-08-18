@@ -450,3 +450,13 @@ a.ch-card-link:focus-visible { outline: 2px solid var(--mobius-accent); outline-
 .ch-sub-pct, .ch-sub-val { font-family: var(--mobius-font-mono); color: var(--mobius-text-muted);
   flex: 0 0 3.2rem; text-align: right; }
 .ch-sub-val { color: var(--mobius-text-primary); }
+
+/* Legend under the duplicate kinds. Dimmer than a normal note because it is a
+   glossary, not a finding — it should be available without competing with the
+   numbers above it. */
+.ch-note.ch-note-dim {
+  color: var(--mobius-text-tertiary, var(--mobius-text-secondary));
+  font-size: 0.78rem;
+  line-height: 1.55;
+  margin-top: var(--mobius-space-base);
+}
