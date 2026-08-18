@@ -588,6 +588,42 @@ by the wrong party.
 above being scoped to whoever owns Gate/Structure's caller-context extraction, not assumed to already
 exist.
 
+### 10.2 Retriever's response to §17 — right catch, sign-off updated (2026-08-17)
+
+Read §16.4 and §17 firsthand before responding. Agree with the finding, and it does change what §10 has
+to mean, not just when it ships.
+
+**You're right about what I assumed.** §10.1 above was written against a mental model of "current vs.
+superseded" — one winner, one loser. §16.4's second property (multiple admitted-but-unretired versions can
+coexist at one `doc_key` while verdicts are pending) means the real requirement is **selection among N
+concurrently-active versions**, not a filter down to a single flagged one. `lifecycle_state = active` was
+never going to be sufficient on its own — I should have derived that from §4.2's ambiguity design when I
+first read it, not needed the human-loop simulation to surface it. Correcting the record rather than
+leaving the narrower framing standing.
+
+**One data point already in hand: my tonight stopgap happens to generalize.** The `filler_a.py` tiebreak
+groups *all* pool candidates sharing a rule-number identifier, not just a pair — so a same-`doc_key` chain
+of 5 concurrently-active versions would already get grouped together today, and the query-year gate would
+already decide among however many are in the group, not just two. It's still the wrong layer (Filler-stage
+score nudge, not Pool-level as-of filtering) and still text-regex rather than a structured `as_of_date`, but
+the *shape* of "select among several, not pick between two" turns out to already be there by accident. Not
+claiming this validates the design — flagging it because it's a real, running data point on the N-version
+case, not a hypothetical.
+
+**Agree with the build-order correction.** §10 as prerequisite rather than step 7 is right: an as-of filter
+that only exists after the gate has already been writing ambiguous chains for a while means every query in
+that window silently picks among concurrent versions with no real signal — worse than today, where at
+least a lone `active` flag (wrong as it can be) doesn't multiply. No objection to resequencing.
+
+**Not mine to build:** queue drain rate as a corpus-health metric and the `supersedes_id` split-cascade
+traversal are both gate-side (§4.2/§8), Master RAG's scope. Noting I read them, not taking them on.
+
+**Sign-off stands, restated precisely:** §10's retrieval contract must resolve as-of a date by **selecting
+among however many versions of a `doc_key` are concurrently active** (not filtering to one pre-flagged
+current version), ranked/chosen by the validity window against `effective_date`/`termination_date`. This is
+a materially different (harder) implementation than what I originally signed, and I'm signing the harder
+version now that it's understood, not the easier one I assumed.
+
 ---
 
 ## 11. Open questions requiring a ruling
@@ -759,7 +795,7 @@ Nothing was written: no retire, no delete, no re-trigger, no index change.
 | Seat | Scope of review | Status |
 |---|---|---|
 | **Fact Store / Payor Platform** *(one seat — Ananth 2026-08-17)* | §7 human loop · §11.5 review surface · **§11.1 exclusion vs floor · §11.2 importance grain · §5.2 recall bias** | 🟡 PARTIAL — §7/§11.5 ✅ signed 2026-08-17 w/ 2 refinements: (1) §7 returns TWO separate valid-time dates, never derive one from the other; (2) verdict keyed on the DIGEST PAIR + doc_key. Verdict store theirs; RAG pre-renders diff; priority-triaged. **Still owed: §11.1 / §11.2 / §5.2** |
-| Retriever | §10 as-of contract · index filter on (`doc_key`, `lifecycle_state`) | ✅ signed, see §10.1 — contingent on `as_of_date` being a structured caller param, not query-text regex |
+| Retriever | §10 as-of contract · index filter on (`doc_key`, `lifecycle_state`) | ✅ signed, see §10.1/§10.2 — updated after §17: contract is *selection among N concurrently-active versions*, not a filter to one; `as_of_date` must be a structured caller param, not query-text regex; §10 build-order moved to prerequisite, agreed |
 | Eval | §11.3 classifier miss profile baseline · τ_high calibration | ⬜ |
 | DB seat | §9 schema deltas · §11.4 column contract + index strategy | ⬜ |
 | Maintaining | §3 normalization vs coherence gate · `last_validated_at` freshness overlap · nightly-sweep interaction | ⬜ |
