@@ -14,6 +14,7 @@ import { DocumentDetailTab } from './components/tabs/DocumentDetailTab'
 import { SourcesTab } from './components/tabs/SourcesTab'
 import { UploadTab } from './components/tabs/UploadTab'
 import { RepositoryTab } from './components/tabs/RepositoryTab'
+import { CorpusHealthTab } from './components/tabs/CorpusHealthTab'
 import { TestTab } from './components/tabs/TestTab'
 import { EvalTab } from './components/tabs/EvalTab'
 
@@ -255,7 +256,7 @@ function App() {
   // new 2-tab Upload + Repository shell (Stage A of the IA refactor).
   const [legacyMode, setLegacyMode] = useState(false)
   // Stage A: new shell uses just two tabs.
-  const [shellTab, setShellTab] = useState<'upload' | 'repository' | 'test' | 'eval'>('repository')
+  const [shellTab, setShellTab] = useState<'upload' | 'repository' | 'health' | 'test' | 'eval'>('repository')
 
   // Load documents on mount + handle deep-link URL params from cross-module links
   // (e.g. mobius-chat opens ?tab=read&documentId=...&pageNumber=...)
@@ -1481,6 +1482,9 @@ function App() {
             <Tab id="repository" isActive={shellTab === 'repository'} onClick={() => setShellTab('repository')}>
               Repository
             </Tab>
+            <Tab id="health" isActive={shellTab === 'health'} onClick={() => setShellTab('health')}>
+              Corpus health
+            </Tab>
             <Tab id="test" isActive={shellTab === 'test'} onClick={() => setShellTab('test')}>
               Chat Queries
             </Tab>
@@ -1497,6 +1501,9 @@ function App() {
                 error={error}
                 onDocumentAdded={loadDocuments}
               />
+            </TabPanel>
+            <TabPanel id="health" isActive={shellTab === 'health'}>
+              <CorpusHealthTab />
             </TabPanel>
             <TabPanel id="repository" isActive={shellTab === 'repository'}>
               <RepositoryTab

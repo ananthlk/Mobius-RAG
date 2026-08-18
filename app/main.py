@@ -3967,6 +3967,306 @@ async def normalize_payer(
     }
 
 
+# ── Corpus Health — the pipeline as a waterfall, per stage ──────────────────
+# Spec: docs/versioning-dedup-gate-spec.md §12.2 / §12.3.
+#
+# GCS -> extract -> classify -> chunk -> embed -> version -> dedup -> publish
+#
+# Each stage reports what REACHED it, what is MISSING, why, and the action that
+# clears it. Complements /admin/integrity/report (which answers "what is the
+# pipeline missing"); this answers "what should I DO about it".
+#
+# Versioning/dedup rows read the gate's own telemetry (gate_decisions) rather
+# than recomputing, so the page reports what the gate decided, not a second
+# opinion that could disagree with it.
+
+# ── SOURCE REGISTRY ────────────────────────────────────────────────────────
+# Every route a document can arrive by. Sources grow over time — email is next,
+# and after that whatever else — so adding one must be a SINGLE entry here, not
+# an edit in three places. Nothing downstream enumerates sources.
+#
+#   predicate  SQL over `documents d` identifying the route. None => this corpus
+#              cannot see it (the store belongs to another module), so it is
+#              listed with its owner instead of a count. Listing it honestly beats
+#              folding an uncountable source into the waterfall.
+#   fallback   exactly one source may claim "everything not matched above".
+_SOURCES: list[dict] = [
+    {"key": "scrape", "label": "Scrape", "blurb": "crawler-fetched pages and documents",
+     "predicate": "d.file_path LIKE 'gs://%%/web-scraper/%%' OR d.file_path LIKE 'scraped:%%'"},
+    {"key": "url_import", "label": "URL import", "blurb": "a single URL pulled directly",
+     "predicate": "d.file_path LIKE 'https:%%'"},
+    {"key": "drive", "label": "Drive", "blurb": "imported from Google Drive",
+     "predicate": "d.file_path LIKE 'gs://%%/drive/%%'"},
+    {"key": "instant", "label": "Instant RAG", "blurb": "uploaded in chat, scoped to an agent",
+     "predicate": "d.source_metadata ? 'agent_scope'"},
+    {"key": "upload", "label": "Computer upload", "blurb": "operator uploaded from their machine",
+     "predicate": None, "fallback": True},
+    # Stores this corpus does not own. They never write into `documents`, so their
+    # counts are not ours to report.
+    {"key": "org", "label": "Org upload", "blurb": "per-organisation document store",
+     "predicate": None, "owner": "Org agent",
+     "why": "separate namespace database — not in this corpus"},
+    {"key": "vault", "label": "Personal vault", "blurb": "a person's own documents",
+     "predicate": None, "owner": "Vault agent",
+     "why": "mobius-vault holds these; promotion into RAG is a separate step"},
+]
+_SOURCE_BY_KEY = {s["key"]: s for s in _SOURCES}
+# NOTE: LIKE wildcards above are written %% because psycopg2 performs parameter
+# interpolation whenever a params tuple is passed, and every call site passes one
+# (possibly empty). A single % there raises IndexError at execute time.
+
+
+def _source_sql(key: str) -> str | None:
+    """SQL predicate for a source, resolving the fallback against all the rest."""
+    src = _SOURCE_BY_KEY.get(key)
+    if src is None or (src.get("predicate") is None and not src.get("fallback")):
+        return None
+    if src.get("fallback"):
+        others = [f"({s['predicate']})" for s in _SOURCES if s.get("predicate")]
+        return "NOT (" + " OR ".join(others) + ")" if others else "TRUE"
+    return f"({src['predicate']})"
+
+
+# ── CLASSIFIER REGISTRY ────────────────────────────────────────────────────
+# "Classify" is not one step. Payor Platform is the first classifier; others
+# already run (lexicon tagging, policy lines) and more will follow. Same rule as
+# sources: adding one is a SINGLE entry, and a classifier whose results live in
+# another store is listed with its owner rather than silently counted as absent.
+_CLASSIFIERS: list[dict] = [
+    {"key": "payor", "label": "Payor Platform", "owner": "Fact Store",
+     "what": "importance, authority, claim",
+     "predicate": "d.source_metadata->'payor_classification' IS NOT NULL"},
+    {"key": "lexicon", "label": "Lexicon tags", "owner": "Curation",
+     "what": "d/p/j tags used by retrieval",
+     "predicate": "EXISTS (SELECT 1 FROM document_tags t WHERE t.document_id=d.id)"},
+    {"key": "policy_lines", "label": "Policy lines", "owner": "Curation",
+     "what": "extracted policy statements",
+     "predicate": "EXISTS (SELECT 1 FROM policy_lines pl WHERE pl.document_id=d.id)"},
+    {"key": "phi", "label": "PHI / HIPAA", "owner": "PHI classifier",
+     "what": "protected-health-information gate",
+     "predicate": None, "why": "runs out of process; verdicts are not stored in this corpus"},
+]
+
+_STAGE_PREDICATES = {
+    "in_gcs":     "d.file_path IS NOT NULL",
+    "extracted":  "EXISTS (SELECT 1 FROM document_pages p WHERE p.document_id=d.id)",
+    # "classified" = scored by AT LEAST ONE classifier. Per-classifier coverage
+    # is reported separately, because a document classified by lexicon but not by
+    # Payor Platform is not the same as an unclassified one.
+    "classified": ("d.source_metadata->'payor_classification' IS NOT NULL "
+                   "OR EXISTS (SELECT 1 FROM document_tags t WHERE t.document_id=d.id)"),
+    "chunked":    "EXISTS (SELECT 1 FROM hierarchical_chunks c WHERE c.document_id=d.id)",
+    "embedded":   "EXISTS (SELECT 1 FROM chunk_embeddings ce WHERE ce.document_id=d.id)",
+    "versioned":  "EXISTS (SELECT 1 FROM gate_decisions g WHERE g.document_id=d.id)",
+    "published":  "EXISTS (SELECT 1 FROM rag_published_embeddings e WHERE e.document_id=d.id)",
+}
+
+# Ordered pipeline. Each entry: the stage, what "missing here" means, and the
+# remediation §5.0 prescribes for it.
+_STAGES = [
+    ("in_gcs", "Raw file in GCS", None,
+     "no stored file — nothing can be rebuilt from it", "human: re-fetch from source", "blocked"),
+    ("extracted", "Text extracted", "in_gcs",
+     "extraction produced no pages", "delete derived, re-trigger EXTRACTION", "retrigger_extract"),
+    ("classified", "Classified", "extracted",
+     "no classifier has scored this document", "run classifiers", "reclassify"),
+    ("chunked", "Chunked", "extracted",
+     "chunking never completed", "delete partial chunks, re-enqueue CHUNKING", "retrigger_chunk"),
+    ("embedded", "Embedded", "chunked",
+     "chunks exist but were never embedded", "re-trigger EMBEDDING", "retrigger_embed"),
+    ("versioned", "Version decided", "embedded",
+     "the gate has never scored this document", "run the versioning gate", "run_gate"),
+    ("published", "Published to index", "embedded",
+     "embedded but not serving", "publish", "publish"),
+]
+
+
+@app.get("/corpus/health")
+def corpus_health(payer: str | None = None) -> dict:
+    """Stage-by-stage corpus health: what reached each stage, what is stuck, what to do."""
+    import psycopg2 as _pg
+    conn = _pg.connect(_retag_inplace_dsn(), connect_timeout=15)
+    try:
+        cur = conn.cursor()
+        cur.execute("SET statement_timeout = 90000")
+        pw = "AND d.payer = %s" if payer else ""
+        args: tuple = (payer,) if payer else ()
+
+        def one(sql: str, a: tuple = ()) -> int:
+            cur.execute(sql, a)
+            r = cur.fetchone()
+            return int(r[0] or 0) if r else 0
+
+        total = one(f"SELECT count(*) FROM documents d WHERE TRUE {pw}", args)
+
+        # ── SOURCES — where documents come in, and what each is doing now ──
+        sources = []
+        for src in _SOURCES:
+            sql = _source_sql(src["key"])
+            if sql is None:                      # owned by another module
+                sources.append({"source": src["key"], "label": src["label"],
+                                "blurb": src["blurb"], "external": True,
+                                "owner": src.get("owner"), "why": src.get("why"),
+                                "documents": None, "last_7d": None,
+                                "not_chunked": None, "drill": None})
+                continue
+            sources.append({
+                "source": src["key"], "label": src["label"], "blurb": src["blurb"],
+                "external": False,
+                "documents": one(f"SELECT count(*) FROM documents d WHERE {sql} {pw}", args),
+                "last_7d": one(f"""SELECT count(*) FROM documents d WHERE {sql}
+                                   AND d.created_at > now() - interval '7 days' {pw}""", args),
+                "not_chunked": one(f"""SELECT count(*) FROM documents d WHERE {sql}
+                                       AND NOT EXISTS (SELECT 1 FROM hierarchical_chunks c
+                                       WHERE c.document_id=d.id) {pw}""", args),
+                "drill": f"source:{src['key']}",
+            })
+
+        # ── what is moving RIGHT NOW ──────────────────────────────────────
+        inflight = {
+            "chunking_pending": one(
+                "SELECT count(*) FROM chunking_jobs WHERE status IN ('pending','processing')"),
+            "chunking_blocked": one("SELECT count(*) FROM chunking_jobs WHERE status='blocked'"),
+            "chunking_failed_24h": one(
+                "SELECT count(*) FROM chunking_jobs WHERE status='failed' "
+                "AND updated_at > now() - interval '24 hours'"),
+        }
+
+        stages = []
+        for key, label, prev, miss_reason, action, action_key in _STAGES:
+            reached = one(
+                f"SELECT count(*) FROM documents d WHERE {_STAGE_PREDICATES[key]} {pw}", args)
+            # "missing" = reached the previous stage but not this one. That is the
+            # actionable population; comparing against total would count documents
+            # that never got far enough to be stuck here.
+            if prev:
+                missing = one(
+                    f"""SELECT count(*) FROM documents d
+                        WHERE {_STAGE_PREDICATES[prev]}
+                          AND NOT ({_STAGE_PREDICATES[key]}) {pw}""", args)
+            else:
+                missing = total - reached
+            stages.append({
+                "stage": key, "label": label, "reached": reached, "missing": missing,
+                "of": prev or "ingested",
+                "missing_reason": miss_reason, "action": action, "action_key": action_key,
+                "drill": key,
+                "tone": "good" if missing == 0 else ("bad" if key in
+                        ("extracted", "chunked", "embedded") else "warn"),
+            })
+
+        # ── CLASSIFIERS — coverage per classifier, not one lumped stage ────
+        classifiers = []
+        for cf in _CLASSIFIERS:
+            if not cf.get("predicate"):
+                classifiers.append({**{k: cf[k] for k in ("key", "label", "owner", "what")},
+                                    "external": True, "why": cf.get("why"),
+                                    "scored": None, "coverage_pct": None})
+                continue
+            scored = one(f"SELECT count(*) FROM documents d WHERE {cf['predicate']} {pw}", args)
+            classifiers.append({
+                **{k: cf[k] for k in ("key", "label", "owner", "what")},
+                "external": False, "scored": scored,
+                "coverage_pct": round((scored / total * 100) if total else 0.0, 1),
+            })
+
+        # ── versioning + dedup, from the gate's telemetry ──────────────────
+        gate: dict = {"measured": False}
+        cur.execute("SELECT run_id, max(decided_at) FROM gate_decisions "
+                    "GROUP BY run_id ORDER BY 2 DESC LIMIT 1")
+        row = cur.fetchone()
+        if row:
+            run_id, when = row
+            cur.execute("SELECT decision, count(*) FROM gate_decisions WHERE run_id=%s GROUP BY 1",
+                        (run_id,))
+            by_decision = {k: int(v) for k, v in cur.fetchall()}
+            gate = {
+                "measured": True,
+                "run_id": str(run_id),
+                "measured_at": when.isoformat() if when else None,
+                "documents_scored": sum(by_decision.values()),
+                "by_decision": by_decision,
+                "awaiting_adjudication": one(
+                    "SELECT count(*) FROM gate_decisions WHERE run_id=%s "
+                    "AND adjudication_target IS NOT NULL", (run_id,)),
+                "chunks_carried": one(
+                    "SELECT coalesce(sum(chunks_carried),0) FROM gate_decisions WHERE run_id=%s",
+                    (run_id,)),
+                "chunks_reembedded": one(
+                    "SELECT coalesce(sum(chunks_changed),0) FROM gate_decisions WHERE run_id=%s",
+                    (run_id,)),
+            }
+
+        # ── ordering clock (§19.1) — can we order a version chain at all? ──
+        pub = one(f"""SELECT count(*) FROM documents d
+                      WHERE d.source_metadata->'pdf_meta' ? 'creation_date' {pw}""", args)
+        fnd = one(f"""SELECT count(*) FROM documents d
+                      WHERE d.filename ~ '20[0-9]{{2}}[-_][0-9]{{1,2}}' {pw}""", args)
+
+        return {
+            "payer": payer,
+            "documents_total": total,
+            "sources": sources,
+            "classifiers": classifiers,
+            "inflight": inflight,
+            "stages": stages,
+            "gate": gate,
+            "ordering_clock": {
+                "with_publication_date": pub,
+                "with_filename_date": fnd,
+                "total": total,
+                "coverage_pct": round((pub / total * 100) if total else 0.0, 1),
+            },
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/corpus/health/drill/{stage}")
+def corpus_health_drill(stage: str, payer: str | None = None, limit: int = 200) -> dict:
+    """The documents stuck AT a stage — the list behind the number.
+
+    A count you cannot open is a count nobody acts on.
+    """
+    import psycopg2 as _pg
+    prev_of = {k: p for k, _, p, _, _, _ in _STAGES}
+    if stage.startswith("source:"):
+        where = _source_sql(stage.split(":", 1)[1])
+        if where is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"'{stage.split(':', 1)[1]}' is not a source this corpus can list")
+        prev = None
+    elif stage in _STAGE_PREDICATES:
+        prev = prev_of.get(stage)
+        where = (f"{_STAGE_PREDICATES[prev]} AND NOT ({_STAGE_PREDICATES[stage]})"
+                 if prev else f"NOT ({_STAGE_PREDICATES[stage]})")
+    else:
+        raise HTTPException(status_code=404, detail=f"unknown stage '{stage}'")
+    conn = _pg.connect(_retag_inplace_dsn(), connect_timeout=15)
+    try:
+        cur = conn.cursor()
+        cur.execute("SET statement_timeout = 30000")
+        args: list = []
+        if payer:
+            args.append(payer)
+        args.append(limit)
+        cur.execute(
+            f"""SELECT d.id, d.filename, d.display_name, d.payer, d.status, d.created_at,
+                       d.effective_date, d.file_path
+                FROM documents d
+                WHERE {where} {'AND d.payer = %s' if payer else ''}
+                ORDER BY d.created_at DESC LIMIT %s""", tuple(args))
+        docs = [{"id": str(r[0]), "filename": r[1], "display_name": r[2], "payer": r[3],
+                 "status": r[4], "created_at": r[5].isoformat() if r[5] else None,
+                 "effective_date": r[6].isoformat() if r[6] else None,
+                 "has_file": bool(r[7])} for r in cur.fetchall()]
+        return {"stage": stage, "stuck_after": prev, "payer": payer,
+                "count": len(docs), "documents": docs}
+    finally:
+        conn.close()
+
+
 @app.get("/admin/integrity/report")
 def integrity_report() -> dict:
     """One-call corpus-integrity snapshot for the ops UI. Every gap plus the
