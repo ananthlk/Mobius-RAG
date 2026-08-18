@@ -384,6 +384,12 @@ absorb the false positives. Same principle already applied to the PHI classifier
 importance. This catches the case where the classifier saw a placeholder filename or a bad URL and
 shrugged.
 
+**SIGNED 2026-08-18 (Fact Store).** Recall-biased importance accepted — same posture as the PHI
+classifier, and the asymmetry argument is correct: a wasted human diff is cheap, silent lineage loss is
+not. The tripwire is accepted as specified and lands in `classifier.py` as a text-pattern guard
+(rule-number patterns / "supersedes" / effective-date language → floor at `standard`); implementation is
+Fact Store's, tracked in the coord file, not blocking the gate.
+
 ---
 
 ## 6. Validity in time — perpetual until superseded
@@ -634,6 +640,21 @@ Contract v2 states junk and non-authoritative sources land on the ratified floor
 *"so they rank last instead of disappearing."* This spec states untracked documents never enter the index.
 **These conflict** — one is a ranking penalty, the other is exclusion. Joint ruling needed.
 
+**RULED 2026-08-18 (Fact Store), on the day's evidence — the conflict dissolves once "junk" is split by WHY:**
+
+| population | treatment | mechanism |
+|---|---|---|
+| low-value content from a TRACKED payor (chrome, admin pages, stale episodic) | **ranking floor** — rank last, never disappear | `fyi_not_citable` (0.20); contract v2 sentence stands |
+| not-a-payor / untracked-payor source | **no payer-authority claim at all** | `payer_scope` stage 0: `authority_level=None` — a trust tier is a claim about payer sources and does not apply; `may_index` stays true (never gate RAG's pipeline) |
+| confirmed duplicate (all signals) | **excluded from index** | executor `retire_duplicate` — unpublished, reversible, ledgered |
+| revisable prior edition caught by the age guard | **in corpus, out of serving** | A-11(b): `lifecycle_state='shelved'` until §10 as-of resolution — approved by Ananth 2026-08-18 |
+
+The spec sentence "untracked documents never enter the index" is therefore too strong as written:
+untracked means *no authority claim and no gate*, not exclusion. Exclusion is reserved for confirmed
+duplicates (noise) and shelved editions (pending lineage) — both reversible, both ledgered. Evidence
+this matters: the Sunshine DME forms sat on the floor at 0.20 and still beat an unverified directory
+doc once corrected to 0.65 — the floor preserves recoverability in exactly the way exclusion cannot.
+
 ### 11.2 Fact Store / Payor Platform — `importance` grain, and `asset_type` for revisability
 
 **New ask (§2.2):** `doc_key` tier 2 depends on knowing whether a document is **revisable** (a policy or
@@ -646,6 +667,22 @@ re-derive it from filename regexes on the RAG side.
 
 A page that is `low` today can become a policy landing page tomorrow, arriving with no history. Acceptable,
 but it should be decided rather than discovered.
+
+**ANSWERED 2026-08-18 (Fact Store) — both halves, shipped not promised:**
+
+*Revisability:* carried by `asset_type` via a derived field, not a second taxonomy. The contract returns
+top-level `is_revisable` (true/false/null) computed from the taxonomy (`is_revisable()` in
+`mobius-payor/app/classifier.py`); backfilled on all 6,068 classified documents (1,840 revisable /
+153 episodic — enrollment 80 + newsletter 50 + capitation 23, reconciles exactly). Two episodic types
+added on evidence (`program_report`, `meeting_record`) after 169 SMMC periodic reports were caught
+marked revisable — your gate would have chained them as superseding editions. **NULL means unknown:
+tier 2 declines to version (ratified A-14)** — a wrong retirement is unrecoverable in a way an
+unversioned document is not. Never re-derive from filename regexes; your own A-24 normalizer showed why
+(it stripped the product prefix that classifies the pair).
+
+*Importance grain:* **property of the VERSION, assessed at each edition's ingest.** Content changes what
+a document is; a doc arriving with no history is assessed fresh, and that is now decided rather than
+discovered. For monitoring, a doc_key cluster's effective importance is the max over its live versions.
 
 ### 11.3 Eval — miss profile of the importance classifier
 
@@ -794,7 +831,7 @@ Nothing was written: no retire, no delete, no re-trigger, no index change.
 
 | Seat | Scope of review | Status |
 |---|---|---|
-| **Fact Store / Payor Platform** *(one seat — Ananth 2026-08-17)* | §7 human loop · §11.5 review surface · **§11.1 exclusion vs floor · §11.2 importance grain · §5.2 recall bias** | 🟡 PARTIAL — §7/§11.5 ✅ signed 2026-08-17 w/ 2 refinements: (1) §7 returns TWO separate valid-time dates, never derive one from the other; (2) verdict keyed on the DIGEST PAIR + doc_key. Verdict store theirs; RAG pre-renders diff; priority-triaged. **Still owed: §11.1 / §11.2 / §5.2** |
+| **Fact Store / Payor Platform** *(one seat — Ananth 2026-08-17)* | §7 human loop · §11.5 review surface · §11.1 exclusion vs floor · §11.2 importance grain · §5.2 recall bias | ✅ COMPLETE — §7/§11.5 signed 2026-08-17 (two dates never derived from each other; verdict keyed on digest pair + doc_key). §11.1 ruled, §11.2 answered (is_revisable shipped on 6,068 docs), §5.2 signed w/ tripwire adopted — all 2026-08-18, rulings inline at each section. |
 | Retriever | §10 as-of contract · index filter on (`doc_key`, `lifecycle_state`) | ✅ signed, see §10.1/§10.2 — updated after §17: contract is *selection among N concurrently-active versions*, not a filter to one; `as_of_date` must be a structured caller param, not query-text regex; §10 build-order moved to prerequisite, agreed |
 | Eval | §11.3 classifier miss profile baseline · τ_high calibration | ⬜ |
 | DB seat | §9 schema deltas · §11.4 column contract + index strategy | ✅ **SIGNED** (2026-08-18) — migration written: `mobius-payor/migrations/021_versioning_lineage_columns.sql`, NOT yet applied. Ruling in `docs/DB_REQUEST_VERSIONING_COLUMNS.md`. **Corrected one defect:** `CREATE INDEX CONCURRENTLY` cannot run inside a transaction block — the requested DDL would have aborted; index builds moved after COMMIT. **Q1:** a CHECK constrains values, not writers — added `termination_date_source` + provenance CHECK instead (5,477/5,496 AHCA rows backfilled `ttl_legacy`, making the TTL corruption queryable); column-level GRANT is the real fix, filed as follow-up (RAG connects as `postgres`, no role split). **Q2:** `text` + CHECK, not enum — vocabulary already moved once (`shelved`), and `ALTER TYPE … ADD VALUE` is not transactional. **Q3:** `(doc_key, lifecycle_state)` is sufficient, no date column — measured version chains are avg 2.26 / p95 5 / max 7, and `effective_date` has only 4 distinct values so a date index would never be planned. |
