@@ -138,6 +138,18 @@ retrievable, simply never superseding anything. A *wrong* `doc_key` causes false
 silently removes a valid document from retrieval and leaves no gap to find. The two failure modes are not
 comparable, so a key is assigned **only on positive evidence of a revisable identity**.
 
+#### The episodic test runs FIRST *(bug found in the §12.4 pilot)*
+
+`Notice of Proposed Rule: 59G-4.130/Home Health Visit Services` carries the rule number **in its
+filename** and is *not* the rule — it is a dated announcement about it. Under the original precedence it
+took tier 1, landed on the coverage policy's `doc_key`, and at 0.019 overlap the old ladder promoted it —
+**a notice would have retired the policy it announced.**
+
+Finding §2.2b said filename occurrence means identity and body occurrence means citation. That was too
+strong: *citation-vs-identity is a property of the document's nature, not of where the string appears.*
+So the episodic test precedes every tier — an episodic document gets **no key even when a rule number is
+present in its filename.**
+
 #### The key, in precedence order
 
 | Tier | Evidence required | Key | AHCA coverage |
@@ -219,9 +231,42 @@ on document D arriving at the gate (chunked, embedded):
   then apply the lane rules in §5.
 ```
 
-**`τ_high` ≈ 0.70, provisional** — measured in §12.2, not guessed. Across 112 real AHCA candidate pairs
-the overlap distribution is usefully bimodal: 70 pairs ≥ 0.70, 11 pairs at ≈0, and a thin middle
-(median 0.722). Eval to confirm or move it. Original note retained: it must be calibrated against real
+### 4.2 The ladder defaults to ASK, never to PROMOTE  *(corrected after the §12.4 pilot)*
+
+Promotion is the **destructive** branch: it retires a live document. It therefore requires positive
+evidence, and ambiguity must never fall through to it. The original ladder had `else → successor`, which
+meant a 0.019-overlap pair was promoted over a live policy. Corrected:
+
+```
+overlap ≥ τ_high            → SUCCESSOR            promote, retire prior
+τ_low ≤ overlap < τ_high    → AMBIGUOUS_REVISION   → Fact Store. PRIOR STAYS ACTIVE.
+overlap < τ_low             → AMBIGUOUS_TAIL       → Fact Store. PRIOR STAYS ACTIVE.
+```
+
+Both ambiguous branches admit the new document and leave the predecessor live. Serving two versions
+briefly is recoverable; retiring the wrong one silently is not.
+
+### 4.3 τ CANNOT be calibrated from this corpus — measured, not assumed
+
+The earlier figure (τ_high ≈ 0.70 from 112 pairs, median 0.722) was **contaminated and is withdrawn**.
+Once episodic documents are correctly excluded from keying (§2.2), **111 of those 112 pairs disappear** —
+they were notice-vs-notice pairs scoring high because announcements share boilerplate, not because they
+were versions of each other.
+
+**Exactly one genuine revisable version pair exists in the whole AHCA corpus:** 59G-4.130, 2016-11-01 vs
+2024-09-01, overlap **0.698**.
+
+One data point cannot place a threshold. Consequences:
+
+- `τ_high` and `τ_low` stay **provisional** (0.70 / 0.35) and are *safety* parameters, not tuned ones.
+- The single real pair sits at 0.698 — just under τ_high. It routes to a human, which is the correct
+  outcome under §4.2 and the reason the safe default matters more than the threshold.
+- Versioning is a **forward-looking capability, not a back-propagation opportunity**: there is almost
+  nothing historical to link. Real pairs accumulate as the crawler re-fetches over time, and τ gets
+  calibrated then. **Eval's ask (§11.3) changes accordingly** — it is not "tune τ now", it is "define the
+  evidence needed before τ may be moved off its safe default."
+
+Original note retained: `τ_high` must be calibrated against real
 version pairs, not guessed.
 
 ### 4.1 Hashes decide; vectors only nominate
@@ -680,6 +725,32 @@ invariants that can only be checked after the fact, and they run on a schedule:
 
 Each violation count is a number that should trend to zero and stay there. A check that has never been
 green is a check that is measuring a known defect, not guarding an invariant — and should say so.
+
+---
+
+### 12.4 Pilot results — dry run, 12 documents, 2026-08-17
+
+`scripts/gate_dryrun.py`, read-only. Pilot set chosen to hit every branch: the 59G-4.130 family, a
+duplicate group, zero-page and zero-chunk documents, and an episodic cluster.
+
+**It found two design bugs before any code was written — which is what the pilot was for.**
+
+| # | Bug | Symptom in the run | Fix |
+|---|---|---|---|
+| 1 | episodic docs keyed by rule number | `Notice of Proposed Rule: 59G-4.130` took `doc_key = AHCA\|FL\|59G-4.130`, overlap 0.019, decision `SUCCESSOR` → **would retire the real coverage policy** | episodic test precedes all tiers (§2.2) |
+| 2 | ladder defaulted to promote | anything under τ_high but over 0.01 became `successor(partial)` and promoted | default is ASK; both ambiguous branches leave the prior ACTIVE (§4.2) |
+
+**Post-fix decisions across the 12:**
+
+| Decision | n | Notes |
+|---|---|---|
+| `first_version` | 7 | includes all 4 episodic notices — correctly unkeyed, correctly not superseding anything |
+| `unpublishable` | 4 | 2 zero-chunk, 2 zero-page → §5.0 remediation actions emitted |
+| `ambiguous_revision` | 1 | the genuine 59G-4.130 pair at 0.698 → routed to Fact Store, prior stays active |
+
+Third finding, from recalibrating after fix 1: **the τ measurement was contaminated** — see §4.3.
+
+Nothing was written: no retire, no delete, no re-trigger, no index change.
 
 ---
 
