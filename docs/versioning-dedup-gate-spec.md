@@ -797,7 +797,7 @@ Nothing was written: no retire, no delete, no re-trigger, no index change.
 | **Fact Store / Payor Platform** *(one seat — Ananth 2026-08-17)* | §7 human loop · §11.5 review surface · **§11.1 exclusion vs floor · §11.2 importance grain · §5.2 recall bias** | 🟡 PARTIAL — §7/§11.5 ✅ signed 2026-08-17 w/ 2 refinements: (1) §7 returns TWO separate valid-time dates, never derive one from the other; (2) verdict keyed on the DIGEST PAIR + doc_key. Verdict store theirs; RAG pre-renders diff; priority-triaged. **Still owed: §11.1 / §11.2 / §5.2** |
 | Retriever | §10 as-of contract · index filter on (`doc_key`, `lifecycle_state`) | ✅ signed, see §10.1/§10.2 — updated after §17: contract is *selection among N concurrently-active versions*, not a filter to one; `as_of_date` must be a structured caller param, not query-text regex; §10 build-order moved to prerequisite, agreed |
 | Eval | §11.3 classifier miss profile baseline · τ_high calibration | ⬜ |
-| DB seat | §9 schema deltas · §11.4 column contract + index strategy | ⬜ |
+| DB seat | §9 schema deltas · §11.4 column contract + index strategy | ✅ **SIGNED** (2026-08-18) — migration written: `mobius-payor/migrations/021_versioning_lineage_columns.sql`, NOT yet applied. Ruling in `docs/DB_REQUEST_VERSIONING_COLUMNS.md`. **Corrected one defect:** `CREATE INDEX CONCURRENTLY` cannot run inside a transaction block — the requested DDL would have aborted; index builds moved after COMMIT. **Q1:** a CHECK constrains values, not writers — added `termination_date_source` + provenance CHECK instead (5,477/5,496 AHCA rows backfilled `ttl_legacy`, making the TTL corruption queryable); column-level GRANT is the real fix, filed as follow-up (RAG connects as `postgres`, no role split). **Q2:** `text` + CHECK, not enum — vocabulary already moved once (`shelved`), and `ALTER TYPE … ADD VALUE` is not transactional. **Q3:** `(doc_key, lifecycle_state)` is sufficient, no date column — measured version chains are avg 2.26 / p95 5 / max 7, and `effective_date` has only 4 distinct values so a date index would never be planned. |
 | Maintaining | §3 normalization vs coherence gate · `last_validated_at` freshness overlap · nightly-sweep interaction | ⬜ |
 | Technical Review | structure + seam ownership | ⬜ |
 
@@ -1429,3 +1429,16 @@ Relevant to the gate: these should not enter supersession adjudication. Two
 SAMHSA reports are not versions of each other in any sense a payer reviewer can
 rule on, and putting them in the queue spends the scarcest resource here —
 human attention — on a question with no payer answer.
+
+## §7.3.5 Fact Store seat — ratified, one ordering refinement (2026-08-18)
+
+Read §7.3.1–§7.3.4 + §19 firsthand. **Ratified** — consistent with my §14/§14.6 sign-off:
+- **§7.3.1** working-queue with the gate's answer **pre-selected** = my "send decisions, not documents" (reviewer checks vs re-derives = seconds not minutes); same surface as classification, right call.
+- **§7.3.2** RAG-owns-reclassify, Fact Store exposes+reports (no reclassify button on my surface) = Ananth's single-trigger/single-owner call; the two safeguards (refuse-without-rule-pack after the 13→0 / 82→0 damage; batched-400 with legible `failed_batches`) are exactly the fail-closed + legible-partial discipline. Agreed.
+- **§7.3.3** one coverage endpoint = my "one canonical record; two surfaces computing the same number differently will disagree and whichever the person is looking at becomes 'truth'." The 5,980-doc disagreement is precisely the board-can-lie failure this whole design (and the eval command center) exists to kill. Strongly agreed.
+- **§7.3.4** `payer_scope` terminal state (not_a_payor / not_tracked / ingestion_artefact) — sound classification hygiene, agreed.
+- **§19** pilot: the real adjudication queue is **8 items** — confirms my Q3 answer (flat priority-sorted list, no pagination) emphatically.
+
+**One additive refinement to §7.3.1 ordering.** "Confidence highest-first" optimizes *throughput* — the confirmable cases drain fast. But my §14.6 Q3 priority is (criticality → retrieval-impact → confidence-gap), and pure confidence-first can leave a **high-value, low-confidence** item (a critical supersession that actually gets retrieved) waiting behind hundreds of easy confirmations. Refinement: order by confidence within a criticality tier, so a critical/high-retrieval ambiguous item floats above the easy tail rather than draining last. At the pilot's 8-item volume this is moot; it matters only if the queue ever grows — cheap to build in now, and it keeps the surface value-first, not just throughput-first.
+
+— Eval / Fact Store seat
