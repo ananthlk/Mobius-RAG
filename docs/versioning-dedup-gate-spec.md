@@ -921,3 +921,79 @@ These have no seat and are not in the §13 ledger. Flagging rather than assuming
 Zero chains auto-resolve, entirely because of §14.3 — the ordering is degenerate, not because the content
 evidence is weak. **Fixing filename date extraction is what converts this from 7 human tasks to nearly
 zero**, and it is the single highest-leverage missing module.
+
+
+---
+
+## 15. Telemetry persisted, and the first real calibration (2026-08-17)
+
+`scripts/gate_persist_run.py`. Creates `gate_decisions` and writes one row per document.
+**Additive only** — no document, chunk or index was modified. The gate's decisions are *recorded*, not
+applied, which is exactly the §1.1 separation: the decision row exists before (here, instead of) any
+mutation, so it can be inspected before anything acts on it.
+
+`gate_decisions` DDL is **dev-only and unratified** — the DB seat owns the column contract (§11.4) and
+this table is expected to be revised to their shape. Flagged to them on creation.
+
+### 15.1 500 documents run as incoming
+
+| Decision | lane | n | avg overlap | carried | re-embed |
+|---|---|---|---|---|---|
+| `first_version` | untracked | 398 | — | — | — |
+| `first_version` | tracked | 76 | — | — | — |
+| `unpublishable` | — | 16 | — | — | — |
+| `ambiguous_revision` | tracked | 6 | 0.636 | 7,396 | 2,289 |
+| `ambiguous_order` | tracked | 2 | 0.321 | 1,645 | 2,243 |
+| **`successor`** | tracked | **2** | **0.740** | **3,329** | **587** |
+
+8 adjudications would reach Fact Store. Ordering confidence: 478 no-sibling, **8 filename-date**,
+12 degenerate, 2 effective-date.
+
+**The §14.3 fix works.** Filename date extraction produced the first automatic promotions the design has
+ever made — previously 0 of 7 chains resolved. Both were verified by hand and both are correct:
+
+```
+2021-10-01  supersedes  2020-10-01     overlap 0.744   85% of embeddings reused
+11-4-22     supersedes  2022-10-01     overlap 0.736   85% of embeddings reused
+```
+
+**Delta reuse is real and large:** 3,329 chunks carried against 587 re-embedded. A contract revision costs
+15% of a full re-embed, not 100%.
+
+### 15.2 τ IS document-class dependent — the finding that changes §4.3
+
+The `Attachment II — Core Contract Provisions` chain gives nine consecutive-edition links, all ordered by
+filename date, all genuine successions:
+
+```
+2019-02-01 → 2020-02-01   0.599
+2020-02-01 → 2020-07-01   0.651
+2020-07-01 → 2020-10-01   0.588
+2020-10-01 → 2021-10-01   0.744   ← promoted
+2021-10-01 → 2022-02-01   0.610
+2022-02-01 → 2022-10-01   0.670
+2022-10-01 → 11-4-22      0.736   ← promoted
+```
+
+Genuine consecutive editions of this contract occupy roughly **0.59–0.74**. A global `τ_high = 0.70`
+slices that band almost arbitrarily: two links promote, five identical-in-kind links go to a human.
+
+Compare the only other real pair we have — 59G-4.130, a *coverage policy*, at **0.698**.
+
+**A single global threshold is wrong in principle.** A contract attachment revised twice a year and a
+coverage policy revised once a decade have different characteristic overlap, and one number cannot serve
+both. τ should be **per `asset_type`**, which is a third independent reason to need that field from Fact
+Store (§11.2) — it now gates tier-2 keying *and* threshold selection.
+
+Do **not** simply lower τ to 0.58 to capture this chain. That is fitting one document family, the same
+error as the withdrawn 0.70. The correct next step is to accumulate links per asset class and let each
+class carry its own threshold, with the safe default (§4.2) holding until a class has enough evidence.
+
+### 15.3 What is still unproven
+
+- **The promotion gate still has not run.** It is `n/a` on all 500 rows: the two successors would be its
+  first invocations, and completeness-vs-predecessor has never been exercised.
+- **`unchanged` never fired.** No document in the run was a re-observation of one already present, so
+  pilot Case A — the nightly path that must be *exactly free* — remains unverified against real data.
+  It needs a genuine re-scrape, which means Crawler, not a corpus replay.
+- Latency is reported as ~0 ms because only the decision is timed; hashing and IO are not.
