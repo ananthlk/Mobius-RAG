@@ -997,3 +997,91 @@ class carry its own threshold, with the safe default (§4.2) holding until a cla
   pilot Case A — the nightly path that must be *exactly free* — remains unverified against real data.
   It needs a genuine re-scrape, which means Crawler, not a corpus replay.
 - Latency is reported as ~0 ms because only the decision is timed; hashing and IO are not.
+
+
+---
+
+## 16. Bug 4 — the ambiguity deadlock, found by forward simulation
+
+`scripts/gate_forward_sim.py`. **The 500-doc run in §15 was mislabelled `mode='forward'`. It was a
+replay.** Verified against the corpus:
+
+- **0 URLs have ever been fetched more than once** — a re-observation has never occurred, so `unchanged`
+  was unreachable by construction.
+- All 12 `Attachment II` editions were **ingested on a single day** (2026-04-29) from an archive page.
+  A historical pile, not a revision stream.
+
+Its two "promotions" were back-propagation chain reconstruction — a different question from *"a document
+just arrived; does it supersede what is live?"* Correcting that is what exposed the bug.
+
+### 16.1 The deadlock
+
+Presenting the eight dated editions in publication order, with the original rule that only
+`first_version` and `successor` advance the live pointer:
+
+```
+2019-02-01  FIRST_VERSION
+2020-02-01  ambiguous_revision   ov 0.599   vs 2019-02-01
+2020-07-01  ambiguous_revision   ov 0.565   vs 2019-02-01
+2020-10-01  ambiguous_revision   ov 0.525   vs 2019-02-01
+2021-10-01  ambiguous_revision   ov 0.531   vs 2019-02-01
+2022-02-01  ambiguous_revision   ov 0.484   vs 2019-02-01
+2022-10-01  ambiguous_revision   ov 0.478   vs 2019-02-01
+2022-11-04  ambiguous_revision   ov 0.479   vs 2019-02-01
+```
+
+**The chain never advances, and it gets worse the longer it runs.** Because ambiguity leaves the prior
+active, `live` freezes at the oldest edition; every subsequent arrival is compared against a
+five-year-old ancestor, so overlap **decays monotonically** and the chain becomes progressively *less*
+able to resolve. One ambiguous link permanently deadlocks a document family.
+
+This is a direct consequence of the §4.2 safe default and could not be seen in a replay, which compares
+consecutive pairs rather than against a frozen anchor.
+
+### 16.2 The fix — admission and retirement are separate decisions
+
+The comparison anchor must be the most recently **admitted** version, not the most recently **promoted**
+one. Every branch of §4.2 admits the incoming document to the index; they differ only in whether the
+*prior* is retired. Anchoring on the last promotion conflates two independent things.
+
+```
+anchor := most recent ADMITTED version at doc_key      (not: last promoted)
+```
+
+Same chain, after the fix:
+
+```
+2019-02-01  FIRST_VERSION
+2020-02-01  ambiguous_revision   ov 0.599   vs 2019-02-01
+2020-07-01  ambiguous_revision   ov 0.651   vs 2020-02-01
+2020-10-01  ambiguous_revision   ov 0.587   vs 2020-07-01
+2021-10-01  SUCCESSOR            ov 0.744   vs 2020-10-01   → retires prior
+2022-02-01  ambiguous_revision   ov 0.610   vs 2021-10-01
+2022-10-01  ambiguous_revision   ov 0.670   vs 2022-02-01
+2022-11-04  SUCCESSOR            ov 0.736   vs 2022-10-01   → retires prior
+```
+
+Overlap now reflects the actual edition-to-edition delta, two links resolve automatically, and the chain
+progresses. Re-embed cost drops with it (489 → 390 → 511 → **285** on the promoted link).
+
+### 16.3 Case A passes
+
+| Case | Result |
+|---|---|
+| re-present the active document unchanged | `UNCHANGED`, `index_action = none`, **0 chunks re-embedded** — **PASS** |
+| same document + cosmetic drift (whitespace, injected "Printed on …" line) | `UNCHANGED`, 0 re-embedded — **PASS**, normalization absorbed it |
+
+The nightly path is free, and §3 normalization does the job it was specified for. Note this is a
+*synthetic* re-presentation: the corpus still contains no genuine re-fetch, so Case A remains unproven
+against real crawler output. That test needs Crawler, not a replay.
+
+### 16.4 What this says about the ambiguity design
+
+Ambiguity must never be load-bearing on progress. Two properties now required:
+
+1. **An unresolved adjudication cannot block the chain.** The anchor advances regardless; only retirement
+   waits for a verdict.
+2. **Multiple admitted-but-unretired versions can coexist** at one `doc_key` while verdicts are pending.
+   That makes §10's as-of resolution more important, not less — with several unretired versions live,
+   "which one answers a date-of-service query" is decided by the validity window (§6.1), not by a single
+   `active` flag.
