@@ -515,6 +515,11 @@ export function CorpusHealthTab() {
                 both determinations is counted once, in the one that must clear first.
                 <b> Managed</b> documents are the ones the Payor platform classified and can act
                 on; the rest are the long tail nobody owns.
+                <br /><br />
+                Nothing here is un-analysed: the gate has scored every document and duplicate
+                determination has run corpus-wide. These rows are what is <b>unresolved</b>, not
+                unexamined. The copy we kept from a resolved pair counts as <b>clean</b> — it is
+                the answer, not an open question.
               </p>
               <div className="ch-tablewrap">
                 <table className="ch-table ch-queue">
@@ -524,9 +529,11 @@ export function CorpusHealthTab() {
                   </tr></thead>
                   <tbody>
                     {([
-                      ['awaiting_duplicate', 'Awaiting duplicate determination',
-                       'in a candidate pair — held until a person decides, none auto-retired'],
-                      ['awaiting_versioning', 'Awaiting versioning determination',
+                      ['awaiting_duplicate', 'Duplicate — decided, not resolved',
+                       'determination HAS run on all of these. They are held because the '
+                       + 'verdict was not "duplicate" (period series, product variant) or '
+                       + 'because it was but no edition date exists to pick which copy survives'],
+                      ['awaiting_versioning', 'Version — needs a person',
                        'overlap or ordering the gate would not call on its own'],
                       ['unpublishable', 'Unpublishable',
                        'no pages or no chunks — neither determination is possible until fixed'],

@@ -4343,7 +4343,15 @@ def corpus_health(payer: str | None = None,
                   FROM documents),
                 v AS (SELECT document_id, decision, adjudication_target
                       FROM gate_decisions WHERE run_id = %s),
-                dp AS (SELECT DISTINCT document_id FROM gate_decisions WHERE run_id = %s)
+                -- Documents still genuinely pending a duplicate decision.
+                -- EXCLUDES the survivors: once a group is resolved, the copy we
+                -- kept is the canonical — it is the ANSWER, not an open question.
+                -- Counting it as pending overstated unmanaged work by 148 and
+                -- made a resolved pair look like two unresolved documents.
+                dp AS (SELECT DISTINCT g.document_id FROM gate_decisions g
+                       WHERE g.run_id = %s
+                         AND NOT EXISTS (SELECT 1 FROM corpus_cleanup_actions a
+                                         WHERE a.canonical_id = g.document_id))
                 SELECT CASE
                          WHEN v.decision = 'unpublishable'      THEN 'unpublishable'
                          WHEN dp.document_id IS NOT NULL        THEN 'awaiting_duplicate'
