@@ -52,6 +52,15 @@ interface Health {
     managed_documents?: number; unmanaged_documents?: number
     managed_by_kind?: Record<string, number>; managed_basis?: string
   }
+  cleanup: {
+    measured: boolean
+    actions?: Record<string, {
+      documents: number; managed: number; unmanaged: number
+      vectors_removed: number; chunks_removed: number; embeddings_removed: number
+      pages_retained: number; reversible: number; last_acted_at?: string
+    }>
+    index_rows_now?: number; index_share_removed_pct?: number
+  }
   queue: {
     measured: boolean
     scored?: { managed: number; unmanaged: number }
@@ -181,6 +190,7 @@ export function CorpusHealthTab() {
   const g = health?.gate
   const d = health?.duplicates
   const qq = health?.queue
+  const cl = health?.cleanup
   const asOf = health?.as_of ? new Date(health.as_of).toLocaleString() : null
 
   // Which preset is active is DERIVED from the dates rather than stored, so it
@@ -477,6 +487,64 @@ export function CorpusHealthTab() {
             </table>
           </div>
 
+          </Section>
+
+          <Section title="Duplicate cleanup"
+                   badge={cl?.measured ? (cl.actions?.retired_unpublished?.documents || null) : null}
+                   tone="good">
+          {!cl?.measured ? <div className="ch-empty">No cleanup has run.</div> : (
+            <>
+              <p className="ch-note">
+                Unmanaged duplicates are cleaned without waiting for a person; managed ones are
+                held for adjudication. Cleaning removes the <b>chunks, embeddings and vector
+                writes</b> — the document row, the GCS object, the extracted pages and the full
+                process log stay, so restoring one is a re-chunk, not a re-download.
+                These numbers come from the cleanup ledger, recorded as each removal happened:
+                once the rows are gone the corpus itself can no longer tell a cleaned document
+                from one that never chunked.
+              </p>
+              {(() => {
+                const r = cl.actions?.retired_unpublished
+                const h = cl.actions?.held_for_human
+                return (
+                  <>
+                    <div className="ch-cards">
+                      <div className="ch-card"><div className="ch-card-n green">{n(r?.documents || 0)}</div>
+                        <div className="ch-card-l">retired &amp; unpublished</div>
+                        <div className="ch-card-s">{n(r?.unmanaged || 0)} unmanaged · auto-cleaned</div></div>
+                      <div className="ch-card"><div className="ch-card-n green">{n(r?.vectors_removed || 0)}</div>
+                        <div className="ch-card-l">vectors out of the index</div>
+                        <div className="ch-card-s">
+                          {cl.index_share_removed_pct}% of the index · {n(cl.index_rows_now)} rows now live
+                        </div></div>
+                      <div className="ch-card"><div className="ch-card-n amber">{n(h?.documents || 0)}</div>
+                        <div className="ch-card-l">held for a human</div>
+                        <div className="ch-card-s">managed — withheld from publishing, not retired</div></div>
+                      <div className="ch-card"><div className="ch-card-n">{n(r?.reversible || 0)}</div>
+                        <div className="ch-card-l">reversible</div>
+                        <div className="ch-card-s">{n(r?.pages_retained || 0)} pages retained as reversal fuel</div></div>
+                    </div>
+                    <div className="ch-tablewrap">
+                      <table className="ch-table ch-queue">
+                        <thead><tr><th>Removed</th><th className="num">Rows</th><th>Kept</th></tr></thead>
+                        <tbody>
+                          <tr><td>Published vectors <span className="ch-card-s">live retrieval index</span></td>
+                            <td className="num">{n(r?.vectors_removed || 0)}</td>
+                            <td>GCS object <span className="ch-card-s">untouched at file_path</span></td></tr>
+                          <tr><td>Chunk embeddings</td><td className="num">{n(r?.embeddings_removed || 0)}</td>
+                            <td>Extracted pages <span className="ch-card-s">{n(r?.pages_retained || 0)} rows — enables re-chunk</span></td></tr>
+                          <tr><td>Hierarchical chunks</td><td className="num">{n(r?.chunks_removed || 0)}</td>
+                            <td>Process log <span className="ch-card-s">chunking jobs, publish events, status</span></td></tr>
+                          <tr><td>&nbsp;</td><td className="num">&nbsp;</td>
+                            <td>Decision trace <span className="ch-card-s">why each was retired, and against which copy</span></td></tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                )
+              })()}
+            </>
+          )}
           </Section>
 
           <Section title="Cleanup queue"

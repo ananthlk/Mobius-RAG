@@ -303,7 +303,7 @@ async def main():
                 "duplicate", reason, round(tj, 4), None, inter, None, None, None,
                 "dedup", meta[did]["d"]["importance"], meta[did]["d"]["authority_level"],
                 "n/a",
-                ("superseded" if (is_dropped and kind == "duplicate") else "active"),
+                ("retired" if (is_dropped and kind == "duplicate") else "active"),
                 ("retire duplicate" if (is_dropped and kind == "duplicate") else "keep"),
                 (None if kind == "duplicate" else "fact_store"),
                 ("retire; canonical is the earlier edition" if is_dropped
@@ -337,7 +337,7 @@ async def main():
     if apply:
         # Only exact_text, and only where the canonical pick had dates to stand on.
         act = [(r[2], r[5]) for r in rows
-               if r[30] == "duplicate" and r[19] == "superseded"
+               if r[30] == "duplicate" and r[19] == "retired"
                and "canonical pick arbitrary" not in r[8]]
         print(f"\n--apply: retiring {len(act)} documents as exact-text duplicates")
         async with c.transaction():

@@ -4135,7 +4135,17 @@ def corpus_health(payer: str | None = None,
         # Scope applies to the WHOLE page — sources, stages, classifiers, gate
         # and dedup alike — so a window isolates an issue everywhere at once
         # rather than only in ingestion.
-        pw = ""
+        # Retired documents leave the working corpus entirely. This is load-bearing,
+        # not cosmetic: duplicate cleanup deletes their chunks and embeddings, which
+        # makes them indistinguishable from a chunking FAILURE — they would surface
+        # as "missing chunking" with a one-click "re-enqueue CHUNKING" action that
+        # would rebuild exactly what the cleanup removed. Excluding them here keeps
+        # the pipeline stages honest and makes the cleanup stick.
+        #
+        # They are not hidden: the Duplicate cleanup section reads
+        # corpus_cleanup_actions, which records what was removed at the moment of
+        # removal precisely because these tables can no longer answer for them.
+        pw = " AND d.lifecycle_state IS DISTINCT FROM 'retired'"
         args_l: list = []
         if payer:
             pw += " AND d.payer = %s"
@@ -4238,7 +4248,7 @@ def corpus_health(payer: str | None = None,
             # real edition date. Where dates are absent the canonical choice is
             # arbitrary, so the pair is held rather than resolved by coin-flip.
             cur.execute(f"""SELECT
-                  count(*) FILTER (WHERE g.lifecycle_state = 'superseded'
+                  count(*) FILTER (WHERE g.lifecycle_state = 'retired'
                                      AND g.reason NOT LIKE '%%arbitrary%%'),
                   count(*) FILTER (WHERE g.reason LIKE '%%arbitrary%%')
                 FROM gate_decisions g JOIN documents d ON d.id = g.document_id
@@ -4345,6 +4355,54 @@ def corpus_health(payer: str | None = None,
                 "unmanaged": sum(v["unmanaged"] for v in buckets.values()),
             }
             queue_block = {"measured": True, "scored": scored, "buckets": buckets}
+
+        # ── duplicate cleanup — what was actually removed ─────────────────
+        #
+        # Reads corpus_cleanup_actions, NOT the corpus. After cleanup the chunks
+        # and embeddings are gone, so recounting them reports 0 — identical to a
+        # document that never chunked. The ledger is the only surface that can
+        # still say what a retirement cost, and it is also the reversal
+        # instruction: pages_retained and gcs_path together mean restoring is a
+        # re-chunk, not a re-download.
+        #
+        # Deliberately NOT scoped by `pw`: retired documents are excluded from the
+        # working corpus above, so joining them back through the payer filter
+        # would zero this section out and make a completed cleanup look like it
+        # never happened.
+        cur.execute("""
+            SELECT action,
+                   count(*),
+                   count(*) FILTER (WHERE managed),
+                   COALESCE(sum(published_embeddings_removed), 0),
+                   COALESCE(sum(hierarchical_chunks_removed), 0),
+                   COALESCE(sum(chunk_embeddings_removed), 0),
+                   COALESCE(sum(pages_retained), 0),
+                   count(*) FILTER (WHERE reversible),
+                   max(acted_at)
+            FROM corpus_cleanup_actions GROUP BY action""")
+        crows = cur.fetchall()
+        if not crows:
+            cleanup_block = {"measured": False}
+        else:
+            actions = {}
+            for (act, cnt, mng, pub, hch, emb, pages, rev, last) in crows:
+                actions[act] = {
+                    "documents": int(cnt), "managed": int(mng),
+                    "unmanaged": int(cnt) - int(mng),
+                    "vectors_removed": int(pub), "chunks_removed": int(hch),
+                    "embeddings_removed": int(emb), "pages_retained": int(pages),
+                    "reversible": int(rev),
+                    "last_acted_at": last.isoformat() if last else None,
+                }
+            live = one("SELECT count(*) FROM rag_published_embeddings", ())
+            cleanup_block = {
+                "measured": True, "actions": actions,
+                "index_rows_now": int(live),
+                # What the cleanup bought, as a share of the live index.
+                "index_share_removed_pct": round(
+                    100.0 * sum(a["vectors_removed"] for a in actions.values())
+                    / max(int(live) + sum(a["vectors_removed"] for a in actions.values()), 1), 3),
+            }
 
         # ── sources of entry — "how did it get here", nothing more ────────
         sources = []
@@ -4458,6 +4516,7 @@ def corpus_health(payer: str | None = None,
             },
             "duplicates": dup_block,
             "queue": queue_block,
+            "cleanup": cleanup_block,
         }
     finally:
         conn.close()
