@@ -1,7 +1,7 @@
 # Versioning & Deduplication Gate — spec
 
 **Author/owner of spec:** Master RAG Coordinator. **Builder/owner of code:** Master RAG Coordinator (gate + back-propagation).
-**Human review surface:** Fact Store. **Classification input:** Payor Platform. **Read-side:** Retriever. **DDL:** DB seat. **Miss-profile baseline:** Eval.
+**Human review surface + classification input:** Fact Store / Payor Platform (one seat). **Read-side:** Retriever. **DDL:** DB seat. **Miss-profile baseline:** Eval.
 
 Status: **design, unbuilt** — 2026-08-17. Circulated for sign-off. Nothing in this spec is implemented.
 
@@ -149,7 +149,9 @@ on document D arriving at the gate (chunked, embedded):
   then apply the lane rules in §5.
 ```
 
-`τ_high` is unset pending the phase-4 measurement in §8 — it must be calibrated against real
+**`τ_high` ≈ 0.70, provisional** — measured in §12.2, not guessed. Across 112 real AHCA candidate pairs
+the overlap distribution is usefully bimodal: 70 pairs ≥ 0.70, 11 pairs at ≈0, and a thin middle
+(median 0.722). Eval to confirm or move it. Original note retained: it must be calibrated against real
 version pairs, not guessed.
 
 ### 4.1 Hashes decide; vectors only nominate
@@ -182,6 +184,62 @@ Both lanes keep every version. **Nothing is ever deleted.** What differs is admi
 | Deduplication | chunk-level delta + canonical pick | `file_hash` only |
 | Failure alarm | `alert_on_failure` from Payor Platform | silent |
 
+### 5.0 Publishability precondition, and what to DO about each failure
+
+**Ruling (Ananth, 2026-08-17):** *"we should also not publish… documents with no chunks, they just add
+more problems"* and *"no pages — do not publish and back propagate to remove… no chunks with pages…
+failed something delete everything and retrigger or whatever needs to happen."*
+
+A document must have **at least one chunk** to be publishable, in either lane. Zero-page and zero-chunk
+documents cannot be retrieved, so they add nothing — while inflating every count and passing every "did we
+ingest it" check.
+
+#### The governing principle
+
+**Derived artifacts are disposable; the raw document is not.** Pages, chunks and embeddings are all
+rebuildable from the stored raw file. So the remedy for any partial-pipeline failure is always the same
+shape: **delete the derived state and re-trigger from the last good upstream artifact** — never patch
+partial state in place, because partial state is what produced the failure signature in the first place.
+
+#### Remediation matrix
+
+| Condition | Diagnosis | Action on ingest | Back-propagation action |
+|---|---|---|---|
+| 0 pages | extraction produced nothing | do not publish; `shelved` | delete derived state, re-trigger **extraction** from raw |
+| pages > 0, 0 chunks | chunking never ran or never completed | do not publish; `shelved` | delete any partial chunk rows, re-enqueue **chunking** (`POST /documents/{id}/chunking/start`) |
+| chunks > 0, embeddings incomplete | embedding failed mid-run | do not publish; `shelved` | delete chunks **and** embeddings, re-trigger **chunk + embed** together |
+| `status` failed / `has_errors` | any upstream stage failed | do not publish; `shelved` | delete **all** derived artifacts, re-trigger from raw |
+| duplicate `content_digest` | redundant copy | publish canonical only | retire non-canonical **and remove its chunks from the index** |
+| raw file missing | nothing to rebuild from | do not publish; `quarantined` | **human** — cannot be fixed by retry |
+
+#### Retry budget
+
+Re-triggering is bounded: **2 attempts**, then `quarantined` with the failure reason on the record. A
+document that fails extraction three times is not a transient failure and must stop consuming pipeline
+capacity — it is a defect report, and it goes to the §7 review queue rather than into an infinite retry.
+Every attempt writes a §1.1 telemetry row, so "how many are we retrying, and are they converging" is
+answerable rather than inferred.
+
+#### One distinction that matters for cleanup
+
+A zero-chunk document has **nothing in the vector index by construction** — there is no index cleanup to
+do, only corpus bookkeeping and a re-trigger. A **duplicate** is the opposite: its chunks *are* indexed and
+competing in retrieval right now, so retiring it requires an actual index deletion. Conflating the two
+produces either a no-op that reports success or an index left dirty.
+
+#### Measured back-propagation workload (AHCA, §12.2)
+
+| Condition | Docs | Action |
+|---|---|---|
+| 0 pages | 150 | re-trigger extraction |
+| pages, 0 chunks | 211 | re-enqueue chunking |
+| duplicate digest | 100 | retire + delete 14,522 indexed chunks |
+| **total unpublishable** | **361** | 6.6% of the payer corpus, currently counted as ingested |
+
+Re-triggering 361 documents is the first real test of whether these failures are transient or structural.
+If most succeed on retry, this was a queue problem; if most fail again, extraction has a defect that the
+zero-page count has been quietly hiding.
+
 ### 5.1 The promotion gate (tracked only)
 
 A new version is **not** promoted until it passes a completeness check against its predecessor:
@@ -213,27 +271,57 @@ shrugged.
 
 ---
 
-## 6. Two clocks — the failure that produces confidently wrong answers
+## 6. Validity in time — perpetual until superseded
 
-Retiring on a new hash is a statement about **our knowledge**, not about the policy.
+**Ruling (Ananth, 2026-08-17):** *"dont trust the term date… we will assume a doc is perpetually valid
+until we get another revision or the doc retires. until we read the doc there is no way to set the term
+date."*
+
+A document is **valid from its effective date onward, indefinitely**, until one of two things happens: a
+newer revision supersedes it, or it is explicitly retired. We do not invent an end date at ingestion.
 
 | Stamp | Meaning | Set by |
 |---|---|---|
-| `retired_at` | transaction time — when we stopped believing this was current | the gate, automatically, on new `content_digest` |
-| `termination_date` | valid time — when the policy actually stopped being in force | a human or a high-confidence extraction, **never the gate** |
+| `effective_date` | start of validity | the document itself |
+| `termination_date` | **explicit** end of validity, stated by the authority | a human, or a high-confidence extraction, **never the gate and never ingestion** |
+| `retired_at` | transaction time — when *we* stopped believing it current | the gate, automatically, on a new `content_digest` |
+
+### 6.1 The validity window is DERIVED, not stored
 
 ```
-on a new content_digest:
-  set  retired_at       = now()     -- automatic, free, always correct
-  keep termination_date = NULL      -- unknown until someone reads the document
+valid_window(v) = [ v.effective_date ,
+                    COALESCE( v.termination_date,              -- explicit, if ever read
+                              successor(v).effective_date,     -- implicit: the next edition
+                              +infinity ) )                    -- still the current edition
 ```
 
-**The failure case.** AHCA publishes v2 effective 2026-07-01. We crawl it 2026-08-17. If retirement writes
-`termination_date = today`, v1 looks valid through 17 August, and every July date-of-service query is
-answered from the superseded policy with full confidence — a six-week blind window.
+`termination_date IS NULL` is the **normal and correct** state. It means *open-ended*, not *unknown*.
 
-`NULL` is the honest answer and it makes the gap findable. *"We don't know when this stopped applying"* is
-a queryable backlog; *"it applied through August"* is a wrong answer nobody can detect.
+**Why derived beats stored.** A derived bound cannot contradict the chain — it is computed from the
+successor's start, so the two can never disagree. A stored bound can, and silently. It also degrades
+honestly: with a single version the answer is "valid from X onward," which is true, rather than a
+fabricated window. `termination_date` exists as an **override** for the case where the authority states
+an end date explicitly (a policy that self-terminates without a replacement), which is the only situation
+the derived rule cannot express.
+
+### 6.2 Deferred, deliberately
+
+Reading a stated end date out of document text is **not built now**. The concept and the column exist so
+the model is right from the start; populating them is later work. Until then the derived rule carries the
+whole load, and it is sufficient for every case except self-terminating policies.
+
+### 6.3 The current column is UNTRUSTED — measured, not assumed
+
+Step 0 (§12.2) found `termination_date` is `created_at + 182 days` for **5,475 of 5,494** AHCA documents,
+with **five distinct values** corpus-wide. It is a refresh TTL wearing a policy date's name.
+
+Concretely: the 59G-4.130 coverage policy effective **2016-11-01** carries `termination_date = 2027-02-15`
+— the corpus asserts a nine-year-old superseded policy remains valid for another six months. 22 documents
+are already past their stated termination date and still servable.
+
+This is worse than a NULL. A missing value is a findable gap; a populated wrong value is a confident wrong
+answer with nothing to detect it. **The derived values must be cleared before any as-of query depends on
+this column** — §10 cannot be built on it as it stands.
 
 ---
 
@@ -459,12 +547,69 @@ writes to the vector index. If Case A is not free, the nightly pipeline will thr
 
 ---
 
+### 12.2 Step 0 results — AHCA, measured 2026-08-17 (read-only)
+
+5,494 AHCA documents, 1,168,108 chunks. Chunk hashing used `lower()` + whitespace collapse only, so
+every duplicate figure below is a **lower bound** — full §3 normalization will find more.
+
+**Waterfall — what is indexed vs what should be:**
+
+| | Reason | Docs | Running |
+|---|---|---|---|
+| | AHCA documents ingested | **5,494** | |
+| − | zero pages — extraction produced nothing | 150 | 5,344 |
+| − | pages but zero chunks — chunking never completed | 211 | 5,133 |
+| − | exact content duplicate — same normalized text, keep 1 canonical | 100 | 5,033 |
+| = | **distinct indexable documents** | **5,033** | |
+| − | superseded version — older edition in a rule chain *(lower bound)* | 61 | 4,972 |
+| = | **should be active in index** | **4,972** | |
+
+522 documents (9.5%) should not be servable; 18,243 chunks (1.6%) are attached to them. This waterfall is
+the shape the **post-publish integrity check** should report on a schedule — see §12.3.
+
+**Finding 1 — `doc_key` by rule number FAILS as specified.** A 59G-x.y rule number is extractable for only
+**2.3%** of AHCA documents; 97.7% are unkeyed. A title-based fallback reaches 98.9% coverage but
+over-merges catastrophically — one cluster of **590 documents**. §8.1 called this the riskiest assumption
+and it did not survive contact. **The lineage key needs redesign before anything is built on it**, and
+measuring first cost hours instead of weeks.
+
+**Finding 2 — `termination_date` is fabricated.** See §6.3. `created_at + 182 days`, five distinct values
+corpus-wide.
+
+**Finding 3 — τ_high ≈ 0.70 is supported by data.** 112 candidate pairs: median overlap 0.722, 70 pairs
+≥ 0.70, 11 at ≈0, thin middle. The ambiguous branch (§4.1) is real but small — about 10% of pairs.
+
+**Worked case, 59G-4.130** — the collision Retriever hit in production is four documents, not two: two
+rulemaking notices plus two coverage policies (effective 2016-11-01 and 2024-09-01), identical 53-chunk
+counts, both carrying the same fabricated termination date. The reranker was choosing between two of four
+near-identical candidates with nothing in the data to break the tie correctly.
+
+### 12.3 Post-publish integrity checks
+
+**Ananth:** *"these are all the integrity checks post publish."*
+
+Distinct from the pre-publish gate. The gate decides one document at a time; these are corpus-wide
+invariants that can only be checked after the fact, and they run on a schedule:
+
+| Check | Invariant | Current AHCA |
+|---|---|---|
+| unpublishable present | no active document has zero chunks | 361 violations |
+| duplicate content | no two active documents share a `content_digest` | 100 violations |
+| chain integrity | at most one `active` version per `doc_key` | unmeasurable until key redesign |
+| date sanity | no `termination_date` earlier than its `effective_date`; none derived from `created_at` | 5,475 derived |
+| stale service | no active document past an explicit `termination_date` | 22 violations |
+| orphan chunks | no chunk whose document is retired or shelved | to measure |
+
+Each violation count is a number that should trend to zero and stay there. A check that has never been
+green is a check that is measuring a known defect, not guarding an invariant — and should say so.
+
+---
+
 ## 13. Sign-off ledger
 
 | Seat | Scope of review | Status |
 |---|---|---|
-| Payor Platform | §11.1 exclusion vs floor · §11.2 importance grain · §5.2 recall bias | ⬜ |
-| Fact Store | §7 human loop · §11.5 review surface · verdict store shape | ✅ (Eval/Fact Store, 2026-08-17) — signed w/ 2 additive refinements: (1) §7 returns TWO separate valid-time dates (successor.effective_date + predecessor.termination_date), never auto-derive one from the other, NULL if boundary unstated; (2) §11.5 verdict keyed on the DIGEST PAIR (pred+succ content_digest)+doc_key, not a lone digest. Q1: verdict store mine (classifications shape). Q2: RAG pre-renders diff, I display. Q3: priority-triaged not paginated; queue count gated on §12 step 0. |
+| **Fact Store / Payor Platform** *(one seat — Ananth 2026-08-17)* | §7 human loop · §11.5 review surface · **§11.1 exclusion vs floor · §11.2 importance grain · §5.2 recall bias** | 🟡 PARTIAL — §7/§11.5 ✅ signed 2026-08-17 w/ 2 refinements: (1) §7 returns TWO separate valid-time dates, never derive one from the other; (2) verdict keyed on the DIGEST PAIR + doc_key. Verdict store theirs; RAG pre-renders diff; priority-triaged. **Still owed: §11.1 / §11.2 / §5.2** |
 | Retriever | §10 as-of contract · index filter on (`doc_key`, `lifecycle_state`) | ✅ signed, see §10.1 — contingent on `as_of_date` being a structured caller param, not query-text regex |
 | Eval | §11.3 classifier miss profile baseline · τ_high calibration | ⬜ |
 | DB seat | §9 schema deltas · §11.4 column contract + index strategy | ⬜ |
@@ -472,3 +617,44 @@ writes to the vector index. If Case A is not free, the nightly pipeline will thr
 | Technical Review | structure + seam ownership | ⬜ |
 
 Nothing in §12 beyond step 0 begins before the seats covering that step have signed.
+
+---
+
+## 14. Fact Store / Eval sign-off — detail (2026-08-17)
+
+Signed §7 + §11.5 (Fact Store row ✅). Read §6, §7, §7.1/7.2, §8, §11.3, §11.5, §12 firsthand. Two additive refinements — both strengthen the design, neither blocks the build.
+
+### 14.1 §7 — return TWO valid-time dates, never auto-derive one from the other
+The human returns `successor.effective_date` **and** `predecessor.termination_date` as **separate** fields. They usually coincide but not always: editions can gap (a policy lapses before its successor takes effect) or overlap (both in force during a transition). Auto-writing `predecessor.termination_date = successor.effective_date` silently manufactures the exact confidently-wrong window §6 exists to kill. If the human supplies only the successor date and the boundary is unstated, `termination_date` stays **NULL** (honest, queryable) — same discipline as §6's two clocks, applied to valid-time itself.
+
+### 14.2 §11.5 — key the verdict on the DIGEST PAIR, not a lone digest
+A verdict answers "is B a successor of A" — it is about a **pair**. A single document is adjudicated against multiple candidates, so a lone-`content_digest` key can't disambiguate which comparison a row answers. Verdict row (append-only, my side, extending the classifications-log shape):
+
+```
+(pred_content_digest, succ_content_digest, doc_key,
+ verdict ∈ {successor, not_successor, unrelated},
+ successor_effective_date, predecessor_termination_date,
+ adjudicated_by, adjudicated_at)
+```
+
+Append-only → re-adjudication writes a new row; a wrong verdict stays diagnosable. Keyed on content_digest (not document_id) so tonight's re-crawl can't recompute the human's answer away.
+
+### 14.3 Answers to Q1–Q3
+- **Q1 (store side):** the verdict store lives on the **Fact Store** side, extending the classifications append-only pattern — one place for the human-facing record. RAG emits the adjudication request and ingests the verdict over a contract; store of record is mine.
+- **Q2 (diff render):** **RAG pre-renders** the chunk diff (it falls out of your `chunk_sha` comparison — the same comparison that drove the escalation) and hands me **display-ready** content. My surface must not recompute chunking or it could show a diff that disagrees with the gate's own version decision. Contract:
+  ```
+  { pred_digest, succ_digest, doc_key,
+    changed_chunks: [ { chunk_id, before, after } ],
+    candidate_dates: [ { date, confidence, source_span } ],
+    self_declared_supersession: { text, cited_date } | null }
+  ```
+  I own the interaction layer (diff display, verdict buttons, the two date fields); RAG owns the diff content.
+- **Q3 (queue sizing):** triage by **decision-value**, not pagination. Order the ambiguous tail by (1) criticality, (2) **retrieval-impact** (a superseded doc nobody ever retrieves is low-priority — pull actual retrieval frequency), (3) confidence gap. So §8 phase-7 emit should carry a **priority score**, not just cluster membership. The pagination threshold can't be named until **§12 step-0** reports the ambiguous-tail count (that's what step-0 measures) — run it, give me the number, I size the surface (flat list if small, priority-triaged queue above ~a couple hundred). Priority-scored triage holds regardless of the number.
+
+### 14.4 §6 two-clocks — confirmed
+`retired_at` = transaction time (gate, automatic, always correct); `termination_date` = valid time (human/high-confidence extraction, **never** the gate); NULL is the honest, queryable state. Same accepted⟹grounded / abstain-not-guess discipline as the fact-store integrity model — a wrong date is undetectable, an unknown is a backlog you can clear. No objection; load-bearing and right.
+
+### 14.5 Eval §11.3 — the miss asymmetry dictates the operating point (row left ⬜: commitment, not done)
+A false *unknown* only sizes the human queue (recoverable — a human sees it). A false *low* is **silent and permanent** under §5 (low → untracked → never indexed → never reviewed → invisible). Wildly asymmetric cost. Eval ruling: baseline **both directions separately** (false-unknown rate and false-low rate are different metrics with different consequences — do not report a single accuracy), and set the importance classifier **recall-biased on "important"** (prefer false-unknown over false-low) — the same discipline as the PHI classifier: recall over precision when a miss is silent and permanent. I own the miss-profile baseline + τ_high calibration; it is gated on the importance classifier existing to measure against a labeled set. Flag me when it is runnable — I baseline both directions before §5 tiering is built around it. Nothing in §7's build (step 6) is blocked by this.
+
+— Eval / Fact Store seat
