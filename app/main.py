@@ -4522,6 +4522,228 @@ def corpus_health(payer: str | None = None,
         conn.close()
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Duplicate action executor — the Fact Store human's instructions, executed
+#
+# Contract: docs/RAG_FACTSTORE_COORDINATION.md A-28 (proposed) / A-30 (adopted by
+# Fact Store as the wire contract). One instruction per record.
+#
+# The point of this endpoint is that a person's decision in the Payor work queue
+# has an EFFECT rather than being recorded and forgotten. Fact Store's resolve
+# currently writes a version_log entry; without this it writes into a void.
+#
+# Guarantees, all of them load-bearing:
+#   * ledger row and effect share ONE transaction — no removal goes unlogged, and
+#     no ledger row can claim a removal that rolled back
+#   * idempotent on idempotency_key — a retried queue click replays the original
+#     outcome instead of retiring a second document
+#   * unknown action is a 400, never the nearest thing
+#   * `purge` is refused at every authority level: it destroys the only record of
+#     what happened, which is the one thing no queue click should be able to do
+#   * duplicates UNPUBLISH; versions stay PUBLISHED and are retired by date. A
+#     superseded edition is evidence ("what did the contract say in 2022"); a
+#     duplicate is noise. Confirmed by Fact Store, A-30 Q2.
+# ═══════════════════════════════════════════════════════════════════════════
+
+_DUP_ACTIONS = {
+    "retire_duplicate", "swap_canonical", "keep_both", "mark_product_variant",
+    "mark_period_series", "reclassify_as_version", "hold", "quarantine_both", "restore",
+}
+
+_DERIVED_TABLES = ("rag_published_embeddings", "chunk_embeddings",
+                   "embeddable_units", "hierarchical_chunks")
+
+
+class DuplicateAction(BaseModel):
+    document_id: str
+    action: str
+    canonical_id: str | None = None
+    reason: str | None = None
+    actor: str | None = None
+    decided_at: str | None = None
+    idempotency_key: str | None = None
+
+
+def _unpublish(cur, doc_id: str) -> dict:
+    """Remove derived artefacts, counting as we go. Pages and the GCS object stay,
+    so the document can be rebuilt by re-chunking rather than re-downloading."""
+    counts = {}
+    for t in _DERIVED_TABLES:
+        cur.execute(f"SELECT count(*) FROM {t} WHERE document_id = %s", (doc_id,))
+        counts[t] = int(cur.fetchone()[0] or 0)
+        cur.execute(f"DELETE FROM {t} WHERE document_id = %s", (doc_id,))
+    return counts
+
+
+@app.post("/corpus/duplicates/action")
+def corpus_duplicate_action(body: DuplicateAction):
+    if body.action == "purge":
+        raise HTTPException(
+            status_code=403,
+            detail="purge is refused on this contract at any authority level: it destroys "
+                   "the GCS object and the decision trace, the only record of what happened. "
+                   "Retire or quarantine instead — both are reversible.")
+    if body.action not in _DUP_ACTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown action '{body.action}'. Known: {sorted(_DUP_ACTIONS)}. "
+                   "Refusing rather than approximating — a near-miss here retires the "
+                   "wrong document.")
+
+    import psycopg2 as _pg
+    conn = _pg.connect(_retag_inplace_dsn(), connect_timeout=15)
+    try:
+        conn.autocommit = False
+        cur = conn.cursor()
+
+        # Idempotency BEFORE any effect. A queue click that timed out will be
+        # retried; replay the original outcome rather than acting twice.
+        if body.idempotency_key:
+            cur.execute("""SELECT action, document_id, canonical_id, acted_at,
+                                  published_embeddings_removed
+                           FROM corpus_cleanup_actions WHERE idempotency_key = %s""",
+                        (body.idempotency_key,))
+            prior = cur.fetchone()
+            if prior:
+                conn.rollback()
+                return {"status": "already_applied", "action": prior[0],
+                        "document_id": str(prior[1]),
+                        "canonical_id": str(prior[2]) if prior[2] else None,
+                        "acted_at": prior[3].isoformat() if prior[3] else None,
+                        "vectors_removed": int(prior[4] or 0),
+                        "note": "replayed from the ledger — no second effect"}
+
+        cur.execute("""SELECT id, lifecycle_state,
+                              (SELECT count(*) FROM document_pages p WHERE p.document_id = d.id),
+                              file_path
+                       FROM documents d WHERE d.id = %s""", (body.document_id,))
+        row = cur.fetchone()
+        if not row:
+            conn.rollback()
+            raise HTTPException(status_code=404, detail=f"document {body.document_id} not found")
+        _, life, pages, gcs = row
+
+        act = body.action
+        removed: dict = {}
+        effects: list[str] = []
+        rechunk_required = False
+
+        if act in ("retire_duplicate", "quarantine_both"):
+            # A duplicate must not be retired against a canonical that is itself
+            # unpublished — that would take the content out of the index entirely
+            # rather than deduplicating it.
+            if act == "retire_duplicate":
+                if not body.canonical_id:
+                    conn.rollback()
+                    raise HTTPException(400, "retire_duplicate requires canonical_id — "
+                                             "the copy that survives")
+                cur.execute("""SELECT count(*) FROM rag_published_embeddings
+                               WHERE document_id = %s""", (body.canonical_id,))
+                if int(cur.fetchone()[0] or 0) == 0:
+                    conn.rollback()
+                    raise HTTPException(409, "canonical has no published embeddings — retiring "
+                                             "this copy would remove the content from the index "
+                                             "entirely. Use swap_canonical, or publish the "
+                                             "canonical first.")
+            removed = _unpublish(cur, body.document_id)
+            new_state = "retired" if act == "retire_duplicate" else "quarantined"
+            cur.execute("""UPDATE documents SET lifecycle_state = %s, supersedes_id = %s
+                           WHERE id = %s""",
+                        (new_state, body.canonical_id, body.document_id))
+            effects.append(f"unpublished; lifecycle_state={new_state}")
+            if act == "quarantine_both" and body.canonical_id:
+                removed_b = _unpublish(cur, body.canonical_id)
+                cur.execute("""UPDATE documents SET lifecycle_state = 'quarantined'
+                               WHERE id = %s""", (body.canonical_id,))
+                for k, v in removed_b.items():
+                    removed[k] = removed.get(k, 0) + v
+                effects.append("counterpart also unpublished and quarantined")
+
+        elif act == "swap_canonical":
+            # The human says the survivor was picked wrong. Retire the current
+            # canonical and bring this one back. The restored document has no
+            # chunks, so it needs re-chunking before it can serve again — said
+            # plainly rather than pretended.
+            if not body.canonical_id:
+                conn.rollback()
+                raise HTTPException(400, "swap_canonical requires canonical_id — the document "
+                                         "currently treated as canonical, which will be retired")
+            removed = _unpublish(cur, body.canonical_id)
+            cur.execute("""UPDATE documents SET lifecycle_state='retired', supersedes_id=%s
+                           WHERE id=%s""", (body.document_id, body.canonical_id))
+            cur.execute("""UPDATE documents SET lifecycle_state='active', supersedes_id=NULL
+                           WHERE id=%s""", (body.document_id,))
+            rechunk_required = life == "retired"
+            effects.append("canonical retired and unpublished; this document restored to active")
+
+        elif act == "reclassify_as_version":
+            # NOT dedup. The prior edition stays PUBLISHED and retrievable as
+            # history, retired by DATE only. Retiring editions out of the index
+            # is what makes "what did the contract say in 2022" unanswerable.
+            cur.execute("""UPDATE documents
+                           SET retired_at = COALESCE(retired_at, now()),
+                               lifecycle_state = 'active', supersedes_id = %s
+                           WHERE id = %s""", (body.canonical_id, body.document_id))
+            effects.append("retired_at set; STAYS PUBLISHED and retrievable as history "
+                           "(versions are evidence, duplicates are noise)")
+
+        elif act == "restore":
+            cur.execute("""UPDATE documents SET lifecycle_state='active', supersedes_id=NULL,
+                                                retired_at=NULL
+                           WHERE id=%s""", (body.document_id,))
+            rechunk_required = True
+            effects.append(f"lifecycle_state=active; {pages} pages retained so this is a "
+                           f"re-chunk, not a re-download")
+
+        else:
+            # keep_both / mark_product_variant / mark_period_series / hold.
+            # No corpus effect by design: these say the pair is NOT a duplicate.
+            # Product assignment itself is Fact Store's write (source_metadata.
+            # product_line, A-23) — duplicating it here would give one field two
+            # authors, which is the defect that started this whole thread.
+            effects.append("recorded; no corpus change — this decision says the documents "
+                           "are legitimately separate")
+
+        cur.execute("""
+            INSERT INTO corpus_cleanup_actions
+              (run_id, document_id, canonical_id, duplicate_kind, managed, action, reason,
+               confidence, published_embeddings_removed, chunk_embeddings_removed,
+               hierarchical_chunks_removed, embeddable_units_removed, pages_retained,
+               gcs_path, reversible, idempotency_key, actor, action_source, request)
+            VALUES (gen_random_uuid(), %s, %s, 'duplicate', true, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, true, %s, %s, 'fact_store_queue', %s)
+            RETURNING action_id, acted_at""",
+            (body.document_id, body.canonical_id, act,
+             body.reason or "decided in the Fact Store work queue",
+             "human determination",
+             removed.get("rag_published_embeddings", 0), removed.get("chunk_embeddings", 0),
+             removed.get("hierarchical_chunks", 0), removed.get("embeddable_units", 0),
+             pages, gcs, body.idempotency_key, body.actor,
+             json.dumps(body.model_dump())))
+        action_id, acted_at = cur.fetchone()
+        conn.commit()
+
+        return {
+            "status": "executed", "action": act, "action_id": str(action_id),
+            "document_id": body.document_id, "canonical_id": body.canonical_id,
+            "acted_at": acted_at.isoformat() if acted_at else None,
+            "effects": effects,
+            "vectors_removed": removed.get("rag_published_embeddings", 0),
+            "chunks_removed": removed.get("hierarchical_chunks", 0),
+            "rechunk_required": rechunk_required,
+            "reversible": True,
+        }
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.exception("duplicate action failed")
+        raise HTTPException(status_code=500, detail=f"action failed, nothing changed: {e}")
+    finally:
+        conn.close()
+
+
 @app.get("/corpus/health/time-to-serve")
 def corpus_time_to_serve(days: int = 30, payer: str | None = None,
                          since: str | None = None, until: str | None = None) -> dict:
