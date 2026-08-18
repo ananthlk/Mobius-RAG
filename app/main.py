@@ -4538,6 +4538,8 @@ def corpus_health(payer: str | None = None,
 #   * idempotent on idempotency_key — a retried queue click replays the original
 #     outcome instead of retiring a second document
 #   * unknown action is a 400, never the nearest thing
+#   * `restore` enqueues a real re-chunk (worker claim verified at
+#     app/worker/main.py:446), and is a no-op if one is already queued
 #   * `purge` is refused at every authority level: it destroys the only record of
 #     what happened, which is the one thing no queue click should be able to do
 #   * duplicates UNPUBLISH; versions stay PUBLISHED and are retired by date. A
@@ -4691,9 +4693,35 @@ def corpus_duplicate_action(body: DuplicateAction):
             cur.execute("""UPDATE documents SET lifecycle_state='active', supersedes_id=NULL,
                                                 retired_at=NULL
                            WHERE id=%s""", (body.document_id,))
-            rechunk_required = True
-            effects.append(f"lifecycle_state=active; {pages} pages retained so this is a "
-                           f"re-chunk, not a re-download")
+            # Enqueue the re-chunk. Verified against the consumer rather than
+            # assumed: app/worker/main.py:446 claims ANY row with status='pending'
+            # under FOR UPDATE SKIP LOCKED, filtered only by priority lane —
+            # coalesce(priority,10)==0 is the instant lane, >0 is the batch lane.
+            # There is no provenance or sweep-ownership check, so a row written
+            # here is claimed like any other. Stale 'processing' rows are recovered
+            # back to 'pending' by the worker's heartbeat sweep, so a claimed-then-
+            # died restore self-heals rather than stranding.
+            #
+            # priority=20 matches what the batch corpus queue actually writes;
+            # the column default is 10, which would jump this ahead of ordinary
+            # corpus work for no reason. threshold 0.6 is the corpus convention.
+            cur.execute("""
+                INSERT INTO chunking_jobs
+                  (id, document_id, status, threshold, priority, created_at, updated_at)
+                SELECT gen_random_uuid(), %s, 'pending', '0.6', 20, now(), now()
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM chunking_jobs
+                  WHERE document_id = %s AND status IN ('pending','processing'))
+                RETURNING id""", (body.document_id, body.document_id))
+            job = cur.fetchone()
+            rechunk_required = job is None
+            if job:
+                effects.append(f"re-chunk enqueued (chunking_job {job[0]}, batch lane) — "
+                               f"{pages} pages retained, so this is a re-chunk, not a re-download")
+            else:
+                effects.append("a chunking job was already pending or processing for this "
+                               "document — not enqueuing a second one")
+            effects.append("lifecycle_state=active")
 
         else:
             # keep_both / mark_product_variant / mark_period_series / hold.
