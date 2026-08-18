@@ -1325,3 +1325,107 @@ Chains orderable without a human went from **1 to 3 of 7**. The remaining four l
 they are the undated `Attachment_II_-_Core_Contract_Provisions.pdf` style filenames, where neither the
 name nor the file metadata distinguishes editions. Those are genuinely a human's call, which is the
 correct outcome rather than a gap.
+
+---
+
+# §7.3 · Fact Store additions — agreed 2026-08-18
+
+Two additions from Ananth, both landing on the seam between RAG (which calls)
+and Fact Store (which decides and surfaces).
+
+## §7.3.1 Working-queue surfacing of duplicate/human-action items
+
+§7 already says the gate emits an adjudication request and a human resolves it
+in Fact Store. This makes the *arrival* concrete.
+
+Adjudications land in the **payor console Working Queue** — the surface a person
+already opens to resolve ambiguous documents. Not a new screen: a reviewer
+should not have to learn where supersession questions live versus where
+classification questions live. They are the same job.
+
+Per item, the queue shows what §7 specifies — the diff, candidate dates, any
+self-declared supersession, the inferred `doc_key` — with the gate's proposed
+answer **pre-selected**. A reviewer handed an open question re-derives the
+gate's reasoning; a reviewer handed a proposed answer checks it. That is the
+difference between seconds and minutes per item, and at the volumes §8 phase 7
+implies it is the difference between a queue that clears and one that does not.
+
+Ordering is by confidence, highest first, so the confirmable cases drain fast
+and what remains is the genuinely ambiguous tail.
+
+## §7.3.2 Reclassification trigger — **RAG owns the calling**
+
+Ananth 2026-08-18: *"they own the calling.. so the only place to plug the
+endpoint is really theirs to own.. where they have the classify they should be
+able to trigger it.. we will not reclassify from your surface."*
+
+Fact Store **exposes** the capability and reports on it. RAG **triggers** it,
+from wherever classification is already invoked. The Payor console deliberately
+does not carry a reclassify button — one trigger, one owner, no divergence about
+which surface last touched the corpus.
+
+```
+POST /api/registry/classification/reclassify      { "payor": "AHCA" }
+  -> { job_id, payor, state: "starting", poll: "/…/reclassify/<job_id>" }
+
+GET  /api/registry/classification/reclassify/{job_id}
+  -> { state: starting|running|completed|partial|failed,
+       run_id, total, done, batches, failed_batches? }
+```
+
+**Asynchronous by necessity.** A full AHCA reclassify is 5,496 documents and
+runs 7–11 minutes; Cloud Run terminates a request at 120 s. A synchronous
+version returns 504 while the work continues invisibly — which is exactly how a
+run once sat marked `running` for eight hours. Poll instead.
+
+**Two safeguards learned the hard way, both from real damage on 2026-08-17:**
+
+1. **It refuses to run without a rule pack.** A forced reclassify with no rules
+   overwrites every existing verdict with a rule-less one. That happened:
+   `capitation_rate` 13 → 0, `rate_schedule` 82 → 0, unresolved *rose* by 265,
+   and every progress signal said success. The endpoint now returns `failed`
+   with a reason rather than proceeding.
+2. **Batched, 400 documents per connection.** The dev proxy drops long-lived
+   connections; a single-connection sweep died three times. A dropped connection
+   now costs one batch, retried, and `failed_batches` names any that did not
+   land — a partial sweep is legible rather than silently incomplete.
+
+## §7.3.3 Coverage — one rollup, three scopes
+
+```
+GET /api/registry/classification/coverage                    # corpus  (RAG front end)
+GET /api/registry/classification/coverage?payor=AHCA         # payer   (payor console)
+GET /api/registry/classification/coverage?document_id=…      # document
+```
+
+Deliberately one endpoint. A corpus figure and a payer figure computed by
+different code will disagree eventually, and whichever surface a person happens
+to be looking at becomes the truth.
+
+**This exists because the two systems currently disagree by 5,980 documents.**
+Corpus Health shows *"Payor Platform · scored 88 · coverage 1.6%"*. Fact Store
+has classified **6,068**. Neither number is wrong; they measure different
+things. RAG reads `documents.source_metadata->payor_classification`, which is
+written only when RAG itself calls the contract. Fact Store's own verdicts live
+in `source_run_item.stages->classify`, which RAG cannot see.
+
+So the Corpus Health row is accurately reporting *"documents RAG has asked about"*
+under a label that reads as *"documents the classifier has judged"*. Reading it
+from the coverage endpoint instead makes the two agree by construction.
+
+## §7.3.4 New terminal state — `payer_scope`
+
+Not every document is a payer document, and the classifier now says so before
+running any payer taxonomy over it.
+
+| scope | meaning | count |
+|---|---|---|
+| `not_a_payor` | SAMHSA, GovInfo, CMS, KFF, MACPAC — reference sources whose "payer" came from a crawl hostname | 911 |
+| `not_tracked` | Humana — a real payer nobody has onboarded | 340 |
+| `ingestion_artefact` | "Instant-Rag", "Medicaid" — a bad value, not a payer | ~120 |
+| `no_payer` | unattributed | 1,646 |
+
+Relevant to the gate: these should not enter supersession adjudication. Two
+SAMHSA reports are not versions of each other in any sense a payer reviewer can
+rule on, and putting them in the queue spends the scarcest resource here —
+human attention — on a question with no payer answer.
