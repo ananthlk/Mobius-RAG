@@ -1180,3 +1180,78 @@ Two follow-ups this creates:
 2. **The split cascade needs a defined traversal.** The simulation moved documents by filename order as a
    stand-in; the real cascade must follow `supersedes_id`, so that exactly the documents chained through
    the rejected link move, and no others.
+
+
+---
+
+## 18. Four clocks — publication time is the missing one (Ananth, 2026-08-17)
+
+> *"3 different concerns: effective/term — buried inside the doc, only LLM or human reading the doc can
+> say; the date the doc was created/updated at source — says relevancy; the date we ingested… if we have
+> the middle that's the closest proxy of the recency of the doc."*
+
+Correct, and it fixes the problem the whole design has been hacking around. §14.3 resorted to scraping
+dates out of **filenames** precisely because no honest ordering signal existed. Publication time is that
+signal.
+
+| Clock | What it answers | Where it comes from | State today |
+|---|---|---|---|
+| **valid** — `effective_date` / `termination_date` | *when was this policy in force?* | inside the document; LLM or human must read it | fabricated (§6.3) — must be cleared |
+| **publication** — `source_created_at` / `source_modified_at` | *how recent is this edition?* → **the ordering key** | PDF `/CreationDate` `/ModDate`; HTTP `Last-Modified` | **extracted for 7% of AHCA, then discarded** |
+| **transaction** — `first_seen_at` / `retired_at` | *when did we know?* | our own pipeline | present, but useless for ordering — see below |
+| *(derived)* | *which version answers an as-of query?* | §6.1 validity window | not built |
+
+### 18.1 Why transaction time cannot substitute
+
+All twelve `Attachment II` editions were ingested on **one day** from an archive page. Ingest time orders
+them arbitrarily. It is a proxy for publication only when we see a document *near* its publication —
+true for future crawling, false for every backfill. **Prospectively useful, retrospectively worthless.**
+
+### 18.2 The data is already in the files
+
+Read directly from three stored PDFs whose true order is known from their filenames:
+
+```
+filename 2020-10-01  →  /CreationDate 2021-01-11   Adobe PDF Library
+filename 2022-02-01  →  /CreationDate 2022-05-06   Microsoft Word
+filename Oct 2025    →  /CreationDate 2025-10-07   Microsoft Word
+```
+
+Publication runs 0–3 months **after** the effective date — so it is emphatically *not* valid time — but
+**the ordering is preserved exactly**. That is all the chain walk needs.
+
+Coverage is an **extraction gap, not a data gap**: `pdf_meta` (with `creation_date` and `mod_date`) is
+already captured on 949 corpus documents, 382 in AHCA (7.0%), because only some ingestion paths pull it.
+The rest of the PDFs carry the same metadata and we discard it.
+
+### 18.3 The ordering ladder
+
+```
+edition_date := source_modified_at            -- publication, most reliable
+             ?? source_created_at
+             ?? filename_date                 -- §14.3, works but a hack
+             ?? first_seen_at                 -- only within crawl cadence; flag as weak
+             ?? NULL                          -- degenerate → human (§14.3)
+```
+
+Ananth: *"for webpages or others where we don't have we will use null or the date of extraction… we will
+be extracting every 2-4 weeks so will not be that late."* Right — with a 2–4 week cadence, `first_seen_at`
+is within a month of publication **for documents we meet as they appear**. It must still be *recorded as*
+a weak proxy, because that guarantee fails for every backfilled document.
+
+**Known failure mode:** a payer re-exporting an old policy stamps today's `/CreationDate`, which would
+invert the chain. The `/Producer` field helps — a genuine authoring tool versus a bulk converter — and
+where publication and filename dates disagree by more than a year, the conflict itself should route to a
+human rather than be silently resolved.
+
+### 18.4 What this changes
+
+1. **Extract `pdf_meta` on every ingestion path**, not the 7% that happen to run it. Cheap, deterministic,
+   no model calls — and it converts most of §14.6's 7 human tasks into automatic resolutions.
+2. **Backfill it for existing PDFs** from the stored files. The data is already in GCS.
+3. **Ask Crawler for HTTP `Last-Modified` and `ETag`.** Not captured at all today (verified in the
+   scraper source). Two payoffs: publication time for HTML, and **conditional GET** — asking "has this
+   changed?" without downloading, which makes the nightly re-check free at the network layer, not just
+   the embedding layer. That strengthens Case A well beyond what §16.3 proved.
+4. **Add `source_created_at` / `source_modified_at` / `first_seen_at`** to §9's column set, with a
+   `edition_date_confidence` enum recording which rung of the ladder supplied it.
