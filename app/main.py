@@ -4114,12 +4114,23 @@ _STAGES = [
 
 @app.get("/corpus/health")
 def corpus_health(payer: str | None = None) -> dict:
-    """Stage-by-stage corpus health: what reached each stage, what is stuck, what to do."""
+    """Corpus Health — sources of entry, pipeline stages, versioning, time to serve.
+
+    READS THE GATE'S TELEMETRY. Publishability, versioning and dedup all come from
+    ``gate_decisions``, not from re-deriving over 2M chunks. That is both correct
+    (the page reports what the gate DECIDED, not a second opinion) and the
+    difference between 0.5s and 110s — the first cut recomputed everything per
+    request and the tab never finished loading.
+
+    Live-derived: only the small, cheap things — source counts over `documents`
+    and in-flight jobs. Everything expensive is as-of the last gate run, and the
+    response says when that was.
+    """
     import psycopg2 as _pg
     conn = _pg.connect(_retag_inplace_dsn(), connect_timeout=15)
     try:
         cur = conn.cursor()
-        cur.execute("SET statement_timeout = 90000")
+        cur.execute("SET statement_timeout = 45000")
         pw = "AND d.payer = %s" if payer else ""
         args: tuple = (payer,) if payer else ()
 
@@ -4128,18 +4139,47 @@ def corpus_health(payer: str | None = None) -> dict:
             r = cur.fetchone()
             return int(r[0] or 0) if r else 0
 
-        total = one(f"SELECT count(*) FROM documents d WHERE TRUE {pw}", args)
+        cur.execute("SELECT run_id, max(decided_at) FROM gate_decisions "
+                    "GROUP BY run_id ORDER BY 2 DESC LIMIT 1")
+        row = cur.fetchone()
+        if not row:
+            return {"payer": payer, "gate": {"measured": False},
+                    "sources": [], "stages": [], "stopped": [], "classifiers": [],
+                    "time_to_serve": [], "documents_total": 0}
+        run_id, measured_at = row
 
-        # ── SOURCES — where documents come in, and what each is doing now ──
+        # ── everything the gate already computed, one indexed pass ─────────
+        cur.execute(f"""
+            SELECT count(*),
+              count(*) FILTER (WHERE g.n_pages = 0),
+              count(*) FILTER (WHERE g.n_pages > 0 AND g.chunks_total = 0
+                               AND d.status <> 'needs_ocr'),
+              count(*) FILTER (WHERE g.n_pages > 0 AND g.chunks_total = 0
+                               AND d.status = 'needs_ocr'),
+              count(*) FILTER (WHERE g.doc_key IS NOT NULL),
+              count(*) FILTER (WHERE g.adjudication_target IS NOT NULL),
+              count(*) FILTER (WHERE g.decision = 'successor'),
+              coalesce(sum(g.chunks_carried), 0), coalesce(sum(g.chunks_changed), 0),
+              count(*) FILTER (WHERE g.decision = 'unpublishable')
+            FROM gate_decisions g JOIN documents d ON d.id = g.document_id
+            WHERE g.run_id = %s {pw}""", (run_id,) + args)
+        (total, no_pages, stuck_chunk, stopped_ocr, tracked, awaiting,
+         successors, carried, reembed, unpublishable) = cur.fetchone()
+
+        cur.execute(f"""SELECT g.decision, count(*) FROM gate_decisions g
+            JOIN documents d ON d.id = g.document_id
+            WHERE g.run_id = %s {pw} GROUP BY 1""", (run_id,) + args)
+        by_decision = {k: int(v) for k, v in cur.fetchall()}
+
+        # ── sources of entry — "how did it get here", nothing more ────────
         sources = []
         for src in _SOURCES:
             sql = _source_sql(src["key"])
-            if sql is None:                      # owned by another module
+            if sql is None:
                 sources.append({"source": src["key"], "label": src["label"],
                                 "blurb": src["blurb"], "external": True,
                                 "owner": src.get("owner"), "why": src.get("why"),
-                                "documents": None, "last_7d": None,
-                                "not_chunked": None, "drill": None})
+                                "documents": None, "last_7d": None, "drill": None})
                 continue
             sources.append({
                 "source": src["key"], "label": src["label"], "blurb": src["blurb"],
@@ -4147,132 +4187,113 @@ def corpus_health(payer: str | None = None) -> dict:
                 "documents": one(f"SELECT count(*) FROM documents d WHERE {sql} {pw}", args),
                 "last_7d": one(f"""SELECT count(*) FROM documents d WHERE {sql}
                                    AND d.created_at > now() - interval '7 days' {pw}""", args),
-                "not_chunked": one(f"""SELECT count(*) FROM documents d WHERE {sql}
-                                       AND NOT EXISTS (SELECT 1 FROM hierarchical_chunks c
-                                       WHERE c.document_id=d.id) {pw}""", args),
-                "drill": f"source:{src['key']}",
-            })
+                "drill": f"source:{src['key']}"})
 
-        # ── what is moving RIGHT NOW ──────────────────────────────────────
-        inflight = {
-            "chunking_pending": one(
-                "SELECT count(*) FROM chunking_jobs WHERE status IN ('pending','processing')"),
-            "chunking_blocked": one("SELECT count(*) FROM chunking_jobs WHERE status='blocked'"),
-            "chunking_failed_24h": one(
-                "SELECT count(*) FROM chunking_jobs WHERE status='failed' "
-                "AND updated_at > now() - interval '24 hours'"),
-        }
+        # ── pipeline, as of the gate run ──────────────────────────────────
+        extracted = total - int(no_pages)
+        chunked = extracted - int(stuck_chunk) - int(stopped_ocr)
+        stages = [
+            {"stage": "in_gcs", "label": "Raw file in GCS", "reached": total,
+             "missing": 0, "stopped": 0, "missing_reason": "", "action": "",
+             "action_key": None, "drill": "in_gcs", "tone": "good"},
+            {"stage": "extracted", "label": "Text extracted", "reached": extracted,
+             "missing": int(no_pages), "stopped": 0,
+             "missing_reason": "extraction produced no pages",
+             "action": "delete derived, re-trigger EXTRACTION",
+             "action_key": "retrigger_extract", "drill": "extracted",
+             "tone": "bad" if no_pages else "good"},
+            {"stage": "chunked", "label": "Chunked", "reached": chunked,
+             "missing": int(stuck_chunk), "stopped": int(stopped_ocr),
+             "missing_reason": "chunking never completed",
+             "action": "delete partial chunks, re-enqueue CHUNKING",
+             "action_key": "retrigger_chunk", "drill": "chunked",
+             "tone": "bad" if stuck_chunk else "good"},
+            {"stage": "versioned", "label": "Version decided", "reached": total,
+             "missing": 0, "stopped": 0, "missing_reason": "", "action": "",
+             "action_key": "run_gate", "drill": "versioned", "tone": "good"},
+        ]
 
-        stages = []
-        for key, label, prev, miss_reason, action, action_key in _STAGES:
-            reached = one(
-                f"SELECT count(*) FROM documents d WHERE {_STAGE_PREDICATES[key]} {pw}", args)
-            # "missing" = reached the previous stage but not this one. That is the
-            # actionable population; comparing against total would count documents
-            # that never got far enough to be stuck here.
-            # "stuck" excludes documents in a terminal state — those are STOPPED,
-            # reported separately. Including them would present an unclearable
-            # population as a retry queue.
-            if prev:
-                missing = one(
-                    f"""SELECT count(*) FROM documents d
-                        WHERE {_STAGE_PREDICATES[prev]}
-                          AND NOT ({_STAGE_PREDICATES[key]})
-                          AND NOT ({_TERMINAL_SQL}) {pw}""", args)
-                stopped_here = one(
-                    f"""SELECT count(*) FROM documents d
-                        WHERE {_STAGE_PREDICATES[prev]}
-                          AND NOT ({_STAGE_PREDICATES[key]})
-                          AND ({_TERMINAL_SQL}) {pw}""", args)
-            else:
-                missing = total - reached
-                stopped_here = 0
-            stages.append({
-                "stage": key, "label": label, "reached": reached, "missing": missing,
-                "stopped": stopped_here,
-                "of": prev or "ingested",
-                "missing_reason": miss_reason, "action": action, "action_key": action_key,
-                "drill": key,
-                "tone": "good" if missing == 0 else ("bad" if key in
-                        ("extracted", "chunked", "embedded") else "warn"),
-            })
+        stopped = [{"status": t["status"], "label": t["label"], "why": t["why"],
+                    "unblocked_by": t["unblocked_by"], "owner": t["owner"],
+                    "count": one(f"SELECT count(*) FROM documents d WHERE d.status=%s {pw}",
+                                 (t["status"],) + args),
+                    "drill": f"stopped:{t['status']}"} for t in _TERMINAL_STATES]
 
-        # ── STOPPED — cannot progress with what we have ───────────────────
-        stopped = []
-        for t in _TERMINAL_STATES:
-            n_ = one(f"SELECT count(*) FROM documents d WHERE d.status = %s {pw}",
-                     (t["status"],) + args)
-            stopped.append({**t, "count": n_, "drill": f"stopped:{t['status']}"})
-
-        # ── CLASSIFIERS — coverage per classifier, not one lumped stage ────
         classifiers = []
         for cf in _CLASSIFIERS:
             gating = bool(cf.get("gating"))
-            blocked = (one("SELECT count(*) FROM documents d WHERE d.status = %s "
-                           + pw, (cf["blocked_status"],) + args)
-                       if gating and cf.get("blocked_status") else None)
             if not cf.get("predicate"):
                 classifiers.append({**{k: cf[k] for k in ("key", "label", "owner", "what")},
-                                    "external": True, "why": cf.get("why"),
-                                    "gating": gating, "blocked": blocked,
-                                    "scored": None, "coverage_pct": None})
+                                    "external": True, "why": cf.get("why"), "gating": gating,
+                                    "blocked": None, "scored": None, "coverage_pct": None})
                 continue
-            scored = one(f"SELECT count(*) FROM documents d WHERE {cf['predicate']} {pw}", args)
-            classifiers.append({
-                **{k: cf[k] for k in ("key", "label", "owner", "what")},
-                "external": False, "gating": gating, "blocked": blocked, "scored": scored,
-                "coverage_pct": round((scored / total * 100) if total else 0.0, 1),
-            })
+            n_ = one(f"SELECT count(*) FROM documents d WHERE {cf['predicate']} {pw}", args)
+            classifiers.append({**{k: cf[k] for k in ("key", "label", "owner", "what")},
+                                "external": False, "gating": gating, "blocked": None,
+                                "scored": n_,
+                                "coverage_pct": round((n_ / total * 100) if total else 0.0, 1)})
 
-        # ── versioning + dedup, from the gate's telemetry ──────────────────
-        gate: dict = {"measured": False}
-        cur.execute("SELECT run_id, max(decided_at) FROM gate_decisions "
-                    "GROUP BY run_id ORDER BY 2 DESC LIMIT 1")
-        row = cur.fetchone()
-        if row:
-            run_id, when = row
-            cur.execute("SELECT decision, count(*) FROM gate_decisions WHERE run_id=%s GROUP BY 1",
-                        (run_id,))
-            by_decision = {k: int(v) for k, v in cur.fetchall()}
-            gate = {
-                "measured": True,
-                "run_id": str(run_id),
-                "measured_at": when.isoformat() if when else None,
-                "documents_scored": sum(by_decision.values()),
-                "by_decision": by_decision,
-                "awaiting_adjudication": one(
-                    "SELECT count(*) FROM gate_decisions WHERE run_id=%s "
-                    "AND adjudication_target IS NOT NULL", (run_id,)),
-                "chunks_carried": one(
-                    "SELECT coalesce(sum(chunks_carried),0) FROM gate_decisions WHERE run_id=%s",
-                    (run_id,)),
-                "chunks_reembedded": one(
-                    "SELECT coalesce(sum(chunks_changed),0) FROM gate_decisions WHERE run_id=%s",
-                    (run_id,)),
-            }
-
-        # ── ordering clock (§19.1) — can we order a version chain at all? ──
-        pub = one(f"""SELECT count(*) FROM documents d
-                      WHERE d.source_metadata->'pdf_meta' ? 'creation_date' {pw}""", args)
-        fnd = one(f"""SELECT count(*) FROM documents d
-                      WHERE d.filename ~ '20[0-9]{{2}}[-_][0-9]{{1,2}}' {pw}""", args)
+        # ── in flight right now (small table, cheap) ──────────────────────
+        inflight = {
+            "chunking_pending": one("SELECT count(*) FROM chunking_jobs "
+                                    "WHERE status IN ('pending','processing')"),
+            "chunking_blocked": one("SELECT count(*) FROM chunking_jobs WHERE status='blocked'"),
+        }
 
         return {
             "payer": payer,
-            "documents_total": total,
+            "documents_total": int(total),
+            "as_of": measured_at.isoformat() if measured_at else None,
             "sources": sources,
-            "classifiers": classifiers,
-            "stopped": stopped,
-            "inflight": inflight,
             "stages": stages,
-            "gate": gate,
-            "ordering_clock": {
-                "with_publication_date": pub,
-                "with_filename_date": fnd,
-                "total": total,
-                "coverage_pct": round((pub / total * 100) if total else 0.0, 1),
+            "stopped": stopped,
+            "classifiers": classifiers,
+            "inflight": inflight,
+            "gate": {
+                "measured": True, "run_id": str(run_id),
+                "measured_at": measured_at.isoformat() if measured_at else None,
+                "documents_scored": int(total), "by_decision": by_decision,
+                "awaiting_adjudication": int(awaiting), "successors": int(successors),
+                "chunks_carried": int(carried), "chunks_reembedded": int(reembed),
+                "tracked": int(tracked), "unpublishable": int(unpublishable),
             },
         }
+    finally:
+        conn.close()
+
+
+@app.get("/corpus/health/time-to-serve")
+def corpus_time_to_serve(days: int = 30) -> dict:
+    """Ingest → first published vector, per source. The number a customer feels.
+
+    Kept separate from /corpus/health because it is the one genuinely expensive
+    query left, and the page can render without waiting for it.
+    """
+    import psycopg2 as _pg
+    conn = _pg.connect(_retag_inplace_dsn(), connect_timeout=15)
+    try:
+        cur = conn.cursor()
+        cur.execute("SET statement_timeout = 60000")
+        out = []
+        for src in _SOURCES:
+            sql = _source_sql(src["key"])
+            if sql is None:
+                continue
+            cur.execute(f"""
+                SELECT count(*),
+                  round(percentile_disc(.5) WITHIN GROUP (ORDER BY s)/60.0, 1),
+                  round(percentile_disc(.9) WITHIN GROUP (ORDER BY s)/60.0, 1)
+                FROM (SELECT extract(epoch from (min(e.created_at) - d.created_at)) AS s
+                      FROM documents d
+                      JOIN rag_published_embeddings e ON e.document_id = d.id
+                      WHERE {sql} AND d.created_at > now() - interval '%s days'
+                      GROUP BY d.id, d.created_at) x WHERE s > 0""" % int(days))
+            n, p50, p90 = cur.fetchone()
+            if n:
+                out.append({"source": src["key"], "label": src["label"], "documents": int(n),
+                            "p50_min": float(p50) if p50 is not None else None,
+                            "p90_min": float(p90) if p90 is not None else None})
+        return {"window_days": days, "sources": sorted(out, key=lambda r: r["p50_min"] or 0)}
     finally:
         conn.close()
 
@@ -4285,7 +4306,14 @@ def corpus_health_drill(stage: str, payer: str | None = None, limit: int = 200) 
     """
     import psycopg2 as _pg
     prev_of = {k: p for k, _, p, _, _, _ in _STAGES}
-    if stage.startswith("stopped:"):
+    if stage.startswith("search:"):
+        term = stage.split(":", 1)[1].strip()
+        if len(term) < 2:
+            raise HTTPException(status_code=400, detail="search term too short")
+        where = ("(d.filename ILIKE %(q)s OR d.display_name ILIKE %(q)s "
+                 "OR d.file_path ILIKE %(q)s)")
+        prev = None
+    elif stage.startswith("stopped:"):
         st = stage.split(":", 1)[1]
         if st not in {t["status"] for t in _TERMINAL_STATES}:
             raise HTTPException(status_code=404, detail=f"unknown terminal state '{st}'")
@@ -4308,16 +4336,28 @@ def corpus_health_drill(stage: str, payer: str | None = None, limit: int = 200) 
     try:
         cur = conn.cursor()
         cur.execute("SET statement_timeout = 30000")
-        args: list = []
-        if payer:
-            args.append(payer)
-        args.append(limit)
-        cur.execute(
-            f"""SELECT d.id, d.filename, d.display_name, d.payer, d.status, d.created_at,
-                       d.effective_date, d.file_path
-                FROM documents d
-                WHERE {where} {'AND d.payer = %s' if payer else ''}
-                ORDER BY d.created_at DESC LIMIT %s""", tuple(args))
+        if stage.startswith("search:"):
+            p: dict = {"q": f"%{stage.split(':', 1)[1].strip()}%", "lim": limit}
+            pclause = ""
+            if payer:
+                p["payer"] = payer
+                pclause = "AND d.payer = %(payer)s"
+            cur.execute(
+                f"""SELECT d.id, d.filename, d.display_name, d.payer, d.status, d.created_at,
+                           d.effective_date, d.file_path
+                    FROM documents d WHERE {where} {pclause}
+                    ORDER BY d.created_at DESC LIMIT %(lim)s""", p)
+        else:
+            args: list = []
+            if payer:
+                args.append(payer)
+            args.append(limit)
+            cur.execute(
+                f"""SELECT d.id, d.filename, d.display_name, d.payer, d.status, d.created_at,
+                           d.effective_date, d.file_path
+                    FROM documents d
+                    WHERE {where} {'AND d.payer = %s' if payer else ''}
+                    ORDER BY d.created_at DESC LIMIT %s""", tuple(args))
         docs = [{"id": str(r[0]), "filename": r[1], "display_name": r[2], "payer": r[3],
                  "status": r[4], "created_at": r[5].isoformat() if r[5] else None,
                  "effective_date": r[6].isoformat() if r[6] else None,

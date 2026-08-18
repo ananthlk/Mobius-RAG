@@ -3,154 +3,107 @@ import { API_BASE } from '../../config'
 import './CorpusHealthTab.css'
 
 /**
- * Corpus Health — the whole pipeline in one view.
+ * Corpus Health — v3 layout.
  *
- *   sources → GCS → extract → classify → chunk → embed → version → dedup → publish
+ *   sources of entry → GCS → time to serve → pipeline → stopped → classifiers → versioning
  *
- * Every stage reports what reached it, what is stuck, WHY, and the action that
- * clears it. Every number opens the list behind it — a count you cannot open is
- * a count nobody acts on.
+ * Reads the gate's telemetry (gate_decisions) rather than recomputing over 2M
+ * chunks. That is both correct — the page reports what the gate DECIDED, not a
+ * second opinion — and the difference between 0.5s and 110s. The first cut
+ * recomputed everything per request and the tab never finished loading.
  *
  * Spec: docs/versioning-dedup-gate-spec.md §12.2 / §12.3.
  */
 
-interface Stopped {
-  status: string
-  label: string
-  why: string
-  unblocked_by: string
-  owner: string
-  count: number
-  drill: string
-}
-
-interface Stage {
-  stage: string
-  label: string
-  reached: number
-  /** retryable — reached the previous stage and should have progressed */
-  missing: number
-  /** cannot progress with the capability we have; counted separately */
-  stopped: number
-  of: string
-  missing_reason: string
-  action: string
-  action_key: string
-  drill: string
-  tone: 'good' | 'bad' | 'warn'
-}
-
 interface Source {
-  source: string
-  label: string
-  blurb: string
-  documents: number | null
-  last_7d: number | null
-  not_chunked: number | null
-  drill: string | null
-  /** Org upload and personal vault live in other stores; this corpus cannot count them. */
-  external?: boolean
-  owner?: string
-  why?: string
+  source: string; label: string; blurb: string
+  documents: number | null; last_7d: number | null; drill: string | null
+  external?: boolean; owner?: string; why?: string
 }
-
+interface Stage {
+  stage: string; label: string; reached: number; missing: number; stopped: number
+  missing_reason: string; action: string; action_key: string | null
+  drill: string; tone: 'good' | 'bad' | 'warn'
+}
+interface Stopped {
+  status: string; label: string; why: string; unblocked_by: string
+  owner: string; count: number; drill: string
+}
 interface Classifier {
-  key: string
-  label: string
-  owner: string
-  what: string
-  external: boolean
-  why?: string
-  scored: number | null
-  coverage_pct: number | null
-  /** A gating classifier can halt the pipeline, not just enrich it. */
-  gating?: boolean
-  blocked?: number | null
+  key: string; label: string; owner: string; what: string
+  external: boolean; why?: string; gating?: boolean
+  blocked?: number | null; scored: number | null; coverage_pct: number | null
 }
-
 interface Health {
-  payer: string | null
-  documents_total: number
-  sources: Source[]
-  classifiers: Classifier[]
-  stopped: Stopped[]
+  payer: string | null; documents_total: number; as_of: string | null
+  sources: Source[]; stages: Stage[]; stopped: Stopped[]; classifiers: Classifier[]
   inflight: Record<string, number>
-  stages: Stage[]
   gate: {
-    measured: boolean
-    run_id?: string
-    measured_at?: string
-    documents_scored?: number
-    by_decision?: Record<string, number>
-    awaiting_adjudication?: number
-    chunks_carried?: number
-    chunks_reembedded?: number
-  }
-  ordering_clock: {
-    with_publication_date: number
-    with_filename_date: number
-    total: number
-    coverage_pct: number
+    measured: boolean; measured_at?: string; documents_scored?: number
+    by_decision?: Record<string, number>; awaiting_adjudication?: number
+    successors?: number; chunks_carried?: number; chunks_reembedded?: number
+    tracked?: number; unpublishable?: number
   }
 }
-
+interface TTS {
+  source: string; label: string; documents: number
+  p50_min: number | null; p90_min: number | null
+}
 interface DrillDoc {
-  id: string
-  filename: string
-  display_name: string | null
-  payer: string | null
-  status: string
-  created_at: string | null
-  effective_date: string | null
+  id: string; filename: string; display_name: string | null; payer: string | null
+  status: string; created_at: string | null; effective_date: string | null
 }
 
-const n = (v: number | undefined) => (v ?? 0).toLocaleString()
+const n = (v: number | null | undefined) => (v ?? 0).toLocaleString()
+const mins = (v: number | null) =>
+  v == null ? '—' : v < 1 ? `${Math.round(v * 60)}s` : v < 90 ? `${v}m` : `${(v / 60).toFixed(1)}h`
 
 export function CorpusHealthTab() {
-  const [payer, setPayer] = useState<string>('AHCA')
+  const [payer, setPayer] = useState('AHCA')
   const [health, setHealth] = useState<Health | null>(null)
+  const [tts, setTts] = useState<TTS[] | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [q, setQ] = useState('')
   const [drill, setDrill] = useState<{ key: string; label: string } | null>(null)
   const [drillDocs, setDrillDocs] = useState<DrillDoc[] | null>(null)
-  const [drillLoading, setDrillLoading] = useState(false)
 
   const load = useCallback(async () => {
-    setLoading(true)
-    setError(null)
+    setLoading(true); setError(null)
     try {
-      const q = payer ? `?payer=${encodeURIComponent(payer)}` : ''
-      const r = await fetch(`${API_BASE}/corpus/health${q}`)
+      const qs = payer ? `?payer=${encodeURIComponent(payer)}` : ''
+      const r = await fetch(`${API_BASE}/corpus/health${qs}`)
       if (!r.ok) throw new Error(`health ${r.status}`)
       setHealth(await r.json())
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load corpus health')
-    } finally {
-      setLoading(false)
-    }
+    } finally { setLoading(false) }
   }, [payer])
 
   useEffect(() => { load() }, [load])
 
+  // Time to serve is the one genuinely slow query left; fetched separately so
+  // the rest of the page renders without waiting for it.
+  useEffect(() => {
+    let dead = false
+    fetch(`${API_BASE}/corpus/health/time-to-serve?days=30`)
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { if (!dead && d) setTts(d.sources) })
+      .catch(() => { })
+    return () => { dead = true }
+  }, [])
+
   const openDrill = async (key: string, label: string) => {
-    setDrill({ key, label })
-    setDrillDocs(null)
-    setDrillLoading(true)
+    setDrill({ key, label }); setDrillDocs(null)
     try {
-      const q = payer ? `?payer=${encodeURIComponent(payer)}` : ''
-      const r = await fetch(`${API_BASE}/corpus/health/drill/${encodeURIComponent(key)}${q}`)
-      if (!r.ok) throw new Error(`drill ${r.status}`)
-      const d = await r.json()
-      setDrillDocs(d.documents || [])
-    } catch {
-      setDrillDocs([])
-    } finally {
-      setDrillLoading(false)
-    }
+      const qs = payer ? `?payer=${encodeURIComponent(payer)}` : ''
+      const r = await fetch(`${API_BASE}/corpus/health/drill/${encodeURIComponent(key)}${qs}`)
+      setDrillDocs(r.ok ? (await r.json()).documents || [] : [])
+    } catch { setDrillDocs([]) }
   }
 
   const g = health?.gate
-  const oc = health?.ordering_clock
+  const asOf = health?.as_of ? new Date(health.as_of).toLocaleString() : null
 
   return (
     <div className="ch-root">
@@ -158,292 +111,233 @@ export function CorpusHealthTab() {
         <div>
           <h2>Corpus health</h2>
           <p className="ch-sub">
-            Where documents come from, how far they get, and what to do about the ones that stop.
+            Where documents come from, how far they get, what they yield, and what to do
+            about the ones that stop.
           </p>
-        </div>
-        <div className="ch-controls">
-          <select value={payer} onChange={e => setPayer(e.target.value)} className="ch-select">
-            <option value="">All payers</option>
-            <option value="AHCA">AHCA</option>
-            <option value="Sunshine Health">Sunshine Health</option>
-            <option value="Humana">Humana</option>
-            <option value="Samhsa">Samhsa</option>
-          </select>
-          <button className="ch-btn" onClick={load} disabled={loading}>
-            {loading ? 'Loading…' : 'Refresh'}
-          </button>
         </div>
       </header>
 
+      <div className="ch-scope">
+        <select value={payer} onChange={e => setPayer(e.target.value)}>
+          <option value="">All payers</option>
+          <option value="AHCA">AHCA</option>
+          <option value="Sunshine Health">Sunshine Health</option>
+          <option value="Humana">Humana</option>
+          <option value="Samhsa">Samhsa</option>
+        </select>
+        <input
+          placeholder="Search a document by name — see its own journey"
+          value={q}
+          onChange={e => setQ(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter' && q.trim()) openDrill(`search:${q.trim()}`, `“${q.trim()}”`) }}
+        />
+        <button className="ch-go" onClick={() => q.trim() && openDrill(`search:${q.trim()}`, `“${q.trim()}”`)}>
+          Search
+        </button>
+        <button className="ch-btn" onClick={load} disabled={loading}>
+          {loading ? 'Loading…' : 'Refresh'}
+        </button>
+        {asOf && <span className="ch-asof">gate run {asOf}</span>}
+      </div>
+
       {error && <div className="ch-error">{error}</div>}
+      {loading && !health && <div className="ch-empty">Loading…</div>}
 
       {health && (
         <>
-          {/* ── SOURCES ─────────────────────────────────────────────── */}
-          <section className="ch-section">
-            <h3>Sources — how documents arrive</h3>
-            <p className="ch-note ch-note-top">
-              Every source lands the raw file in GCS, and from there a single ingestion pipeline
-              runs. New sources (email is next) join here without changing anything downstream.
-            </p>
-            <div className="ch-sources">
-              {health.sources
-                .filter(s => s.external || (s.documents ?? 0) > 0)
-                .map(s => s.external ? (
-                  <div key={s.source} className="ch-source ch-source-ext">
-                    <div className="ch-source-top">
-                      <span className="ch-source-label">{s.label}</span>
-                      <span className="ch-ext-tag">elsewhere</span>
-                    </div>
-                    <div className="ch-source-count ch-muted">—</div>
-                    <div className="ch-source-blurb">{s.blurb}</div>
-                    <div className="ch-source-why">{s.why}</div>
-                    <div className="ch-source-owner">owned by {s.owner}</div>
-                  </div>
-                ) : (
-                  <button key={s.source} className="ch-source"
-                          onClick={() => s.drill && openDrill(s.drill, s.label)}>
-                    <div className="ch-source-top">
-                      <span className="ch-source-label">{s.label}</span>
-                      {(s.last_7d ?? 0) > 0 && <span className="ch-live">● {n(s.last_7d!)} this week</span>}
-                    </div>
-                    <div className="ch-source-count">{n(s.documents!)}</div>
-                    <div className="ch-source-blurb">{s.blurb}</div>
-                    {(s.not_chunked ?? 0) > 0 && (
-                      <div className="ch-source-warn">{n(s.not_chunked!)} never chunked</div>
-                    )}
-                  </button>
-                ))}
-            </div>
-            <div className="ch-inflight">
-              <span>In flight now:</span>
-              <b>{n(health.inflight.chunking_pending)}</b> chunking
-              <span className="ch-dot">·</span>
-              <b className={health.inflight.chunking_blocked ? 'ch-red' : ''}>
-                {n(health.inflight.chunking_blocked)}
-              </b> blocked
-              <span className="ch-dot">·</span>
-              <b className={health.inflight.chunking_failed_24h ? 'ch-red' : ''}>
-                {n(health.inflight.chunking_failed_24h)}
-              </b> failed 24h
-            </div>
-          </section>
-
-          <div className="ch-converge">
-            <span>all sources land in</span><b>GCS</b><span>→ one ingestion pipeline</span>
-          </div>
-
-          {/* ── PIPELINE WATERFALL ──────────────────────────────────── */}
-          <section className="ch-section">
-            <h3>Pipeline — what reached each stage</h3>
-            <table className="ch-table">
-              <thead>
-                <tr>
-                  <th>Stage</th>
-                  <th className="num">Reached</th>
-                  <th className="num">Stuck</th>
-                  <th className="num">Stopped</th>
-                  <th>Why it stopped</th>
-                  <th>Action</th>
-                </tr>
-              </thead>
+          <h3 className="ch-sec">Sources of entry</h3>
+          <p className="ch-note ch-top">
+            Where documents come in. Every one lands the raw file in GCS and a single pipeline
+            runs from there, so this only answers “how did it get here”.
+          </p>
+          <div className="ch-scroll">
+            <table className="ch-table ch-narrow">
+              <thead><tr>
+                <th>Source</th><th className="num">Documents</th>
+                <th className="num">This week</th><th>What it is</th>
+              </tr></thead>
               <tbody>
-                {health.stages.map(st => (
-                  <tr key={st.stage} className={st.missing > 0 ? `tone-${st.tone}` : ''}>
-                    <td className="ch-stage-label">
-                      <span className={`ch-pip tone-${st.missing === 0 ? 'good' : st.tone}`} />
-                      {st.label}
+                {health.sources.map(s => (
+                  <tr key={s.source} className={s.external ? 'ch-ext' : ''}>
+                    <td className="ch-name">
+                      {s.drill
+                        ? <button className="ch-lnk-plain" onClick={() => openDrill(s.drill!, s.label)}>{s.label}</button>
+                        : s.label}
+                      {s.external && <span className="ch-tag">elsewhere</span>}
                     </td>
-                    <td className="num">{n(st.reached)}</td>
+                    <td className="num">{s.external ? <span className="ch-zero">—</span> : n(s.documents)}</td>
                     <td className="num">
-                      {st.missing > 0 ? (
-                        <button className="ch-num-link" onClick={() => openDrill(st.drill, st.label)}>
-                          {n(st.missing)}
-                        </button>
-                      ) : <span className="ch-zero">—</span>}
-                    </td>
-                    <td className="num">
-                      {st.stopped > 0
-                        ? <span className="ch-stopped-n" title="cannot progress — see Stopped below">
-                            {n(st.stopped)}
-                          </span>
+                      {(s.last_7d ?? 0) > 0
+                        ? <span className="ch-live">{n(s.last_7d)}</span>
                         : <span className="ch-zero">—</span>}
                     </td>
-                    <td className="ch-reason">{st.missing > 0 ? st.missing_reason : ''}</td>
-                    <td className="ch-action">{st.missing > 0 ? st.action : ''}</td>
+                    <td className="ch-why">{s.external ? `${s.why} · ${s.owner}` : s.blurb}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
-            <p className="ch-note">
-              <b>Stuck</b> reached the previous stage and should have progressed — re-triggering is
-              the fix. <b>Stopped</b> cannot progress with the capability we have, so it is counted
-              separately: re-triggering it forever is waste, and folding it into “stuck” turns a
-              permanent gap into a queue nobody can clear.
-            </p>
-          </section>
+          </div>
+          <div className="ch-converge">
+            <span>all of the above land in</span><b>GCS</b><span>→ one pipeline</span>
+          </div>
 
-          {/* ── STOPPED ─────────────────────────────────────────────── */}
-          {health.stopped.some(t => t.count > 0) && (
-            <section className="ch-section">
-              <h3>Stopped — not a backlog</h3>
-              <p className="ch-note ch-note-top">
-                These will never clear by retrying. Each needs a capability or a decision that does
-                not exist yet, so they are held out of every “stuck” count above.
-              </p>
-              <table className="ch-table">
-                <thead>
-                  <tr><th>State</th><th className="num">Docs</th><th>Why</th>
-                      <th>What would unblock it</th><th>Owner</th></tr>
-                </thead>
+          <h3 className="ch-sec">Time to serve — ingest to searchable</h3>
+          <p className="ch-note ch-top">
+            The number a customer feels: document landing → first published vector, last 30 days.
+          </p>
+          {!tts ? <div className="ch-empty">Measuring…</div> : (
+            <div className="ch-scroll">
+              <table className="ch-table ch-narrow">
+                <thead><tr><th>Source</th><th className="num">Docs</th>
+                  <th className="num">p50</th><th className="num">p90</th></tr></thead>
                 <tbody>
-                  {health.stopped.filter(t => t.count > 0).map(t => (
-                    <tr key={t.status}>
-                      <td className="ch-stage-label">
-                        <span className="ch-pip ch-pip-stop" />{t.label}
+                  {tts.map(t => (
+                    <tr key={t.source}>
+                      <td className="ch-name">
+                        <span className={`ch-pip ${(t.p50_min ?? 0) < 5 ? 'good' : 'warn'}`} />{t.label}
                       </td>
-                      <td className="num">
-                        <button className="ch-num-link" onClick={() => openDrill(t.drill, t.label)}>
-                          {n(t.count)}
-                        </button>
-                      </td>
-                      <td className="ch-reason">{t.why}</td>
-                      <td className="ch-action">{t.unblocked_by}</td>
-                      <td className="ch-owner">{t.owner}</td>
+                      <td className="num">{n(t.documents)}</td>
+                      <td className="num"><b>{mins(t.p50_min)}</b></td>
+                      <td className="num">{mins(t.p90_min)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-            </section>
+            </div>
           )}
 
-          {/* ── CLASSIFIERS ─────────────────────────────────────────── */}
-          <section className="ch-section">
-            <h3>Classifiers — “classified” is several things</h3>
-            <p className="ch-note ch-note-top">
-              A document scored by one classifier and not another is not unclassified. Each runs
-              independently and more will be added.
-            </p>
+          <h3 className="ch-sec">Pipeline — one path, whatever the source</h3>
+          <div className="ch-scroll">
             <table className="ch-table">
-              <thead>
-                <tr><th>Classifier</th><th>What it decides</th><th>Owner</th>
-                    <th className="num">Scored</th><th className="num">Coverage</th></tr>
-              </thead>
+              <thead><tr>
+                <th>Stage</th><th className="num">Reached</th><th className="num">Stuck</th>
+                <th className="num">Stopped</th><th>Why it stopped</th><th>Action</th>
+              </tr></thead>
+              <tbody>
+                {health.stages.map(st => (
+                  <tr key={st.stage}>
+                    <td className="ch-name">
+                      <span className={`ch-pip ${st.missing === 0 ? 'good' : st.tone}`} />{st.label}
+                    </td>
+                    <td className="num">{n(st.reached)}</td>
+                    <td className="num">
+                      {st.missing > 0
+                        ? <button className="ch-lnk" onClick={() => openDrill(st.drill, st.label)}>{n(st.missing)}</button>
+                        : <span className="ch-zero">—</span>}
+                    </td>
+                    <td className="num">
+                      {st.stopped > 0
+                        ? <span className="ch-stopn">{n(st.stopped)}</span>
+                        : <span className="ch-zero">—</span>}
+                    </td>
+                    <td className="ch-why">{st.missing > 0 ? st.missing_reason : ''}</td>
+                    <td className="ch-act">{st.missing > 0 ? st.action : ''}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="ch-note">
+            <b>Stuck</b> reached the previous stage and should have progressed — re-triggering is
+            the fix. <b>Stopped</b> cannot progress with the capability we have; folding it into
+            “stuck” turns a permanent gap into a queue nobody can clear.
+            <span className="ch-inflight"> In flight now: <b>{n(health.inflight.chunking_pending)}</b> chunking
+              · <b className={health.inflight.chunking_blocked ? 'ch-red' : ''}>
+                {n(health.inflight.chunking_blocked)}</b> blocked</span>
+          </p>
+
+          {health.stopped.some(t => t.count > 0) && (
+            <>
+              <h3 className="ch-sec">Stopped — not a backlog</h3>
+              <div className="ch-scroll">
+                <table className="ch-table">
+                  <thead><tr><th>State</th><th className="num">Docs</th><th>Why</th>
+                    <th>What would unblock it</th><th>Owner</th></tr></thead>
+                  <tbody>
+                    {health.stopped.filter(t => t.count > 0).map(t => (
+                      <tr key={t.status}>
+                        <td className="ch-name"><span className="ch-pip stop" />{t.label}</td>
+                        <td className="num">
+                          <button className="ch-lnk" onClick={() => openDrill(t.drill, t.label)}>{n(t.count)}</button>
+                        </td>
+                        <td className="ch-why">{t.why}</td>
+                        <td className="ch-act">{t.unblocked_by}</td>
+                        <td className="ch-owner">{t.owner}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+
+          <h3 className="ch-sec">Classifiers — “classified” is several things</h3>
+          <div className="ch-scroll">
+            <table className="ch-table">
+              <thead><tr><th>Classifier</th><th>What it decides</th><th>Owner</th>
+                <th className="num">Scored</th><th className="num">Coverage</th></tr></thead>
               <tbody>
                 {health.classifiers.map(cf => (
-                  <tr key={cf.key} className={cf.external ? 'ch-ext-row' : ''}>
-                    <td className="ch-stage-label">
+                  <tr key={cf.key} className={cf.external ? 'ch-ext' : ''}>
+                    <td className="ch-name">
                       <span className={`ch-pip ${cf.external ? '' :
-                        (cf.coverage_pct! > 90 ? 'tone-good' : cf.coverage_pct! > 10 ? 'tone-warn' : 'tone-bad')}`} />
-                      {cf.label}
-                      {cf.gating && <span className="ch-gate-tag">gate</span>}
+                        (cf.coverage_pct! > 90 ? 'good' : cf.coverage_pct! > 10 ? 'warn' : 'bad')}`} />
+                      {cf.label}{cf.gating && <span className="ch-tag gate">gate</span>}
                     </td>
-                    <td className="ch-reason">
-                      {cf.what}
-                      {cf.gating && (cf.blocked ?? 0) > 0 && (
-                        <span className="ch-blocked"> · {n(cf.blocked!)} blocked</span>
-                      )}
-                    </td>
+                    <td className="ch-why">{cf.what}</td>
                     <td className="ch-owner">{cf.owner}</td>
-                    <td className="num">{cf.external ? '—' : n(cf.scored!)}</td>
+                    <td className="num">{cf.external ? <span className="ch-zero">—</span> : n(cf.scored)}</td>
                     <td className="num">
-                      {cf.external
-                        ? <span className="ch-ext-tag">elsewhere</span>
-                        : `${cf.coverage_pct}%`}
+                      {cf.external ? <span className="ch-tag">elsewhere</span> : `${cf.coverage_pct}%`}
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
-          </section>
+          </div>
 
-          {/* ── VERSIONING & DEDUP ──────────────────────────────────── */}
-          <section className="ch-section">
-            <h3>Versioning &amp; deduplication</h3>
-            {!g?.measured ? (
-              <div className="ch-empty">
-                The gate has not run yet. Version and duplicate state is unmeasured — not zero.
+          <h3 className="ch-sec">Versioning &amp; deduplication</h3>
+          {!g?.measured ? <div className="ch-empty">The gate has not run yet.</div> : (
+            <>
+              <div className="ch-cards">
+                <div className="ch-card"><div className="ch-card-n">{n(g.documents_scored)}</div>
+                  <div className="ch-card-l">documents scored</div></div>
+                <div className="ch-card"><div className="ch-card-n amber">{n(g.awaiting_adjudication)}</div>
+                  <div className="ch-card-l">awaiting a human</div>
+                  <div className="ch-card-s">each is an extra active version competing in retrieval</div></div>
+                <div className="ch-card"><div className="ch-card-n green">{n(g.chunks_carried)}</div>
+                  <div className="ch-card-l">chunks carried forward</div>
+                  <div className="ch-card-s">embeddings reused, not recomputed</div></div>
+                <div className="ch-card"><div className="ch-card-n">{n(g.chunks_reembedded)}</div>
+                  <div className="ch-card-l">chunks re-embedded</div></div>
               </div>
-            ) : (
-              <>
-                <div className="ch-cards">
-                  <div className="ch-card">
-                    <div className="ch-card-n">{n(g.documents_scored)}</div>
-                    <div className="ch-card-l">documents scored</div>
-                  </div>
-                  <div className="ch-card">
-                    <div className="ch-card-n ch-amber">{n(g.awaiting_adjudication)}</div>
-                    <div className="ch-card-l">awaiting a human</div>
-                    <div className="ch-card-s">each one is an extra active version competing in retrieval</div>
-                  </div>
-                  <div className="ch-card">
-                    <div className="ch-card-n ch-green">{n(g.chunks_carried)}</div>
-                    <div className="ch-card-l">chunks carried forward</div>
-                    <div className="ch-card-s">embeddings reused, not recomputed</div>
-                  </div>
-                  <div className="ch-card">
-                    <div className="ch-card-n">{n(g.chunks_reembedded)}</div>
-                    <div className="ch-card-l">chunks re-embedded</div>
-                  </div>
-                </div>
-                <div className="ch-decisions">
-                  {Object.entries(g.by_decision || {})
-                    .sort((a, b) => b[1] - a[1])
-                    .map(([k, v]) => (
-                      <span key={k} className={`ch-chip ch-chip-${k}`}>
-                        {k.replace(/_/g, ' ')} <b>{n(v)}</b>
-                      </span>
-                    ))}
-                </div>
-                <p className="ch-note">
-                  Last run {g.measured_at ? new Date(g.measured_at).toLocaleString() : '—'}
-                </p>
-              </>
-            )}
-          </section>
-
-          {/* ── ORDERING CLOCK ──────────────────────────────────────── */}
-          <section className="ch-section">
-            <h3>Ordering clock</h3>
-            <p className="ch-note ch-note-top">
-              A version chain can only be ordered if each edition carries a date. Publication date
-              (from the file) covers most of the corpus; where it is missing, ordering falls back to
-              when we first saw the document, which is unreliable for anything backfilled.
-            </p>
-            <div className="ch-bar">
-              <div className="ch-bar-fill" style={{ width: `${oc?.coverage_pct ?? 0}%` }} />
-            </div>
-            <div className="ch-bar-legend">
-              <span><b>{n(oc?.with_publication_date)}</b> with a publication date</span>
-              <span><b>{oc?.coverage_pct}%</b> of {n(oc?.total)}</span>
-            </div>
-          </section>
+              <div className="ch-chips">
+                {Object.entries(g.by_decision || {}).sort((a, b) => b[1] - a[1]).map(([k, v]) => (
+                  <span key={k} className={`ch-chip ch-chip-${k}`}>
+                    {k.replace(/_/g, ' ')} <b>{n(v)}</b>
+                  </span>
+                ))}
+              </div>
+            </>
+          )}
         </>
       )}
 
-      {/* ── DRILL-DOWN ────────────────────────────────────────────── */}
       {drill && (
         <div className="ch-drill-backdrop" onClick={() => setDrill(null)}>
           <div className="ch-drill" onClick={e => e.stopPropagation()}>
-            <header>
-              <h4>{drill.label}</h4>
-              <button className="ch-close" onClick={() => setDrill(null)}>✕</button>
-            </header>
-            {drillLoading && <div className="ch-empty">Loading…</div>}
-            {!drillLoading && drillDocs && drillDocs.length === 0 && (
-              <div className="ch-empty">Nothing here.</div>
-            )}
-            {!drillLoading && drillDocs && drillDocs.length > 0 && (
-              <table className="ch-table ch-drill-table">
-                <thead>
-                  <tr><th>Document</th><th>Payer</th><th>Status</th><th>Added</th></tr>
-                </thead>
+            <header><h4>{drill.label}</h4>
+              <button className="ch-close" onClick={() => setDrill(null)}>✕</button></header>
+            {!drillDocs && <div className="ch-empty">Loading…</div>}
+            {drillDocs && drillDocs.length === 0 && <div className="ch-empty">Nothing here.</div>}
+            {drillDocs && drillDocs.length > 0 && (
+              <table className="ch-table">
+                <thead><tr><th>Document</th><th>Payer</th><th>Status</th><th>Added</th></tr></thead>
                 <tbody>
                   {drillDocs.map(d => (
                     <tr key={d.id}>
                       <td className="ch-fn">{d.display_name || d.filename}</td>
-                      <td>{d.payer || '—'}</td>
-                      <td>{d.status}</td>
+                      <td>{d.payer || '—'}</td><td>{d.status}</td>
                       <td>{d.created_at ? d.created_at.slice(0, 10) : '—'}</td>
                     </tr>
                   ))}
