@@ -45,6 +45,10 @@ interface Health {
     tracked?: number; unpublishable?: number
   }
 }
+interface StageLat {
+  step: string; label: string; kind: 'wait' | 'work'
+  p50_min: number; p90_min: number; documents: number; share_pct: number
+}
 interface TTS {
   source: string; label: string; documents: number
   p50_min: number | null; p90_min: number | null
@@ -93,6 +97,7 @@ export function CorpusHealthTab() {
   const [until, setUntil] = useState('')
   const [health, setHealth] = useState<Health | null>(null)
   const [tts, setTts] = useState<TTS[] | null>(null)
+  const [lat, setLat] = useState<StageLat[] | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [q, setQ] = useState('')
@@ -129,6 +134,11 @@ export function CorpusHealthTab() {
       .then(r => (r.ok ? r.json() : null))
       .then(d => { if (!dead && d) setTts(d.sources) })
       .catch(() => { })
+    const q2 = scopeQS()
+    fetch(`${API_BASE}/corpus/health/stage-latency${q2 || '?'}${q2 ? '&' : ''}days=30`)
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { if (!dead && d) setLat(d.steps) })
+      .catch(() => { })
     return () => { dead = true }
   }, [scopeQS])
 
@@ -142,6 +152,18 @@ export function CorpusHealthTab() {
 
   const g = health?.gate
   const asOf = health?.as_of ? new Date(health.as_of).toLocaleString() : null
+
+  // Which preset is active is DERIVED from the dates rather than stored, so it
+  // stays truthful when the range is edited by hand — a stored flag would keep
+  // "30d" lit while the inputs said something else.
+  const PRESETS: [string, number][] = [['7d', 7], ['30d', 30], ['90d', 90]]
+  const iso = (d: Date) => d.toISOString().slice(0, 10)
+  const activePreset = (() => {
+    if (!since && !until) return 'all'
+    if (until !== iso(new Date())) return null
+    const hit = PRESETS.find(([, d]) => since === iso(new Date(Date.now() - d * 864e5)))
+    return hit ? hit[0] : null
+  })()
 
   return (
     <div className="ch-root">
@@ -169,14 +191,23 @@ export function CorpusHealthTab() {
           <input type="date" value={until} min={since || undefined}
                  onChange={e => setUntil(e.target.value)} aria-label="To" />
         </span>
-        <span className="ch-presets">
-          {([['7d', 7], ['30d', 30], ['90d', 90]] as [string, number][]).map(([lab, d]) => (
-            <button key={lab} className="ch-preset" onClick={() => {
-              const t = new Date(); const f = new Date(Date.now() - d * 864e5)
-              setSince(f.toISOString().slice(0, 10)); setUntil(t.toISOString().slice(0, 10))
-            }}>{lab}</button>
+        <span className="ch-presets" role="group" aria-label="Date range preset">
+          {PRESETS.map(([lab, d]) => (
+            <button
+              key={lab}
+              className={`ch-preset${activePreset === lab ? ' is-on' : ''}`}
+              aria-pressed={activePreset === lab}
+              onClick={() => {
+                setSince(iso(new Date(Date.now() - d * 864e5)))
+                setUntil(iso(new Date()))
+              }}
+            >{lab}</button>
           ))}
-          <button className="ch-preset" onClick={() => { setSince(''); setUntil('') }}>all</button>
+          <button
+            className={`ch-preset${activePreset === 'all' ? ' is-on' : ''}`}
+            aria-pressed={activePreset === 'all'}
+            onClick={() => { setSince(''); setUntil('') }}
+          >all</button>
         </span>
         <button className="ch-btn" onClick={load} disabled={loading}>
           {loading ? 'Loading…' : 'Refresh'}
@@ -252,6 +283,41 @@ export function CorpusHealthTab() {
             </div>
           )}
 
+          </Section>
+
+          <Section title="Where the time goes"
+                   badge={lat ? `${lat.reduce((a, x) => a + x.p50_min, 0).toFixed(1)}m total` : null}>
+            <p className="ch-note ch-top">
+              The same wait, decomposed by transition. <b>Waiting</b> is capacity or scheduling;
+              <b> working</b> is code. They have different fixes, so they are counted separately.
+            </p>
+            {!lat ? <div className="ch-empty">Measuring…</div> : (
+              <div className="ch-scroll">
+                <table className="ch-table ch-narrow">
+                  <thead><tr><th>Transition</th><th className="num">p50</th>
+                    <th className="num">p90</th><th className="num">share</th><th>Kind</th></tr></thead>
+                  <tbody>
+                    {lat.map(st => (
+                      <tr key={st.step}>
+                        <td className="ch-name">
+                          <span className={`ch-pip ${st.kind === 'wait' && st.share_pct > 50 ? 'bad'
+                            : st.kind === 'wait' ? 'warn' : 'good'}`} />{st.label}
+                        </td>
+                        <td className="num"><b>{mins(st.p50_min)}</b></td>
+                        <td className="num">{mins(st.p90_min)}</td>
+                        <td className="num">
+                          <span className="ch-share">
+                            <span className="ch-share-bar" style={{ width: `${st.share_pct}%` }} />
+                            <span className="ch-share-n">{st.share_pct}%</span>
+                          </span>
+                        </td>
+                        <td className="ch-why">{st.kind === 'wait' ? 'queue' : 'processing'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </Section>
 
           <Section title="Pipeline"

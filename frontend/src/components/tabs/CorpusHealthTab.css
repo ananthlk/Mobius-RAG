@@ -382,3 +382,26 @@ tr.ch-ext td { opacity: 0.62; }
 }
 .ch-preset:hover { color: var(--mobius-accent); background: var(--mobius-bg-hover); border-color: var(--mobius-border); }
 .ch-root > .ch-scope:first-child { margin-top: var(--mobius-space-md); }
+
+/* selected range reads as selected — filled, not just hovered */
+.ch-preset.is-on {
+  background: var(--mobius-accent);
+  border-color: var(--mobius-accent);
+  color: var(--mobius-accent-text);
+  font-weight: 500;
+}
+.ch-preset.is-on:hover {
+  background: var(--mobius-accent-hover);
+  border-color: var(--mobius-accent-hover);
+  color: var(--mobius-accent-text);
+}
+.ch-preset:focus-visible { outline: 2px solid var(--mobius-accent); outline-offset: 1px; }
+
+/* share-of-total: the bar carries the comparison, the number carries the value */
+.ch-share { display: inline-flex; align-items: center; gap: 0.4rem; justify-content: flex-end; width: 100%; }
+.ch-share-bar {
+  height: 5px; border-radius: 3px; background: var(--mobius-accent);
+  opacity: 0.75; min-width: 2px; max-width: 76px; flex-shrink: 0;
+}
+.ch-share-n { font-family: var(--mobius-font-mono); font-size: var(--mobius-text-xs);
+  color: var(--mobius-text-muted); width: 3.1rem; text-align: right; }

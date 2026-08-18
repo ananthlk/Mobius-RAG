@@ -4368,6 +4368,86 @@ def corpus_time_to_serve(days: int = 30, payer: str | None = None,
         conn.close()
 
 
+@app.get("/corpus/health/stage-latency")
+def corpus_stage_latency(days: int = 30, payer: str | None = None,
+                         since: str | None = None, until: str | None = None) -> dict:
+    """WHERE the time goes, transition by transition.
+
+    Time-to-serve by SOURCE answers "who waits". This answers "why" — and the
+    two are different questions. Measured on AHCA: 96% of a 21-minute scrape is
+    one transition, a document sitting in the queue waiting for a chunking
+    worker. Actual work across the whole pipeline is under a minute.
+
+    Each row separates WAITING from WORKING, because they have different fixes:
+    waiting is capacity or scheduling, working is code.
+    """
+    import psycopg2 as _pg
+    conn = _pg.connect(_retag_inplace_dsn(), connect_timeout=15)
+    try:
+        cur = conn.cursor()
+        cur.execute("SET statement_timeout = 90000")
+        w, wargs = "", []
+        if since or until:
+            if since:
+                w += " AND d.created_at >= %s"
+                wargs.append(since)
+            if until:
+                w += " AND d.created_at < (%s::date + 1)"
+                wargs.append(until)
+        else:
+            w = f" AND d.created_at > now() - interval '{int(days)} days'"
+        if payer:
+            w += " AND d.payer = %s"
+            wargs.append(payer)
+
+        STEPS = [
+            ("extract", "Ingest → text extracted", "work",
+             f"""SELECT extract(epoch from (min(p.created_at)-d.created_at))/60 v
+                 FROM documents d JOIN document_pages p ON p.document_id=d.id
+                 WHERE TRUE {w} GROUP BY d.id, d.created_at"""),
+            ("chunk_queue", "Waiting for a chunking worker", "wait",
+             f"""SELECT extract(epoch from (j.started_at-d.created_at))/60 v
+                 FROM documents d JOIN chunking_jobs j ON j.document_id=d.id
+                 WHERE j.started_at IS NOT NULL {w}"""),
+            ("chunk_run", "Chunking runs", "work",
+             f"""SELECT extract(epoch from (j.completed_at-j.started_at))/60 v
+                 FROM documents d JOIN chunking_jobs j ON j.document_id=d.id
+                 WHERE j.completed_at IS NOT NULL AND j.started_at IS NOT NULL {w}"""),
+            ("embed", "Chunked → embedded", "work",
+             f"""SELECT extract(epoch from (min(ce.created_at)-max(j.completed_at)))/60 v
+                 FROM documents d JOIN chunking_jobs j ON j.document_id=d.id
+                 JOIN chunk_embeddings ce ON ce.document_id=d.id
+                 WHERE j.completed_at IS NOT NULL {w} GROUP BY d.id"""),
+            ("publish", "Embedded → published", "work",
+             f"""SELECT extract(epoch from (min(e.created_at)-min(ce.created_at)))/60 v
+                 FROM documents d JOIN chunk_embeddings ce ON ce.document_id=d.id
+                 JOIN rag_published_embeddings e ON e.document_id=d.id
+                 WHERE TRUE {w} GROUP BY d.id"""),
+        ]
+        out = []
+        for key, label, kind, q in STEPS:
+            try:
+                cur.execute(f"""SELECT
+                    round(percentile_disc(.5) WITHIN GROUP (ORDER BY v)::numeric, 2),
+                    round(percentile_disc(.9) WITHIN GROUP (ORDER BY v)::numeric, 2),
+                    count(*) FROM ({q}) x WHERE v >= 0""", tuple(wargs))
+                p50, p90, n_ = cur.fetchone()
+            except Exception:
+                conn.rollback()
+                continue
+            if n_:
+                out.append({"step": key, "label": label, "kind": kind,
+                            "p50_min": float(p50 or 0), "p90_min": float(p90 or 0),
+                            "documents": int(n_)})
+        total = sum(r["p50_min"] for r in out) or 1.0
+        for r in out:
+            r["share_pct"] = round(r["p50_min"] / total * 100, 1)
+        return {"window_days": days, "payer": payer, "steps": out,
+                "total_p50_min": round(total, 2)}
+    finally:
+        conn.close()
+
+
 @app.get("/corpus/health/drill/{stage}")
 def corpus_health_drill(stage: str, payer: str | None = None, limit: int = 200,
                         since: str | None = None, until: str | None = None) -> dict:
