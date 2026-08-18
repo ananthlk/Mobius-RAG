@@ -112,7 +112,12 @@ const mins = (v: number | null) =>
   v == null ? '—' : v < 1 ? `${Math.round(v * 60)}s` : v < 90 ? `${v}m` : `${(v / 60).toFixed(1)}h`
 
 export function CorpusHealthTab() {
-  const [payer, setPayer] = useState('AHCA')
+  // Opens on ALL payers, not AHCA. Defaulting to one payer made every number on
+  // the page a filtered number that read as a corpus-wide one — the cleanup panel
+  // showed "152 retired" under an AHCA filter when none of the 152 is an AHCA
+  // document. The scope should be something you choose, never something you have
+  // to notice.
+  const [payer, setPayer] = useState('')
   // Scope is global — payer AND window apply to every section, so a range
   // isolates an issue across the whole page, not only in ingestion.
   const [since, setSince] = useState('')

@@ -4145,18 +4145,29 @@ def corpus_health(payer: str | None = None,
         # They are not hidden: the Duplicate cleanup section reads
         # corpus_cleanup_actions, which records what was removed at the moment of
         # removal precisely because these tables can no longer answer for them.
-        pw = " AND d.lifecycle_state IS DISTINCT FROM 'retired'"
+        # `scope` = payer + window. Applies to EVERY section including the cleanup
+        # record. `pw` = scope PLUS the retired-exclusion, and is for the WORKING
+        # corpus only — a retired document is not pipeline work, but it is very
+        # much part of what the cleanup did.
+        #
+        # These were one clause until the AHCA view was caught reporting "152
+        # retired, 8,050 vectors removed" when not one of those 152 is an AHCA
+        # document (141 Humana, 7 WellCare, 4 unattributed). A page-wide filter
+        # that one panel ignores is worse than no filter: every number looks
+        # equally authoritative.
+        scope = ""
         args_l: list = []
         if payer:
-            pw += " AND d.payer = %s"
+            scope += " AND d.payer = %s"
             args_l.append(payer)
         if since:
-            pw += " AND d.created_at >= %s"
+            scope += " AND d.created_at >= %s"
             args_l.append(since)
         if until:
-            pw += " AND d.created_at < (%s::date + 1)"
+            scope += " AND d.created_at < (%s::date + 1)"
             args_l.append(until)
         args: tuple = tuple(args_l)
+        pw = scope + " AND d.lifecycle_state IS DISTINCT FROM 'retired'"
 
         def one(sql: str, a: tuple = ()) -> int:
             cur.execute(sql, a)
@@ -4369,17 +4380,20 @@ def corpus_health(payer: str | None = None,
         # working corpus above, so joining them back through the payer filter
         # would zero this section out and make a completed cleanup look like it
         # never happened.
-        cur.execute("""
-            SELECT action,
+        cur.execute(f"""
+            SELECT a.action,
                    count(*),
-                   count(*) FILTER (WHERE managed),
-                   COALESCE(sum(published_embeddings_removed), 0),
-                   COALESCE(sum(hierarchical_chunks_removed), 0),
-                   COALESCE(sum(chunk_embeddings_removed), 0),
-                   COALESCE(sum(pages_retained), 0),
-                   count(*) FILTER (WHERE reversible),
-                   max(acted_at)
-            FROM corpus_cleanup_actions GROUP BY action""")
+                   count(*) FILTER (WHERE a.managed),
+                   COALESCE(sum(a.published_embeddings_removed), 0),
+                   COALESCE(sum(a.hierarchical_chunks_removed), 0),
+                   COALESCE(sum(a.chunk_embeddings_removed), 0),
+                   COALESCE(sum(a.pages_retained), 0),
+                   count(*) FILTER (WHERE a.reversible),
+                   max(a.acted_at)
+            FROM corpus_cleanup_actions a
+            JOIN documents d ON d.id = a.document_id
+            WHERE TRUE {scope}
+            GROUP BY a.action""", args)
         crows = cur.fetchall()
         if not crows:
             cleanup_block = {"measured": False}
@@ -4394,7 +4408,9 @@ def corpus_health(payer: str | None = None,
                     "reversible": int(rev),
                     "last_acted_at": last.isoformat() if last else None,
                 }
-            live = one("SELECT count(*) FROM rag_published_embeddings", ())
+            live = one(f"""SELECT count(*) FROM rag_published_embeddings e
+                            JOIN documents d ON d.id = e.document_id
+                            WHERE TRUE {scope}""", args)
             cleanup_block = {
                 "measured": True, "actions": actions,
                 "index_rows_now": int(live),
