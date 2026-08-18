@@ -200,7 +200,10 @@ async def main():
                                   index="none  <-- MUST be free", prior=prior, overlap=1.0)
             continue
 
-        ov = len(s["hashes"] & ps["hashes"]) / max(len(s["hashes"] | ps["hashes"]), 1)
+        carried = len(s["hashes"] & ps["hashes"])
+        changed = len(s["hashes"] - ps["hashes"])
+        dropped = len(ps["hashes"] - s["hashes"])
+        ov = carried / max(len(s["hashes"] | ps["hashes"]), 1)
         # Default is ASK, never PROMOTE. Promotion retires a live document, so it
         # requires positive evidence; ambiguity must never resolve to the
         # destructive branch.
@@ -218,7 +221,9 @@ async def main():
             idx = "admitted; prior NOT retired"
         decisions[did] = dict(decision=dec, lifecycle="active",
                               reason=f"overlap={ov:.3f}  (tau_low={TAU_LOW} tau_high={TAU_HIGH})",
-                              action=act, index=idx, prior=prior, overlap=ov)
+                              action=act, index=idx, prior=prior, overlap=ov,
+                              carried=carried, changed=changed, dropped=dropped,
+                              adjudication="fact_store" if dec.startswith("ambiguous") else None)
 
     for did, s in sorted(state.items(), key=lambda kv: (kv[1]["tag"], str(kv[1]["d"]["filename"]))):
         dec = decisions[did]
@@ -232,15 +237,51 @@ async def main():
         print(f"   index     : {dec['index']}")
 
     # ── §1.1 telemetry rows the gate WOULD write ─────────────────────────
-    h("§1.1 TELEMETRY — rows that WOULD be written before publish (nothing written)")
-    print(f"{'decision':<20}{'lane':<11}{'overlap':>8}  {'index_action':<22}doc")
-    print("-" * 92)
-    for did, s in sorted(state.items(), key=lambda kv: kv[1]["tag"]):
+    h("§1.1 TELEMETRY — the row the gate WOULD write, per document (nothing written)")
+    gen = {r["document_id"]: (r["generator_id"], r["chunking_config_snapshot"])
+           for r in await c.fetch("""SELECT DISTINCT ON (document_id) document_id, generator_id,
+                                     chunking_config_snapshot FROM chunking_jobs
+                                     WHERE document_id=ANY($1::uuid[])
+                                     ORDER BY document_id, created_at DESC""", ids)}
+
+    for did, s_ in sorted(state.items(), key=lambda kv: (kv[1]["tag"], str(kv[1]["d"]["filename"]))):
         dec = decisions[did]
-        lane = "tracked" if s["doc_key"] else "untracked"
-        ov = f"{dec['overlap']:.3f}" if dec["overlap"] is not None else "  —"
-        print(f"{dec['decision']:<20}{lane:<11}{ov:>8}  {dec['index'][:20]:<22}"
-              f"{str(s['d']['filename'])[:30]}")
+        d = s_["d"]
+        g, cfg = gen.get(did, (None, None))
+        prior_id = dec.get("prior")
+        print(f"\n┌─ {str(d['filename'])[:80]}")
+        print(f"│  identity     document_id     = {str(did)[:8]}…")
+        print(f"│               doc_key         = {s_['doc_key'] or 'NULL  (episodic — singleton forever)'}")
+        print(f"│               content_digest  = {s_['digest'] or '(none — unchunked)'}")
+        print(f"│               prior_document  = {str(prior_id)[:8]+'…' if prior_id else 'NULL'}")
+        print(f"│               prior_digest    = {state[prior_id]['digest'] if prior_id else 'NULL'}")
+        print(f"│  decision     decision        = {dec['decision'].upper()}")
+        print(f"│               reason          = {dec['reason']}")
+        if dec.get("overlap") is not None:
+            print(f"│  evidence     overlap_ratio   = {dec['overlap']:.4f}   "
+                  f"(tau_low={TAU_LOW}  tau_high={TAU_HIGH})")
+            print(f"│               chunks_total    = {s_['n_chunks']}")
+            print(f"│               chunks_carried  = {dec.get('carried','—')}   (reusable embeddings)")
+            print(f"│               chunks_changed  = {dec.get('changed','—')}   (need re-embed)")
+            print(f"│               chunks_dropped  = {dec.get('dropped','—')}   (gone from prior)")
+        else:
+            print(f"│  evidence     chunks_total    = {s_['n_chunks']}   pages = {s_['n_pages']}")
+        print(f"│  lane         lane            = {'tracked' if s_['doc_key'] else 'untracked'}")
+        print(f"│               authority_level = {d['authority_level'] or 'NULL'}")
+        print(f"│               importance      = (awaiting Fact Store — not yet on these rows)")
+        print(f"│  gate         promotion_gate  = {'n/a' if dec['decision'] != 'successor' else 'would run'}")
+        print(f"│  effect       lifecycle_state = {dec['lifecycle']}")
+        print(f"│               index_action    = {dec['index']}")
+        print(f"│               adjudication    = {dec.get('adjudication') or 'none'}")
+        print(f"│               remediation     = {dec['action']}")
+        print(f"│  dates        effective_date  = {d['effective_date']}")
+        print(f"│               termination_date= {d['termination_date']}  "
+              f"<-- UNTRUSTED, created_at+182d (§6.3)")
+        print(f"│               retired_at      = {'would set now()' if 'retire prior' in dec['index'] else 'NULL'}")
+        print(f"│  provenance   normalization   = v1-prose")
+        print(f"│               generator_id    = {g or 'NULL'}")
+        print(f"│               chunk_cfg       = {'present' if cfg else 'NULL'}")
+        print(f"└─")
 
     h("SUMMARY BY DECISION")
     agg = defaultdict(int)
