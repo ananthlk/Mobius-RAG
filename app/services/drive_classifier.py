@@ -50,7 +50,18 @@ _AUTHORITY_POLICY_FALLBACK: dict[str, str] = {
     "provider_directory": "payer_policy",
     "benefits_summary": "payer_policy",
     "quick_reference":  "operational_suggested",
-    "useful_forms":     "fyi_not_citable",       # ratified: templates must not outrank manuals
+    # A payer-published form is the payer's own operating instruction, not an inert
+    # template: authoritative for HOW to transact (routing, contacts, required
+    # fields), never for WHAT is covered. Revised 2026-08-18 (Ananth), superseding
+    # the 2026-07-04 ratification. 0.65 still sits below contract_source_of_truth
+    # 1.0, so a form cannot outrank the manual on a coverage question.
+    #
+    # This ALSO removes a contradiction: the regex table below already mapped
+    # PA form / prior auth form / appeal form / template -> operational_suggested,
+    # so the same asset_type resolved to two different authorities depending on
+    # which code path matched first — nothing about the document explained the
+    # difference. Found by Fact Store (coordination file, A-1).
+    "useful_forms":     "operational_suggested",
     "newsletter":       "fyi_not_citable",
 }
 
