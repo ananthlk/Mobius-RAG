@@ -419,3 +419,34 @@ a.ch-card-link:hover {
 }
 a.ch-card-link:focus-visible { outline: 2px solid var(--mobius-accent); outline-offset: 2px; }
 .ch-out { color: var(--mobius-accent); font-size: 0.7rem; margin-left: 0.15rem; }
+
+/* ── share bar: was overflowing its cell and striking through the p90 value.
+   The bar now lives in a fixed-width TRACK that cannot exceed the column. ── */
+.ch-share-cell { width: 9.5rem; overflow: hidden; }
+.ch-share { display: flex; align-items: center; gap: 0.45rem; justify-content: flex-end; }
+.ch-share-track {
+  width: 54px; height: 5px; flex: 0 0 54px;
+  background: var(--mobius-bg-tertiary); border-radius: 3px; overflow: hidden;
+}
+.ch-share-bar { display: block; height: 100%; background: var(--mobius-accent); opacity: 0.8; }
+.ch-share-n { font-family: var(--mobius-font-mono); font-size: var(--mobius-text-xs);
+  color: var(--mobius-text-muted); width: 3rem; text-align: right; flex: 0 0 3rem; }
+
+/* ── source → stage drilldown ── */
+.ch-row-click { cursor: pointer; }
+.ch-row-click:hover { background: var(--mobius-bg-hover); }
+.ch-chev-sm { width: 9px; height: 9px; margin-right: 0.35rem; vertical-align: middle;
+  transition: transform 0.16s ease; }
+.ch-chev-sm.is-open { transform: rotate(90deg); }
+.ch-sub-cell { background: var(--mobius-bg-secondary); padding: 0.6rem 0.9rem !important; }
+.ch-sub-head { font-size: var(--mobius-text-xs); text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--mobius-text-tertiary); margin-bottom: 0.45rem; }
+.ch-sub-row { display: flex; align-items: center; gap: 0.5rem; padding: 0.18rem 0;
+  font-size: var(--mobius-text-xs); }
+.ch-sub-lab { flex: 1 1 auto; color: var(--mobius-text-secondary); }
+.ch-sub-bar-wrap { flex: 0 0 90px; height: 5px; background: var(--mobius-bg-tertiary);
+  border-radius: 3px; overflow: hidden; }
+.ch-sub-bar { display: block; height: 100%; background: var(--mobius-accent); opacity: 0.8; }
+.ch-sub-pct, .ch-sub-val { font-family: var(--mobius-font-mono); color: var(--mobius-text-muted);
+  flex: 0 0 3.2rem; text-align: right; }
+.ch-sub-val { color: var(--mobius-text-primary); }

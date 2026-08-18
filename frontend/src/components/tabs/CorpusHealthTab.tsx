@@ -98,6 +98,9 @@ export function CorpusHealthTab() {
   const [health, setHealth] = useState<Health | null>(null)
   const [tts, setTts] = useState<TTS[] | null>(null)
   const [lat, setLat] = useState<StageLat[] | null>(null)
+  // source -> its own stage breakdown. Crossing the two is the only view that
+  // says whether a slow source is slow for the same reason as everything else.
+  const [srcLat, setSrcLat] = useState<Record<string, StageLat[] | 'loading'>>({})
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [q, setQ] = useState('')
@@ -141,6 +144,18 @@ export function CorpusHealthTab() {
       .catch(() => { })
     return () => { dead = true }
   }, [scopeQS])
+
+  const toggleSourceLat = async (src: string) => {
+    if (srcLat[src]) { setSrcLat(p => { const c = { ...p }; delete c[src]; return c }) ; return }
+    setSrcLat(p => ({ ...p, [src]: 'loading' }))
+    const qs = scopeQS()
+    try {
+      const r = await fetch(
+        `${API_BASE}/corpus/health/stage-latency${qs || '?'}${qs ? '&' : ''}days=30&source=${encodeURIComponent(src)}`)
+      const d = r.ok ? await r.json() : null
+      setSrcLat(p => ({ ...p, [src]: d?.steps ?? [] }))
+    } catch { setSrcLat(p => ({ ...p, [src]: [] })) }
+  }
 
   const openDrill = async (key: string, label: string) => {
     setDrill({ key, label }); setDrillDocs(null)
@@ -268,16 +283,46 @@ export function CorpusHealthTab() {
                 <thead><tr><th>Source</th><th className="num">Docs</th>
                   <th className="num">p50</th><th className="num">p90</th></tr></thead>
                 <tbody>
-                  {tts.map(t => (
-                    <tr key={t.source}>
-                      <td className="ch-name">
-                        <span className={`ch-pip ${(t.p50_min ?? 0) < 5 ? 'good' : 'warn'}`} />{t.label}
-                      </td>
-                      <td className="num">{n(t.documents)}</td>
-                      <td className="num"><b>{mins(t.p50_min)}</b></td>
-                      <td className="num">{mins(t.p90_min)}</td>
-                    </tr>
-                  ))}
+                  {tts.map(t => {
+                    const sub = srcLat[t.source]
+                    return (
+                      <>
+                        <tr key={t.source} className="ch-row-click" onClick={() => toggleSourceLat(t.source)}>
+                          <td className="ch-name">
+                            <svg className={`ch-chev ch-chev-sm${sub ? ' is-open' : ''}`} viewBox="0 0 12 12" aria-hidden="true">
+                              <path d="M4 2.5 L8 6 L4 9.5" fill="none" stroke="currentColor"
+                                    strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                            <span className={`ch-pip ${(t.p50_min ?? 0) < 5 ? 'good' : 'warn'}`} />{t.label}
+                          </td>
+                          <td className="num">{n(t.documents)}</td>
+                          <td className="num"><b>{mins(t.p50_min)}</b></td>
+                          <td className="num">{mins(t.p90_min)}</td>
+                        </tr>
+                        {sub === 'loading' && (
+                          <tr key={t.source + '-l'}><td colSpan={4} className="ch-sub-cell">measuring…</td></tr>
+                        )}
+                        {Array.isArray(sub) && sub.length > 0 && (
+                          <tr key={t.source + '-s'}>
+                            <td colSpan={4} className="ch-sub-cell">
+                              <div className="ch-sub-head">where {t.label.toLowerCase()}’s time goes</div>
+                              {sub.map(st => (
+                                <div key={st.step} className="ch-sub-row">
+                                  <span className={`ch-pip ${st.kind === 'wait' && st.share_pct > 50 ? 'bad' : st.kind === 'wait' ? 'warn' : 'good'}`} />
+                                  <span className="ch-sub-lab">{st.label}</span>
+                                  <span className="ch-sub-bar-wrap">
+                                    <span className="ch-sub-bar" style={{ width: `${Math.min(st.share_pct, 100)}%` }} />
+                                  </span>
+                                  <span className="ch-sub-pct">{st.share_pct}%</span>
+                                  <span className="ch-sub-val">{mins(st.p50_min)}</span>
+                                </div>
+                              ))}
+                            </td>
+                          </tr>
+                        )}
+                      </>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>
@@ -305,9 +350,11 @@ export function CorpusHealthTab() {
                         </td>
                         <td className="num"><b>{mins(st.p50_min)}</b></td>
                         <td className="num">{mins(st.p90_min)}</td>
-                        <td className="num">
+                        <td className="num ch-share-cell">
                           <span className="ch-share">
-                            <span className="ch-share-bar" style={{ width: `${st.share_pct}%` }} />
+                            <span className="ch-share-track">
+                              <span className="ch-share-bar" style={{ width: `${Math.min(st.share_pct, 100)}%` }} />
+                            </span>
                             <span className="ch-share-n">{st.share_pct}%</span>
                           </span>
                         </td>

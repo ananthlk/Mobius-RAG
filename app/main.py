@@ -4370,7 +4370,8 @@ def corpus_time_to_serve(days: int = 30, payer: str | None = None,
 
 @app.get("/corpus/health/stage-latency")
 def corpus_stage_latency(days: int = 30, payer: str | None = None,
-                         since: str | None = None, until: str | None = None) -> dict:
+                         since: str | None = None, until: str | None = None,
+                         source: str | None = None) -> dict:
     """WHERE the time goes, transition by transition.
 
     Time-to-serve by SOURCE answers "who waits". This answers "why" — and the
@@ -4399,6 +4400,14 @@ def corpus_stage_latency(days: int = 30, payer: str | None = None,
         if payer:
             w += " AND d.payer = %s"
             wargs.append(payer)
+        # Crossing source x stage is the question "WHERE does THIS source's time
+        # go" — by-source alone says scrape is slow, by-stage alone says the
+        # queue is slow, and neither says whether they are the same sentence.
+        if source:
+            ssql = _source_sql(source)
+            if ssql is None:
+                raise HTTPException(status_code=404, detail=f"unknown source '{source}'")
+            w += f" AND ({ssql})"
 
         STEPS = [
             ("extract", "Ingest → text extracted", "work",
@@ -4442,7 +4451,7 @@ def corpus_stage_latency(days: int = 30, payer: str | None = None,
         total = sum(r["p50_min"] for r in out) or 1.0
         for r in out:
             r["share_pct"] = round(r["p50_min"] / total * 100, 1)
-        return {"window_days": days, "payer": payer, "steps": out,
+        return {"window_days": days, "payer": payer, "source": source, "steps": out,
                 "total_p50_min": round(total, 2)}
     finally:
         conn.close()
