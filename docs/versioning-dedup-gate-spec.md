@@ -1085,3 +1085,62 @@ Ambiguity must never be load-bearing on progress. Two properties now required:
    That makes §10's as-of resolution more important, not less — with several unretired versions live,
    "which one answers a date-of-service query" is decided by the validity window (§6.1), not by a single
    `active` flag.
+
+
+---
+
+## 17. The human loop, simulated — and the dependency it exposes
+
+`scripts/gate_human_loop_sim.py`. Verdicts delivered **out of order**, deliberately, to test that a late
+answer still applies. Read-only.
+
+### 17.1 What the loop proved
+
+| Property | Evidence |
+|---|---|
+| A verdict keyed on the **digest pair** applies even when it arrives after the crawler has moved on | verdict 1 resolved a pair queued three editions earlier |
+| **A human is the only writer of `termination_date`** | `term=2020-01-31` was the first valid-time value anything had written; the gate had left every one NULL |
+| `not_successor` is **not a no-op** — it splits the lineage | 3 documents moved to a new `doc_key`; everything chained *through* the rejected link inherits the split, or later editions stay attached to the wrong ancestry |
+| An automatic promotion is **reversible** | verdict 3 un-retired a document the gate had auto-retired. Recoverable *only* because retirement never deletes — had the gate dropped the row or its chunks, the verdict would be unactionable |
+
+### 17.2 The risk this exposes — ambiguity accumulation
+
+After the gate ran and before any human looked, the state was:
+
+```
+[ACTIVE ] v1  2019-02-01
+[ACTIVE ] v2  2020-02-01
+[ACTIVE ] v3  2020-07-01
+[retired] v4  2020-10-01   ← auto-promoted past
+[ACTIVE ] v5  2021-10-01
+        4 of 5 versions simultaneously ACTIVE, 3 adjudications pending
+```
+
+**§4.2's safe default has a cost, and this is it.** Refusing to retire on ambiguity prevents silent
+wrong-supersession — but it leaves the index holding four near-identical versions of one contract. That
+is precisely the 59G-4.130 collision Retriever hit in production, multiplied by the length of the chain.
+
+The safe default is only *safe* if something downstream disambiguates. That something is the validity
+window (§6.1): with ordered effective dates, an as-of query resolves to exactly one version regardless of
+how many carry `lifecycle_state = active`.
+
+### 17.3 Consequence for the build order — §10 is a prerequisite, not a follow-on
+
+**`active` is not a retrieval filter. The validity window is.** Which makes the dependency hard:
+
+> Shipping the gate **without** §10 as-of resolution would make retrieval **worse**, not better — it
+> would add concurrently-active versions to the index with nothing able to choose between them.
+
+§12 lists the Retriever contract at step 7. That ordering is now wrong: §10 must land **with or before**
+the gate's first write, not after it. Retriever signed §10 before this was known and should see it —
+their sign-off assumed a filter over one active version, and the real requirement is selection among
+several.
+
+Two follow-ups this creates:
+
+1. **Queue drain rate becomes a corpus-health metric, not just an ops number.** Every pending
+   adjudication is an extra active version competing in retrieval, so a slow queue degrades answers.
+   That belongs in §12.3's integrity checks.
+2. **The split cascade needs a defined traversal.** The simulation moved documents by filename order as a
+   stand-in; the real cascade must follow `supersedes_id`, so that exactly the documents chained through
+   the rejected link move, and no others.
