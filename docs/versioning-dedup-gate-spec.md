@@ -807,3 +807,117 @@ Append-only → re-adjudication writes a new row; a wrong verdict stays diagnosa
 A false *unknown* only sizes the human queue (recoverable — a human sees it). A false *low* is **silent and permanent** under §5 (low → untracked → never indexed → never reviewed → invisible). Wildly asymmetric cost. Eval ruling: baseline **both directions separately** (false-unknown rate and false-low rate are different metrics with different consequences — do not report a single accuracy), and set the importance classifier **recall-biased on "important"** (prefer false-unknown over false-low) — the same discipline as the PHI classifier: recall over precision when a miss is silent and permanent. I own the miss-profile baseline + τ_high calibration; it is gated on the importance classifier existing to measure against a labeled set. Flag me when it is runnable — I baseline both directions before §5 tiering is built around it. Nothing in §7's build (step 6) is blocked by this.
 
 — Eval / Fact Store seat
+
+### 14.6 Post-step-0 — Q3 now sizable, and §11.3 must cover the revisable/episodic classifier too (2026-08-17)
+
+Read §2.2 step-0 findings. Two follow-ups.
+
+**Endorse "no key is better than a wrong key" — it is exactly the §11.3 asymmetry, upstream.** A NULL doc_key = a recoverable singleton (retrievable, never supersedes); a WRONG doc_key = false supersession = a valid doc silently removed from retrieval with no gap to find. Not comparable — assign a key only on positive evidence of a revisable identity. This is the same "false-*low*/false-episodic is silent and permanent, false-*unknown* only sizes the queue" principle I ruled for the importance classifier. Right call.
+
+**Q3 is now answerable, and the queue is small.** Step 0 says **83.3% of the corpus is episodic** (never revised — needs no key, never adjudicated) and only **~16.7% (~880 of 5,259) is revisable**. The adjudication queue is bounded by that revisable subset, and further by only the clusters with *unresolved* ordering (§8 phase 7) — a fraction of ~880, not 5,259. So: **my surface v1 is a priority-sorted flat list, no pagination.** Priority score on the emit still stands (criticality → retrieval-impact → confidence gap) so the reviewer works highest-value-first, but at this volume pagination is unnecessary. Revisit only if the ambiguous-with-conflict count exceeds ~200; step 0 strongly suggests it won't.
+
+**New Eval item — §11.3 baseline must cover BOTH classifiers, not just importance.** Step 0 introduces a second gating classifier: the **revisable vs episodic** call, which "must come before keying." It carries the identical silent-miss asymmetry: a false-**episodic** on a truly revisable document → never keyed → never supersedes → a stale edition stays live in retrieval with full confidence, invisibly. So the miss-profile baseline I own now has two subjects — importance AND revisable/episodic — each baselined in **both** directions separately, each set **recall-biased toward the needs-attention class** (important / revisable). A single accuracy number on either hides the only error that matters. I'll baseline both when they're runnable against a labeled set; flag me.
+
+— Eval / Fact Store seat
+
+
+---
+
+## 14. Readiness audit — modules and seams (2026-08-17)
+
+Verified against the live dev schema and the two dry-run harnesses. **Nothing is built.** Every module
+below exists only as prototype logic inside `scripts/gate_dryrun.py` / `scripts/gate_backprop_dryrun.py`,
+which are read-only.
+
+### 14.1 Schema — 0 of 10 present
+
+| Object | State |
+|---|---|
+| `documents.doc_key` / `version_no` / `content_digest` / `supersedes_id` / `lifecycle_state` / `retired_at` / `last_validated_at` | **all MISSING** |
+| `hierarchical_chunks.chunk_sha` / `carried_from_chunk_id` | **both MISSING** |
+| `gate_decisions` (§1.1 telemetry) | **MISSING** — not yet specified as a table anywhere |
+
+Blocked on the DB seat (§11.4). Note `gate_decisions` was described in §1.1 as fields but never given a
+table definition — that is a gap in this spec, not just in the schema.
+
+### 14.2 Modules
+
+| # | Module | State | Note |
+|---|---|---|---|
+| 1 | normalization (§3) | prototype | prose only; **structure-preserving not built** — the fee-schedule caution is unaddressed |
+| 2 | `chunk_sha` / `content_digest` | prototype | computed on the fly, nowhere to store |
+| 3 | `doc_key` (§2.2) | prototype | tier 2 blocked on Fact Store `asset_type` |
+| 4 | version decision (§4) | prototype | ladder corrected after pilot |
+| 5 | lane rules (§5) | prototype | `importance` not yet on these rows |
+| 6 | publishability + remediation (§5.0) | **decides but does not act** | emits the action; no re-trigger is wired |
+| 7 | promotion gate (§5.1) | **NOT BUILT, NEVER EXERCISED** | 0 chains auto-resolved, so the branch has never run |
+| 8 | telemetry (§1.1) | prints, does not persist | no table |
+| 9 | delta reuse (`carried_from_chunk_id`) | measured, not wired | 59G-4.130 shows 37 carried / 8 changed |
+| 10 | back-propagation (§8) | prototype, phases 1–6 | phase 7 emit not wired |
+| 11 | Fact Store emit | payload shaped, not sent | §14.4 |
+| 12 | verdict ingest | **NOT BUILT** | no path for an answer to come back |
+| 13 | retrieval as-of (§10) | **NOT BUILT** | Retriever's; signed, unimplemented |
+| 14 | ordering confidence | **BUGGY** | §14.3 |
+| 15 | filename date extraction | **NOT BUILT** | required by §14.3; unowned |
+
+### 14.3 Bug 3, found by the back-propagation run
+
+The `Attachment II — Core Contract Provisions` cluster is a genuine **10-edition chain**: filenames carry
+`2019-02-01`, `2020-02-01`, `2020-07-01`, `2020-10-01`, `2021-10-01`, `11-4-22`. Tier 2 keyed it
+correctly — the first real multi-edition chain the design has found.
+
+But the run reported `ordering_confidence: "date-ordered"`, which is **false**. All ten share
+`effective_date = 2026-07-01` (the fabricated value, §6.3) — one distinct date across the whole chain.
+Sorting by it is arbitrary, so the chain order is meaningless while claiming confidence.
+
+Two fixes required:
+- **Ordering confidence must detect *degenerate* ordering, not just NULL dates.** If a cluster has fewer
+  distinct `effective_date` values than members, ordering is unreliable and the cluster goes to a human.
+  Testing `IS NULL` was never sufficient.
+- **The real dates are in the filenames.** Filename date extraction is the highest-value missing module —
+  it would order this chain correctly without a human. Currently unowned.
+
+### 14.4 Seams
+
+| Seam | Direction | Crosses | Status |
+|---|---|---|---|
+| Fact Store → RAG | in | `importance`, `claimed`, `authority_level` | live, but only 86 AHCA docs carry it |
+| Fact Store → RAG | in | **`asset_type` = revisable vs episodic** | **OPEN — §11.2. Blocks `doc_key` tier 2** |
+| RAG → Fact Store | out | adjudication request (cluster-level) | shape drafted §14.5, not sent |
+| Fact Store → RAG | in | verdict: relationship + 2 valid-time dates | shape agreed, **no ingest path** |
+| RAG → Retriever | out | `doc_key`, `lifecycle_state`, as-of window | **✅ signed**, unimplemented both sides |
+| RAG → DB seat | out | 9 columns + telemetry table | **⬜ unsigned — blocks everything** |
+| RAG → Eval | out | τ evidence bar | ask changed after §4.3; open |
+| RAG → Maintaining | out | `last_validated_at` vs coherence gate | **⬜ added late, not yet answered** |
+| Crawler → RAG | in | re-fetch cadence (drives Case A) | informed, no vote |
+| RAG internal | — | chunking re-trigger endpoint | **exists** — `POST /documents/{id}/chunking/start` |
+
+### 14.5 Uncovered seams — no owner assigned
+
+These have no seat and are not in the §13 ledger. Flagging rather than assuming:
+
+1. **Who clears the fabricated dates?** `effective_date` (4 distinct values) and `termination_date`
+   (`created_at + 182d`) are RAG's columns, but the values came from some upstream process. Remediation
+   has no owner. §10 cannot ship until it is done.
+2. **Who owns filename date extraction?** Needed for §14.3 ordering. Plausibly Curation, plausibly
+   extraction — undecided.
+3. **Who owns `display_name` remediation?** Raised with Fact Store (28.5% of the corpus is a category
+   label); Q3 of that ask is exactly "yours or mine" and is unanswered.
+
+### 14.6 Back-propagation, measured
+
+| Step | Documents |
+|---|---|
+| AHCA total | 5,496 |
+| − re-enqueue chunking | 213 |
+| − re-trigger extraction | 150 |
+| − retire duplicates | 100 *(14,522 indexed chunks deleted)* |
+| keyed into clusters | 95 *(80 clusters)* |
+| episodic / unkeyed | 4,938 → singleton forever |
+| **multi-doc chains** | **7** |
+| → auto-resolvable | **0** |
+| → needs Fact Store | **7** |
+
+Zero chains auto-resolve, entirely because of §14.3 — the ordering is degenerate, not because the content
+evidence is weak. **Fixing filename date extraction is what converts this from 7 human tasks to nearly
+zero**, and it is the single highest-leverage missing module.
