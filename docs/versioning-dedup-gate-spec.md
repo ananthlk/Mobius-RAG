@@ -302,6 +302,51 @@ The filter is **not** "exclude inactive". It is **resolve as-of a date**:
 
 Untracked/`shelved` documents are excluded from retrieval in all cases (subject to §11.1).
 
+### 10.1 Retriever's review (2026-08-17) — sign off on §10, with one technical requirement
+
+**Sign off on the design.** The index filter on `(doc_key, lifecycle_state)` is right, and "resolve as-of a
+date" rather than "exclude inactive" is the correct framing — I hit this exact gap tonight from the other
+direction and had to hand-roll a stopgap for it.
+
+**Direct connection to tonight's work, worth being explicit about:** the AHCA pilot surfaced a live
+59G-4.130 collision — two real documents, 2016 and 2024, ranked 0.0003 apart in `rerank_score` (a
+production coin-flip). Without `doc_key`/`lifecycle_state`/`content_digest` existing yet, I shipped a
+`filler_a.py`-level tiebreak: a bounded penalty applied only when two pool candidates share a rule-number
+identifier extracted from filename, gated on whether the query carries an explicit year (Crawler caught my
+first cut being query-blind — flat penalty, not an actual date check — fixed and re-verified). It works,
+but it's a **regex-on-raw-query-text approximation of "does this query carry a date of service"**, applied
+as a post-hoc score nudge after the pool is already built from both versions.
+
+**Once §10 ships, that tiebreak should be retired, not layered on top of the real contract.** Filtering to
+the as-of version belongs in Pool's candidate query (`WHERE lifecycle_state = 'active'` or an explicit
+date-range predicate against `effective_date`/`termination_date`), not as a Filler-stage score adjustment
+on a pool that already contains both versions. My stopgap is doing Pool's job badly because Pool doesn't
+have the data yet.
+
+**The technical requirement this creates, for whoever builds the caller side of §10:** "an appeal carries a
+date of service" needs `as_of_date` to arrive at Pool as a **structured parameter**, threaded from
+Gate/Structure (or wherever the caller's date-of-service context lives), not inferred by regexing the raw
+query text for a 4-digit year. My tonight's heuristic is a real, deployed, honest stopgap — not a
+foundation to build the real contract on. Happy to own the Pool-side query change once `doc_key`/
+`lifecycle_state`/effective-date-range exist; the caller-side "does this turn carry a date of service"
+extraction is a Gate/Structure concern, not mine, and should be scoped explicitly rather than assumed.
+
+**Also flagging, not blocking:** the composite index proposed in §11.4 is `(doc_key, lifecycle_state)` —
+for the as-of-date case specifically (not just "current version"), a range predicate against
+`effective_date`/`termination_date` will also need to hit an index, or a date-of-service query on a large
+`doc_key` cluster does a filtered scan. Worth DB seat confirming whether `(doc_key, lifecycle_state)` alone
+covers this or a third column belongs in the index.
+
+**On §7/§11.5 (misrouted to this session):** the sign-off request that reached me asked me to review and
+flip §7/§11.5 — those are Fact Store's row per this spec's own header (`Human review surface: Fact Store`)
+and the §13 ledger. I'm Retriever (`Read-side: Retriever`, §10 is my row). Not signing a row that isn't
+mine; flagging so the request can be routed to Fact Store's actual session rather than silently answered
+by the wrong party.
+
+**Flipping my own row: §10 signed off**, contingent on the `as_of_date` structured-parameter requirement
+above being scoped to whoever owns Gate/Structure's caller-context extraction, not assumed to already
+exist.
+
 ---
 
 ## 11. Open questions requiring a ruling
@@ -377,7 +422,7 @@ writes to the vector index. If Case A is not free, the nightly pipeline will thr
 |---|---|---|
 | Payor Platform | §11.1 exclusion vs floor · §11.2 importance grain · §5.2 recall bias | ⬜ |
 | Fact Store | §7 human loop · §11.5 review surface · verdict store shape | ⬜ |
-| Retriever | §10 as-of contract · index filter on (`doc_key`, `lifecycle_state`) | ⬜ |
+| Retriever | §10 as-of contract · index filter on (`doc_key`, `lifecycle_state`) | ✅ signed, see §10.1 — contingent on `as_of_date` being a structured caller param, not query-text regex |
 | Eval | §11.3 classifier miss profile baseline · τ_high calibration | ⬜ |
 | DB seat | §9 schema deltas · §11.4 column contract + index strategy | ⬜ |
 | Technical Review | structure + seam ownership | ⬜ |
