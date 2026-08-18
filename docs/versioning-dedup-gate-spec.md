@@ -32,6 +32,44 @@ for untracked documents**, which are deduplicated on `file_hash` alone.
 The gate is the **only writer of `lifecycle_state`**. Everything upstream produces artifacts; the gate
 alone decides which of them a query can reach.
 
+### 1.1 Telemetry — one row per decision, written BEFORE publish
+
+**Requirement (Ananth, 2026-08-17):** *"in the pipeline i want this telemetry produced before publish so
+that i can track this too."*
+
+The gate writes its decision record **before** any publish or index mutation. One row per document
+through the gate:
+
+| Group | Fields |
+|---|---|
+| identity | `document_id`, `doc_key`, `content_digest`, `prior_document_id`, `prior_digest` |
+| decision | `first_version` \| `unchanged` \| `successor` \| `new_doc_key` \| `quarantined` |
+| evidence | `overlap_ratio`, `chunks_total`, `chunks_changed`, `chunks_carried` |
+| lane | `tracked` \| `untracked`, plus `importance` / `claimed` / `authority_level` as received |
+| promotion gate | `pass` \| `fail` \| `n/a`, and which check failed |
+| effect | `index_action`: `admitted` \| `none` \| `retired_predecessor`; `adjudication_emitted` + target |
+| provenance | `normalization_version`, chunker `generator_id`, `chunking_config_snapshot` ref |
+| timing | decision latency |
+
+**Why before publish, not after.** If the row is written after the mutation, a failed or partial publish
+leaves a decision nobody can see — precisely the failure class that produced `classified: 5259` while
+changing nothing, and an import that reported success while writing zero pages. Writing the intended
+action first means the record survives a failed mutation, and the two can be reconciled: a decision row
+with no matching corpus change is a detectable defect rather than a silent one.
+
+**What it makes answerable**, none of which is inferable from corpus state after the fact:
+
+- *Is the nightly no-change path actually free?* Count `decision = unchanged AND index_action = none`.
+  Pilot Case A (§12.1) is verified from this row, not from logs.
+- *Is normalization drifting?* A spike in `successor` on a night with no real publications means
+  boilerplate is leaking past §3 — the failure mode that would otherwise take weeks to notice.
+- *Is the classifier's lane assignment sane?* Distribution of `lane` against `importance` over time.
+- *How big is the human backlog, and is it draining?* `adjudication_emitted` count vs verdicts returned.
+- *Did a chunker change cause a mass version event?* `generator_id` + `normalization_version` on every row.
+
+This is the same principle already ratified for query telemetry: one row that serves the cockpit, the
+trace, and the training set at once, rather than three partial records reconstructed later.
+
 ---
 
 ## 2. Three identities, three jobs
@@ -371,6 +409,11 @@ A false *low* is silent and permanent under §5. Baseline both directions before
 
 Eight new fields; index on (`doc_key`, `lifecycle_state`) — every retrieval query filters on the pair.
 
+**Raised by Retriever in §10.1, needs your ruling:** `(doc_key, lifecycle_state)` covers the
+"current version" case. It may **not** cover the as-of-date case — a date-of-service query runs a range
+predicate against `effective_date` / `termination_date`, and on a large `doc_key` cluster that becomes a
+filtered scan. Confirm whether the pair suffices or a third column belongs in the index.
+
 ### 11.5 Fact Store — review surface shape
 
 Diff view, verdict buttons, append-only verdict store keyed on `content_digest`.
@@ -421,10 +464,11 @@ writes to the vector index. If Case A is not free, the nightly pipeline will thr
 | Seat | Scope of review | Status |
 |---|---|---|
 | Payor Platform | §11.1 exclusion vs floor · §11.2 importance grain · §5.2 recall bias | ⬜ |
-| Fact Store | §7 human loop · §11.5 review surface · verdict store shape | ⬜ |
+| Fact Store | §7 human loop · §11.5 review surface · verdict store shape | ✅ (Eval/Fact Store, 2026-08-17) — signed w/ 2 additive refinements: (1) §7 returns TWO separate valid-time dates (successor.effective_date + predecessor.termination_date), never auto-derive one from the other, NULL if boundary unstated; (2) §11.5 verdict keyed on the DIGEST PAIR (pred+succ content_digest)+doc_key, not a lone digest. Q1: verdict store mine (classifications shape). Q2: RAG pre-renders diff, I display. Q3: priority-triaged not paginated; queue count gated on §12 step 0. |
 | Retriever | §10 as-of contract · index filter on (`doc_key`, `lifecycle_state`) | ✅ signed, see §10.1 — contingent on `as_of_date` being a structured caller param, not query-text regex |
 | Eval | §11.3 classifier miss profile baseline · τ_high calibration | ⬜ |
 | DB seat | §9 schema deltas · §11.4 column contract + index strategy | ⬜ |
+| Maintaining | §3 normalization vs coherence gate · `last_validated_at` freshness overlap · nightly-sweep interaction | ⬜ |
 | Technical Review | structure + seam ownership | ⬜ |
 
 Nothing in §12 beyond step 0 begins before the seats covering that step have signed.
