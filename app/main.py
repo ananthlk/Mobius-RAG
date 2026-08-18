@@ -4113,7 +4113,8 @@ _STAGES = [
 
 
 @app.get("/corpus/health")
-def corpus_health(payer: str | None = None) -> dict:
+def corpus_health(payer: str | None = None,
+                  since: str | None = None, until: str | None = None) -> dict:
     """Corpus Health — sources of entry, pipeline stages, versioning, time to serve.
 
     READS THE GATE'S TELEMETRY. Publishability, versioning and dedup all come from
@@ -4131,8 +4132,21 @@ def corpus_health(payer: str | None = None) -> dict:
     try:
         cur = conn.cursor()
         cur.execute("SET statement_timeout = 45000")
-        pw = "AND d.payer = %s" if payer else ""
-        args: tuple = (payer,) if payer else ()
+        # Scope applies to the WHOLE page — sources, stages, classifiers, gate
+        # and dedup alike — so a window isolates an issue everywhere at once
+        # rather than only in ingestion.
+        pw = ""
+        args_l: list = []
+        if payer:
+            pw += " AND d.payer = %s"
+            args_l.append(payer)
+        if since:
+            pw += " AND d.created_at >= %s"
+            args_l.append(since)
+        if until:
+            pw += " AND d.created_at < (%s::date + 1)"
+            args_l.append(until)
+        args: tuple = tuple(args_l)
 
         def one(sql: str, a: tuple = ()) -> int:
             cur.execute(sql, a)
@@ -4165,6 +4179,22 @@ def corpus_health(payer: str | None = None) -> dict:
             WHERE g.run_id = %s {pw}""", (run_id,) + args)
         (total, no_pages, stuck_chunk, stopped_ocr, tracked, awaiting,
          successors, carried, reembed, unpublishable) = cur.fetchone()
+
+        # dedup comes free from the gate's own digests
+        cur.execute(f"""SELECT coalesce(sum(c - 1), 0) FROM (
+              SELECT count(*) AS c FROM gate_decisions g JOIN documents d ON d.id = g.document_id
+              WHERE g.run_id = %s AND g.content_digest IS NOT NULL {pw}
+              GROUP BY g.content_digest HAVING count(*) > 1) x""", (run_id,) + args)
+        redundant = int((cur.fetchone() or [0])[0] or 0)
+
+        # embedded / published are NOT in gate telemetry, so they are live.
+        # NOTE: chunk_embeddings has NO index on document_id (1.95M rows), which
+        # is why `embedded` costs ~3.7s while `published` costs 0.2s. Flagged to
+        # the DB seat; folding both into the gate run would make them free.
+        embedded = one(f"""SELECT count(*) FROM documents d WHERE EXISTS
+            (SELECT 1 FROM chunk_embeddings ce WHERE ce.document_id = d.id) {pw}""", args)
+        published = one(f"""SELECT count(*) FROM documents d WHERE EXISTS
+            (SELECT 1 FROM rag_published_embeddings e WHERE e.document_id = d.id) {pw}""", args)
 
         cur.execute(f"""SELECT g.decision, count(*) FROM gate_decisions g
             JOIN documents d ON d.id = g.document_id
@@ -4208,9 +4238,25 @@ def corpus_health(payer: str | None = None) -> dict:
              "action": "delete partial chunks, re-enqueue CHUNKING",
              "action_key": "retrigger_chunk", "drill": "chunked",
              "tone": "bad" if stuck_chunk else "good"},
+            {"stage": "embedded", "label": "Embedded", "reached": embedded,
+             "missing": max(chunked - embedded, 0), "stopped": 0,
+             "missing_reason": "chunks exist but were never embedded",
+             "action": "re-trigger EMBEDDING", "action_key": "retrigger_embed",
+             "drill": "embedded", "tone": "bad" if chunked - embedded > 0 else "good"},
+            {"stage": "deduped", "label": "Deduplicated", "reached": total - redundant,
+             "missing": 0, "stopped": redundant,
+             "missing_reason": "identical normalized text as an earlier document",
+             "action": "retire non-canonical, delete its chunks from the index",
+             "action_key": "retire_duplicate", "drill": "duplicate",
+             "tone": "warn" if redundant else "good"},
             {"stage": "versioned", "label": "Version decided", "reached": total,
              "missing": 0, "stopped": 0, "missing_reason": "", "action": "",
              "action_key": "run_gate", "drill": "versioned", "tone": "good"},
+            {"stage": "published", "label": "Published to index", "reached": published,
+             "missing": max(embedded - published, 0), "stopped": 0,
+             "missing_reason": "embedded but not serving",
+             "action": "publish", "action_key": "publish", "drill": "published",
+             "tone": "bad" if embedded - published > 0 else "good"},
         ]
 
         stopped = [{"status": t["status"], "label": t["label"], "why": t["why"],
@@ -4242,6 +4288,7 @@ def corpus_health(payer: str | None = None) -> dict:
 
         return {
             "payer": payer,
+            "since": since, "until": until,
             "documents_total": int(total),
             "as_of": measured_at.isoformat() if measured_at else None,
             "sources": sources,
@@ -4249,6 +4296,13 @@ def corpus_health(payer: str | None = None) -> dict:
             "stopped": stopped,
             "classifiers": classifiers,
             "inflight": inflight,
+            "dedup": {"redundant_documents": redundant},
+            # Eval is deliberately NOT a pipeline stage. It scores QUERIES
+            # (rag_query_decisions), not documents — there is no per-document
+            # eval verdict in this corpus. Presenting it as a stage would imply
+            # a per-document gate that does not exist.
+            "eval": {"grain": "query", "owner": "Eval agent",
+                     "note": "measures answers, not documents — corpus-level, not a stage"},
             "gate": {
                 "measured": True, "run_id": str(run_id),
                 "measured_at": measured_at.isoformat() if measured_at else None,
@@ -4263,7 +4317,8 @@ def corpus_health(payer: str | None = None) -> dict:
 
 
 @app.get("/corpus/health/time-to-serve")
-def corpus_time_to_serve(days: int = 30) -> dict:
+def corpus_time_to_serve(days: int = 30, payer: str | None = None,
+                         since: str | None = None, until: str | None = None) -> dict:
     """Ingest → first published vector, per source. The number a customer feels.
 
     Kept separate from /corpus/health because it is the one genuinely expensive
@@ -4274,6 +4329,21 @@ def corpus_time_to_serve(days: int = 30) -> dict:
     try:
         cur = conn.cursor()
         cur.execute("SET statement_timeout = 60000")
+        # An explicit window overrides the rolling `days` default.
+        wargs: list = []
+        if since or until:
+            win = ""
+            if since:
+                win += " AND d.created_at >= %s"
+                wargs.append(since)
+            if until:
+                win += " AND d.created_at < (%s::date + 1)"
+                wargs.append(until)
+        else:
+            win = f" AND d.created_at > now() - interval '{int(days)} days'"
+        if payer:
+            win += " AND d.payer = %s"
+            wargs.append(payer)
         out = []
         for src in _SOURCES:
             sql = _source_sql(src["key"])
@@ -4286,8 +4356,8 @@ def corpus_time_to_serve(days: int = 30) -> dict:
                 FROM (SELECT extract(epoch from (min(e.created_at) - d.created_at)) AS s
                       FROM documents d
                       JOIN rag_published_embeddings e ON e.document_id = d.id
-                      WHERE {sql} AND d.created_at > now() - interval '%s days'
-                      GROUP BY d.id, d.created_at) x WHERE s > 0""" % int(days))
+                      WHERE {sql} {win}
+                      GROUP BY d.id, d.created_at) x WHERE s > 0""", tuple(wargs))
             n, p50, p90 = cur.fetchone()
             if n:
                 out.append({"source": src["key"], "label": src["label"], "documents": int(n),
@@ -4299,7 +4369,8 @@ def corpus_time_to_serve(days: int = 30) -> dict:
 
 
 @app.get("/corpus/health/drill/{stage}")
-def corpus_health_drill(stage: str, payer: str | None = None, limit: int = 200) -> dict:
+def corpus_health_drill(stage: str, payer: str | None = None, limit: int = 200,
+                        since: str | None = None, until: str | None = None) -> dict:
     """The documents stuck AT a stage — the list behind the number.
 
     A count you cannot open is a count nobody acts on.
@@ -4341,7 +4412,13 @@ def corpus_health_drill(stage: str, payer: str | None = None, limit: int = 200) 
             pclause = ""
             if payer:
                 p["payer"] = payer
-                pclause = "AND d.payer = %(payer)s"
+                pclause += " AND d.payer = %(payer)s"
+            if since:
+                p["since"] = since
+                pclause += " AND d.created_at >= %(since)s"
+            if until:
+                p["until"] = until
+                pclause += " AND d.created_at < (%(until)s::date + 1)"
             cur.execute(
                 f"""SELECT d.id, d.filename, d.display_name, d.payer, d.status, d.created_at,
                            d.effective_date, d.file_path
@@ -4349,14 +4426,22 @@ def corpus_health_drill(stage: str, payer: str | None = None, limit: int = 200) 
                     ORDER BY d.created_at DESC LIMIT %(lim)s""", p)
         else:
             args: list = []
+            extra = ""
             if payer:
+                extra += " AND d.payer = %s"
                 args.append(payer)
+            if since:
+                extra += " AND d.created_at >= %s"
+                args.append(since)
+            if until:
+                extra += " AND d.created_at < (%s::date + 1)"
+                args.append(until)
             args.append(limit)
             cur.execute(
                 f"""SELECT d.id, d.filename, d.display_name, d.payer, d.status, d.created_at,
                            d.effective_date, d.file_path
                     FROM documents d
-                    WHERE {where} {'AND d.payer = %s' if payer else ''}
+                    WHERE {where} {extra}
                     ORDER BY d.created_at DESC LIMIT %s""", tuple(args))
         docs = [{"id": str(r[0]), "filename": r[1], "display_name": r[2], "payer": r[3],
                  "status": r[4], "created_at": r[5].isoformat() if r[5] else None,

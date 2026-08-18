@@ -55,11 +55,42 @@ interface DrillDoc {
 }
 
 const n = (v: number | null | undefined) => (v ?? 0).toLocaleString()
+
+/** Collapsible section. Sections carrying an attention count show it in the
+ *  header, so a collapsed section still tells you whether it needs you. */
+function Section({ title, badge, tone, defaultOpen = true, children }: {
+  title: string
+  badge?: string | number | null
+  tone?: 'good' | 'warn' | 'bad'
+  defaultOpen?: boolean
+  children: React.ReactNode
+}) {
+  const [open, setOpen] = useState(defaultOpen)
+  return (
+    <section className={`ch-acc ${open ? 'is-open' : ''}`}>
+      <button className="ch-acc-head" onClick={() => setOpen(o => !o)} aria-expanded={open}>
+        <svg className="ch-chev" viewBox="0 0 12 12" aria-hidden="true">
+          <path d="M4 2.5 L8 6 L4 9.5" fill="none" stroke="currentColor"
+                strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+        <span className="ch-acc-title">{title}</span>
+        {badge != null && badge !== '' && (
+          <span className={`ch-acc-badge${tone ? ' ' + tone : ''}`}>{badge}</span>
+        )}
+      </button>
+      {open && <div className="ch-acc-body">{children}</div>}
+    </section>
+  )
+}
 const mins = (v: number | null) =>
   v == null ? '—' : v < 1 ? `${Math.round(v * 60)}s` : v < 90 ? `${v}m` : `${(v / 60).toFixed(1)}h`
 
 export function CorpusHealthTab() {
   const [payer, setPayer] = useState('AHCA')
+  // Scope is global — payer AND window apply to every section, so a range
+  // isolates an issue across the whole page, not only in ingestion.
+  const [since, setSince] = useState('')
+  const [until, setUntil] = useState('')
   const [health, setHealth] = useState<Health | null>(null)
   const [tts, setTts] = useState<TTS[] | null>(null)
   const [loading, setLoading] = useState(false)
@@ -68,17 +99,24 @@ export function CorpusHealthTab() {
   const [drill, setDrill] = useState<{ key: string; label: string } | null>(null)
   const [drillDocs, setDrillDocs] = useState<DrillDoc[] | null>(null)
 
+  const scopeQS = useCallback(() => {
+    const p = new URLSearchParams()
+    if (payer) p.set('payer', payer)
+    if (since) p.set('since', since)
+    if (until) p.set('until', until)
+    return p.toString() ? `?${p}` : ''
+  }, [payer, since, until])
+
   const load = useCallback(async () => {
     setLoading(true); setError(null)
     try {
-      const qs = payer ? `?payer=${encodeURIComponent(payer)}` : ''
-      const r = await fetch(`${API_BASE}/corpus/health${qs}`)
+      const r = await fetch(`${API_BASE}/corpus/health${scopeQS()}`)
       if (!r.ok) throw new Error(`health ${r.status}`)
       setHealth(await r.json())
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load corpus health')
     } finally { setLoading(false) }
-  }, [payer])
+  }, [scopeQS])
 
   useEffect(() => { load() }, [load])
 
@@ -86,18 +124,18 @@ export function CorpusHealthTab() {
   // the rest of the page renders without waiting for it.
   useEffect(() => {
     let dead = false
-    fetch(`${API_BASE}/corpus/health/time-to-serve?days=30`)
+    const qs = scopeQS()
+    fetch(`${API_BASE}/corpus/health/time-to-serve${qs || '?'}${qs ? '&' : ''}days=30`)
       .then(r => (r.ok ? r.json() : null))
       .then(d => { if (!dead && d) setTts(d.sources) })
       .catch(() => { })
     return () => { dead = true }
-  }, [])
+  }, [scopeQS])
 
   const openDrill = async (key: string, label: string) => {
     setDrill({ key, label }); setDrillDocs(null)
     try {
-      const qs = payer ? `?payer=${encodeURIComponent(payer)}` : ''
-      const r = await fetch(`${API_BASE}/corpus/health/drill/${encodeURIComponent(key)}${qs}`)
+      const r = await fetch(`${API_BASE}/corpus/health/drill/${encodeURIComponent(key)}${scopeQS()}`)
       setDrillDocs(r.ok ? (await r.json()).documents || [] : [])
     } catch { setDrillDocs([]) }
   }
@@ -107,16 +145,6 @@ export function CorpusHealthTab() {
 
   return (
     <div className="ch-root">
-      <header className="ch-head">
-        <div>
-          <h2>Corpus health</h2>
-          <p className="ch-sub">
-            Where documents come from, how far they get, what they yield, and what to do
-            about the ones that stop.
-          </p>
-        </div>
-      </header>
-
       <div className="ch-scope">
         <select value={payer} onChange={e => setPayer(e.target.value)}>
           <option value="">All payers</option>
@@ -134,6 +162,22 @@ export function CorpusHealthTab() {
         <button className="ch-go" onClick={() => q.trim() && openDrill(`search:${q.trim()}`, `“${q.trim()}”`)}>
           Search
         </button>
+        <span className="ch-range">
+          <input type="date" value={since} max={until || undefined}
+                 onChange={e => setSince(e.target.value)} aria-label="From" />
+          <span className="ch-dash">→</span>
+          <input type="date" value={until} min={since || undefined}
+                 onChange={e => setUntil(e.target.value)} aria-label="To" />
+        </span>
+        <span className="ch-presets">
+          {([['7d', 7], ['30d', 30], ['90d', 90]] as [string, number][]).map(([lab, d]) => (
+            <button key={lab} className="ch-preset" onClick={() => {
+              const t = new Date(); const f = new Date(Date.now() - d * 864e5)
+              setSince(f.toISOString().slice(0, 10)); setUntil(t.toISOString().slice(0, 10))
+            }}>{lab}</button>
+          ))}
+          <button className="ch-preset" onClick={() => { setSince(''); setUntil('') }}>all</button>
+        </span>
         <button className="ch-btn" onClick={load} disabled={loading}>
           {loading ? 'Loading…' : 'Refresh'}
         </button>
@@ -145,7 +189,8 @@ export function CorpusHealthTab() {
 
       {health && (
         <>
-          <h3 className="ch-sec">Sources of entry</h3>
+          <Section title="Sources of entry"
+                   badge={`${health.sources.filter(x => !x.external).length} routes`}>
           <p className="ch-note ch-top">
             Where documents come in. Every one lands the raw file in GCS and a single pipeline
             runs from there, so this only answers “how did it get here”.
@@ -180,8 +225,9 @@ export function CorpusHealthTab() {
           <div className="ch-converge">
             <span>all of the above land in</span><b>GCS</b><span>→ one pipeline</span>
           </div>
+          </Section>
 
-          <h3 className="ch-sec">Time to serve — ingest to searchable</h3>
+          <Section title="Time to serve" badge={tts?.length ? `${tts.length} sources` : null}>
           <p className="ch-note ch-top">
             The number a customer feels: document landing → first published vector, last 30 days.
           </p>
@@ -206,7 +252,11 @@ export function CorpusHealthTab() {
             </div>
           )}
 
-          <h3 className="ch-sec">Pipeline — one path, whatever the source</h3>
+          </Section>
+
+          <Section title="Pipeline"
+                   badge={health.stages.reduce((a, x) => a + x.missing, 0) || null}
+                   tone="bad">
           <div className="ch-scroll">
             <table className="ch-table">
               <thead><tr>
@@ -246,9 +296,12 @@ export function CorpusHealthTab() {
                 {n(health.inflight.chunking_blocked)}</b> blocked</span>
           </p>
 
+          </Section>
+
           {health.stopped.some(t => t.count > 0) && (
-            <>
-              <h3 className="ch-sec">Stopped — not a backlog</h3>
+            <Section title="Stopped — not a backlog"
+                     badge={health.stopped.reduce((a, t) => a + t.count, 0)}
+                     tone="warn" defaultOpen={false}>
               <div className="ch-scroll">
                 <table className="ch-table">
                   <thead><tr><th>State</th><th className="num">Docs</th><th>Why</th>
@@ -268,10 +321,10 @@ export function CorpusHealthTab() {
                   </tbody>
                 </table>
               </div>
-            </>
+            </Section>
           )}
 
-          <h3 className="ch-sec">Classifiers — “classified” is several things</h3>
+          <Section title="Classifiers" badge={`${health.classifiers.length}`} defaultOpen={false}>
           <div className="ch-scroll">
             <table className="ch-table">
               <thead><tr><th>Classifier</th><th>What it decides</th><th>Owner</th>
@@ -296,7 +349,10 @@ export function CorpusHealthTab() {
             </table>
           </div>
 
-          <h3 className="ch-sec">Versioning &amp; deduplication</h3>
+          </Section>
+
+          <Section title="Versioning &amp; deduplication"
+                   badge={g?.awaiting_adjudication || null} tone="warn">
           {!g?.measured ? <div className="ch-empty">The gate has not run yet.</div> : (
             <>
               <div className="ch-cards">
@@ -320,6 +376,7 @@ export function CorpusHealthTab() {
               </div>
             </>
           )}
+          </Section>
         </>
       )}
 
