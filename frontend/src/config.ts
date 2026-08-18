@@ -31,3 +31,21 @@ const scraperBase = import.meta.env?.VITE_SCRAPER_API_BASE as string | undefined
 // (``isDev`` already declared above for API_BASE — reuse it.)
 export const SCRAPER_API_BASE: string =
   scraperBase !== undefined ? scraperBase : isDev ? 'http://localhost:8002' : ''
+
+/**
+ * Fact Store / Payor Platform base URL.
+ *
+ * Version adjudications are decided THERE, not here — RAG detects, a person
+ * adjudicates in their working queue (spec §7). Corpus Health links out rather
+ * than rebuilding a queue we do not own.
+ *
+ * The queue PATH is still owed by Fact Store; until they name it the link
+ * points at their app root, which is honest — it gets an operator to the right
+ * surface without inventing a route that may not exist.
+ */
+export const PAYOR_BASE: string =
+  (import.meta.env?.VITE_PAYOR_BASE as string | undefined)
+  ?? 'https://mobius-payor-ortabkknqa-uc.a.run.app'
+
+export const PAYOR_QUEUE_PATH: string =
+  (import.meta.env?.VITE_PAYOR_QUEUE_PATH as string | undefined) ?? ''

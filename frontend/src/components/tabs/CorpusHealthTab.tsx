@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { API_BASE } from '../../config'
+import { API_BASE, PAYOR_BASE, PAYOR_QUEUE_PATH } from '../../config'
 import './CorpusHealthTab.css'
 
 /**
@@ -424,9 +424,16 @@ export function CorpusHealthTab() {
               <div className="ch-cards">
                 <div className="ch-card"><div className="ch-card-n">{n(g.documents_scored)}</div>
                   <div className="ch-card-l">documents scored</div></div>
-                <div className="ch-card"><div className="ch-card-n amber">{n(g.awaiting_adjudication)}</div>
-                  <div className="ch-card-l">awaiting a human</div>
-                  <div className="ch-card-s">each is an extra active version competing in retrieval</div></div>
+                <a className="ch-card ch-card-link"
+                   href={`${PAYOR_BASE}${PAYOR_QUEUE_PATH}`}
+                   target="_blank" rel="noopener noreferrer">
+                  <div className="ch-card-n amber">{n(g.awaiting_adjudication)}</div>
+                  <div className="ch-card-l">awaiting a human <span className="ch-out">↗</span></div>
+                  <div className="ch-card-s">
+                    decided in Fact Store's working queue, not here — each pending one is an
+                    extra active version competing in retrieval
+                  </div>
+                </a>
                 <div className="ch-card"><div className="ch-card-n green">{n(g.chunks_carried)}</div>
                   <div className="ch-card-l">chunks carried forward</div>
                   <div className="ch-card-s">embeddings reused, not recomputed</div></div>

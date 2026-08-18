@@ -405,3 +405,17 @@ tr.ch-ext td { opacity: 0.62; }
 }
 .ch-share-n { font-family: var(--mobius-font-mono); font-size: var(--mobius-text-xs);
   color: var(--mobius-text-muted); width: 3.1rem; text-align: right; }
+
+/* a card that leaves the app — it must look like it leaves the app */
+a.ch-card-link {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+a.ch-card-link:hover {
+  border-color: var(--mobius-accent);
+  box-shadow: var(--mobius-shadow-md);
+}
+a.ch-card-link:focus-visible { outline: 2px solid var(--mobius-accent); outline-offset: 2px; }
+.ch-out { color: var(--mobius-accent); font-size: 0.7rem; margin-left: 0.15rem; }
