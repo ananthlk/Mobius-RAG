@@ -122,3 +122,6 @@
   color: #b91c1c; border: 1px solid currentColor; border-radius: 3px; padding: 0 .28em;
   margin-left: .45rem; vertical-align: middle; }
 .ch-blocked { color: #b91c1c; font-weight: 550; }
+/* stopped ≠ stuck: a distinct mark so it never reads as a retry queue */
+.ch-pip-stop { background: #6b7280 !important; border-radius: 1px; }
+.ch-stopped-n { color: #6b7280; font-variant-numeric: tabular-nums; border-bottom: 1px dotted currentColor; }

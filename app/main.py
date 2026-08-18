@@ -4054,6 +4054,30 @@ _CLASSIFIERS: list[dict] = [
      "predicate": None, "why": "runs out of process; verdicts are not stored in this corpus"},
 ]
 
+# ── TERMINAL STATES ────────────────────────────────────────────────────────
+# A document can fail to reach a stage for two very different reasons, and
+# conflating them makes the actionable number wrong:
+#
+#   STUCK    it should have progressed and did not. Re-triggering is the fix.
+#   STOPPED  it cannot progress with the capability we have. Re-triggering it
+#            forever is waste, and it inflates every "stuck" count into a queue
+#            nobody can clear.
+#
+# A `needs_ocr` document sitting in "stuck at chunked" reads as a retry
+# candidate; it is a scanned PDF with no text layer and no OCR step exists to
+# fix it. Surfacing it as stuck is how a permanent gap disguises itself as a
+# backlog.
+_TERMINAL_STATES: list[dict] = [
+    {"status": "needs_ocr", "label": "Needs OCR",
+     "why": "scanned PDF with no text layer — nothing to extract",
+     "unblocked_by": "an OCR step, which does not exist yet", "owner": "RAG"},
+    {"status": "phi_blocked", "label": "PHI blocked",
+     "why": "the PHI gate refused this document",
+     "unblocked_by": "an attestation or override decision", "owner": "PHI classifier"},
+]
+_TERMINAL_SQL = ("d.status IN (" +
+                 ", ".join(f"'{t['status']}'" for t in _TERMINAL_STATES) + ")")
+
 _STAGE_PREDICATES = {
     "in_gcs":     "d.file_path IS NOT NULL",
     "extracted":  "EXISTS (SELECT 1 FROM document_pages p WHERE p.document_id=d.id)",
@@ -4146,21 +4170,39 @@ def corpus_health(payer: str | None = None) -> dict:
             # "missing" = reached the previous stage but not this one. That is the
             # actionable population; comparing against total would count documents
             # that never got far enough to be stuck here.
+            # "stuck" excludes documents in a terminal state — those are STOPPED,
+            # reported separately. Including them would present an unclearable
+            # population as a retry queue.
             if prev:
                 missing = one(
                     f"""SELECT count(*) FROM documents d
                         WHERE {_STAGE_PREDICATES[prev]}
-                          AND NOT ({_STAGE_PREDICATES[key]}) {pw}""", args)
+                          AND NOT ({_STAGE_PREDICATES[key]})
+                          AND NOT ({_TERMINAL_SQL}) {pw}""", args)
+                stopped_here = one(
+                    f"""SELECT count(*) FROM documents d
+                        WHERE {_STAGE_PREDICATES[prev]}
+                          AND NOT ({_STAGE_PREDICATES[key]})
+                          AND ({_TERMINAL_SQL}) {pw}""", args)
             else:
                 missing = total - reached
+                stopped_here = 0
             stages.append({
                 "stage": key, "label": label, "reached": reached, "missing": missing,
+                "stopped": stopped_here,
                 "of": prev or "ingested",
                 "missing_reason": miss_reason, "action": action, "action_key": action_key,
                 "drill": key,
                 "tone": "good" if missing == 0 else ("bad" if key in
                         ("extracted", "chunked", "embedded") else "warn"),
             })
+
+        # ── STOPPED — cannot progress with what we have ───────────────────
+        stopped = []
+        for t in _TERMINAL_STATES:
+            n_ = one(f"SELECT count(*) FROM documents d WHERE d.status = %s {pw}",
+                     (t["status"],) + args)
+            stopped.append({**t, "count": n_, "drill": f"stopped:{t['status']}"})
 
         # ── CLASSIFIERS — coverage per classifier, not one lumped stage ────
         classifiers = []
@@ -4220,6 +4262,7 @@ def corpus_health(payer: str | None = None) -> dict:
             "documents_total": total,
             "sources": sources,
             "classifiers": classifiers,
+            "stopped": stopped,
             "inflight": inflight,
             "stages": stages,
             "gate": gate,
@@ -4242,7 +4285,13 @@ def corpus_health_drill(stage: str, payer: str | None = None, limit: int = 200) 
     """
     import psycopg2 as _pg
     prev_of = {k: p for k, _, p, _, _, _ in _STAGES}
-    if stage.startswith("source:"):
+    if stage.startswith("stopped:"):
+        st = stage.split(":", 1)[1]
+        if st not in {t["status"] for t in _TERMINAL_STATES}:
+            raise HTTPException(status_code=404, detail=f"unknown terminal state '{st}'")
+        where = f"d.status = '{st}'"
+        prev = None
+    elif stage.startswith("source:"):
         where = _source_sql(stage.split(":", 1)[1])
         if where is None:
             raise HTTPException(

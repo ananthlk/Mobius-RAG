@@ -14,11 +14,24 @@ import './CorpusHealthTab.css'
  * Spec: docs/versioning-dedup-gate-spec.md §12.2 / §12.3.
  */
 
+interface Stopped {
+  status: string
+  label: string
+  why: string
+  unblocked_by: string
+  owner: string
+  count: number
+  drill: string
+}
+
 interface Stage {
   stage: string
   label: string
   reached: number
+  /** retryable — reached the previous stage and should have progressed */
   missing: number
+  /** cannot progress with the capability we have; counted separately */
+  stopped: number
   of: string
   missing_reason: string
   action: string
@@ -60,6 +73,7 @@ interface Health {
   documents_total: number
   sources: Source[]
   classifiers: Classifier[]
+  stopped: Stopped[]
   inflight: Record<string, number>
   stages: Stage[]
   gate: {
@@ -228,6 +242,7 @@ export function CorpusHealthTab() {
                   <th>Stage</th>
                   <th className="num">Reached</th>
                   <th className="num">Stuck</th>
+                  <th className="num">Stopped</th>
                   <th>Why it stopped</th>
                   <th>Action</th>
                 </tr>
@@ -247,6 +262,13 @@ export function CorpusHealthTab() {
                         </button>
                       ) : <span className="ch-zero">—</span>}
                     </td>
+                    <td className="num">
+                      {st.stopped > 0
+                        ? <span className="ch-stopped-n" title="cannot progress — see Stopped below">
+                            {n(st.stopped)}
+                          </span>
+                        : <span className="ch-zero">—</span>}
+                    </td>
                     <td className="ch-reason">{st.missing > 0 ? st.missing_reason : ''}</td>
                     <td className="ch-action">{st.missing > 0 ? st.action : ''}</td>
                   </tr>
@@ -254,10 +276,46 @@ export function CorpusHealthTab() {
               </tbody>
             </table>
             <p className="ch-note">
-              “Stuck” counts documents that reached the previous stage but not this one — the
-              population an action would actually move.
+              <b>Stuck</b> reached the previous stage and should have progressed — re-triggering is
+              the fix. <b>Stopped</b> cannot progress with the capability we have, so it is counted
+              separately: re-triggering it forever is waste, and folding it into “stuck” turns a
+              permanent gap into a queue nobody can clear.
             </p>
           </section>
+
+          {/* ── STOPPED ─────────────────────────────────────────────── */}
+          {health.stopped.some(t => t.count > 0) && (
+            <section className="ch-section">
+              <h3>Stopped — not a backlog</h3>
+              <p className="ch-note ch-note-top">
+                These will never clear by retrying. Each needs a capability or a decision that does
+                not exist yet, so they are held out of every “stuck” count above.
+              </p>
+              <table className="ch-table">
+                <thead>
+                  <tr><th>State</th><th className="num">Docs</th><th>Why</th>
+                      <th>What would unblock it</th><th>Owner</th></tr>
+                </thead>
+                <tbody>
+                  {health.stopped.filter(t => t.count > 0).map(t => (
+                    <tr key={t.status}>
+                      <td className="ch-stage-label">
+                        <span className="ch-pip ch-pip-stop" />{t.label}
+                      </td>
+                      <td className="num">
+                        <button className="ch-num-link" onClick={() => openDrill(t.drill, t.label)}>
+                          {n(t.count)}
+                        </button>
+                      </td>
+                      <td className="ch-reason">{t.why}</td>
+                      <td className="ch-action">{t.unblocked_by}</td>
+                      <td className="ch-owner">{t.owner}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+          )}
 
           {/* ── CLASSIFIERS ─────────────────────────────────────────── */}
           <section className="ch-section">
