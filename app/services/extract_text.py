@@ -21,6 +21,75 @@ def html_to_plain_text(html: str) -> str:
     return "\n".join(chunk for chunk in chunks if chunk)
 
 
+# Site chrome. Stripping these is the difference between storing a policy and
+# storing a navigation menu: on a content-heavy page the nav is a rounding error,
+# but on a thin page it is 95% of the text. 161 scraped pages in this corpus
+# stored ~2,800 characters each of which the real content was a title and a date —
+# "Home / Vision and Shared Purpose / Board of Directors / Meet the Team / ..."
+# repeated identically across every page of the site. Indexing that adds hundreds
+# of near-identical documents that match nothing anyone asks for.
+_CHROME_TAGS = ("nav", "header", "footer", "aside", "form", "noscript",
+                "script", "style", "svg", "button")
+_CHROME_HINT = re.compile(
+    r"(^|[-_ ])(nav|menu|breadcrumb|sidebar|side-bar|footer|header|masthead|"
+    r"cookie|banner|skip|social|share|subscribe|newsletter|pagination|widget)([-_ ]|$)",
+    re.I)
+MIN_MAIN_CONTENT_CHARS = 200
+
+
+def extract_main_content(html: str) -> tuple[str, str]:
+    """(main_text, whole_text). Main content with site chrome removed.
+
+    Prefers an explicit <main>/<article> when the page declares one, since that is
+    the page telling us where its content is. Otherwise strips chrome tags and any
+    element whose class or id names itself as navigation.
+    """
+    if not html or not html.strip():
+        return "", ""
+    whole = html_to_plain_text(html)
+
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(list(_CHROME_TAGS)):
+        tag.decompose()
+    # decompose() detaches nodes, so a later match can hold a already-freed
+    # element whose .attrs is gone. Snapshot the list and guard each access.
+    for el in list(soup.find_all(True)):
+        if el.decomposed or not getattr(el, "attrs", None):
+            continue
+        cls = " ".join(el.attrs.get("class") or [])
+        eid = str(el.attrs.get("id") or "")
+        role = str(el.attrs.get("role") or "").lower()
+        if (_CHROME_HINT.search(cls) or _CHROME_HINT.search(eid)
+                or role in ("navigation", "banner", "contentinfo", "search")):
+            el.decompose()
+
+    node = soup.find("main") or soup.find("article") or soup.body or soup
+    text = node.get_text(separator="\n")
+    lines = [ln.strip() for ln in text.splitlines()]
+    main = "\n".join(ln for ln in lines if ln)
+    return main, whole
+
+
+def classify_html_content(html: str) -> tuple[str, str | None, str | None]:
+    """(main_text, reason, message).
+
+    `boilerplate_only` is its own category rather than being folded into
+    text_below_threshold, because the cause and the fix differ: a stub PDF has
+    nothing to recover, whereas a nav-only page means the SITE has nothing on it
+    and no parser improvement will change that. Keeping them apart also stops
+    them being re-fetched forever in the hope that the next attempt finds content.
+    """
+    main, whole = extract_main_content(html)
+    body = main.strip()
+    if len(body) >= MIN_MAIN_CONTENT_CHARS:
+        return main, None, None
+    if len(whole.strip()) >= MIN_MAIN_CONTENT_CHARS:
+        return main, "boilerplate_only", (
+            f"{len(whole.strip())} chars on the page but only {len(body)} outside "
+            f"navigation, header and footer")
+    return main, "text_below_threshold", f"only {len(body)} characters of content"
+
+
 def extract_text_from_bytes(content: bytes, ext: str) -> str:
     """Extract plain text from raw file bytes. Supports PDF, HTML, TXT.
 
@@ -83,7 +152,8 @@ def extract_text_from_bytes(content: bytes, ext: str) -> str:
 RETRYABLE_REASONS = {"fetch_timeout", "upstream_error", "parser_crashed", "no_stored_file"}
 # Retrying these produces the identical failure and hides the real fix.
 TERMINAL_REASONS = {"unsupported_format", "no_text_layer", "encrypted",
-                    "empty_file", "text_below_threshold", "bad_storage_path"}
+                    "empty_file", "text_below_threshold", "bad_storage_path",
+                    "boilerplate_only"}
 MAX_INGEST_ATTEMPTS = 3
 
 # Formats with a real parser above. Anything else is unsupported_format — said
