@@ -5018,8 +5018,11 @@ _RESOLVING_ACTIONS = (
     'mark_period_series',     # two periods — both stay, question answered
     'keep_both',
     'reclassify_as_version',  # handed to versioning; no longer a dedup question
-    'held_for_human',         # explicitly parked for the Payor queue
 )
+# NOT here, deliberately: 'held_for_human'. Parking a document for a person is the
+# DEFINITION of outstanding, not a resolution. It sat in this list and quietly
+# reported 9 AHCA documents as done while they were waiting on a human — the
+# queue's own version of a write path with no reader.
 
 _RESOLVED_SQL = """NOT EXISTS (
     SELECT 1 FROM corpus_cleanup_actions a
