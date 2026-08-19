@@ -7130,6 +7130,82 @@ def _estimate_processing_seconds(ext: str, size_bytes: int, page_count: int, is_
 
 
 
+
+# ── Ingest sources, and the transaction ledger ───────────────────────────────
+#
+# Every way a document can enter the corpus, including the ones not built yet.
+# Listing the future paths here rather than in a plan means adding deep_research
+# or email is a new ROW, not a new mechanism — and that the dashboard can show a
+# source with zero documents as "not built" instead of silently omitting it.
+INGEST_SOURCES: list[dict] = [
+    {"key": "upload",        "label": "Operator upload",   "status": "live",
+     "what": "a person uploads a file from their machine"},
+    {"key": "drive_import",  "label": "Drive file",        "status": "live",
+     "what": "one file imported from Google Drive"},
+    {"key": "drive_folder",  "label": "Drive folder",      "status": "live",
+     "what": "a whole Drive folder swept"},
+    {"key": "gcs_import",    "label": "GCS import",        "status": "live",
+     "what": "a file already staged in the bucket"},
+    {"key": "html_import",   "label": "Web fetch",         "status": "live",
+     "what": "a URL fetched and stored"},
+    {"key": "scraped_pages", "label": "Scrape",            "status": "live",
+     "what": "pages pushed by the crawler"},
+    {"key": "instant_rag",   "label": "Instant RAG",       "status": "live",
+     "what": "uploaded in chat, scoped to an agent"},
+    {"key": "deep_research", "label": "Deep research",     "status": "planned",
+     "what": "documents an investigation decides it needs"},
+    {"key": "email",         "label": "Email",             "status": "planned",
+     "what": "documents arriving by mail"},
+]
+_INGEST_SOURCE_KEYS = {s["key"] for s in INGEST_SOURCES}
+
+
+def record_ingest_txn(source_type: str, outcome: str, *, document_id=None,
+                      source_url: str | None = None, filename: str | None = None,
+                      file_hash: str | None = None, bytes_len: int | None = None,
+                      failure_reason: str | None = None, error_message: str | None = None,
+                      http_status: int | None = None, actor: str | None = None,
+                      idempotency_key: str | None = None, request: dict | None = None,
+                      duration_ms: int | None = None) -> None:
+    """Record one ingest ATTEMPT. Never raises.
+
+    `documents` records what succeeded; this records what was TRIED. A 409
+    duplicate is the case that matters most — it returns an id and leaves no other
+    trace, so re-fetch rates are unknowable without this row, and re-fetch rate is
+    the first number you want when tuning a crawler.
+
+    Deliberately swallows its own errors: an ingest must never fail because its
+    audit row could not be written. The failure is logged so the gap is visible
+    rather than silent — a ledger that takes the request down with it is worse
+    than no ledger.
+    """
+    if source_type not in _INGEST_SOURCE_KEYS:
+        logger.warning("record_ingest_txn: unknown source_type %r", source_type)
+    try:
+        import psycopg2 as _pg
+        conn = _pg.connect(_retag_inplace_dsn(), connect_timeout=5)
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO ingest_transactions
+                          (source_type, outcome, document_id, source_url, filename,
+                           file_hash, bytes, failure_reason, error_message, http_status,
+                           actor, idempotency_key, request, duration_ms, finished_at)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now())
+                        ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL
+                        DO NOTHING""",
+                        (source_type, outcome, document_id, source_url,
+                         (filename or "")[:500] or None, file_hash, bytes_len,
+                         failure_reason, (error_message or "")[:1000] or None,
+                         http_status, actor, idempotency_key,
+                         json.dumps(request or {}), duration_ms))
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning("ingest ledger write failed (%s/%s): %s", source_type, outcome, e)
+
+
 def ingest_source_metadata(source_type: str, existing: dict | None = None, **extra) -> dict:
     """source_metadata with source_type ALWAYS set.
 
@@ -7346,6 +7422,10 @@ async def upload_file(
                 "upload", source_metadata_value, source_url=source_url),
         )
         db.add(document)
+        record_ingest_txn("upload", "created", document_id=document.id,
+                          filename=getattr(document, "filename", None),
+                          file_hash=getattr(document, "file_hash", None),
+                          source_url=getattr(document, "file_path", None))
         await db.commit()
         await db.refresh(document)
 
@@ -7785,6 +7865,13 @@ async def import_document_from_gcs(
                         body_source_url, cur_err,
                     )
                     await db.rollback()
+            # A 409 is the cheapest correct outcome in ingest — and it used to
+            # vanish. Without this row, "how often is a crawl re-fetching what we
+            # already hold?" is unanswerable, which is the first number you want.
+            record_ingest_txn("upload", "duplicate", document_id=existing_doc.id,
+                              filename=getattr(file, "filename", None),
+                              file_hash=file_hash, bytes_len=len(contents),
+                              source_url=source_url, http_status=409)
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -7828,6 +7915,10 @@ async def import_document_from_gcs(
             source_metadata=ingest_source_metadata("gcs_import", meta_dict),
         )
         db.add(document)
+        record_ingest_txn("gcs_import", "created", document_id=document.id,
+                          filename=getattr(document, "filename", None),
+                          file_hash=getattr(document, "file_hash", None),
+                          source_url=getattr(document, "file_path", None))
         await db.commit()
         await db.refresh(document)
 
@@ -8069,6 +8160,9 @@ async def import_document_from_html(
                 url, cur_err,
             )
             await db.rollback()
+        record_ingest_txn("html_import", "duplicate", document_id=existing_doc.id,
+                          source_url=url, file_hash=file_hash,
+                          bytes_len=len(html_body or ""), http_status=409)
         raise HTTPException(
             status_code=409,
             detail={
@@ -8124,6 +8218,10 @@ async def import_document_from_html(
         status="uploaded",
     )
     db.add(document)
+    record_ingest_txn("html_import", "created", document_id=document.id,
+                      filename=getattr(document, "filename", None),
+                      file_hash=getattr(document, "file_hash", None),
+                      source_url=getattr(document, "file_path", None))
     await db.commit()
     await db.refresh(document)
 
@@ -8588,6 +8686,10 @@ async def import_from_drive(
         db.add(doc)
         await db.commit()
         await db.refresh(doc)
+        record_ingest_txn("drive_import", "created", document_id=doc.id,
+                          filename=getattr(doc, "filename", None),
+                          file_hash=getattr(doc, "file_hash", None),
+                          source_url=getattr(doc, "file_path", None))
 
         try:
             doc.status = "extracting"
@@ -8854,6 +8956,10 @@ async def drive_import_folder(
         db.add(doc)
         await db.commit()
         await db.refresh(doc)
+        record_ingest_txn("drive_folder", "created", document_id=doc.id,
+                          filename=getattr(doc, "filename", None),
+                          file_hash=getattr(doc, "file_hash", None),
+                          source_url=getattr(doc, "file_path", None))
 
         # Extract → chunk (Path B)
         try:
@@ -9382,6 +9488,10 @@ async def import_scraped_pages(
         status="completed",
     )
     db.add(document)
+    record_ingest_txn("scraped_pages", "created", document_id=document.id,
+                      filename=getattr(document, "filename", None),
+                      file_hash=getattr(document, "file_hash", None),
+                      source_url=getattr(document, "file_path", None))
     await db.commit()
     await db.refresh(document)
 
