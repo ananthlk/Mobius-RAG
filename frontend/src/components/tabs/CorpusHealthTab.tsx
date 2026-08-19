@@ -63,8 +63,8 @@ interface Health {
   }
   queue: {
     measured: boolean
-    scored?: { managed: number; unmanaged: number }
-    buckets?: Record<string, { managed: number; unmanaged: number }>
+    scored?: { claimed: number; declined: number; unassessed: number }
+    buckets?: Record<string, { claimed: number; declined: number; unassessed: number }>
   }
 }
 interface DupRule {
@@ -564,10 +564,13 @@ export function CorpusHealthTab() {
               added as it was built rather than designed alongside the others.
               Read top to bottom it is now a sequence: what is waiting, what kind
               of thing it is, what has already been done about it. */}
+          {/* The badge counts CLAIMED work only — what a person actually owes a
+              decision on. Counting declined and unassessed would advertise a
+              backlog nobody is waiting on. */}
           <Section title="Duplicates &amp; versioning"
                    badge={qq?.measured
-                     ? ((qq.buckets?.awaiting_duplicate?.managed || 0)
-                        + (qq.buckets?.awaiting_versioning?.managed || 0)) || null
+                     ? ((qq.buckets?.awaiting_duplicate?.claimed || 0)
+                        + (qq.buckets?.awaiting_versioning?.claimed || 0)) || null
                      : null} tone="warn">
           {!qq?.measured ? <div className="ch-empty">Nothing scored yet.</div> : (
             <>
@@ -577,8 +580,14 @@ export function CorpusHealthTab() {
                 Every scored document sits in exactly one bucket, so these sum to the total —
                 that is what makes <b>clean</b> a number worth trusting. A document waiting on
                 both determinations is counted once, in the one that must clear first.
-                <b> Managed</b> documents are the ones the Payor platform classified and can act
-                on; the rest are the long tail nobody owns.
+                <br /><br />
+                Ownership has three states, not two. <b>Claimed</b> means Fact Store owns the
+                document and a person decides it. <b>Declined</b> means Fact Store looked and
+                said no — those are eligible for automatic cleanup. <b>Unassessed</b> means
+                nobody has looked yet, which needs a classifier rather than a decision.
+                This column previously read "managed" and counted anything a classifier had
+                touched, so declined documents were sitting in a human queue they did not
+                belong in.
                 <br /><br />
                 Nothing here is un-analysed: the gate has scored every document and duplicate
                 determination has run corpus-wide. These rows are what is <b>unresolved</b>, not
@@ -588,8 +597,9 @@ export function CorpusHealthTab() {
               <div className="ch-tablewrap">
                 <table className="ch-table ch-queue">
                   <thead><tr>
-                    <th>Queue</th><th className="num">Managed</th>
-                    <th className="num">Unmanaged</th><th className="num">Total</th>
+                    <th>Queue</th><th className="num">Claimed</th>
+                    <th className="num">Declined</th><th className="num">Unassessed</th>
+                    <th className="num">Total</th>
                   </tr></thead>
                   <tbody>
                     {([
@@ -603,28 +613,31 @@ export function CorpusHealthTab() {
                        'no pages or no chunks — neither determination is possible until fixed'],
                       ['clean', 'Clean', 'scored, unambiguous, nothing pending'],
                     ] as const).map(([k, label, why]) => {
-                      const b = qq.buckets?.[k] || { managed: 0, unmanaged: 0 }
+                      const b = qq.buckets?.[k] || { claimed: 0, declined: 0, unassessed: 0 }
                       return (
                         <tr key={k} className={k === 'clean' ? 'is-clean' : ''}>
                           <td><b>{label}</b><div className="ch-card-s">{why}</div></td>
-                          <td className="num">{n(b.managed)}</td>
-                          <td className="num">{n(b.unmanaged)}</td>
-                          <td className="num">{n(b.managed + b.unmanaged)}</td>
+                          <td className="num">{n(b.claimed)}</td>
+                          <td className="num">{n(b.declined)}</td>
+                          <td className="num">{n(b.unassessed)}</td>
+                          <td className="num">{n(b.claimed + b.declined + b.unassessed)}</td>
                         </tr>
                       )
                     })}
                     <tr className="is-total">
                       <td><b>Documents scored</b></td>
-                      <td className="num">{n(qq.scored?.managed)}</td>
-                      <td className="num">{n(qq.scored?.unmanaged)}</td>
-                      <td className="num">{n((qq.scored?.managed || 0) + (qq.scored?.unmanaged || 0))}</td>
+                      <td className="num">{n(qq.scored?.claimed)}</td>
+                      <td className="num">{n(qq.scored?.declined)}</td>
+                      <td className="num">{n(qq.scored?.unassessed)}</td>
+                      <td className="num">{n((qq.scored?.claimed || 0) + (qq.scored?.declined || 0)
+                                              + (qq.scored?.unassessed || 0))}</td>
                     </tr>
                   </tbody>
                 </table>
               </div>
               <a className="ch-actionlink" href={`${PAYOR_BASE}${PAYOR_QUEUE_PATH}`}
                  target="_blank" rel="noopener noreferrer">
-                Decide the managed ones in the Payor work queue <span className="ch-out">↗</span>
+                Decide the claimed ones in the Payor work queue <span className="ch-out">↗</span>
               </a>
 
               {/* ── 2. what was decided, and by which rule ───────────── */}
@@ -663,10 +676,10 @@ export function CorpusHealthTab() {
                     </div>
                   ))}
                   <p className="ch-note ch-note-dim">
-                    Managed documents in the <b>duplicate</b> verdict are the ones handed to the
-                    Payor work queue — a person there picks which copy survives. Everything under
-                    <b> not a duplicate</b> needs nothing; it is shown so a decision made on your
-                    behalf is auditable rather than invisible.
+                    <b>Claimed</b> documents in the <b>duplicate</b> verdict are the ones handed
+                    to the Payor work queue — a person there picks which copy survives. Everything
+                    under <b>not a duplicate</b> needs nothing; it is shown so a decision made on
+                    your behalf is auditable rather than invisible.
                   </p>
                 </>
               )}

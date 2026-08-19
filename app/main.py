@@ -4288,8 +4288,7 @@ def corpus_health(payer: str | None = None,
             # actionable in their queue, so only that half is deep-linked.
             cur.execute(f"""SELECT
                   count(DISTINCT g.document_id) FILTER (
-                    WHERE jsonb_typeof(d.source_metadata) = 'object'
-                      AND d.source_metadata ? 'payor_classification'),
+                    WHERE d.source_metadata->'payor_classification'->>'claimed' = 'true'),
                   count(DISTINCT g.document_id)
                 FROM gate_decisions g JOIN documents d ON d.id = g.document_id
                 WHERE g.run_id = %s {pw}""", (drun,) + args)
@@ -4297,8 +4296,7 @@ def corpus_health(payer: str | None = None,
             cur.execute(f"""SELECT g.duplicate_kind, count(DISTINCT g.document_id)
                 FROM gate_decisions g JOIN documents d ON d.id = g.document_id
                 WHERE g.run_id = %s {pw}
-                  AND jsonb_typeof(d.source_metadata) = 'object'
-                  AND d.source_metadata ? 'payor_classification'
+                  AND d.source_metadata->'payor_classification'->>'claimed' = 'true'
                 GROUP BY 1""", (drun,) + args)
             managed_by_kind = {k: int(v) for k, v in cur.fetchall() if k}
             dup_block = {
@@ -4312,9 +4310,9 @@ def corpus_health(payer: str | None = None,
                 "managed_documents": int(managed or 0),
                 "unmanaged_documents": int((total_docs or 0) - (managed or 0)),
                 "managed_by_kind": managed_by_kind,
-                "managed_basis": "has payor_classification — the Payor platform's "
-                                 "Deduplicate queue is scoped to these; the rest of "
-                                 "the corpus is nobody's managed set",
+                "managed_basis": "payor_classification.claimed = true — Fact Store owns it. "
+                                 "Documents it looked at and DECLINED are not managed, "
+                                 "which a classifier-ran-on-it test wrongly counted as such.",
             }
 
         # ── the cleanup queue ─────────────────────────────────────────────
@@ -4337,9 +4335,14 @@ def corpus_health(payer: str | None = None,
         else:
             cur.execute(f"""
                 WITH m AS (
-                  SELECT id, COALESCE(jsonb_typeof(source_metadata) = 'object'
-                                      AND source_metadata ? 'payor_classification',
-                                      false) AS managed
+                  SELECT id,
+                         (source_metadata->'payor_classification'->>'claimed' = 'true') AS managed,
+                         CASE
+                           WHEN source_metadata->'payor_classification'->>'claimed' = 'true'
+                             THEN 'claimed'
+                           WHEN source_metadata->'payor_classification'->>'claimed' = 'false'
+                             THEN 'declined'
+                           ELSE 'unassessed' END AS ownership
                   FROM documents),
                 v AS (SELECT document_id, decision, adjudication_target
                       FROM gate_decisions WHERE run_id = %s),
@@ -4367,22 +4370,26 @@ def corpus_health(payer: str | None = None,
                          WHEN dp.document_id IS NOT NULL        THEN 'awaiting_duplicate'
                          WHEN v.adjudication_target IS NOT NULL THEN 'awaiting_versioning'
                          ELSE 'clean' END AS bucket,
-                       m.managed, count(*)
+                       m.ownership, count(*)
                 FROM v JOIN m ON m.id = v.document_id
                 LEFT JOIN dp ON dp.document_id = v.document_id
                 JOIN documents d ON d.id = v.document_id
                 WHERE TRUE {pw}
                 GROUP BY 1, 2""", (run_id, drun, _RESOLVING_ACTIONS) + args)
+            _EMPTY = {"claimed": 0, "declined": 0, "unassessed": 0}
             buckets: dict = {}
-            for b, mg, cnt in cur.fetchall():
-                slot = buckets.setdefault(b, {"managed": 0, "unmanaged": 0})
-                slot["managed" if mg else "unmanaged"] += int(cnt)
+            for b, own, cnt in cur.fetchall():
+                slot = buckets.setdefault(b, dict(_EMPTY))
+                slot[own] = slot.get(own, 0) + int(cnt)
             for b in ("awaiting_duplicate", "awaiting_versioning", "unpublishable", "clean"):
-                buckets.setdefault(b, {"managed": 0, "unmanaged": 0})
-            scored = {
-                "managed": sum(v["managed"] for v in buckets.values()),
-                "unmanaged": sum(v["unmanaged"] for v in buckets.values()),
-            }
+                buckets.setdefault(b, dict(_EMPTY))
+            # `managed` retained as an alias for claimed so nothing downstream
+            # silently reads a stale meaning while the UI catches up.
+            for v in buckets.values():
+                v["managed"] = v["claimed"]
+                v["unmanaged"] = v["declined"] + v["unassessed"]
+            scored = {k: sum(v[k] for v in buckets.values())
+                      for k in ("claimed", "declined", "unassessed", "managed", "unmanaged")}
             queue_block = {"measured": True, "scored": scored, "buckets": buckets}
 
         # ── duplicate cleanup — what was actually removed ─────────────────
@@ -4974,8 +4981,9 @@ def corpus_duplicate_decisions(payer: str | None = None, since: str | None = Non
                                      AND a.action_source <> 'rag_batch'))
             FROM gate_decisions g
             JOIN documents d ON d.id = g.document_id
-            JOIN LATERAL (SELECT COALESCE(jsonb_typeof(d.source_metadata)='object'
-                          AND d.source_metadata ? 'payor_classification', false) AS managed) m ON true
+            JOIN LATERAL (SELECT COALESCE(
+                          d.source_metadata->'payor_classification'->>'claimed'='true',
+                          false) AS managed) m ON true
             WHERE g.run_id = %s AND g.duplicate_kind IS NOT NULL {w}
             GROUP BY 1""", (drun,) + tuple(args_l))
         groups: dict[str, list] = {v: [] for v in _VERDICT_ORDER}
@@ -5030,6 +5038,29 @@ _RESOLVED_SQL = """NOT EXISTS (
       AND a.action IN %s)"""
 
 
+# OWNERSHIP, three states — not two.
+#
+# `source_metadata.payor_classification` only means a CLASSIFIER RAN. Inside it is
+# an explicit `claimed` flag, which is the actual ownership signal, and this
+# service ignored it for a day: everything a classifier had touched was reported
+# as "managed", including 1,933 AHCA documents Fact Store had explicitly DECLINED.
+# That mislabelling had teeth — the policy is "unclaimed is auto-cleaned, claimed
+# waits for a human", so declined documents sat in a human queue they did not
+# belong in, and clearing that queue never touched them because they were never
+# in it.
+#
+#   claimed=true   Fact Store owns it. A person decides.
+#   claimed=false  Fact Store looked and declined it. Eligible for auto-clean.
+#   absent         nobody has assessed it. Neither — it needs a classifier first.
+#
+# Collapsing declined and unassessed together would repeat the original mistake at
+# a smaller scale: "not owned" and "not looked at" require different work.
+_CLAIM = "d.source_metadata->'payor_classification'->>'claimed'"
+_IS_CLAIMED = f"({_CLAIM} = 'true')"
+_IS_DECLINED = f"({_CLAIM} = 'false')"
+_IS_UNASSESSED = f"({_CLAIM} IS NULL)"
+
+
 _BUCKET_ACTIONS: dict[str, list[dict]] = {
     "awaiting_duplicate": [
         {"key": "keep", "label": "Keep — not a duplicate", "tone": "good",
@@ -5082,11 +5113,9 @@ def corpus_bucket_documents(bucket: str, payer: str | None = None,
         if until:
             w += " AND d.created_at < (%s::date + 1)"; args_l.append(until)
         if managed == "true":
-            w += (" AND COALESCE(jsonb_typeof(d.source_metadata)='object'"
-                  " AND d.source_metadata ? 'payor_classification', false)")
+            w += f" AND {_IS_CLAIMED}"
         elif managed == "false":
-            w += (" AND NOT COALESCE(jsonb_typeof(d.source_metadata)='object'"
-                  " AND d.source_metadata ? 'payor_classification', false)")
+            w += f" AND NOT COALESCE({_CLAIM} = 'true', false)"
         if q:
             w += " AND (d.filename ILIKE %s OR d.display_name ILIKE %s)"
             args_l += [f"%{q}%", f"%{q}%"]
@@ -5114,8 +5143,8 @@ def corpus_bucket_documents(bucket: str, payer: str | None = None,
                        g.prior_document_id::text, d2.filename AS counterpart,
                        (SELECT count(*) FROM rag_published_embeddings e
                         WHERE e.document_id = d.id) AS vectors,
-                       COALESCE(jsonb_typeof(d.source_metadata)='object'
-                                AND d.source_metadata ? 'payor_classification', false) AS managed
+                       COALESCE(d.source_metadata->'payor_classification'->>'claimed'='true',
+                                false) AS managed
                 FROM gate_decisions g
                 JOIN documents d ON d.id = g.document_id
                 LEFT JOIN documents d2 ON d2.id = g.prior_document_id
@@ -5133,8 +5162,8 @@ def corpus_bucket_documents(bucket: str, payer: str | None = None,
                 SELECT DISTINCT ON (d.id) d.id::text, d.filename, d.display_name, d.payer,
                        d.created_at, g.decision, NULL::numeric, NULL::text, g.reason,
                        (SELECT count(*) FROM document_pages p WHERE p.document_id = d.id) AS pages,
-                       COALESCE(jsonb_typeof(d.source_metadata)='object'
-                                AND d.source_metadata ? 'payor_classification', false) AS managed
+                       COALESCE(d.source_metadata->'payor_classification'->>'claimed'='true',
+                                false) AS managed
                 FROM gate_decisions g
                 JOIN documents d ON d.id = g.document_id
                 WHERE g.run_id = %s AND {dec}
