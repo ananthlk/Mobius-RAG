@@ -7129,6 +7129,28 @@ def _estimate_processing_seconds(ext: str, size_bytes: int, page_count: int, is_
         return min(max(30, int(size_bytes / 200_000) * 3 + 15), 5 * 60)
 
 
+
+def ingest_source_metadata(source_type: str, existing: dict | None = None, **extra) -> dict:
+    """source_metadata with source_type ALWAYS set.
+
+    Six endpoints create documents and three of them passed no source_metadata at
+    all, so 2,981 documents carry no record of how they arrived. That made a
+    simple question — "how did we get documents with no GCS object?" — answerable
+    only by reading the code and inferring. Provenance that has to be reverse
+    engineered is not provenance.
+
+    source_type is written at every entry point from here on:
+      upload | gcs_import | html_import | drive_import | drive_folder | scraped_pages
+    """
+    meta = dict(existing or {})
+    meta["source_type"] = source_type
+    meta["ingested_at"] = datetime.utcnow().isoformat()
+    for k, v in extra.items():
+        if v is not None:
+            meta[k] = v
+    return meta
+
+
 @app.post("/upload")
 async def upload_file(
     file: UploadFile,
@@ -7320,7 +7342,8 @@ async def upload_file(
             termination_date=termination_date_obj,
             status="uploaded",
             expires_at=expires_at_value,
-            source_metadata=source_metadata_value,
+            source_metadata=ingest_source_metadata(
+                "upload", source_metadata_value, source_url=source_url),
         )
         db.add(document)
         await db.commit()
@@ -7802,7 +7825,7 @@ async def import_document_from_gcs(
             authority_level=body.authority_level,
             termination_date=termination_date_obj,
             status="uploaded",
-            source_metadata=meta_dict,
+            source_metadata=ingest_source_metadata("gcs_import", meta_dict),
         )
         db.add(document)
         await db.commit()
@@ -8056,6 +8079,32 @@ async def import_document_from_html(
             },
         )
 
+    # ── Store the raw HTML ──────────────────────────────────────────
+    #
+    # This path used to put the URL in file_path and keep nothing. The text made
+    # it in, so it never looked broken — 2,981 documents in this corpus have no
+    # stored bytes. Three costs, all of which we hit today:
+    #   * no re-extraction. Every PDF can be re-run when the parser improves; the
+    #     main-content parser written today cannot be applied to any of these.
+    #   * no provenance. "What did this coverage page say in 2022" is
+    #     unanswerable when only our extraction of it survives.
+    #   * the pipeline overstates. "Raw file in GCS" counted them as present.
+    # An HTML page is smaller than most PDFs we already store, so the asymmetry
+    # was saving space on exactly the documents that are cheapest to keep.
+    _safe = re.sub(r"[^A-Za-z0-9._-]+", "_", (title or "page"))[:120] or "page"
+    _blob_name = f"html/{file_hash[:12]}_{_safe}.html"
+    gcs_html_path = url                       # fallback keeps ingest working
+    try:
+        from google.cloud import storage as _storage
+        _client = _storage.Client()
+        _blob = _client.bucket(GCS_BUCKET).blob(_blob_name)
+        _blob.upload_from_string(html_body, content_type="text/html; charset=utf-8")
+        gcs_html_path = f"gs://{GCS_BUCKET}/{_blob_name}"
+    except Exception as _gcs_err:
+        # Storage failing must not lose the document — the text is already
+        # extracted and useful. Recorded so the gap is visible rather than silent.
+        logger.warning("import-from-html: could not store raw HTML for %s: %s", url, _gcs_err)
+
     # ── Create Document row ─────────────────────────────────────────
     # NO default termination date — see the note at the /upload site. NULL is the
     # honest value at ingest; a 182-day TTL is a refresh cadence, not provenance.
@@ -8063,7 +8112,10 @@ async def import_document_from_html(
     document = Document(
         filename=title[:240],
         file_hash=file_hash,
-        file_path=url,  # Source URL stands in for the GCS path
+        file_path=gcs_html_path,
+        source_metadata=ingest_source_metadata(
+            "html_import", source_url=url,
+            raw_html_stored=gcs_html_path.startswith("gs://")),
         payer=payer_val,
         state=state_val,
         program=program_val,
@@ -8525,6 +8577,7 @@ async def import_from_drive(
             filename=name,
             file_hash=file_hash,
             file_path=gcs_path,
+            source_metadata=ingest_source_metadata("drive_import"),
             payer=body.payer,
             state=body.state,
             program=body.program,
@@ -8790,6 +8843,7 @@ async def drive_import_folder(
             filename=name,
             file_hash=file_hash,
             file_path=gcs_path,
+            source_metadata=ingest_source_metadata("drive_folder"),
             payer=payer,
             state=state,
             program=program,
@@ -9324,7 +9378,7 @@ async def import_scraped_pages(
         effective_date=effective_date_obj,
         termination_date=termination_date_obj,
         termination_date_source=termination_date_source_value,
-        source_metadata=source_metadata,
+        source_metadata=ingest_source_metadata("scraped_pages", source_metadata),
         status="completed",
     )
     db.add(document)
