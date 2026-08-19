@@ -7400,6 +7400,15 @@ async def upload_file(
                 await db.commit()
                 # Fall through to normal upload + ingest path below.
             else:
+                # A 409 is the cheapest correct outcome in ingest — and it used
+                # to vanish. Without this row, "how often is a crawl re-fetching
+                # what we already hold?" is unanswerable, which is the first
+                # number you want when tuning discovery.
+                record_ingest_txn("instant_rag" if agent_scope else "upload",
+                                  "duplicate", document_id=existing_doc.id,
+                                  filename=getattr(file, "filename", None),
+                                  file_hash=file_hash, bytes_len=len(contents),
+                                  source_url=source_url, http_status=409)
                 raise HTTPException(
                     status_code=409,
                     detail={
@@ -7925,11 +7934,11 @@ async def import_document_from_gcs(
             # A 409 is the cheapest correct outcome in ingest — and it used to
             # vanish. Without this row, "how often is a crawl re-fetching what we
             # already hold?" is unanswerable, which is the first number you want.
-            record_ingest_txn("instant_rag" if agent_scope else "upload",
-                              "duplicate", document_id=existing_doc.id,
-                              filename=getattr(file, "filename", None),
-                              file_hash=file_hash, bytes_len=len(contents),
-                              source_url=source_url, http_status=409)
+            record_ingest_txn("gcs_import", "duplicate",
+                              document_id=existing_doc.id,
+                              filename=getattr(existing_doc, "filename", None),
+                              file_hash=file_hash, source_url=body_source_url,
+                              http_status=409)
             raise HTTPException(
                 status_code=409,
                 detail={
