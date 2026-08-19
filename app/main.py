@@ -7206,6 +7206,54 @@ def record_ingest_txn(source_type: str, outcome: str, *, document_id=None,
         logger.warning("ingest ledger write failed (%s/%s): %s", source_type, outcome, e)
 
 
+
+# ── Ingest failures land in the ledger too ───────────────────────────────────
+#
+# The per-endpoint calls record `created` and `duplicate`. A REJECTION recorded
+# nothing: a malformed request, a PHI block or an unhandled error left the caller
+# with a status code and this service with no memory of the attempt. For a
+# discovery agent that is the difference between "we tried 40 and 6 were refused"
+# and "we tried 34".
+#
+# Middleware rather than per-endpoint try/except: it cannot be forgotten when a
+# seventh ingest path is added, and it cannot change an endpoint's behaviour,
+# because it only observes the status code on the way out.
+_INGEST_PATH_SOURCE = {
+    "/upload": "upload",
+    "/documents/import-from-gcs": "gcs_import",
+    "/documents/import-from-html": "html_import",
+    "/documents/import-from-drive": "drive_import",
+    "/drive/import-folder": "drive_folder",
+    "/documents/import-scraped-pages": "scraped_pages",
+}
+
+
+@app.middleware("http")
+async def _ingest_outcome_ledger(request, call_next):
+    src = _INGEST_PATH_SOURCE.get(request.url.path)
+    if src is None or request.method != "POST":
+        return await call_next(request)
+    import time as _t
+    t0 = _t.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception as e:
+        record_ingest_txn(src, "failed", error_message=f"{type(e).__name__}: {e}",
+                          http_status=500,
+                          duration_ms=int((_t.perf_counter() - t0) * 1000),
+                          request={"path": request.url.path})
+        raise
+    # 2xx and the 409 duplicate are already recorded by the endpoints themselves,
+    # with the document_id they alone know. Only the uncovered cases land here.
+    if response.status_code >= 400 and response.status_code != 409:
+        record_ingest_txn(
+            src, "failed" if response.status_code >= 500 else "rejected",
+            http_status=response.status_code,
+            duration_ms=int((_t.perf_counter() - t0) * 1000),
+            request={"path": request.url.path, "query": str(request.url.query)[:300]})
+    return response
+
+
 def ingest_source_metadata(source_type: str, existing: dict | None = None, **extra) -> dict:
     """source_metadata with source_type ALWAYS set.
 
@@ -7418,11 +7466,17 @@ async def upload_file(
             termination_date=termination_date_obj,
             status="uploaded",
             expires_at=expires_at_value,
+            # Instant RAG is not a separate endpoint — it is /upload with an
+            # agent_scope, which is why it had no writer of its own. Recording it
+            # as `upload` would merge two populations with different retention and
+            # different owners into one number.
             source_metadata=ingest_source_metadata(
-                "upload", source_metadata_value, source_url=source_url),
+                "instant_rag" if agent_scope else "upload",
+                source_metadata_value, source_url=source_url, agent_scope=agent_scope),
         )
         db.add(document)
-        record_ingest_txn("upload", "created", document_id=document.id,
+        record_ingest_txn("instant_rag" if agent_scope else "upload",
+                          "created", document_id=document.id,
                           filename=getattr(document, "filename", None),
                           file_hash=getattr(document, "file_hash", None),
                           source_url=getattr(document, "file_path", None))
@@ -7868,7 +7922,8 @@ async def import_document_from_gcs(
             # A 409 is the cheapest correct outcome in ingest — and it used to
             # vanish. Without this row, "how often is a crawl re-fetching what we
             # already hold?" is unanswerable, which is the first number you want.
-            record_ingest_txn("upload", "duplicate", document_id=existing_doc.id,
+            record_ingest_txn("instant_rag" if agent_scope else "upload",
+                              "duplicate", document_id=existing_doc.id,
                               filename=getattr(file, "filename", None),
                               file_hash=file_hash, bytes_len=len(contents),
                               source_url=source_url, http_status=409)
