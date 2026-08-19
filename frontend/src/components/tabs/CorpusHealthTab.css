@@ -549,3 +549,17 @@ a.ch-card-link:focus-visible { outline: 2px solid var(--mobius-accent); outline-
 .ch-btn:disabled { opacity: .45; cursor: not-allowed; }
 .ch-btn.good { background: rgba(21,128,61,.1); color: #15803d; border-color: rgba(21,128,61,.3); }
 .ch-btn.bad { background: rgba(185,28,28,.09); color: #b91c1c; border-color: rgba(185,28,28,.3); }
+
+/* The shared number. Deliberately the largest thing in the section: it is the
+   figure the Payor queue also shows, and the two must be visibly the same. The
+   blocked count sits beside it, labelled, never folded in. */
+.ch-headline { display: flex; gap: var(--mobius-space-lg); flex-wrap: wrap;
+  padding: var(--mobius-space-base) 0 var(--mobius-space-lg); }
+.ch-headline-main, .ch-headline-side { flex: 1; min-width: 240px; }
+.ch-headline-n { font-size: 2.6rem; line-height: 1; font-weight: 300;
+  font-variant-numeric: tabular-nums; color: var(--mobius-violet, #7c3aed); }
+.ch-headline-n2 { font-size: 2.6rem; line-height: 1; font-weight: 300;
+  font-variant-numeric: tabular-nums; color: var(--mobius-text-secondary); }
+.ch-headline-l { font-size: .82rem; font-weight: 600; margin-top: .3rem; }
+.ch-headline-s { font-size: .74rem; line-height: 1.5; color: var(--mobius-text-secondary);
+  margin-top: .25rem; max-width: 46ch; }

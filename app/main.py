@@ -4937,6 +4937,12 @@ _DUP_RULES: dict[str, dict] = {
     },
 }
 
+# Which rules a person can actually settle. Derived from _DUP_RULES so the feed,
+# the filter and the summary can never disagree about what "actionable" means —
+# three copies of that judgement is how the counts drifted in the first place.
+_ACTIONABLE_KINDS = sorted(k for k, v in _DUP_RULES.items() if v["verdict"] != "undecided")
+_BLOCKED_KINDS = sorted(k for k, v in _DUP_RULES.items() if v["verdict"] == "undecided")
+
 _VERDICT_ORDER = ["duplicate", "not_duplicate", "undecided"]
 _VERDICT_LABEL = {
     "duplicate": "Decided: duplicate",
@@ -4988,6 +4994,50 @@ def corpus_duplicates_feed(claimed: str | None = None, payer: str | None = None,
             w += f" AND {_IS_CLAIMED}"
         elif claimed == "false":
             w += f" AND COALESCE({_CLAIM} = 'true', false) = false"
+        if actionable == "true":
+            w += " AND g.duplicate_kind = ANY(%s)"; args_l.append(_ACTIONABLE_KINDS)
+        elif actionable == "false":
+            w += " AND g.duplicate_kind = ANY(%s)"; args_l.append(_BLOCKED_KINDS)
+
+        # SUMMARY FIRST, over the whole population — never the page.
+        #
+        # This was page-scoped: with ?limit=1 the summary described the single
+        # returned group, so `human_actionable` changed with pagination. A number
+        # that moves when you page cannot be the contract number (A-43 clause 1
+        # requires it computed in ONE place with ONE answer). Fact Store's parity
+        # test caught it on the first run, which is what the test is for.
+        cur.execute(f"""
+            SELECT k, ownership, count(*) FROM (
+              SELECT DISTINCT ON (least(g.document_id::text, g.prior_document_id::text),
+                                  greatest(g.document_id::text, g.prior_document_id::text))
+                     g.duplicate_kind AS k,
+                     COALESCE({_CLAIM}, 'unassessed') AS ownership
+              FROM gate_decisions g
+              JOIN documents d  ON d.id  = g.document_id
+              LEFT JOIN documents d2 ON d2.id = g.prior_document_id
+              WHERE g.run_id = %s
+                AND g.prior_document_id IS NOT NULL
+                AND d.lifecycle_state IS DISTINCT FROM 'retired'
+                AND (d2.id IS NULL OR d2.lifecycle_state IS DISTINCT FROM 'retired')
+                AND {_RESOLVED_SQL.format(col="g.document_id")}
+                AND {_RESOLVED_SQL.format(col="g.prior_document_id")} {w}
+              ORDER BY least(g.document_id::text, g.prior_document_id::text),
+                       greatest(g.document_id::text, g.prior_document_id::text),
+                       g.overlap_ratio DESC NULLS LAST
+            ) x GROUP BY k, ownership""",
+            (drun, _RESOLVING_ACTIONS, _RESOLVING_ACTIONS) + tuple(args_l))
+        summary = {"groups": 0, "claimed": 0, "human_actionable": 0,
+                   "blocked_needs_data": 0, "by_kind": {}}
+        for k, own, cnt in cur.fetchall():
+            cnt = int(cnt)
+            summary["groups"] += cnt
+            summary["by_kind"][k] = summary["by_kind"].get(k, 0) + cnt
+            if own == "true":
+                summary["claimed"] += cnt
+            if k in _ACTIONABLE_KINDS:
+                summary["human_actionable"] += cnt
+            else:
+                summary["blocked_needs_data"] += cnt
 
         cur.execute(f"""
             SELECT DISTINCT ON (least(g.document_id::text, g.prior_document_id::text),
@@ -5055,21 +5105,10 @@ def corpus_duplicates_feed(claimed: str | None = None, payer: str | None = None,
             g["ownership"] = {"true": "claimed", "false": "declined"}.get(own, "unassessed")
             groups.append(g)
 
-        if actionable == "true":
-            groups = [x for x in groups if x["human_actionable"]]
-        elif actionable == "false":
-            groups = [x for x in groups if not x["human_actionable"]]
-
-        summary = {
-            "groups": len(groups),
-            "claimed": sum(1 for x in groups if x["claimed"]),
-            "human_actionable": sum(1 for x in groups if x["human_actionable"]),
-            "blocked_needs_data": sum(1 for x in groups if not x["human_actionable"]),
-            "by_kind": {},
-        }
-        for x in groups:
-            summary["by_kind"][x["duplicate_kind"]] = summary["by_kind"].get(x["duplicate_kind"], 0) + 1
+        summary["page"] = {"returned": len(groups), "limit": limit, "offset": offset}
         return {"measured": True, "run_id": str(drun), "summary": summary,
+                "parity_contract": "RAG_FACTSTORE_COORDINATION.md A-43 — summary is "
+                                   "corpus-scoped and identical at any limit/offset",
                 "groups": groups,
                 "resolve_with": "POST /corpus/duplicates/action",
                 "note": "clearing every human_actionable group empties this service's "

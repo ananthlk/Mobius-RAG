@@ -67,6 +67,11 @@ interface Health {
     buckets?: Record<string, { claimed: number; declined: number; unassessed: number }>
   }
 }
+interface DupFeed {
+  measured: boolean
+  summary?: { groups: number; claimed: number; human_actionable: number
+              blocked_needs_data: number; by_kind?: Record<string, number> }
+}
 interface DupRule {
   kind: string; rule: string; why: string; overturn: string; verdict: string
   managed: number; unmanaged: number; acted: number; human_decided: number; total: number
@@ -171,6 +176,11 @@ export function CorpusHealthTab() {
       .then(r => (r.ok ? r.json() : null))
       .then(d => { if (!dead && d?.measured) setDecisions(d) })
       .catch(() => { })
+    const fq = scopeQS()
+    fetch(`${API_BASE}/corpus/duplicates${fq || '?'}${fq ? '&' : ''}limit=1`)
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { if (!dead && d?.measured) setFeed(d) })
+      .catch(() => { })
     return () => { dead = true }
   }, [scopeQS])
 
@@ -253,6 +263,11 @@ export function CorpusHealthTab() {
   const qq = health?.queue
   const cl = health?.cleanup
   const [decisions, setDecisions] = useState<{ verdicts: DupVerdict[] } | null>(null)
+  // The shared number. Read from the SAME endpoint Fact Store federates, never
+  // recomputed here — coord A-43 clause 1: human actionable is computed in one
+  // place. A second derivation on this page is exactly how the two surfaces
+  // drifted apart before.
+  const [feed, setFeed] = useState<DupFeed | null>(null)
   // The review panel: a rule the user opened, and the documents behind it.
   const [review, setReview] = useState<DupRule | null>(null)
   const [revDocs, setRevDocs] = useState<BucketDoc[] | null>(null)
@@ -574,6 +589,28 @@ export function CorpusHealthTab() {
                      : null} tone="warn">
           {!qq?.measured ? <div className="ch-empty">Nothing scored yet.</div> : (
             <>
+              {/* ── 0. the shared number ─────────────────────────────── */}
+              {feed?.summary && (
+                <div className="ch-headline">
+                  <div className="ch-headline-main">
+                    <div className="ch-headline-n">{n(feed.summary.human_actionable)}</div>
+                    <div className="ch-headline-l">waiting on a person</div>
+                    <div className="ch-headline-s">
+                      the shared number — this is the same figure the Payor work queue shows,
+                      read from one endpoint rather than counted twice
+                    </div>
+                  </div>
+                  <div className="ch-headline-side">
+                    <div className="ch-headline-n2">{n(feed.summary.blocked_needs_data)}</div>
+                    <div className="ch-headline-l">blocked — needs data, not a decision</div>
+                    <div className="ch-headline-s">
+                      near-identical pairs with no edition date on either side; nobody can
+                      settle these by looking, so they are never counted as someone's backlog
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* ── 1. what is waiting ───────────────────────────────── */}
               <h4 className="ch-sub">What is waiting</h4>
               <p className="ch-note">
