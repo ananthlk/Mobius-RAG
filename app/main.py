@@ -4315,6 +4315,54 @@ def corpus_health(payer: str | None = None,
                                  "which a classifier-ran-on-it test wrongly counted as such.",
             }
 
+        # ── why ingest failed ─────────────────────────────────────────────
+        #
+        # A TECHNICAL cause per document, decided at ingest from the file itself.
+        # Before this existed, 161 documents sat at status='failed' with no
+        # recorded reason anywhere — the system knew THAT they failed and never
+        # WHY, so nothing could retry them and the dashboard could only show a
+        # count. The diagnosis turned out to be 149 .xls files with no parser: a
+        # parser gap that had been presenting as a retry gap.
+        #
+        # `retryable` is shown separately because it is the only part that a
+        # sweep can fix. Everything else needs a parser, an OCR step, or a
+        # decision — and showing them together implies work that retrying cannot do.
+        _RETRYABLE = ("fetch_timeout", "upstream_error", "parser_crashed")
+        _REASON_FIX = {
+            "unsupported_format":   "needs a parser for this file type",
+            "no_text_layer":        "scanned image — needs OCR",
+            "bad_storage_path":     "file_path is malformed; bytes unreachable",
+            "empty_file":           "nothing to extract — discard candidate",
+            "text_below_threshold": "parsed to a stub; little to index",
+            "encrypted":            "password protected",
+            "fetch_timeout":        "transient — a retry may clear it",
+            "upstream_error":       "transient — a retry may clear it",
+            "parser_crashed":       "parser raised on a well-formed file",
+        }
+        cur.execute(f"""SELECT d.ingest_failure_reason, count(*), max(d.ingest_attempts)
+            FROM documents d WHERE d.ingest_failure_reason IS NOT NULL {scope}
+            GROUP BY 1 ORDER BY 2 DESC""", args)
+        reasons = [{"reason": r, "documents": int(n), "max_attempts": int(a or 0),
+                    "retryable": r in _RETRYABLE,
+                    "fix": _REASON_FIX.get(r, "unclassified — see ingest_error_message")}
+                   for r, n, a in cur.fetchall()]
+        # NOT a sum over document_pages — that correlated aggregate scans the whole
+        # table and blew the endpoint's 45s budget. `no chunks` is the same
+        # population for this purpose and rides an index.
+        cur.execute(f"""SELECT count(*) FROM documents d
+            WHERE d.ingest_failure_reason IS NULL {scope}
+              AND d.lifecycle_state IS DISTINCT FROM 'retired'
+              AND NOT EXISTS (SELECT 1 FROM hierarchical_chunks h
+                              WHERE h.document_id = d.id)""", args)
+        unclassified = int((cur.fetchone() or [0])[0] or 0)
+        ingest_failure_block = {
+            "measured": bool(reasons) or unclassified > 0,
+            "reasons": reasons,
+            "total": sum(r["documents"] for r in reasons),
+            "retryable": sum(r["documents"] for r in reasons if r["retryable"]),
+            "unclassified": unclassified,
+        }
+
         # ── the cleanup queue ─────────────────────────────────────────────
         #
         # One row per document, one bucket each, split managed vs unmanaged.
@@ -4558,6 +4606,7 @@ def corpus_health(payer: str | None = None,
             "duplicates": dup_block,
             "queue": queue_block,
             "cleanup": cleanup_block,
+            "ingest_failures": ingest_failure_block,
         }
     finally:
         conn.close()

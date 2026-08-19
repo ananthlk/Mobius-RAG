@@ -61,6 +61,12 @@ interface Health {
     }>
     index_rows_now?: number; index_share_removed_pct?: number
   }
+  ingest_failures: {
+    measured: boolean
+    reasons?: { reason: string; documents: number; max_attempts: number
+                retryable: boolean; fix: string }[]
+    total?: number; retryable?: number; unclassified?: number
+  }
   queue: {
     measured: boolean
     scored?: { claimed: number; declined: number; unassessed: number }
@@ -262,6 +268,7 @@ export function CorpusHealthTab() {
   const g = health?.gate
   const qq = health?.queue
   const cl = health?.cleanup
+  const inf = health?.ingest_failures
   const [decisions, setDecisions] = useState<{ verdicts: DupVerdict[] } | null>(null)
   // The shared number. Read from the SAME endpoint Fact Store federates, never
   // recomputed here — coord A-43 clause 1: human actionable is computed in one
@@ -579,6 +586,60 @@ export function CorpusHealthTab() {
               added as it was built rather than designed alongside the others.
               Read top to bottom it is now a sequence: what is waiting, what kind
               of thing it is, what has already been done about it. */}
+          {/* Why ingest failed. Kept separate from the pipeline stages because a
+              stage says WHERE a document stopped; this says WHY, which is the only
+              thing that tells you what would fix it. */}
+          <Section title="Why ingest failed"
+                   badge={inf?.measured ? (inf.total || null) : null} tone="bad">
+          {!inf?.measured ? <div className="ch-empty">Nothing classified yet.</div> : (
+            <>
+              <p className="ch-note">
+                A <b>technical</b> cause per document, decided from the file itself — independent
+                of who sent it or whether anyone wants it. The keep-or-discard decision sits on
+                top as a separate question.
+                <br /><br />
+                Before this existed, 161 documents sat at <code>status=failed</code> with no
+                recorded reason anywhere: the system knew <i>that</i> they failed and never
+                <i> why</i>, so nothing could retry them. The diagnosis turned out to be 149
+                spreadsheets with no parser — a parser gap that had been presenting as a retry gap.
+              </p>
+              <div className="ch-cards">
+                <div className="ch-card"><div className="ch-card-n">{n(inf.total)}</div>
+                  <div className="ch-card-l">classified</div>
+                  <div className="ch-card-s">each with a cause and an attempt count</div></div>
+                <div className="ch-card"><div className="ch-card-n amber">{n(inf.retryable)}</div>
+                  <div className="ch-card-l">retryable</div>
+                  <div className="ch-card-s">
+                    {inf.retryable ? 'transient — a sweep may clear these'
+                                   : 'none — retrying would produce the identical failure'}
+                  </div></div>
+                <div className="ch-card"><div className="ch-card-n">{n(inf.unclassified)}</div>
+                  <div className="ch-card-l">not yet diagnosed</div>
+                  <div className="ch-card-s">no chunks and no recorded reason — sweep pending</div></div>
+              </div>
+              <div className="ch-tablewrap">
+                <table className="ch-table ch-queue">
+                  <thead><tr>
+                    <th>Cause</th><th className="num">Docs</th><th>What would fix it</th><th>Retry</th>
+                  </tr></thead>
+                  <tbody>
+                    {(inf.reasons || []).map(r => (
+                      <tr key={r.reason}>
+                        <td><b>{r.reason.replace(/_/g, ' ')}</b></td>
+                        <td className="num">{n(r.documents)}</td>
+                        <td className="ch-dim">{r.fix}</td>
+                        <td>{r.retryable
+                          ? <span className="ch-tag">retry to 3</span>
+                          : <span className="ch-tag dim">no — deterministic</span>}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+          </Section>
+
           {/* The badge counts CLAIMED work only — what a person actually owes a
               decision on. Counting declined and unassessed would advertise a
               backlog nobody is waiting on. */}

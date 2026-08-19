@@ -59,15 +59,32 @@ async def main():
     apply = "--apply" in sys.argv
     limit = next((int(a.split("=")[1]) for a in sys.argv if a.startswith("--limit=")), 400)
     status = next((a.split("=")[1] for a in sys.argv if a.startswith("--status=")), "failed")
+    # `--mode=no_text` sweeps every document that produced nothing usable,
+    # whatever status it wears. Status alone misses the worst class: documents
+    # marked `completed` that extracted to a 44-character stub and therefore look
+    # healthy on every dashboard.
+    mode = next((a.split("=")[1] for a in sys.argv if a.startswith("--mode=")), "status")
 
     c = await asyncpg.connect(DSN, timeout=300)
     await c.execute("SET statement_timeout = 0")
-    rows = await c.fetch("""
-        SELECT id, filename, file_path, status, COALESCE(ingest_attempts, 0) AS attempts
-        FROM documents
-        WHERE status = $1 AND lifecycle_state IS DISTINCT FROM 'retired'
-        ORDER BY created_at DESC LIMIT $2""", status, limit)
-    print(f"documents with status={status}: {len(rows)}\n")
+    if mode == "no_text":
+        rows = await c.fetch("""
+            SELECT d.id, d.filename, d.file_path, d.status,
+                   COALESCE(d.ingest_attempts, 0) AS attempts
+            FROM documents d
+            WHERE d.lifecycle_state IS DISTINCT FROM 'retired'
+              AND d.ingest_failure_reason IS NULL
+              AND COALESCE((SELECT sum(p.text_length) FROM document_pages p
+                            WHERE p.document_id = d.id), 0) < 200
+            ORDER BY d.created_at DESC LIMIT $1""", limit)
+        print(f"documents with no usable text (any status): {len(rows)}\n")
+    else:
+        rows = await c.fetch("""
+            SELECT id, filename, file_path, status, COALESCE(ingest_attempts, 0) AS attempts
+            FROM documents
+            WHERE status = $1 AND lifecycle_state IS DISTINCT FROM 'retired'
+            ORDER BY created_at DESC LIMIT $2""", status, limit)
+        print(f"documents with status={status}: {len(rows)}\n")
 
     from google.cloud import storage
     gcs = storage.Client()
