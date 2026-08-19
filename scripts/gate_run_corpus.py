@@ -123,7 +123,13 @@ async def main():
                d.effective_date, d.termination_date, d.created_at, d.authority_level,
                d.source_metadata->'pdf_meta' AS pdf_meta,
                d.source_metadata->'payor_classification'->>'importance' AS importance
-        FROM documents d""")
+        FROM documents d
+        -- The WORKING corpus only. Retired and shelved documents have had their
+        -- chunks deleted on purpose, so scoring them reports `unpublishable` for
+        -- work we deliberately finished — the count jumped 586 -> 747 on the first
+        -- run after cleanup, which reads as regression rather than progress.
+        WHERE d.lifecycle_state IS DISTINCT FROM 'retired'
+          AND d.lifecycle_state IS DISTINCT FROM 'shelved'""")
     print(f"documents: {len(docs)}")
 
     print("computing digests server-side …", flush=True)

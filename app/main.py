@@ -4167,7 +4167,13 @@ def corpus_health(payer: str | None = None,
             scope += " AND d.created_at < (%s::date + 1)"
             args_l.append(until)
         args: tuple = tuple(args_l)
-        pw = scope + " AND d.lifecycle_state IS DISTINCT FROM 'retired'"
+        # SHELVED counts as out of the working corpus too, not just retired.
+        # Excluding only 'retired' left 441 shelved documents — nav-only pages,
+        # scans with no use case, empty test files — being counted as live
+        # pipeline work, so every stage overstated by that much and the cleanup
+        # looked like it had not happened.
+        pw = scope + (" AND d.lifecycle_state IS DISTINCT FROM 'retired'"
+                      " AND d.lifecycle_state IS DISTINCT FROM 'shelved'")
 
         def one(sql: str, a: tuple = ()) -> int:
             cur.execute(sql, a)
