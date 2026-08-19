@@ -112,6 +112,38 @@ async def _persist_classification(db, doc, clf: dict) -> None:
         },
     }
     flag_modified(doc, "source_metadata")
+
+    # MAKE THE HOLD VISIBLE.
+    #
+    # A classifier hold stops the pipeline before chunking, so the document ends
+    # up status=completed, unchunked, unpublished — and, until now, carrying no
+    # failure reason at all. It looked healthy on every dashboard and was
+    # invisible to retrieval. The only reason we found it was running one document
+    # end to end.
+    #
+    # Two different situations, deliberately given different reasons:
+    #   classifier_unavailable — the service was unreachable and the FALLBACK
+    #     fired. Not a decision about the document; a decision about our ability
+    #     to ask. Retryable: when the classifier returns, this should re-run.
+    #   classifier_held — the classifier answered and said no. A real policy
+    #     verdict that a person owns; retrying changes nothing.
+    #
+    # Fail-closed on PHI is right — you do not index what you could not screen.
+    # Failing SILENTLY is not.
+    if not clf.get("may_index", True):
+        if str(clf.get("contract_version") or "") == "fallback":
+            doc.ingest_failure_reason = "classifier_unavailable"
+            doc.ingest_error_message = (clf.get("why") or "classifier unreachable")[:1000]
+        else:
+            doc.ingest_failure_reason = "classifier_held"
+            doc.ingest_error_message = (clf.get("why") or "held by classifier")[:1000]
+        doc.ingest_last_attempt_at = datetime.utcnow()
+        doc.ingest_attempts = (doc.ingest_attempts or 0) + 1
+    elif doc.ingest_failure_reason in ("classifier_unavailable", "classifier_held"):
+        # It cleared — a later run got an answer. Do not leave the old hold behind.
+        doc.ingest_failure_reason = None
+        doc.ingest_error_message = None
+
     db.add(ChunkingEvent(
         document_id=doc.id,
         event_type="payor_classification",
@@ -4388,7 +4420,8 @@ def corpus_health(payer: str | None = None,
         # `retryable` is shown separately because it is the only part that a
         # sweep can fix. Everything else needs a parser, an OCR step, or a
         # decision — and showing them together implies work that retrying cannot do.
-        _RETRYABLE = ("fetch_timeout", "upstream_error", "parser_crashed", "no_stored_file")
+        _RETRYABLE = ("fetch_timeout", "upstream_error", "parser_crashed", "no_stored_file",
+                      "classifier_unavailable")
         _REASON_FIX = {
             "unsupported_format":   "needs a parser for this file type",
             "no_text_layer":        "scanned image — needs OCR",
@@ -4400,6 +4433,8 @@ def corpus_health(payer: str | None = None,
             "fetch_timeout":        "transient — a retry may clear it",
             "upstream_error":       "transient — a retry may clear it",
             "parser_crashed":       "parser raised on a well-formed file",
+            "classifier_unavailable": "payor classifier was unreachable — retry when it returns",
+            "classifier_held":      "classifier said do not index — a person owns this",
         }
         cur.execute(f"""SELECT d.ingest_failure_reason, count(*), max(d.ingest_attempts)
             FROM documents d WHERE d.ingest_failure_reason IS NOT NULL {scope}

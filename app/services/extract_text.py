@@ -214,11 +214,15 @@ def extract_text_from_bytes(content: bytes, ext: str) -> str:
 # `no_stored_file` is retryable, but by a DIFFERENT mechanism: re-fetch the URL,
 # not re-extract bytes we never had. Kept in this set so the sweep surfaces it as
 # recoverable rather than terminal.
-RETRYABLE_REASONS = {"fetch_timeout", "upstream_error", "parser_crashed", "no_stored_file"}
+RETRYABLE_REASONS = {"fetch_timeout", "upstream_error", "parser_crashed", "no_stored_file",
+                     # the classifier being down is a statement about US, not the
+                     # document — it must clear itself when the service returns
+                     "classifier_unavailable"}
 # Retrying these produces the identical failure and hides the real fix.
 TERMINAL_REASONS = {"unsupported_format", "no_text_layer", "encrypted",
                     "empty_file", "text_below_threshold", "bad_storage_path",
-                    "boilerplate_only", "file_too_large", "corrupt_file"}
+                    "boilerplate_only", "file_too_large", "corrupt_file",
+                    "classifier_held"}
 MAX_INGEST_ATTEMPTS = 3
 
 # Formats with a real parser above. Anything else is unsupported_format — said
