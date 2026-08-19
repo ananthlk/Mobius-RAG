@@ -4945,6 +4945,139 @@ _VERDICT_LABEL = {
 }
 
 
+@app.get("/corpus/duplicates")
+def corpus_duplicates_feed(claimed: str | None = None, payer: str | None = None,
+                           kind: str | None = None, actionable: str | None = None,
+                           limit: int = 500, offset: int = 0):
+    """THE federation surface — one list of every unresolved duplicate determination.
+
+    Promised in A-21 and not built until now, which is the whole reason the Payor
+    queue and Corpus Health kept disagreeing: their queue could only show its own
+    candidates plus the ten I hand-delivered, while this service held a different
+    population it had no way to publish. Two screens, two counts, no join.
+
+    Returns PAIRS, not documents, because a person decides a pair. Each carries the
+    rule that fired, why it fired, what overturning it would mean, and the evidence
+    (overlap, both filenames, vectors at stake) so a decision can be made in the
+    queue without opening another tab.
+
+    `human_actionable` is the field that matters for a work queue. An
+    `ordering_unknown` pair is not a question a person can answer — the documents
+    are near-identical and neither carries a date, so choosing a survivor is a coin
+    flip. Those are returned but flagged, so clearing the actionable ones genuinely
+    means clear rather than leaving an unworkable residue that looks like backlog.
+    """
+    import psycopg2 as _pg
+    conn = _pg.connect(_retag_inplace_dsn(), connect_timeout=15)
+    try:
+        cur = conn.cursor()
+        cur.execute("SET statement_timeout = 45000")
+        cur.execute("SELECT run_id FROM gate_decisions WHERE mode='duplicates' "
+                    "GROUP BY run_id ORDER BY max(decided_at) DESC LIMIT 1")
+        r = cur.fetchone()
+        if not r:
+            return {"measured": False, "groups": [], "summary": {}}
+        drun = r[0]
+
+        w, args_l = "", []
+        if payer:
+            w += " AND d.payer = %s"; args_l.append(payer)
+        if kind:
+            w += " AND g.duplicate_kind = %s"; args_l.append(kind)
+        if claimed == "true":
+            w += f" AND {_IS_CLAIMED}"
+        elif claimed == "false":
+            w += f" AND COALESCE({_CLAIM} = 'true', false) = false"
+
+        cur.execute(f"""
+            SELECT DISTINCT ON (least(g.document_id::text, g.prior_document_id::text),
+                                greatest(g.document_id::text, g.prior_document_id::text))
+                   g.document_id::text, g.prior_document_id::text, g.duplicate_kind,
+                   g.overlap_ratio, g.reason,
+                   d.filename, d.payer,
+                   COALESCE({_CLAIM}, 'unassessed') AS ownership,
+                   (SELECT count(*) FROM rag_published_embeddings e WHERE e.document_id = d.id),
+                   d.source_metadata->'payor_classification'->>'asset_type',
+                   d2.filename, d2.payer,
+                   (SELECT count(*) FROM rag_published_embeddings e2 WHERE e2.document_id = d2.id)
+            FROM gate_decisions g
+            JOIN documents d  ON d.id  = g.document_id
+            LEFT JOIN documents d2 ON d2.id = g.prior_document_id
+            WHERE g.run_id = %s
+              AND g.prior_document_id IS NOT NULL
+              -- BOTH sides must still be live and undecided. A pair whose
+              -- counterpart is already retired is settled, not open: recommending
+              -- retire_duplicate on it would send a person to a guaranteed 409,
+              -- because the executor refuses to retire against an unpublished
+              -- canonical. Checking only the candidate side is the same
+              -- half-of-the-pair error that produced the Cytogam bug.
+              AND d.lifecycle_state IS DISTINCT FROM 'retired'
+              AND (d2.id IS NULL OR d2.lifecycle_state IS DISTINCT FROM 'retired')
+              AND {_RESOLVED_SQL.format(col="g.document_id")}
+              AND {_RESOLVED_SQL.format(col="g.prior_document_id")} {w}
+            ORDER BY least(g.document_id::text, g.prior_document_id::text),
+                     greatest(g.document_id::text, g.prior_document_id::text),
+                     g.overlap_ratio DESC NULLS LAST
+            LIMIT %s OFFSET %s""",
+            (drun, _RESOLVING_ACTIONS, _RESOLVING_ACTIONS) + tuple(args_l) + (limit, offset))
+
+        groups = []
+        for (did, pid, k, ov, reason, fn, pay, own, vec, atype,
+             fn2, pay2, vec2) in cur.fetchall():
+            meta = _DUP_RULES.get(k, {})
+            verdict = meta.get("verdict", "undecided")
+            # A pair a person cannot actually settle should not be counted as their
+            # backlog. Undecided-for-want-of-evidence is a data problem.
+            actionable_flag = verdict != "undecided"
+            g = {
+                "group_id": f"{min(did, pid)}:{max(did, pid)}",
+                "duplicate_kind": k, "verdict": verdict,
+                "rule": meta.get("rule"), "why": meta.get("why"),
+                "overturn": meta.get("overturn"),
+                "overlap": float(ov) if ov is not None else None,
+                "evidence": reason,
+                "ownership": own if own in ("true", "false") else "unassessed",
+                "claimed": own == "true",
+                "human_actionable": actionable_flag,
+                "blocked_reason": None if actionable_flag else
+                    "no edition date on either side — needs data, not a decision",
+                "recommended_action": {
+                    "duplicate": "retire_duplicate",
+                    "not_duplicate": "keep_both",
+                }.get(verdict),
+                "documents": [
+                    {"id": did, "filename": fn, "payer": pay, "vectors": int(vec or 0),
+                     "asset_type": atype, "role": "candidate"},
+                    {"id": pid, "filename": fn2, "payer": pay2, "vectors": int(vec2 or 0),
+                     "role": "counterpart"},
+                ],
+            }
+            g["ownership"] = {"true": "claimed", "false": "declined"}.get(own, "unassessed")
+            groups.append(g)
+
+        if actionable == "true":
+            groups = [x for x in groups if x["human_actionable"]]
+        elif actionable == "false":
+            groups = [x for x in groups if not x["human_actionable"]]
+
+        summary = {
+            "groups": len(groups),
+            "claimed": sum(1 for x in groups if x["claimed"]),
+            "human_actionable": sum(1 for x in groups if x["human_actionable"]),
+            "blocked_needs_data": sum(1 for x in groups if not x["human_actionable"]),
+            "by_kind": {},
+        }
+        for x in groups:
+            summary["by_kind"][x["duplicate_kind"]] = summary["by_kind"].get(x["duplicate_kind"], 0) + 1
+        return {"measured": True, "run_id": str(drun), "summary": summary,
+                "groups": groups,
+                "resolve_with": "POST /corpus/duplicates/action",
+                "note": "clearing every human_actionable group empties this service's "
+                        "duplicate queue; blocked groups need an edition date, not a decision"}
+    finally:
+        conn.close()
+
+
 @app.get("/corpus/health/duplicate-decisions")
 def corpus_duplicate_decisions(payer: str | None = None, since: str | None = None,
                                until: str | None = None):
