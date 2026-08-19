@@ -4315,6 +4315,61 @@ def corpus_health(payer: str | None = None,
                                  "which a classifier-ran-on-it test wrongly counted as such.",
             }
 
+        # ── ingest activity: every ATTEMPT, by source ─────────────────────
+        #
+        # Reads ingest_transactions, not `documents`. The difference is the point:
+        # `documents` holds what SUCCEEDED, so duplicates, rejections and failures
+        # leave no trace there and the questions that matter most about a crawl —
+        # "how much of this run was already in the corpus?" — cannot be asked.
+        #
+        # duplicate_rate is the headline. A crawl that returns 90% duplicates is
+        # not failing, it is finished; one that returns 0% on a re-run of the same
+        # site means dedup is not working. Neither is visible without this table.
+        #
+        # Sources with no rows still appear, marked by their registry status, so a
+        # path that exists but has never run is distinguishable from one that is
+        # not built yet. Omitting them is how `instant_rag` stayed unwired without
+        # anyone noticing.
+        cur.execute(f"""
+            SELECT t.source_type, t.outcome, count(*), max(t.started_at)
+            FROM ingest_transactions t
+            LEFT JOIN documents d ON d.id = t.document_id
+            WHERE (t.document_id IS NULL OR TRUE) {scope}
+            GROUP BY 1, 2""", args)
+        by_src: dict = {}
+        for src, outcome, cnt, last in cur.fetchall():
+            row = by_src.setdefault(src, {"attempts": 0, "created": 0, "duplicate": 0,
+                                          "rejected": 0, "failed": 0, "last_at": None})
+            row["attempts"] += int(cnt)
+            if outcome in row:
+                row[outcome] = int(cnt)
+            if last and (row["last_at"] is None or last > row["last_at"]):
+                row["last_at"] = last
+        sources_out = []
+        for srcdef in INGEST_SOURCES:
+            r = by_src.get(srcdef["key"], {"attempts": 0, "created": 0, "duplicate": 0,
+                                           "rejected": 0, "failed": 0, "last_at": None})
+            attempts = r["attempts"]
+            sources_out.append({
+                "source": srcdef["key"], "label": srcdef["label"],
+                "status": srcdef["status"], "what": srcdef["what"],
+                "attempts": attempts, "created": r["created"],
+                "duplicate": r["duplicate"], "rejected": r["rejected"], "failed": r["failed"],
+                # The number a crawler operator actually wants.
+                "duplicate_rate_pct": round(100.0 * r["duplicate"] / attempts, 1) if attempts else None,
+                "last_at": r["last_at"].isoformat() if r["last_at"] else None,
+                "never_run": attempts == 0,
+            })
+        totals = {k: sum(x[k] for x in sources_out)
+                  for k in ("attempts", "created", "duplicate", "rejected", "failed")}
+        ingest_activity_block = {
+            "measured": totals["attempts"] > 0,
+            "sources": sources_out,
+            "totals": totals,
+            "duplicate_rate_pct": (round(100.0 * totals["duplicate"] / totals["attempts"], 1)
+                                   if totals["attempts"] else None),
+        }
+
         # ── why ingest failed ─────────────────────────────────────────────
         #
         # A TECHNICAL cause per document, decided at ingest from the file itself.
@@ -4608,6 +4663,7 @@ def corpus_health(payer: str | None = None,
             "queue": queue_block,
             "cleanup": cleanup_block,
             "ingest_failures": ingest_failure_block,
+            "ingest_activity": ingest_activity_block,
         }
     finally:
         conn.close()

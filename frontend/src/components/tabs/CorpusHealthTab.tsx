@@ -61,6 +61,17 @@ interface Health {
     }>
     index_rows_now?: number; index_share_removed_pct?: number
   }
+  ingest_activity: {
+    measured: boolean
+    sources?: { source: string; label: string; status: string; what: string
+                attempts: number; created: number; duplicate: number
+                rejected: number; failed: number
+                duplicate_rate_pct: number | null; last_at: string | null
+                never_run: boolean }[]
+    totals?: { attempts: number; created: number; duplicate: number
+               rejected: number; failed: number }
+    duplicate_rate_pct?: number | null
+  }
   ingest_failures: {
     measured: boolean
     reasons?: { reason: string; documents: number; max_attempts: number
@@ -269,6 +280,7 @@ export function CorpusHealthTab() {
   const qq = health?.queue
   const cl = health?.cleanup
   const inf = health?.ingest_failures
+  const act = health?.ingest_activity
   const [decisions, setDecisions] = useState<{ verdicts: DupVerdict[] } | null>(null)
   // The shared number. Read from the SAME endpoint Fact Store federates, never
   // recomputed here — coord A-43 clause 1: human actionable is computed in one
@@ -586,6 +598,69 @@ export function CorpusHealthTab() {
               added as it was built rather than designed alongside the others.
               Read top to bottom it is now a sequence: what is waiting, what kind
               of thing it is, what has already been done about it. */}
+          {/* Every ingest ATTEMPT, by source. Reads the transaction ledger, not
+              `documents` — documents holds what SUCCEEDED, so duplicates and
+              rejections leave no trace there and the question that matters most
+              about a crawl ("how much of this was already in the corpus?") cannot
+              be asked at all. */}
+          <Section title="Ingest activity"
+                   badge={act?.measured ? (act.totals?.attempts || null) : 'no traffic'}
+                   tone={act?.measured ? 'good' : undefined}>
+            <p className="ch-note">
+              One row per <b>attempt</b>, whatever the outcome. A <b>duplicate</b> is a success,
+              not an error — it is the cheapest correct result available, and until this ledger
+              existed it returned an id and left no trace at all.
+              <br /><br />
+              <b>Duplicate rate is the number to watch.</b> A crawl returning 90% duplicates is
+              not failing, it is finished. One returning 0% on a re-run of the same site means
+              dedup is not working. Neither is visible from the corpus alone.
+            </p>
+            {act?.measured && (
+              <div className="ch-cards">
+                <div className="ch-card"><div className="ch-card-n">{n(act.totals?.attempts)}</div>
+                  <div className="ch-card-l">attempts</div></div>
+                <div className="ch-card"><div className="ch-card-n green">{n(act.totals?.created)}</div>
+                  <div className="ch-card-l">created</div></div>
+                <div className="ch-card"><div className="ch-card-n">{act.duplicate_rate_pct ?? 0}%</div>
+                  <div className="ch-card-l">duplicate rate</div>
+                  <div className="ch-card-s">{n(act.totals?.duplicate)} already in the corpus</div></div>
+                <div className="ch-card"><div className="ch-card-n amber">
+                  {n((act.totals?.rejected || 0) + (act.totals?.failed || 0))}</div>
+                  <div className="ch-card-l">rejected or failed</div></div>
+              </div>
+            )}
+            <div className="ch-tablewrap">
+              <table className="ch-table ch-queue">
+                <thead><tr>
+                  <th>Source</th><th className="num">Attempts</th><th className="num">Created</th>
+                  <th className="num">Duplicate</th><th className="num">Dup rate</th><th>Last seen</th>
+                </tr></thead>
+                <tbody>
+                  {(act?.sources || []).map(sc => (
+                    <tr key={sc.source} className={sc.never_run ? 'is-clean' : ''}>
+                      <td>
+                        <b>{sc.label}</b>
+                        {sc.status === 'planned' && <span className="ch-tag dim"> not built</span>}
+                        {sc.status === 'live' && sc.never_run && <span className="ch-tag dim"> no traffic</span>}
+                        <div className="ch-card-s">{sc.what}</div>
+                      </td>
+                      <td className="num">{sc.attempts ? n(sc.attempts) : '—'}</td>
+                      <td className="num">{sc.attempts ? n(sc.created) : '—'}</td>
+                      <td className="num">{sc.attempts ? n(sc.duplicate) : '—'}</td>
+                      <td className="num">{sc.duplicate_rate_pct != null ? `${sc.duplicate_rate_pct}%` : '—'}</td>
+                      <td className="ch-dim">{sc.last_at ? sc.last_at.slice(0, 16).replace('T', ' ') : '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="ch-note ch-note-dim">
+              Sources with no traffic are listed rather than omitted, so a path that exists but has
+              never run is distinguishable from one that is not built yet. Omitting them is how a
+              wired-looking source stays unwired without anyone noticing.
+            </p>
+          </Section>
+
           {/* Why ingest failed. Kept separate from the pipeline stages because a
               stage says WHERE a document stopped; this says WHY, which is the only
               thing that tells you what would fix it. */}
