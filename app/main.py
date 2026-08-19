@@ -7181,6 +7181,14 @@ def record_ingest_txn(source_type: str, outcome: str, *, document_id=None,
     """
     if source_type not in _INGEST_SOURCE_KEYS:
         logger.warning("record_ingest_txn: unknown source_type %r", source_type)
+    # psycopg2 cannot adapt a uuid.UUID. Every endpoint passes document.id as a
+    # UUID object, so the insert raised and this function's own never-raise guard
+    # swallowed it into a log line — the ledger looked wired and wrote nothing
+    # except from the middleware, which happens to pass no document_id. Three
+    # probes in, this was the last thing standing between "recorded" and
+    # "recorded and readable".
+    if document_id is not None:
+        document_id = str(document_id)
     try:
         import psycopg2 as _pg
         conn = _pg.connect(_retag_inplace_dsn(), connect_timeout=5)
