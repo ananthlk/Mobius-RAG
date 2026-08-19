@@ -7249,7 +7249,17 @@ async def upload_file(
                 source_metadata_value["attested"] = True
 
         # Save to database with status "uploaded"
-        termination_date_obj = date.fromisoformat(default_termination_date())
+        # NO default termination date. A TTL invented at ingest is not a policy
+        # date, and pretending otherwise is what produced the 9,871 rows now
+        # marked `ttl_legacy` — created_at + 182 days, indistinguishable from a
+        # real end-of-coverage date until someone went looking. Migration 027
+        # documented the cleanup; ck_documents_term_date_provenance exists to stop
+        # it recurring, and the constraint was doing its job: it caught this.
+        #
+        # Per spec §6, a document is valid until something supersedes it. NULL
+        # means open-ended, which is the truth at upload time. Only a human or a
+        # source document can say when coverage ends.
+        termination_date_obj = None
         document = Document(
             filename=file.filename,
             file_hash=file_hash,
@@ -7721,7 +7731,17 @@ async def import_document_from_gcs(
         if body_source_url:
             meta_dict = {"source_url": body_source_url}
 
-        termination_date_obj = date.fromisoformat(default_termination_date())
+        # NO default termination date. A TTL invented at ingest is not a policy
+        # date, and pretending otherwise is what produced the 9,871 rows now
+        # marked `ttl_legacy` — created_at + 182 days, indistinguishable from a
+        # real end-of-coverage date until someone went looking. Migration 027
+        # documented the cleanup; ck_documents_term_date_provenance exists to stop
+        # it recurring, and the constraint was doing its job: it caught this.
+        #
+        # Per spec §6, a document is valid until something supersedes it. NULL
+        # means open-ended, which is the truth at upload time. Only a human or a
+        # source document can say when coverage ends.
+        termination_date_obj = None
         document = Document(
             filename=filename,
             file_hash=file_hash,
@@ -7987,7 +8007,9 @@ async def import_document_from_html(
         )
 
     # ── Create Document row ─────────────────────────────────────────
-    termination_date_obj = date.fromisoformat(default_termination_date())
+    # NO default termination date — see the note at the /upload site. NULL is the
+    # honest value at ingest; a 182-day TTL is a refresh cadence, not provenance.
+    termination_date_obj = None
     document = Document(
         filename=title[:240],
         file_hash=file_hash,
@@ -8438,7 +8460,17 @@ async def import_from_drive(
             results.append({"file_id": file_id, "filename": name, "status": "failed", "error": str(e)})
             continue
 
-        termination_date_obj = date.fromisoformat(default_termination_date())
+        # NO default termination date. A TTL invented at ingest is not a policy
+        # date, and pretending otherwise is what produced the 9,871 rows now
+        # marked `ttl_legacy` — created_at + 182 days, indistinguishable from a
+        # real end-of-coverage date until someone went looking. Migration 027
+        # documented the cleanup; ck_documents_term_date_provenance exists to stop
+        # it recurring, and the constraint was doing its job: it caught this.
+        #
+        # Per spec §6, a document is valid until something supersedes it. NULL
+        # means open-ended, which is the truth at upload time. Only a human or a
+        # source document can say when coverage ends.
+        termination_date_obj = None
         doc = Document(
             filename=name,
             file_hash=file_hash,
@@ -8693,7 +8725,17 @@ async def drive_import_folder(
             results.append({"file_id": file_id, "filename": name, "status": "failed", "error": str(e)})
             continue
 
-        termination_date_obj = date.fromisoformat(default_termination_date())
+        # NO default termination date. A TTL invented at ingest is not a policy
+        # date, and pretending otherwise is what produced the 9,871 rows now
+        # marked `ttl_legacy` — created_at + 182 days, indistinguishable from a
+        # real end-of-coverage date until someone went looking. Migration 027
+        # documented the cleanup; ck_documents_term_date_provenance exists to stop
+        # it recurring, and the constraint was doing its job: it caught this.
+        #
+        # Per spec §6, a document is valid until something supersedes it. NULL
+        # means open-ended, which is the truth at upload time. Only a human or a
+        # source document can say when coverage ends.
+        termination_date_obj = None
         doc = Document(
             filename=name,
             file_hash=file_hash,
@@ -9209,11 +9251,15 @@ async def import_scraped_pages(
         "scraped_page_count": len(body.pages),
         "scraped_page_urls": urls,
     }
-    term_date = body.termination_date if body.termination_date else default_termination_date()
+    # An explicitly supplied termination date is a claim someone made and is
+    # worth keeping; the invented default is not. Provenance is stamped either
+    # way, which is the whole point of the constraint.
+    term_date = body.termination_date or None
 
     # Convert ISO date strings to date objects (migration 020 retyped these columns to DATE)
     effective_date_obj = date.fromisoformat(body.effective_date) if body.effective_date else None
     termination_date_obj = date.fromisoformat(term_date) if term_date else None
+    termination_date_source_value = "api_explicit" if term_date else None
 
     # Scraped pages already have text/text_markdown per page — no separate extraction job. Use "completed" so chunking can start.
     document = Document(
@@ -9227,6 +9273,7 @@ async def import_scraped_pages(
         authority_level=body.authority_level,
         effective_date=effective_date_obj,
         termination_date=termination_date_obj,
+        termination_date_source=termination_date_source_value,
         source_metadata=source_metadata,
         status="completed",
     )
