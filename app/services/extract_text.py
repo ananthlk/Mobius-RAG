@@ -5,6 +5,65 @@ from bs4 import BeautifulSoup
 from app.config import GCS_BUCKET
 
 
+class ExtractionError(Exception):
+    """Base for extraction failures. Typed so classify_ingest_failure keys on the
+    class rather than pattern-matching an arbitrary message."""
+
+
+class UnsupportedFormat(ExtractionError):
+    pass
+
+
+class BadStoragePath(ExtractionError):
+    pass
+
+
+class SourceNotStored(ExtractionError):
+    """file_path points at a URL or local path — the bytes were never archived."""
+
+
+class PdfOpenFailed(ExtractionError):
+    pass
+
+
+class FileTooLarge(ExtractionError):
+    pass
+
+
+# A single document should never be able to exhaust the worker. download_as_bytes
+# pulls the whole object into memory with no ceiling; one 2 GB scan would take the
+# process down and look like an unrelated crash.
+MAX_DOWNLOAD_BYTES = 300 * 1024 * 1024
+
+
+def parse_gcs_path(gcs_path: str, bucket_name: str) -> str:
+    """Blob name within `bucket_name`, or raise.
+
+    STRICT on purpose. The previous fallback was
+        blob_path = gcs_path.split("/")[-1]
+    which silently mapped `gs://OTHER-BUCKET/secret/policy.pdf` to `policy.pdf` in
+    OUR bucket — reading a different document's bytes and attaching its text to
+    this row, with no error anywhere. It did the same to URLs
+    (`https://example.com/page` -> blob `page`). A path we cannot resolve must
+    fail loudly; guessing at it is how one document ends up holding another's
+    content.
+    """
+    if not gcs_path or not gcs_path.strip():
+        raise BadStoragePath("empty file_path")
+    if not gcs_path.startswith("gs://"):
+        raise SourceNotStored(f"file_path is not a GCS object: {gcs_path[:120]}")
+    rest = gcs_path[len("gs://"):]
+    if "/" not in rest:
+        raise BadStoragePath(f"no object name in path: {gcs_path[:120]}")
+    bucket, blob = rest.split("/", 1)
+    if bucket != bucket_name:
+        raise BadStoragePath(
+            f"path points at bucket {bucket!r}, not {bucket_name!r}: {gcs_path[:120]}")
+    if not blob.strip("/"):
+        raise BadStoragePath(f"empty object name: {gcs_path[:120]}")
+    return blob.lstrip("/")
+
+
 def html_to_plain_text(html: str) -> str:
     """
     Convert HTML to plain text (strip scripts/styles, get body text).
@@ -12,7 +71,10 @@ def html_to_plain_text(html: str) -> str:
     """
     if not html or not html.strip():
         return ""
-    soup = BeautifulSoup(html, "html.parser")
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+    except Exception as e:                    # malformed markup, recursion limits
+        raise ExtractionError(f"html parse failed: {type(e).__name__}: {e}") from e
     for tag in soup(["script", "style"]):
         tag.decompose()
     text = soup.get_text(separator="\n")
@@ -48,7 +110,10 @@ def extract_main_content(html: str) -> tuple[str, str]:
         return "", ""
     whole = html_to_plain_text(html)
 
-    soup = BeautifulSoup(html, "html.parser")
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+    except Exception as e:
+        raise ExtractionError(f"html parse failed: {type(e).__name__}: {e}") from e
     for tag in soup(list(_CHROME_TAGS)):
         tag.decompose()
     # decompose() detaches nodes, so a later match can hold a already-freed
@@ -127,7 +192,7 @@ def extract_text_from_bytes(content: bytes, ext: str) -> str:
         # NO blind UTF-8 decode. The old fallback turned every binary .xls into
         # mojibake and called it text — 149 documents whose real problem was a
         # missing parser, reported as content. Say what is true instead.
-        raise ValueError(f"unsupported_format: no parser for .{ext}")
+        raise UnsupportedFormat(f"unsupported_format: no parser for .{ext}")
 
 
 
@@ -153,7 +218,7 @@ RETRYABLE_REASONS = {"fetch_timeout", "upstream_error", "parser_crashed", "no_st
 # Retrying these produces the identical failure and hides the real fix.
 TERMINAL_REASONS = {"unsupported_format", "no_text_layer", "encrypted",
                     "empty_file", "text_below_threshold", "bad_storage_path",
-                    "boilerplate_only"}
+                    "boilerplate_only", "file_too_large", "corrupt_file"}
 MAX_INGEST_ATTEMPTS = 3
 
 # Formats with a real parser above. Anything else is unsupported_format — said
@@ -188,6 +253,22 @@ def classify_ingest_failure(content: bytes | None, ext: str,
     if error is not None:
         msg = f"{type(error).__name__}: {error}"[:500]
         low = msg.lower()
+        # TYPE first, string second. The string branches below are heuristics over
+        # third-party messages and will always be approximate; our own errors carry
+        # their meaning in the class, so read that where it exists. String-matching
+        # our own exception is how `unsupported_format` was mis-filed as
+        # `parser_crashed` and marked 149 unparseable files retryable.
+        if isinstance(error, UnsupportedFormat):
+            return "unsupported_format", msg
+        if isinstance(error, SourceNotStored):
+            return "no_stored_file", msg
+        if isinstance(error, BadStoragePath):
+            return "bad_storage_path", msg
+        if isinstance(error, FileTooLarge):
+            return "file_too_large", msg
+        if isinstance(error, PdfOpenFailed):
+            # An unopenable PDF is not retryable — the bytes will not change.
+            return "corrupt_file", msg
         # Transport first — a file we never received cannot be judged by type.
         if any(k in low for k in ("timeout", "timed out", "deadline", "connection reset")):
             return "fetch_timeout", msg
@@ -257,6 +338,8 @@ def split_into_paragraphs(text: str) -> list[dict]:
     Splits on double-newline boundaries; trims noise.  Used by org-doc ingest
     where full Path-B hierarchical chunking is not needed.
     """
+    if not text or not text.strip():
+        return []
     raw = re.split(r"\n\s*\n+", text.strip())
     paras = []
     for i, p in enumerate(raw):
@@ -277,20 +360,39 @@ async def extract_text_from_gcs(gcs_path: str) -> list[dict]:
     Extract text from PDF stored in GCS, page by page.
     Returns list of {page_number, text, extraction_status, extraction_error, text_length} dicts.
     """
-    # Download file from GCS to memory
-    client = storage.Client()
-    bucket = client.bucket(GCS_BUCKET)
-    
-    # Extract blob path from gcs_path (gs://bucket/path or gs://bucket/path/to/file.pdf)
-    prefix = f"gs://{GCS_BUCKET}/"
-    if gcs_path.startswith(prefix):
-        blob_path = gcs_path[len(prefix):].lstrip("/")
-    else:
-        blob_path = gcs_path.split("/")[-1]
-    blob = bucket.blob(blob_path)
-    
-    # Download to memory
-    pdf_bytes = blob.download_as_bytes()
+    # Resolve the path STRICTLY — see parse_gcs_path. A path we cannot resolve
+    # raises rather than falling back to a basename lookup in our own bucket,
+    # which could return a different document's bytes.
+    blob_path = parse_gcs_path(gcs_path, GCS_BUCKET)
+
+    # Every step below was previously unguarded: a missing object, a permissions
+    # failure or a transport error propagated as a raw google-cloud exception with
+    # no classification, which is how failures reached `documents` with no reason
+    # recorded against them.
+    try:
+        client = storage.Client()
+        bucket = client.bucket(GCS_BUCKET)
+        blob = bucket.blob(blob_path)
+        blob.reload()                              # size before we pull it into memory
+    except Exception as e:
+        if "404" in str(e) or "not found" in str(e).lower():
+            raise BadStoragePath(f"object not found: {gcs_path[:120]}") from e
+        raise ExtractionError(
+            f"could not reach storage for {gcs_path[:120]}: {type(e).__name__}: {e}") from e
+
+    size = blob.size or 0
+    if size > MAX_DOWNLOAD_BYTES:
+        raise FileTooLarge(
+            f"{size:,} bytes exceeds the {MAX_DOWNLOAD_BYTES:,} byte ceiling — "
+            f"downloading it would risk the worker rather than one document")
+
+    try:
+        pdf_bytes = blob.download_as_bytes()
+    except Exception as e:
+        raise ExtractionError(
+            f"download failed for {gcs_path[:120]}: {type(e).__name__}: {e}") from e
+    if not pdf_bytes:
+        raise ExtractionError(f"object is empty: {gcs_path[:120]}")
     
     # Extract text page by page with error tracking
     pages = []
@@ -329,8 +431,11 @@ async def extract_text_from_gcs(gcs_path: str) -> list[dict]:
             pages.append(page_data)
     
     except Exception as e:
-        # If we can't even open the PDF, return error for all pages
-        raise Exception(f"Failed to open PDF: {str(e)}")
+        # Typed, and chained. `raise Exception(...)` discarded both the class and
+        # the traceback, so the classifier could only pattern-match a string and
+        # every open failure looked the same from the outside.
+        raise PdfOpenFailed(f"failed to open PDF {gcs_path[:120]}: "
+                            f"{type(e).__name__}: {e}") from e
     
     finally:
         if doc:
