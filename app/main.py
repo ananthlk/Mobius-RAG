@@ -4910,6 +4910,14 @@ _DUP_RULES: dict[str, dict] = {
         "overturn": "mark as a duplicate — one product loses its copy",
     },
     "near_duplicate": {
+        # Routed AWAY from dedup. A-17 amendment 2, which this seat accepted:
+        # near_duplicate WITH a date relationship is an edition chain, and editions
+        # are decided at the versioning gate where the prior stays published as
+        # history. Counting them as dedup work put four version pairs in a queue
+        # that asks "which copy should we delete" — the exact framing that
+        # amendment exists to prevent. Fact Store's parity test found them: their
+        # 33 was right and this seat's 38 was wrong.
+        "routes_to": "versioning",
         "verdict": "not_duplicate", "rule": "dated overlap — a version pair",
         "why": "high overlap WITH a date relationship, so this is an edition chain. "
                "Versions belong to versioning, where the prior stays published as history",
@@ -4940,8 +4948,13 @@ _DUP_RULES: dict[str, dict] = {
 # Which rules a person can actually settle. Derived from _DUP_RULES so the feed,
 # the filter and the summary can never disagree about what "actionable" means —
 # three copies of that judgement is how the counts drifted in the first place.
-_ACTIONABLE_KINDS = sorted(k for k, v in _DUP_RULES.items() if v["verdict"] != "undecided")
-_BLOCKED_KINDS = sorted(k for k, v in _DUP_RULES.items() if v["verdict"] == "undecided")
+# Actionable IN THE DEDUP QUEUE. A rule that routes elsewhere is real work, just
+# not this queue's work, and counting it here would inflate a shared number with a
+# population the other seat cannot resolve.
+_ACTIONABLE_KINDS = sorted(k for k, v in _DUP_RULES.items()
+                           if v["verdict"] != "undecided" and not v.get("routes_to"))
+_BLOCKED_KINDS = sorted(k for k, v in _DUP_RULES.items()
+                        if v["verdict"] == "undecided" or v.get("routes_to"))
 
 _VERDICT_ORDER = ["duplicate", "not_duplicate", "undecided"]
 _VERDICT_LABEL = {
@@ -5078,7 +5091,8 @@ def corpus_duplicates_feed(claimed: str | None = None, payer: str | None = None,
             verdict = meta.get("verdict", "undecided")
             # A pair a person cannot actually settle should not be counted as their
             # backlog. Undecided-for-want-of-evidence is a data problem.
-            actionable_flag = verdict != "undecided"
+            routed = meta.get("routes_to")
+            actionable_flag = verdict != "undecided" and not routed
             g = {
                 "group_id": f"{min(did, pid)}:{max(did, pid)}",
                 "duplicate_kind": k, "verdict": verdict,
@@ -5089,8 +5103,11 @@ def corpus_duplicates_feed(claimed: str | None = None, payer: str | None = None,
                 "ownership": own if own in ("true", "false") else "unassessed",
                 "claimed": own == "true",
                 "human_actionable": actionable_flag,
-                "blocked_reason": None if actionable_flag else
-                    "no edition date on either side — needs data, not a decision",
+                "routes_to": routed,
+                "blocked_reason": None if actionable_flag else (
+                    f"decided at the {routed} gate, not here — the prior edition stays "
+                    f"published as history" if routed else
+                    "no edition date on either side — needs data, not a decision"),
                 "recommended_action": {
                     "duplicate": "retire_duplicate",
                     "not_duplicate": "keep_both",
