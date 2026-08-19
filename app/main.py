@@ -7475,13 +7475,16 @@ async def upload_file(
                 source_metadata_value, source_url=source_url, agent_scope=agent_scope),
         )
         db.add(document)
+        await db.commit()
+        await db.refresh(document)
+        # AFTER refresh, not before commit: document.id is assigned on flush, so
+        # recording earlier produced ledger rows with a NULL document_id — a row
+        # that cannot be joined to the thing it describes. Caught by the probe.
         record_ingest_txn("instant_rag" if agent_scope else "upload",
                           "created", document_id=document.id,
                           filename=getattr(document, "filename", None),
                           file_hash=getattr(document, "file_hash", None),
                           source_url=getattr(document, "file_path", None))
-        await db.commit()
-        await db.refresh(document)
 
         # Start text extraction (async in background)
         # For now, do it synchronously but could be moved to background task
@@ -7970,12 +7973,15 @@ async def import_document_from_gcs(
             source_metadata=ingest_source_metadata("gcs_import", meta_dict),
         )
         db.add(document)
+        await db.commit()
+        await db.refresh(document)
+        # AFTER refresh, not before commit: document.id is assigned on flush, so
+        # recording earlier produced ledger rows with a NULL document_id — a row
+        # that cannot be joined to the thing it describes. Caught by the probe.
         record_ingest_txn("gcs_import", "created", document_id=document.id,
                           filename=getattr(document, "filename", None),
                           file_hash=getattr(document, "file_hash", None),
                           source_url=getattr(document, "file_path", None))
-        await db.commit()
-        await db.refresh(document)
 
         try:
             document.status = "extracting"
@@ -8273,12 +8279,15 @@ async def import_document_from_html(
         status="uploaded",
     )
     db.add(document)
+    await db.commit()
+    await db.refresh(document)
+    # AFTER refresh, not before commit: document.id is assigned on flush, so
+    # recording earlier produced ledger rows with a NULL document_id — a row
+    # that cannot be joined to the thing it describes. Caught by the probe.
     record_ingest_txn("html_import", "created", document_id=document.id,
                       filename=getattr(document, "filename", None),
                       file_hash=getattr(document, "file_hash", None),
                       source_url=getattr(document, "file_path", None))
-    await db.commit()
-    await db.refresh(document)
 
     # ── Extract → DocumentPage rows ────────────────────────────────
     try:
@@ -9543,12 +9552,15 @@ async def import_scraped_pages(
         status="completed",
     )
     db.add(document)
+    await db.commit()
+    await db.refresh(document)
+    # AFTER refresh, not before commit: document.id is assigned on flush, so
+    # recording earlier produced ledger rows with a NULL document_id — a row
+    # that cannot be joined to the thing it describes. Caught by the probe.
     record_ingest_txn("scraped_pages", "created", document_id=document.id,
                       filename=getattr(document, "filename", None),
                       file_hash=getattr(document, "file_hash", None),
                       source_url=getattr(document, "file_path", None))
-    await db.commit()
-    await db.refresh(document)
 
     for i, (url, text) in enumerate(page_texts):
         raw_text = sanitize_text_for_db(text) if text else None
