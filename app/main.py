@@ -15531,6 +15531,16 @@ def _persist_bank_state(job_id: str, state: dict):
     (a/b/c/d/s), so a run finishing right before the next deploy would
     otherwise vanish with no way to recover it."""
     import json as _json
+    # The directory is no longer shipped in the image — eval/artifacts held 1.5 GB
+    # of historical run outputs and made every build context 2.4 GB. Nothing here
+    # ever called makedirs, so without this the first write on a fresh revision
+    # would raise FileNotFoundError. The docstring above already notes the
+    # container filesystem is wiped on every deploy; this makes that survivable.
+    try:
+        import os as _os
+        _os.makedirs(_os_path_join_root("eval/artifacts"), exist_ok=True)
+    except Exception as _mk:
+        logger.debug("could not ensure eval/artifacts exists: %s", _mk)
     payload = {
         "job_id": job_id, "forced_strategy": state["forced_strategy"],
         "caller_mode": state.get("caller_mode"), "name": state.get("name"),

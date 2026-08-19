@@ -36,3 +36,13 @@ logs/
 docs/
 tests/
 scripts/
+
+# Eval run artifacts — 1.5 GB of historical trace-explorer output (66 files at
+# ~43 MB each) that made every build context 2.4 GB and every deploy an 8-10
+# minute round trip. They are per-job RESULTS, not inputs: a fresh container has
+# no use for a run that finished in July, and _persist_bank_state already mirrors
+# every write to GCS precisely because the container filesystem is wiped on each
+# deploy. The directory itself is kept (see .gitkeep) and the writer now
+# makedirs, so nothing depends on these files being present.
+eval/artifacts/*
+!eval/artifacts/.gitkeep
