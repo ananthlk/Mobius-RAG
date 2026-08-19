@@ -37,6 +37,42 @@ class Document(Base):
     # /admin/cleanup_expired_documents cron once now() > expires_at.
     # Migration: add_documents_expires_at.py.
     expires_at = Column(DateTime, nullable=True)
+    # WHY ingest failed, and how many times we have tried. Migration 033.
+    #
+    # These existed as DB columns for a while before appearing here, which is a
+    # trap worth naming: the sweep scripts write them with raw SQL and worked
+    # fine, so the gap only surfaced when an ORM path assigned one and /upload
+    # returned 500 with "'Document' object has no attribute
+    # ingest_failure_reason". A column added by migration is not usable by the
+    # application until the model knows about it.
+    ingest_failure_reason = Column(String, nullable=True)
+    ingest_error_message = Column(String, nullable=True)
+    ingest_attempts = Column(Integer, default=0, nullable=False)
+    ingest_last_attempt_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Versioning / lifecycle, migrations 027 and later. These were live in the DB
+    # and absent here — eleven columns the application could not read or write,
+    # each a 500 waiting for the first ORM code that touched it, exactly as
+    # ingest_failure_reason was. They have only ever been written by raw-SQL
+    # scripts, which is why nothing noticed.
+    doc_key = Column(String, nullable=True)
+    doc_type = Column(String, nullable=True)
+    content_digest = Column(String, nullable=True)
+    content_signals = Column(String, nullable=True)
+    version_no = Column(Integer, nullable=True)
+    supersedes_id = Column(UUID(as_uuid=True), nullable=True)
+    # lifecycle_state is CHECK-constrained to active | retired | shelved |
+    # quarantined. An earlier run tried 'superseded' and the constraint rolled the
+    # whole transaction back, which is the only reason a vocabulary slip did not
+    # become 152 half-cleaned documents.
+    lifecycle_state = Column(String, nullable=True)
+    retired_at = Column(DateTime(timezone=True), nullable=True)
+    last_validated_at = Column(DateTime(timezone=True), nullable=True)
+    # Provenance for termination_date. ck_documents_term_date_provenance requires
+    # this whenever termination_date is set — the constraint that took ingest down
+    # for a day when /upload invented a TTL without one.
+    termination_date_source = Column(String, nullable=True)
+    policy_lexicon_revision_b = Column(BigInteger, nullable=True)
 
 
 class DocumentPage(Base):
