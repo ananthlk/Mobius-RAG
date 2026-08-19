@@ -1,8 +1,15 @@
 """Duplicate cleanup — the non-human loop.
 
-POLICY (Ananth, 2026-08-18):
-  unmanaged duplicates  -> cleaned automatically, no human wait
-  managed duplicates    -> held from publishing, human adjudicates
+POLICY (Ananth, 2026-08-18, corrected):
+  claimed=true   Fact Store owns it -> held, a person decides
+  claimed=false  looked at, declined -> auto-cleaned
+  claimed absent nobody assessed it  -> auto-cleaned
+
+  The first run of this script used "has a payor_classification blob" as the
+  ownership test. That only means a CLASSIFIER RAN. The blob carries an explicit
+  `claimed` flag, and ignoring it held 1,933 AHCA documents Fact Store had
+  explicitly DECLINED in a human queue they did not belong in. Only `claimed=true`
+  is waiting on a person; everything else is ours to resolve.
 
 WHAT "CLEANED" MEANS, PRECISELY
   lifecycle_state is set to 'retired' — the value the DB constraint ratifies
@@ -31,6 +38,12 @@ CANONICAL RULE
   survivor; resolving pair-by-pair would retire B twice from two different keeps.
 
 SAFETY GATES (each aborts the group, not the run)
+  0. NEVER overturn a human. A pair where either document already carries a
+     resolving decision — from the Payor work queue, from a bulk action, or from a
+     previous cleanup — is skipped outright. Automatic cleanup exists to handle
+     what nobody is looking at; re-deciding something a person already ruled on is
+     the worst failure this script could have, because it would be silent and it
+     would look like the machine disagreeing with the human.
   1. normalized page text must be md5-identical — identity is proven per document
      at cleanup time, not inherited from the earlier scoring run
   2. the canonical must itself be published, or removing its twin would take the
@@ -92,10 +105,27 @@ async def main():
     for x in list(par):
         comp[find(x)].append(x)
 
+    # Documents a person (or an earlier run) has already decided.
+    decided = {r["id"] for r in await c.fetch("""
+        SELECT DISTINCT x.id::text AS id FROM (
+          SELECT document_id AS id FROM corpus_cleanup_actions
+          WHERE action IN ('retired_unpublished','kept_not_duplicate','shelved',
+                           'mark_product_variant','mark_period_series','keep_both',
+                           'reclassify_as_version','retire_duplicate','held_for_human')
+          UNION
+          SELECT canonical_id AS id FROM corpus_cleanup_actions
+          WHERE canonical_id IS NOT NULL
+            AND action IN ('retired_unpublished','kept_not_duplicate','shelved',
+                           'mark_product_variant','mark_period_series','keep_both',
+                           'reclassify_as_version','retire_duplicate','held_for_human')
+          UNION
+          SELECT id FROM documents WHERE lifecycle_state IS NOT NULL
+        ) x WHERE x.id IS NOT NULL""")}
+
     rows = await c.fetch("""
         SELECT d.id::text AS id, d.filename, d.created_at, d.file_path,
-               COALESCE(jsonb_typeof(d.source_metadata)='object'
-                        AND d.source_metadata ? 'payor_classification', false) AS managed,
+               COALESCE(d.source_metadata->'payor_classification'->>'claimed' = 'true',
+                        false) AS managed,
                (SELECT count(*) FROM rag_published_embeddings e WHERE e.document_id=d.id) AS pub,
                (SELECT count(*) FROM document_pages p WHERE p.document_id=d.id) AS pages
         FROM documents d WHERE d.id::text = ANY($1::text[])""", list(par))
@@ -107,6 +137,10 @@ async def main():
     for root, mem in comp.items():
         mem = [x for x in mem if x in m]
         if len(mem) < 2:
+            continue
+        # gate 0 — a decision already exists somewhere in this group
+        if any(x in decided for x in mem):
+            skipped["already_decided"] += len(mem) - 1
             continue
         mem.sort(key=lambda x: (m[x]["created_at"], x))
         keep = mem[0]
@@ -133,8 +167,8 @@ async def main():
             planned.append((r, keep))
 
     print(f"groups                     : {sum(1 for v in comp.values() if len(v) > 1)}")
-    print(f"unmanaged -> auto-clean    : {len(planned)}")
-    print(f"managed   -> held for human: {len(held)}")
+    print(f"not claimed -> auto-clean  : {len(planned)}")
+    print(f"claimed     -> held, human  : {len(held)}")
     for k, v in skipped.items():
         print(f"skipped ({k}) : {v}")
 
