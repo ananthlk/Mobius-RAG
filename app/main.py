@@ -4327,11 +4327,12 @@ def corpus_health(payer: str | None = None,
         # `retryable` is shown separately because it is the only part that a
         # sweep can fix. Everything else needs a parser, an OCR step, or a
         # decision — and showing them together implies work that retrying cannot do.
-        _RETRYABLE = ("fetch_timeout", "upstream_error", "parser_crashed")
+        _RETRYABLE = ("fetch_timeout", "upstream_error", "parser_crashed", "no_stored_file")
         _REASON_FIX = {
             "unsupported_format":   "needs a parser for this file type",
             "no_text_layer":        "scanned image — needs OCR",
             "bad_storage_path":     "file_path is malformed; bytes unreachable",
+            "no_stored_file":       "never archived — re-fetch from the source URL",
             "empty_file":           "nothing to extract — discard candidate",
             "text_below_threshold": "parsed to a stub; little to index",
             "encrypted":            "password protected",

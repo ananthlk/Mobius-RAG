@@ -107,13 +107,15 @@ async def main():
                     break
                 except Exception as e:
                     err = e
-                    reason, _ = classify_ingest_failure(content, ext_of(r["filename"]), None, e)
+                    reason, _ = classify_ingest_failure(content, ext_of(r["filename"]), None, e,
+                                                       storage_path=r["file_path"])
                     if not should_retry(reason, attempts):
                         break          # deterministic — a second attempt is waste
         else:
             attempts += 1
 
-        reason, msg = classify_ingest_failure(content, ext_of(r["filename"]), text, err)
+        reason, msg = classify_ingest_failure(content, ext_of(r["filename"]), text, err,
+                                              storage_path=r["file_path"])
         verdicts[reason or "REPAIRED — extracts fine now"] += 1
         if reason is None:
             repaired.append((r["id"], r["filename"], len(text or "")))

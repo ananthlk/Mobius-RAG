@@ -77,7 +77,10 @@ def extract_text_from_bytes(content: bytes, ext: str) -> str:
 # long as the reason went unrecorded.
 
 # Retrying these is free information — the next attempt may well succeed.
-RETRYABLE_REASONS = {"fetch_timeout", "upstream_error", "parser_crashed"}
+# `no_stored_file` is retryable, but by a DIFFERENT mechanism: re-fetch the URL,
+# not re-extract bytes we never had. Kept in this set so the sweep surfaces it as
+# recoverable rather than terminal.
+RETRYABLE_REASONS = {"fetch_timeout", "upstream_error", "parser_crashed", "no_stored_file"}
 # Retrying these produces the identical failure and hides the real fix.
 TERMINAL_REASONS = {"unsupported_format", "no_text_layer", "encrypted",
                     "empty_file", "text_below_threshold", "bad_storage_path"}
@@ -92,7 +95,8 @@ EMPTY_FILE_BYTES = 2048
 
 
 def classify_ingest_failure(content: bytes | None, ext: str,
-                            text: str | None, error: BaseException | None = None
+                            text: str | None, error: BaseException | None = None,
+                            storage_path: str | None = None
                             ) -> tuple[str | None, str | None]:
     """Return (reason, message), or (None, None) when the extraction is usable.
 
@@ -101,6 +105,16 @@ def classify_ingest_failure(content: bytes | None, ext: str,
     guessing at its type.
     """
     ext_l = (ext or "").lower().strip(".")
+    # A document whose file_path is a URL was never archived: scraped pages put
+    # their text straight into document_pages and keep the source URL here. That
+    # is NOT a malformed path, and the difference decides the fix — a malformed
+    # path needs repair, an un-archived page needs a RE-FETCH from the URL we
+    # already hold. 175 documents were about to be filed as corrupt when they are
+    # simply not stored.
+    if storage_path and not storage_path.startswith("gs://"):
+        if error is not None or not (text or "").strip():
+            return "no_stored_file", f"file_path is not a GCS object: {storage_path[:120]}"
+
     if error is not None:
         msg = f"{type(error).__name__}: {error}"[:500]
         low = msg.lower()
