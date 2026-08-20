@@ -135,6 +135,17 @@
   .kv .k{font-family:var(--mono);font-size:.72rem;color:var(--tx-3);padding-top:.1rem}
   .kv .v{color:var(--tx-2);word-break:break-word}
   .kv .v .chip{margin:0 .2rem .2rem 0}
+  /* query autocomplete */
+  .ac-wrap{position:relative}
+  .ac{position:absolute;top:100%;left:0;right:0;z-index:30;background:var(--card);border:1px solid var(--line-2);
+    border-radius:var(--r);box-shadow:var(--sh-lg);max-height:280px;overflow:auto;margin-top:.25rem}
+  .ac .hd{padding:.4rem .7rem;font-family:var(--mono);font-size:.64rem;letter-spacing:.09em;text-transform:uppercase;color:var(--tx-3);background:var(--bg-2);border-bottom:1px solid var(--line);position:sticky;top:0}
+  .ac .opt{padding:.5rem .7rem;font-size:.83rem;cursor:pointer;border-bottom:1px solid var(--line);display:flex;gap:.6rem;align-items:baseline}
+  .ac .opt:last-child{border-bottom:0}
+  .ac .opt.active,.ac .opt:hover{background:var(--accent-weak)}
+  .ac .opt .qt{flex:1;color:var(--tx);line-height:1.35}
+  .ac .opt .meta{font-family:var(--mono);font-size:.66rem;color:var(--tx-3);white-space:nowrap;flex:none}
+  .ac .opt mark{background:transparent;color:var(--accent);font-weight:600}
   @media(max-width:780px){.shell{grid-template-columns:1fr}.rail{position:static;height:auto;flex-direction:row;flex-wrap:wrap;border-right:0;border-bottom:1px solid var(--line)}.brand{width:100%}.railcap,.railsep,.railfoot{display:none}.kv{grid-template-columns:1fr}}
   svg{display:block}
 </style>
@@ -161,8 +172,11 @@
 
     <div class="card pad" style="margin-top:1rem">
       <div class="fld">
-        <label>Query <span class="hint">what you’re asking the engine</span></label>
-        <textarea class="inp" id="q" rows="2" placeholder="e.g. What is the CMHC timely-filing deadline for a corrected claim?"></textarea>
+        <label>Query <span class="hint">start typing — it completes from your history</span></label>
+        <div class="ac-wrap">
+          <textarea class="inp" id="q" rows="2" autocomplete="off" placeholder="e.g. What is the CMHC timely-filing deadline for a corrected claim?"></textarea>
+          <div class="ac" id="q-sugg" hidden></div>
+        </div>
       </div>
       <div class="composer-bar">
         <div class="cfg-summary" id="summary">
@@ -243,6 +257,47 @@
   var runBtn=$('#runBtn');
   runBtn.addEventListener('click', runQuery);
   $('#q').addEventListener('keydown',function(e){ if((e.metaKey||e.ctrlKey)&&e.key==='Enter') runQuery(); });
+
+  // ---- query autocomplete from history (real prior/chat queries) ----
+  var histQueries=[], histLoaded=false, qEl=$('#q'), suggEl=$('#q-sugg'), curSugg=[], activeIdx=-1;
+  function loadHistory(){
+    if(histLoaded || !keyIn.value.trim()) return;
+    histLoaded=true;
+    fetch('/admin/trace-explorer/history?limit=200',{headers:authHeaders()})
+      .then(function(r){ return r.ok?r.json():{history:[]}; })
+      .then(function(d){ var seen={}; (d.history||[]).forEach(function(h){ var q=(h.query||'').trim(); var k=q.toLowerCase();
+        if(q && !seen[k]){ seen[k]=1; histQueries.push({q:q, strat:h.strategy_chosen, src:h.source}); } });
+        renderSugg(); })  // re-render once history has arrived
+      .catch(function(){ histLoaded=false; });
+  }
+  function reEsc(s){ return s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'); }
+  function renderSugg(){
+    var v=qEl.value.trim().toLowerCase();
+    if(!v || !histQueries.length){ suggEl.hidden=true; return; }
+    curSugg=histQueries.filter(function(h){ return h.q.toLowerCase().indexOf(v)!==-1 && h.q.toLowerCase()!==v; }).slice(0,8);
+    if(!curSugg.length){ suggEl.hidden=true; return; }
+    activeIdx=-1;
+    var rx=new RegExp('('+reEsc(v)+')','ig');
+    suggEl.innerHTML='<div class="hd">'+curSugg.length+' from your history</div>'+curSugg.map(function(h,i){
+      return '<div class="opt" data-i="'+i+'"><span class="qt">'+esc(h.q).replace(rx,'<mark>$1</mark>')+'</span>'
+        +'<span class="meta">'+(h.strat?esc(h.strat):'')+(h.src?' · '+esc(h.src):'')+'</span></div>'; }).join('');
+    suggEl.hidden=false;
+    $$('.opt',suggEl).forEach(function(o){ o.addEventListener('mousedown',function(e){ e.preventDefault(); pick(+o.getAttribute('data-i')); }); });
+  }
+  function pick(i){ if(curSugg[i]){ qEl.value=curSugg[i].q; suggEl.hidden=true; qEl.focus(); } }
+  function hlActive(){ $$('.opt',suggEl).forEach(function(o,i){ o.classList.toggle('active', i===activeIdx); }); }
+  qEl.addEventListener('focus', function(){ loadHistory(); renderSugg(); });
+  qEl.addEventListener('input', function(){ loadHistory(); renderSugg(); });
+  qEl.addEventListener('keydown', function(e){
+    if(suggEl.hidden) return;
+    if(e.key==='ArrowDown'){ e.preventDefault(); activeIdx=Math.min(curSugg.length-1,activeIdx+1); hlActive(); }
+    else if(e.key==='ArrowUp'){ e.preventDefault(); activeIdx=Math.max(0,activeIdx-1); hlActive(); }
+    else if(e.key==='Enter' && activeIdx>=0){ e.preventDefault(); pick(activeIdx); }
+    else if(e.key==='Escape'){ suggEl.hidden=true; }
+  });
+  qEl.addEventListener('blur', function(){ setTimeout(function(){ suggEl.hidden=true; }, 150); });
+  keyIn.addEventListener('change', function(){ histLoaded=false; histQueries=[]; loadHistory(); });
+  loadHistory();  // proactive: if a key is already stored, prime history now
 
   function setStatus(kind,label){ $('#statusdot').className='dot'+(kind?' '+kind:''); $('#statuslbl').textContent=label; }
 
