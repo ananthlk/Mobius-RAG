@@ -541,22 +541,40 @@
   }
 
   function evalPanel(ev,body,evaled){
-    if(!body.run_eval) return '<div class="empty"><b>Eval was off for this run.</b><br>Open ⋮ → Evaluate to score it reference-free or against a golden answer.</div>';
+    if(!body.run_eval) return '<div class="empty"><b>Eval was off for this run.</b><br>Open ⋮ → Evaluate to grade it reference-free (no gold) or against a golden answer.</div>';
     if(!ev) return '<div class="empty">No eval block returned.</div>';
-    if(ev.error) return '<div class="callout"><b>Grade quarantined.</b> '+esc(ev.note||'the judge returned an error')+(ev.error_transient?' (transient — retry)':'')+'</div>';
-    var mode = body.must_facts?'Vs golden':'Reference-free';
+    if(ev.error) return '<div class="callout"><b>Grade quarantined.</b> '+esc(ev.note||'the judge returned an error')+(ev.error_transient?' (transient — retry)':'')+(ev.synth_error?'<br><span class="mono" style="font-size:.72rem">'+esc(ev.synth_error)+'</span>':'')+'</div>';
+    var refFree = (ev.mode==='reference_free') || (ev.mode==null && !body.must_facts);
     var rulerOk = (ev.ruler_ok!=null) ? ev.ruler_ok : (String(ev.judge_model||'').toLowerCase().indexOf('gemini-2.5-pro')!==-1);
-    var out='<div class="panel-h">Grade <span class="chip">'+mode+'</span></div>';
-    if(!rulerOk) out='<div class="callout"><b>Ruler quarantine — not comparable.</b> Graded by <span class="mono">'+esc(ev.judge_model||'?')+'</span>, not the locked <span class="mono">gemini-2.5-pro</span> (a hard-fallback when pro is unavailable). Treat this score as non-authoritative; do not compare it to a pro-graded run.</div>'+out;
-    out+='<div class="kpi">'+kcard(pct(ev.coverage),'retriever coverage', ev.coverage>=0.7?'good':(ev.coverage<0.3?'bad':''))
-      + kcard(ev.coverage_answer==null?'abstain':pct(ev.coverage_answer),'synthesis coverage', ev.coverage_answer>=0.7?'good':(ev.coverage_answer!=null&&ev.coverage_answer<0.3?'bad':''))
-      + kcard((ev.hallucinated_claims||[]).length,'hallucinated', (ev.hallucinated_claims||[]).length?'bad':'good')
-      +'</div>';
-    var facts=ev.facts||[];
-    if(facts.length){ out+='<div class="panel-h" style="margin-top:1rem">Facts</div><div class="tablewrap facts"><table><thead><tr><th>fact</th><th>in chunk</th><th>contradicted</th><th class="num">support</th></tr></thead><tbody>';
-      facts.forEach(function(f){ out+='<tr><td>'+esc(f.fact)+'</td><td>'+(f.in_chunk?'<span class="yes">yes</span>':'<span class="no">no</span>')+'</td><td>'+(f.contradicted?'<span class="no">yes</span>':'no')+'</td><td class="num">'+num(f.support)+'</td></tr>'; });
-      out+='</tbody></table></div>'; }
-    if(mode==='Reference-free') out+='<div class="callout" style="border-left-color:var(--accent);background:var(--accent-weak)">Reference-free: this measures groundedness &amp; citation, not correctness. Calibrated ≠ correct — a grounded answer on a superseded chunk is still wrong.</div>';
+    var out='<div class="panel-h">Grade <span class="chip">'+(refFree?'Reference-free':'Vs golden')+'</span></div>';
+    if(!rulerOk && ev.judge_model) out='<div class="callout"><b>Ruler quarantine — not comparable.</b> Graded by <span class="mono">'+esc(ev.judge_model||'?')+'</span>, not the locked <span class="mono">gemini-2.5-pro</span> (a hard-fallback when pro is unavailable). Treat this score as non-authoritative.</div>'+out;
+
+    if(refFree){
+      var g=ev.groundedness;
+      out+='<div class="kpi">'
+        + kcard(g==null?'—':Math.round(g*100)+'%','groundedness', g!=null&&g>=0.7?'good':(g!=null&&g<0.3?'bad':''))
+        + kcard((ev.n_grounded!=null?ev.n_grounded:'—')+' / '+(ev.n_claims!=null?ev.n_claims:'—'),'grounded claims','')
+        + kcard((ev.hallucinated_claims||[]).length,'hallucinated', (ev.hallucinated_claims||[]).length?'bad':'good')
+        + kcard(ev.honest_abstain?'yes':(ev.honest_abstain==null?'—':'no'),'honest abstain', ev.honest_abstain?'good':'')
+        +'</div>';
+      var claims=ev.claims||ev.facts||[];
+      if(claims.length){ out+='<div class="panel-h" style="margin-top:1rem">Claim ledger <span class="chip">'+claims.length+'</span></div><div class="tablewrap facts"><table><thead><tr><th>claim (from the answer)</th><th>grounded</th><th>contradicted</th><th class="num">support</th></tr></thead><tbody>';
+        claims.forEach(function(c){ out+='<tr><td>'+esc(c.fact)+'</td><td>'+(c.grounded?'<span class="yes">yes</span>':'<span class="no">no</span>')+'</td><td>'+(c.contradicted?'<span class="no">yes</span>':'no')+'</td><td class="num">'+num(c.support)+'</td></tr>'; });
+        out+='</tbody></table></div>'; }
+      else { out+='<div class="empty">'+esc(ev.note||'no claims to ground')+'</div>'; }
+      var hall=ev.hallucinated_claims||[];
+      if(hall.length){ out+='<div class="panel-h" style="margin-top:1rem">Hallucinated claims <span class="chip">'+hall.length+'</span></div><ul style="margin:.3rem 0 0;padding-left:1.1rem;font-size:.82rem;color:var(--err)">'+hall.map(function(h){return '<li>'+esc(h)+'</li>';}).join('')+'</ul>'; }
+      out+='<div class="callout" style="border-left-color:var(--accent);background:var(--accent-weak);margin-top:.8rem">Reference-free measures <b>faithfulness to the retrieved chunks</b>, not correctness — the primary grade when there is no answer key. An honest abstention is good. <b>Calibrated ≠ correct</b>: a grounded answer on a superseded chunk is still wrong.</div>';
+    } else {
+      out+='<div class="kpi">'+kcard(pct(ev.coverage),'retriever coverage', ev.coverage>=0.7?'good':(ev.coverage<0.3?'bad':''))
+        + kcard(ev.coverage_answer==null?'abstain':pct(ev.coverage_answer),'synthesis coverage', ev.coverage_answer>=0.7?'good':(ev.coverage_answer!=null&&ev.coverage_answer<0.3?'bad':''))
+        + kcard((ev.hallucinated_claims||[]).length,'hallucinated', (ev.hallucinated_claims||[]).length?'bad':'good')
+        +'</div>';
+      var facts=ev.facts||[];
+      if(facts.length){ out+='<div class="panel-h" style="margin-top:1rem">Facts</div><div class="tablewrap facts"><table><thead><tr><th>fact</th><th>in chunk</th><th>contradicted</th><th class="num">support</th></tr></thead><tbody>';
+        facts.forEach(function(f){ out+='<tr><td>'+esc(f.fact)+'</td><td>'+(f.in_chunk?'<span class="yes">yes</span>':'<span class="no">no</span>')+'</td><td>'+(f.contradicted?'<span class="no">yes</span>':'no')+'</td><td class="num">'+num(f.support)+'</td></tr>'; });
+        out+='</tbody></table></div>'; }
+    }
     out+='<div class="stamp">ruler: <b>'+esc(ev.judge_model||'—')+'</b>'+(ev.fact_checker_version?' · '+esc(ev.fact_checker_version):'')+'</div>';
     return out;
   }

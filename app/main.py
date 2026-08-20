@@ -15606,61 +15606,47 @@ async def _run_trace_for_query(
     }
 
     eval_result = None
-    if run_eval and must_facts:
+    if run_eval:
         from app.services.fact_checker import check_facts, FACT_CHECKER_VERSION
         chunks = [
             {"chunk_id": c.get("chunk_id"), "text": c.get("text")}
             for c in (contract_dict.get("chunks") or [])
         ]
-        # Tier 1 telemetry (Eval's ruling, 2026-08-04): a bank-summary row
-        # must be self-describing enough to tell WITHOUT cross-referencing
-        # anything whether it's comparable to another row -- grader identity
-        # + error state BEFORE more metrics. Every calibration disaster this
-        # week (700-char truncation, dev-fallback ruler, mixed pro/flash) was
-        # a row that looked valid but was graded by a different/broken
-        # instrument.
-        verdict = await check_facts(
-            query=query, must_facts=must_facts, chunks=chunks,
-            answer=None, stage="rag_eval_adjudicate",
-        )
-        n_contradicted = sum(1 for v in (getattr(verdict, "verdicts", None) or []) if v.contradicted)
-        eval_result = {
-            "coverage": getattr(verdict, "coverage", None),  # retrieval-recall (in_chunk view)
-            "coverage_answer": None,  # filled below -- synthesized-recall (in_answer view)
-            "facts": [
-                {
-                    "fact": getattr(v, "fact", "?"), "support": v.support,
-                    "in_chunk": v.support >= 0.5, "contradicted": v.contradicted,
-                    "passage": v.passage,
-                }
-                for v in (getattr(verdict, "verdicts", None) or [])
-            ],
-            "n_contradicted": n_contradicted,
-            "hallucinated_claims": [],  # filled below -- needs a synthesized answer to exist
-            # Grader-identity stamp -- non-negotiable per Eval's ruling. Lets
-            # any consumer tell from the row ALONE whether it's comparable to
-            # another row, without cross-referencing a deploy timeline.
-            "fact_checker_version": FACT_CHECKER_VERSION,
-            "judge_model": getattr(verdict, "model", None),
-            # Locked-ruler parity (Eval, 2026-08-20): the adjudicate stage is
-            # pinned to gemini-2.5-pro, but hard-falls-back to flash when pro is
-            # unavailable (rate-limit/degraded). A flash-graded row is NOT
-            # comparable to a pro-graded one (decalibrated). ruler_ok=False lets
-            # any consumer quarantine the row instead of silently trusting it.
-            "ruler_ok": ("gemini-2.5-pro" in (str(getattr(verdict, "model", "")) or "").lower()),
-            "error": bool(getattr(verdict, "error", False)),
-            "error_transient": bool(getattr(verdict, "error_transient", False)),
-            "note": ("coverage = retrieval-recall (must_facts vs retrieved chunks, chunk-only "
-                     "mode). coverage_answer = synthesized-recall (must_facts vs a real answer "
-                     "synthesized from those same chunks) -- the gap between the two is the "
-                     "synthesis-loss curve (Eval's biggest calibration lever)."),
-        }
+        reference_free = not must_facts  # no gold answer key -> faithfulness critic
 
-        # Synthesized-recall pass (in_answer view) -- mirrors
-        # scripts/prefix_grade_3mode.py's synthesize()+mode-b grading, same
-        # discipline: a real synth call, then check_facts AGAINST that real
-        # answer (not None), so hallucinated_claims/grounded/contradicted-vs-
-        # answer are meaningful rather than structurally empty.
+        if not reference_free:
+            # ---- Vs golden: chunk-only retrieval coverage (unchanged) ----
+            verdict = await check_facts(
+                query=query, must_facts=must_facts, chunks=chunks,
+                answer=None, stage="rag_eval_adjudicate",
+            )
+            n_contradicted = sum(1 for v in (getattr(verdict, "verdicts", None) or []) if v.contradicted)
+            eval_result = {
+                "mode": "vs_golden",
+                "coverage": getattr(verdict, "coverage", None),
+                "coverage_answer": None,
+                "facts": [
+                    {
+                        "fact": getattr(v, "fact", "?"), "support": v.support,
+                        "in_chunk": v.support >= 0.5, "contradicted": v.contradicted,
+                        "passage": v.passage,
+                    }
+                    for v in (getattr(verdict, "verdicts", None) or [])
+                ],
+                "n_contradicted": n_contradicted,
+                "hallucinated_claims": [],
+                "fact_checker_version": FACT_CHECKER_VERSION,
+                "judge_model": getattr(verdict, "model", None),
+                "ruler_ok": ("gemini-2.5-pro" in (str(getattr(verdict, "model", "")) or "").lower()),
+                "error": bool(getattr(verdict, "error", False)),
+                "error_transient": bool(getattr(verdict, "error_transient", False)),
+                "note": ("coverage = retrieval-recall (must_facts vs retrieved chunks, chunk-only "
+                         "mode). coverage_answer = synthesized-recall (must_facts vs a real answer "
+                         "synthesized from those same chunks) -- the gap between the two is the "
+                         "synthesis-loss curve (Eval's biggest calibration lever)."),
+            }
+
+        # ---- synthesize a real answer, then grade it (runs for BOTH modes) ----
         if chunks:
             from app.services import llm_manager_client as _llm_client
             _synth_system = (
@@ -15676,35 +15662,86 @@ async def _run_trace_for_query(
                     stage="rag_eval_adjudicate", max_tokens=3000,
                 )
                 _synth_answer = (_synth_raw or "").strip()
-                _answer_verdict = await check_facts(
-                    query=query, must_facts=must_facts, chunks=chunks,
-                    answer=_synth_answer, stage="rag_eval_adjudicate",
-                )
-                eval_result["coverage_answer"] = getattr(_answer_verdict, "coverage", None)
-                eval_result["hallucinated_claims"] = list(getattr(_answer_verdict, "hallucinated_claims", None) or [])
-                eval_result["synth_answer"] = _synth_answer
-                eval_result["synth_model"] = (_synth_meta or {}).get("model")
-                # For synthesis-loss attribution (Eval's ask, 2026-08-04):
-                # links THIS bank-eval-harness's synth call back to Chat's
-                # own PG telemetry row via the same llm_call_id mechanism
-                # filler_c already uses (llm_manager_client.generate()'s
-                # returned meta dict carries it straight from Chat's proxy,
-                # not something RAG invents). NOTE: this is the OFFLINE
-                # eval-harness synth call (recall_answer/synthesis-loss
-                # diagnostic only) -- NOT Chat's real production
-                # answer-synthesis call, which happens entirely outside RAG
-                # and has no call_id RAG could ever carry.
-                eval_result["synth_call_id"] = (_synth_meta or {}).get("llm_call_id")
-                # Free from the existing usage dict (Eval's Tier-3 ruling,
-                # 2026-08-04: capture opportunistically, don't build a
-                # pricing table ahead of need -- no cost_usd field exists on
-                # this dict, only real via the locked proxy same as
-                # judge_model, so left None on dev-fallback).
-                eval_result["synth_input_tokens"] = (_synth_meta or {}).get("input_tokens")
-                eval_result["synth_output_tokens"] = (_synth_meta or {}).get("output_tokens")
-            except Exception as exc:  # noqa: BLE001 -- synth/full-grade failure must not kill chunk-only eval
-                logging.getLogger("app.main").warning("synthesized-recall pass failed: %s", exc)
-                eval_result["synth_error"] = str(exc)[:300]
+
+                if reference_free:
+                    # ---- grounding_only: faithfulness of the answer vs its chunks, NO gold.
+                    # Enumerate the ANSWER's own claims; each is grounded / contradicted /
+                    # hallucinated / honest-abstain. This is the primary path -- chat and
+                    # single queries have no answer key. See fact_checker.check_facts. ----
+                    gv = await check_facts(
+                        query=query, must_facts=[], chunks=chunks,
+                        answer=_synth_answer, stage="rag_eval_adjudicate",
+                    )
+                    _claims = [
+                        {
+                            "fact": getattr(v, "fact", "?"),
+                            "grounded": bool(getattr(v, "grounded", False)),
+                            "contradicted": bool(v.contradicted),
+                            "support": v.support, "passage": v.passage,
+                        }
+                        for v in (getattr(gv, "verdicts", None) or [])
+                    ]
+                    _n = len(_claims)
+                    _ng = sum(1 for c in _claims if c["grounded"])
+                    _m = str(getattr(gv, "model", "") or "").lower()
+                    eval_result = {
+                        "mode": "reference_free",
+                        "coverage": None, "coverage_answer": None,
+                        "groundedness": (_ng / _n) if _n else None,
+                        "n_claims": _n, "n_grounded": _ng,
+                        "claims": _claims,
+                        "facts": _claims,  # back-compat: same table shape as vs_golden
+                        "hallucinated_claims": list(getattr(gv, "hallucinated_claims", None) or []),
+                        "honest_abstain": bool(getattr(gv, "honest_abstain", False)),
+                        "score": getattr(gv, "score", None),
+                        "synth_answer": _synth_answer,
+                        "synth_model": (_synth_meta or {}).get("model"),
+                        "synth_call_id": (_synth_meta or {}).get("llm_call_id"),
+                        "fact_checker_version": FACT_CHECKER_VERSION,
+                        "judge_model": getattr(gv, "model", None),
+                        "ruler_ok": ("gemini-2.5-pro" in _m),
+                        "error": bool(getattr(gv, "error", False)),
+                        "error_transient": bool(getattr(gv, "error_transient", False)),
+                        "note": ("reference-free: faithfulness of the synthesized answer to the "
+                                 "retrieved chunks (no gold answer key). groundedness = grounded "
+                                 "claims / total claims; an honest abstention scores well. "
+                                 "calibrated != correct (a grounded answer on a superseded chunk "
+                                 "is still wrong)."),
+                    }
+                else:
+                    # ---- Vs golden full-grade (unchanged) ----
+                    _answer_verdict = await check_facts(
+                        query=query, must_facts=must_facts, chunks=chunks,
+                        answer=_synth_answer, stage="rag_eval_adjudicate",
+                    )
+                    eval_result["coverage_answer"] = getattr(_answer_verdict, "coverage", None)
+                    eval_result["hallucinated_claims"] = list(getattr(_answer_verdict, "hallucinated_claims", None) or [])
+                    eval_result["synth_answer"] = _synth_answer
+                    eval_result["synth_model"] = (_synth_meta or {}).get("model")
+                    eval_result["synth_call_id"] = (_synth_meta or {}).get("llm_call_id")
+                    eval_result["synth_input_tokens"] = (_synth_meta or {}).get("input_tokens")
+                    eval_result["synth_output_tokens"] = (_synth_meta or {}).get("output_tokens")
+            except Exception as exc:  # noqa: BLE001 -- synth/grade failure must not kill the trace
+                logging.getLogger("app.main").warning("eval synth/grade pass failed: %s", exc)
+                if eval_result is None:
+                    eval_result = {
+                        "mode": ("reference_free" if reference_free else "vs_golden"),
+                        "error": True, "synth_error": str(exc)[:300],
+                        "note": "eval synth/grade pass failed",
+                    }
+                else:
+                    eval_result["synth_error"] = str(exc)[:300]
+        elif reference_free:
+            # no chunks retrieved -> nothing to ground the answer against
+            eval_result = {
+                "mode": "reference_free",
+                "coverage": None, "coverage_answer": None,
+                "groundedness": None, "n_claims": 0, "n_grounded": 0,
+                "claims": [], "facts": [], "hallucinated_claims": [], "honest_abstain": None,
+                "score": None, "judge_model": None, "ruler_ok": False,
+                "note": ("reference-free: no chunks retrieved -- nothing to ground the answer "
+                         "against (a no-retrieval/abstain posture, or the corpus is mid-reingest)."),
+            }
 
     return {
         "query": query,
