@@ -39,10 +39,30 @@ from app.services.retriever.synthesis_contracts import SynthesisResult
 
 @dataclass
 class ContractEnvelope:
-    """The frozen 12-field response. Field order/NULL semantics are
+    """The frozen response envelope. Field order/NULL semantics are
     byte-compat P0 (module-gates.md §6) -- do not reorder, do not add
     fields here; a genuinely new field needs a new spec revision, not a
-    quiet addition."""
+    quiet addition.
+
+    SPEC REVISION 12 -> 13 FIELDS (Ananth, 2026-08-19): `passenger_tables`.
+    This is that spec revision, not a quiet addition -- recorded here because
+    the rule above is the one being changed.
+
+    WHY IT HAD TO BE THE CONTRACT. Sourcing's table capture excises a table
+    out of the page text and stores it as structure in `document_tables`;
+    Retriever resolves it back onto a retrieved chunk (by breadcrumb, or by
+    (document_id, page_number) proximity). Without this field the resolved
+    table reached `SynthesisResult.passenger_tables` and then died here --
+    the whole capture chain worked and delivered nothing, because the last
+    handoff had nowhere to put it. Verified live: a chunk reading only
+    "5,610,035" resolved its page's table and the table was dropped at this
+    boundary.
+
+    BYTE-COMPAT IS PRESERVED. The field is APPENDED, never inserted: every
+    existing key keeps its position and its NULL semantics, and it defaults
+    to `[]` (not None) so a consumer that does not know about it sees an
+    empty list rather than a missing key or a null. Nothing that reads the
+    12 fields today changes behaviour."""
 
     query: str
     chosen_slot: str | None
@@ -56,6 +76,9 @@ class ContractEnvelope:
     latency_ms: dict[str, int] = field(default_factory=dict)
     attempt_count: int = 0
     status: str = "unknown"
+    # Appended (spec revision, see class docstring) -- never inserted above,
+    # so the 12 fields before it keep byte-compatible order.
+    passenger_tables: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -71,6 +94,7 @@ class ContractEnvelope:
             "latency_ms": self.latency_ms,
             "attempt_count": self.attempt_count,
             "status": self.status,
+            "passenger_tables": self.passenger_tables,
         }
 
 
@@ -279,6 +303,39 @@ def _build_module_trace(
 
     trace.append({"n": n, "stage": "Synthesis", "ms": latency_ms.get("synthesis_ms")})
     return trace
+
+
+def _passenger_tables(synthesis_result: SynthesisResult | None) -> list[dict]:
+    """Project resolved passenger tables into plain dicts for the envelope.
+
+    Serialised here rather than emitting the PassengerTable dataclass so the
+    contract stays a pure-JSON boundary -- a consumer (Chat) must not need to
+    import a retriever-internal type to read the envelope.
+
+    `matched_via` is carried deliberately: "breadcrumb" means Sourcing's
+    excision placed an exact pointer, "page_proximity" means the table was
+    recovered from the page despite the breadcrumb being absent. Chat can use
+    it as a confidence signal, and it is the only way to tell, downstream,
+    which of the two paths is actually doing the work.
+
+    Degrades to [] rather than raising: a malformed table must not cost the
+    caller its answer -- table content is additive, never load-bearing.
+    """
+    if not synthesis_result:
+        return []
+    out: list[dict] = []
+    for t in getattr(synthesis_result, "passenger_tables", None) or []:
+        try:
+            out.append({
+                "table_id": getattr(t, "table_id", None),
+                "caption": getattr(t, "caption", None),
+                "payload": getattr(t, "payload", None),
+                "cited_by_chunk_ids": list(getattr(t, "cited_by_chunk_ids", ()) or ()),
+                "matched_via": getattr(t, "matched_via", None),
+            })
+        except Exception:
+            continue
+    return out
 
 
 def build_contract(
@@ -585,4 +642,5 @@ def build_contract(
         latency_ms=latency_ms,
         attempt_count=attempt_count,
         status=status,
+        passenger_tables=_passenger_tables(synthesis_result),
     )

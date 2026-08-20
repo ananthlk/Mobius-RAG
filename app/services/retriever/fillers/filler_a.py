@@ -534,6 +534,18 @@ def fill_shape_bm25(
             assigned_chunks.append(
                 FilledChunk(
                     chunk_id=candidate.chunk_id,
+                    # page_number/paragraph_index: threaded 2026-08-19. Same
+                    # threading-gap class as authority_level above -- the field
+                    # existed on FilledChunk ("location within source (from
+                    # Pool)"), PoolCandidate carried the value, and this filler
+                    # simply never passed it along, so every chunk it served
+                    # reached the contract with page_number=None. Found from a
+                    # live trace: page-proximity passenger-table attachment
+                    # joins on (document_id, page_number), so a null page
+                    # silently resolves no table -- and because that path fails
+                    # open, nothing anywhere reports the miss.
+                    page_number=candidate.page_number,
+                    paragraph_index=candidate.paragraph_index,
                     document_id=candidate.document_id,
                     text=candidate.text,
                     document_status=candidate.document_status,

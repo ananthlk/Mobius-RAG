@@ -82,14 +82,40 @@ def _synthesis_result(citations=None, unverified=0, under_filled_flags=None, com
 
 
 class TestBuildContractHappyPath:
-    def test_all_twelve_fields_present(self):
+    def test_all_contract_fields_present(self):
+        """12 fields -> 13 (spec revision, Ananth 2026-08-19: passenger_tables).
+
+        This test caught the change, which is exactly its job. Updated rather
+        than relaxed: the original 12 are still asserted by NAME and by
+        POSITION below, so an accidental reorder or a silent drop still fails
+        -- only a deliberate, documented append passes.
+        """
         envelope = build_contract(_partial_result(), _synthesis_result())
         d = envelope.to_dict()
         assert set(d.keys()) == {
             "query", "chosen_slot", "score", "chunks", "answer_text", "thinking",
             "traces", "routing_keys", "grounding_markers", "latency_ms",
-            "attempt_count", "status",
+            "attempt_count", "status", "passenger_tables",
         }
+
+    def test_original_twelve_keep_their_positions(self):
+        """Byte-compat P0 (module-gates.md §6): the new field is APPENDED.
+
+        Anything reading the envelope positionally, or diffing it, must be
+        unaffected by the revision.
+        """
+        d = build_contract(_partial_result(), _synthesis_result()).to_dict()
+        assert list(d)[:12] == [
+            "query", "chosen_slot", "score", "chunks", "answer_text", "thinking",
+            "traces", "routing_keys", "grounding_markers", "latency_ms",
+            "attempt_count", "status",
+        ]
+        assert list(d)[12] == "passenger_tables"
+
+    def test_passenger_tables_defaults_empty_for_a_run_without_tables(self):
+        """A consumer predating the field sees [], not None and not a missing key."""
+        d = build_contract(_partial_result(), _synthesis_result()).to_dict()
+        assert d["passenger_tables"] == []
 
     def test_chosen_slot_and_score_from_best_citation(self):
         envelope = build_contract(_partial_result(), _synthesis_result())
