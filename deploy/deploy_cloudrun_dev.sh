@@ -211,7 +211,7 @@ deploy_service() {
     --platform=managed
     --allow-unauthenticated
     --memory="$memory"
-    --cpu=2
+    --cpu=4
     --timeout=3600
     --add-cloudsql-instances="$CLOUD_SQL_CONNECTION"
     --service-account="mobius-platform-dev@${PROJECT_ID}.iam.gserviceaccount.com"
@@ -238,6 +238,18 @@ deploy_service() {
 #    status) and can kill the instance mid-eval when it scales down (the 13/110
 #    stall we hit). no-cpu-throttling keeps the long background task alive.
 #    Dev-scale only; a multi-instance prod needs DB-backed job state instead.
+#
+#    CPU 2 -> 4 (2026-08-20). min=max=1 is a correctness constraint we cannot
+#    lift today, but it means background extraction (restart_extraction spawns
+#    asyncio.create_task IN THIS PROCESS) competes with query serving on the same
+#    instance. Measured during a 30-document reingest: a retrieval query that
+#    normally answers in 22s returned status="timeout" at 46s with zero chunks.
+#    More cores does not make it multi-instance, it just stops one batch from
+#    starving every reader.
+#
+#    THE REAL FIX, not done here: move extraction to its own self-polling worker
+#    like chunking and embedding, so the API serves requests and nothing else.
+#    That also removes the reason min=max=1 exists.
 deploy_service "mobius-rag" "" 1 1 "no" "2Gi"   # 2Gi: publishing a giant doc (~9k embeddings) OOM'd at 1Gi
 
 # 4. Chunking worker. Self-polling supervisor (FOR UPDATE SKIP LOCKED
@@ -251,11 +263,16 @@ deploy_service "mobius-rag-chunking-worker" \
   "uvicorn,app.worker_server_chunking:app,--host,0.0.0.0,--port,8080" \
   12 12 "no" "2Gi"
 
-# 5. Embedding worker (same shape, fewer resources since Vertex does
-#    the heavy lifting remotely).
+# 5. Embedding worker. Same self-polling shape as chunking, so instance count IS
+#    the parallelism — and at 1 it was the serial bottleneck of the whole
+#    pipeline: 12 chunking pollers fed a single embedder, which then also does
+#    auto-publish-on-embed. For a corpus-scale rerun (AHCA, 2026-08-20) that one
+#    instance is what everything queues behind. Raised to 6 rather than matching
+#    chunking's 12 because each instance holds a giant document's ~9k embeddings
+#    in memory at publish time, and Vertex quota is the next ceiling anyway.
 deploy_service "mobius-rag-embedding-worker" \
   "uvicorn,app.worker_server_embedding:app,--host,0.0.0.0,--port,8080" \
-  1 1 "no" "2Gi"   # 2Gi: auto-publish-on-embed loads a giant's ~9k embeddings; OOM'd at 1Gi
+  6 6 "no" "2Gi"   # 2Gi: auto-publish-on-embed loads a giant's ~9k embeddings; OOM'd at 1Gi
 
 # 6. Print URLs
 
