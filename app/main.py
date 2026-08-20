@@ -6826,10 +6826,29 @@ async def restart_extraction(
                             "PREVIOUS verdict still stands and now describes text that "
                             "has changed: %s", doc_uuid, clf_err)
 
+                    # Make the reingest VISIBLE. Without this the operation leaves
+                    # no trace in ingest_transactions and corpus health cannot show
+                    # it at all — which is exactly what happened: 30 documents were
+                    # re-extracted and the ingest panel reported nothing, because
+                    # restart_extraction never recorded a transaction.
+                    record_ingest_txn(
+                        "reingest", "created",
+                        document_id=str(doc_uuid),
+                        filename=getattr(doc, "filename", None),
+                        source_url=getattr(doc, "file_path", None),
+                    )
+
                     logger.info(f"Extraction restarted and completed for document {document_id}")
                 except Exception as e:
                     logger.error(f"Extraction error: {e}", exc_info=True)
                     doc.status = "failed"
+                    record_ingest_txn(
+                        "reingest", "failed",
+                        document_id=str(doc_uuid),
+                        filename=getattr(doc, "filename", None),
+                        failure_reason=getattr(doc, "ingest_failure_reason", None),
+                        error_message=str(e)[:400],
+                    )
                     await db_session.commit()
         except Exception as e:
             logger.error(f"Background extraction task error: {e}", exc_info=True)
@@ -7286,6 +7305,15 @@ INGEST_SOURCES: list[dict] = [
      "what": "pages pushed by the crawler"},
     {"key": "instant_rag",   "label": "Instant RAG",       "status": "live",
      "what": "uploaded in chat, scoped to an agent"},
+    # Reingest is not a new arrival — it is an existing document re-run through
+    # extraction because our CAPABILITY changed (table capture, a parser fix, an
+    # OCR lane), not because anything arrived. It earns a row of its own because
+    # its outcomes are unlike every other source's: nothing is created, page text
+    # is REWRITTEN, tables are captured, classification is re-derived and chunks
+    # are replaced. Counting it under the document's original source would have
+    # made a scrape from March look like it re-scraped today.
+    {"key": "reingest",      "label": "Reingest",          "status": "live",
+     "what": "an existing document re-extracted after a capability change"},
     {"key": "deep_research", "label": "Deep research",     "status": "planned",
      "what": "documents an investigation decides it needs"},
     {"key": "email",         "label": "Email",             "status": "planned",

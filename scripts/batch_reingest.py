@@ -64,6 +64,37 @@ def connect():
     return c
 
 
+class DB:
+    """A connection that reconnects instead of poisoning the rest of the run.
+
+    A single long-lived psycopg2 connection does not survive a 30-document batch:
+    the cloud-sql-proxy drops it (the same degradation that killed the chunk
+    purge at 60,000 rows), and because every subsequent poll reuses the same
+    handle, ONE drop failed every remaining document with "connection already
+    closed". Reads here are all idempotent counts, so retrying is free.
+    """
+
+    def __init__(self):
+        self._c = connect()
+
+    def q(self, sql, args=(), retries=3):
+        for attempt in range(retries):
+            try:
+                cur = self._c.cursor(); cur.execute(sql, args)
+                row = cur.fetchone(); cur.close()
+                return row
+            except (psycopg2.OperationalError, psycopg2.InterfaceError):
+                try: self._c.close()
+                except Exception: pass
+                time.sleep(2 * (attempt + 1))
+                self._c = connect()
+        raise RuntimeError("database unreachable after retries")
+
+    def close(self):
+        try: self._c.close()
+        except Exception: pass
+
+
 def groups(c):
     """Connected components over every duplicate-ish edge in the corpus."""
     cur = c.cursor()
@@ -84,11 +115,11 @@ def groups(c):
     return par, comp, find
 
 
-def poll(c, sql, args, want, label, timeout=1800):
+def poll(db, sql, args, want, label, timeout=1800):
     """Poll one condition to completion. Returns True on success."""
     t0 = time.time()
     while time.time() - t0 < timeout:
-        cur = c.cursor(); cur.execute(sql, args); v = cur.fetchone()[0]; cur.close()
+        v = db.q(sql, args)[0]
         if want(v):
             return True
         time.sleep(10)
@@ -130,15 +161,21 @@ def main():
         print("\nDRY RUN — nothing reingested. Re-run with --apply.")
         return
 
+    db = DB()
     ok, failed = [], []
     for n, did in enumerate(batch, 1):
         fn = names[did][:44]
+        # Resume: a document already carrying tables was reingested by an earlier
+        # run of this batch. Re-running it is wasted work and re-churns the index.
+        if db.q("SELECT count(*) FROM document_tables WHERE document_id=%s::uuid", (did,))[0]:
+            print(f"[{n}/{len(batch)}] {fn} — already reingested, skipping", flush=True)
+            continue
         print(f"\n[{n}/{len(batch)}] {fn}", flush=True)
         try:
             r = requests.post(f"{API}/documents/{did}/extract/restart", timeout=300)
             if r.status_code != 200:
                 print(f"      extract -> {r.status_code}"); failed.append((fn, "extract")); continue
-            if not poll(c, "SELECT status FROM documents WHERE id=%s::uuid", (did,),
+            if not poll(db, "SELECT status FROM documents WHERE id=%s::uuid", (did,),
                         lambda v: v == "completed", "extraction"):
                 failed.append((fn, "extract-timeout")); continue
 
@@ -146,25 +183,29 @@ def main():
             r = requests.post(f"{API}/documents/{did}/chunking/start?generator_id=B", timeout=300)
             if r.status_code != 200:
                 print(f"      chunk -> {r.status_code}"); failed.append((fn, "chunk")); continue
-            if not poll(c, """SELECT status FROM chunking_jobs WHERE document_id=%s::uuid
+            if not poll(db, """SELECT status FROM chunking_jobs WHERE document_id=%s::uuid
                               ORDER BY created_at DESC LIMIT 1""", (did,),
                         lambda v: v not in ("processing", "queued", "pending"), "chunking"):
                 failed.append((fn, "chunk-timeout")); continue
 
             # Publishing is AUTO_PUBLISH_ON_EMBED's job; calling it here raced it.
-            cur2 = c.cursor()
-            cur2.execute("""SELECT
+            row = db.q("""SELECT
                  (SELECT count(*) FROM document_tables t WHERE t.document_id=%s::uuid),
                  (SELECT count(*) FROM rag_published_embeddings e WHERE e.document_id=%s::uuid),
                  (SELECT count(*) FROM document_pages p
                     WHERE p.document_id=%s::uuid AND p.text LIKE '%%[Table:%%'),
-                 (SELECT source_metadata->'payor_classification'->>'classified_at'
-                    FROM documents WHERE id=%s::uuid)""",
-                         (did, did, did, did))
-            tabs, pub, crumbs, clf_at = cur2.fetchone(); cur2.close()
+                 -- freshness comes from the event trail, NOT from
+                 -- source_metadata: payor_classification carries no timestamp,
+                 -- so an earlier version of this check read a field that does
+                 -- not exist and reported CLASSIFY-STALE for every document
+                 -- while the classifier was in fact running fine.
+                 (SELECT max(created_at) FROM chunking_events
+                   WHERE document_id=%s::uuid AND event_type='payor_classification')""",
+                       (did, did, did, did))
+            tabs, pub, crumbs, clf_at = row
             # Read the classification back rather than assuming the wired call ran:
             # it fails open by design, so a silent miss is exactly what would hide.
-            stale = " CLASSIFY-STALE" if not clf_at else ""
+            stale = " CLASSIFY-STALE" if not clf_at else ""   # no classification event at all
             print(f"      OK — {tabs} tables, {crumbs} breadcrumb pages, "
                   f"{pub:,} published{stale}", flush=True)
             ok.append((fn, tabs, pub))
