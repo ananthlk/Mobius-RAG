@@ -2628,6 +2628,18 @@ async def pipeline_health(db: AsyncSession = Depends(get_db)):
             "last_hour": await _one("""SELECT count(*) FROM documents
                 WHERE file_path IS NOT NULL AND file_path <> ''
                   AND created_at > now() - interval '1 hour'"""),
+            # Long windows, so the 24h/7d/all selections are not dead on this
+            # card. I shipped GCS with buckets + last_hour only and left those
+            # three rendering "—" — the exact defect I had just fixed on the
+            # other three stages.
+            "last_24h": await _one("""SELECT count(*) FROM documents
+                WHERE file_path IS NOT NULL AND file_path <> ''
+                  AND created_at > now() - interval '24 hours'"""),
+            "last_7d": await _one("""SELECT count(*) FROM documents
+                WHERE file_path IS NOT NULL AND file_path <> ''
+                  AND created_at > now() - interval '7 days'"""),
+            "all_time": await _one("""SELECT count(*) FROM documents
+                WHERE file_path IS NOT NULL AND file_path <> ''"""),
             "rolling": {"buckets_5min": gcs_buckets},
             "status": "red" if gcs_missing > 50 else ("yellow" if gcs_missing > 0 else "green"),
         }

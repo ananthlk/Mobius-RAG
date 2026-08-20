@@ -118,6 +118,14 @@ export function PipelineTab() {
   const [live, setLive] = useState(true);
   const [win, setWin] = useState('1h');
   const [drill, setDrill] = useState<{ stage: string; label: string } | null>(null);
+  // The modal keeps its OWN window, defaulting to all-time.
+  //
+  // It used to inherit the page window, which made clicking a card showing
+  // "155 produced no text" open a modal saying "0 documents · 24h" — the card
+  // number is cumulative, the modal was windowed, and the two disagreed at a
+  // glance. You open a bucket to find what is STUCK, and stuck things are old,
+  // so all-time is the honest default. Narrowing is still one click.
+  const [drillWin, setDrillWin] = useState('all');
   const [items, setItems] = useState<DrillItem[] | null>(null);
   const [dErr, setDErr] = useState<string | null>(null);
 
@@ -147,7 +155,7 @@ export function PipelineTab() {
     let dead = false;
     (async () => {
       try {
-        const r = await fetch(`/pipeline_health/stage/${drill.stage}?window=${win}&limit=200`);
+        const r = await fetch(`/pipeline_health/stage/${drill.stage}?window=${drillWin}&limit=200`);
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const j = await r.json();
         if (!dead) { setItems(j.items || []); setDErr(null); }
@@ -156,7 +164,7 @@ export function PipelineTab() {
       }
     })();
     return () => { dead = true; };
-  }, [drill, win]);
+  }, [drill, drillWin]);
 
   const t = h?.totals || {};
   const inFlight = STAGES.flatMap(s => {
@@ -209,8 +217,8 @@ export function PipelineTab() {
           return (
             <section key={s.key} className={`pl-card pl-${status} pl-click`}
                      role="button" tabIndex={0}
-                     onClick={() => setDrill({ stage: s.key, label: s.label })}
-                     onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') setDrill({ stage: s.key, label: s.label }); }}>
+                     onClick={() => { setDrillWin('all'); setDrill({ stage: s.key, label: s.label }); }}
+                     onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { setDrillWin('all'); setDrill({ stage: s.key, label: s.label }); } }}>
               <header>
                 <span className={`pl-dot pl-d-${status}`} />
                 <h3>{s.label}</h3>
@@ -242,14 +250,14 @@ export function PipelineTab() {
                 <h3>{drill.label}</h3>
                 <p className="pl-sub">
                   {items == null ? 'loading…'
-                    : `${items.length} document${items.length === 1 ? '' : 's'} · ${WINDOWS.find(w => w[0] === win)?.[1]}`}
+                    : `${items.length} document${items.length === 1 ? '' : 's'} · ${WINDOWS.find(w => w[0] === drillWin)?.[1]}`}
                 </p>
               </div>
               <div className="pl-controls">
                 <span className="pl-winbar">
                   {WINDOWS.map(([k, label]) => (
-                    <button key={k} className={`pl-win${win === k ? ' on' : ''}`}
-                            onClick={() => setWin(k)}>{label}</button>
+                    <button key={k} className={`pl-win${drillWin === k ? ' on' : ''}`}
+                            onClick={() => setDrillWin(k)}>{label}</button>
                   ))}
                 </span>
                 <button className="pl-btn" onClick={() => setDrill(null)}>close</button>
@@ -272,8 +280,7 @@ export function PipelineTab() {
                   ))}
                   {items && items.length === 0 && (
                     <tr><td colSpan={4} className="pl-dim" style={{ padding: '16px' }}>
-                      Nothing in this stage for the selected window. Widen to “all time” — a
-                      stalled document usually entered long before the last hour.
+                      Nothing in this stage for the selected window.
                     </td></tr>
                   )}
                 </tbody>
