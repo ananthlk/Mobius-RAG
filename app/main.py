@@ -2316,13 +2316,39 @@ async def pipeline_health(db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(_text("""
         SELECT
           (SELECT COUNT(*) FROM publish_events WHERE published_at > now() - interval '1 hour') AS last_hour,
+          -- GENUINELY unpublished, not "everything we deliberately took out".
+          --
+          -- This used to be `embedding_jobs completed AND no published rows`,
+          -- which read 588 and was almost entirely our own cleanup: 161
+          -- documents we RETIRED as duplicates, 368 we SHELVED, and 425 with no
+          -- chunks left to publish at all. The panel then divided that by a
+          -- throughput rate and reported "ETA 1.1 d" for a backlog that does not
+          -- exist. Real number: 2.
+          --
+          -- A dashboard that counts intentional exclusions as a queue teaches
+          -- people to ignore it, which is worse than not showing the number.
           (SELECT COUNT(DISTINCT ej.document_id)
              FROM embedding_jobs ej
+             JOIN documents d ON d.id = ej.document_id
              WHERE ej.status='completed'
+               AND d.lifecycle_state IS DISTINCT FROM 'retired'
+               AND COALESCE(d.lifecycle_state, '') <> 'shelved'
+               AND EXISTS (SELECT 1 FROM hierarchical_chunks h
+                           WHERE h.document_id = d.id)
                AND NOT EXISTS (
                  SELECT 1 FROM rag_published_embeddings rpe
                  WHERE rpe.document_id = ej.document_id
-               )) AS embedded_unpublished
+               )) AS embedded_unpublished,
+          -- The excluded populations, shown separately so the headline number is
+          -- explainable rather than merely smaller.
+          (SELECT COUNT(*) FROM documents WHERE lifecycle_state='retired') AS excl_retired,
+          (SELECT COUNT(*) FROM documents WHERE lifecycle_state='shelved') AS excl_shelved,
+          (SELECT COUNT(DISTINCT ej.document_id) FROM embedding_jobs ej
+             JOIN documents d ON d.id = ej.document_id
+             WHERE ej.status='completed'
+               AND d.lifecycle_state IS DISTINCT FROM 'retired'
+               AND NOT EXISTS (SELECT 1 FROM hierarchical_chunks h WHERE h.document_id=d.id)
+          ) AS excl_no_chunks
     """))).first()
     pub_lh = int(rows.last_hour or 0)
     pub_gap = int(rows.embedded_unpublished or 0)
@@ -2333,6 +2359,9 @@ async def pipeline_health(db: AsyncSession = Depends(get_db)):
     else:
         pub_status = "red"  # gap > 0 and no recent publishes
     out["publishing"] = {"last_hour": pub_lh, "embedded_unpublished": pub_gap,
+                         "excluded_retired": int(rows.excl_retired or 0),
+                         "excluded_shelved": int(rows.excl_shelved or 0),
+                         "excluded_no_chunks": int(rows.excl_no_chunks or 0),
                          "status": pub_status}
     try:
         out["publishing"]["rolling"] = await _rolling_stats(
@@ -2381,6 +2410,103 @@ async def pipeline_health(db: AsyncSession = Depends(get_db)):
           (SELECT COUNT(DISTINCT document_id) FROM embedding_jobs WHERE status='completed') AS embedded,
           (SELECT COUNT(DISTINCT document_id) FROM rag_published_embeddings) AS published
     """))).first()
+    # ── THE STAGES BEFORE CHUNKING ────────────────────────────────────
+    # The panel showed chunking → embedding → publishing → integrity, which is
+    # the back half of the pipeline. A document that never got scraped, never
+    # landed in GCS, failed extraction, or is held by the classifier never
+    # reaches chunking at all — so on the old panel it was simply absent, and
+    # "9,910 documents, 9,753 chunked" gave no way to see where the other 157
+    # stopped. These five stages close that gap: scrape → gcs → extract →
+    # classify → (chunk → embed) → versioning → (publish → integrity).
+    #
+    # Every count is a live query. Where a stage has no queue of its own its
+    # "pending" is derived from the state documents are actually sitting in,
+    # because that is the honest answer to "what is stuck here".
+    async def _one(sql: str) -> int:
+        try:
+            return int((await db.execute(_text(sql))).scalar() or 0)
+        except Exception:
+            return -1                      # -1 renders as "—", never as zero
+
+    # SCRAPE — documents whose origin is a crawl, and how recent that was.
+    scraped_total = await _one("""SELECT count(*) FROM documents
+        WHERE file_path LIKE '%%web-scraper%%'""")
+    scraped_24h = await _one("""SELECT count(*) FROM documents
+        WHERE file_path LIKE '%%web-scraper%%' AND created_at > now() - interval '24 hours'""")
+    with_source_url = await _one("""SELECT count(*) FROM documents
+        WHERE source_metadata ? 'source_url'""")
+    out["scrape"] = {
+        "total": scraped_total, "last_24h": scraped_24h,
+        "with_source_url": with_source_url,
+        # Provenance is the whole point of scraping rather than importing:
+        # a document with no source_url cannot be re-fetched or version-matched.
+        "status": "green" if scraped_24h > 0 else "grey",
+    }
+
+    # GCS — the landing zone. A document row with no stored object is the
+    # `no_stored_file` failure that used to be invisible until re-extraction.
+    gcs_missing = await _one("""SELECT count(*) FROM documents
+        WHERE (file_path IS NULL OR file_path = '')
+          AND lifecycle_state IS DISTINCT FROM 'retired'""")
+    out["gcs"] = {
+        "stored": await _one("""SELECT count(*) FROM documents
+            WHERE file_path IS NOT NULL AND file_path <> ''
+              AND lifecycle_state IS DISTINCT FROM 'retired'"""),
+        "missing_object": gcs_missing,
+        "status": "red" if gcs_missing > 50 else ("yellow" if gcs_missing > 0 else "green"),
+    }
+
+    # EXTRACT — pages produced, and the documents that produced none.
+    no_text = await _one("""SELECT count(*) FROM documents d
+        WHERE d.lifecycle_state IS DISTINCT FROM 'retired'
+          AND NOT EXISTS (SELECT 1 FROM document_pages p WHERE p.document_id = d.id)""")
+    out["extract"] = {
+        "extracting": await _one("SELECT count(*) FROM documents WHERE status='extracting'"),
+        "no_text": no_text,
+        "failed_typed": await _one("""SELECT count(*) FROM documents
+            WHERE ingest_failure_reason IS NOT NULL"""),
+        "tables_captured": await _one("SELECT count(*) FROM document_tables"),
+        "status": "red" if no_text > 500 else ("yellow" if no_text > 0 else "green"),
+    }
+
+    # CLASSIFY — the gate that holds a document before chunking. A hold is not
+    # a failure; it is a document waiting on a human, and it needs to be
+    # visible as such rather than looking like a stall.
+    held = await _one("""SELECT count(*) FROM documents
+        WHERE source_metadata->'payor_classification'->>'decision' = 'hold'""")
+    out["classify"] = {
+        "classified": await _one("""SELECT count(*) FROM documents
+            WHERE source_metadata ? 'payor_classification'"""),
+        "held_for_human": held,
+        "unclassified": await _one("""SELECT count(*) FROM documents
+            WHERE lifecycle_state IS DISTINCT FROM 'retired'
+              AND NOT (source_metadata ? 'payor_classification')"""),
+        "status": "yellow" if held > 0 else "green",
+    }
+
+    # VERSIONING / DEDUP — the gate runs as a batch, so "pending" here means
+    # verdicts on record, not a queue. `awaiting` is the honest number: active
+    # documents the latest run never reached a verdict on.
+    dup_pairs = await _one("""SELECT count(*) FROM gate_decisions
+        WHERE run_id = (SELECT run_id FROM gate_decisions WHERE mode='duplicates'
+                        GROUP BY run_id ORDER BY max(decided_at) DESC LIMIT 1)""")
+    out["versioning"] = {
+        "pairs_scored": dup_pairs,
+        "duplicates": await _one("""SELECT count(*) FROM gate_decisions
+            WHERE duplicate_kind='duplicate' AND run_id =
+              (SELECT run_id FROM gate_decisions WHERE mode='duplicates'
+               GROUP BY run_id ORDER BY max(decided_at) DESC LIMIT 1)"""),
+        "retired": await _one("SELECT count(*) FROM documents WHERE lifecycle_state='retired'"),
+        "shelved": await _one("SELECT count(*) FROM documents WHERE lifecycle_state='shelved'"),
+        "last_run_at": None,
+        "status": "green" if dup_pairs > 0 else "grey",
+    }
+    try:
+        out["versioning"]["last_run_at"] = str((await db.execute(_text(
+            "SELECT max(decided_at) FROM gate_decisions"))).scalar())
+    except Exception:
+        pass
+
     out["totals"] = {
         "documents": int(rows.documents or 0),
         "chunked": int(rows.chunked or 0),
