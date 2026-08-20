@@ -73,8 +73,10 @@ from urllib.parse import urlparse
 from sqlalchemy import text as _sql
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import PASSENGER_TABLE_RETRIEVAL
 from app.services.corpus_search import _expand_with_neighbors
 from app.services.retriever.chunk_identity import content_keys
+from app.services.retriever.passenger_tables_loader import load_passenger_tables
 from app.services.retriever.fillers.contracts import (
     ASSIGNMENT_REASON_LLM_PARTIAL_MATCH,
     ASSIGNMENT_REASON_LLM_RETRIEVED,
@@ -1029,6 +1031,27 @@ async def compile_synthesis(
     )
     budget_enforcement_ms = int((time.monotonic() - t_budget) * 1000)
 
+    # Table Capture program stage 3 (Mobius/docs/TABLE_CAPTURE_PROGRAM.md),
+    # Ananth's go-ahead 2026-08-19: breadcrumb + page-proximity passenger-
+    # table attachment. Runs AFTER budget trimming, against the FINAL
+    # citation list -- a table shouldn't be pulled in for a citation that
+    # didn't survive the budget cut. Flag-gated, default off; a failure here
+    # must never take the answer down (table content is additive, never
+    # load-bearing -- program-wide rule, and load_passenger_tables already
+    # fails open internally, but the try/except here is the last line of
+    # defense for anything upstream of that).
+    passenger_tables: list = []
+    if PASSENGER_TABLE_RETRIEVAL:
+        try:
+            passenger_tables = await load_passenger_tables(db, citations)
+        except Exception as exc:
+            logger.warning(
+                "synthesis: passenger-table resolution failed, degrading to "
+                "none (fail-open, table content is additive not load-bearing): %s",
+                exc,
+            )
+            passenger_tables = []
+
     telemetry = SynthesisTelemetry(
         chunks_in=chunks_in,
         chunks_out=len(citations),
@@ -1064,4 +1087,5 @@ async def compile_synthesis(
         citations=citations,
         telemetry=telemetry,
         coverage_diagnostics=coverage_diagnostics,
+        passenger_tables=passenger_tables,
     )

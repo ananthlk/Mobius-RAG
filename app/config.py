@@ -164,6 +164,13 @@ EMBEDDING_DIMENSIONS = int(os.getenv("EMBEDDING_DIMENSIONS", "1536"))
 # 768-dim native default, no output_dimensionality override.
 CLUSTERING_EMBEDDING_MODEL = os.getenv("CLUSTERING_EMBEDDING_MODEL", "text-embedding-004")
 
+# ── Table Capture program, stage 3 (Mobius/docs/TABLE_CAPTURE_PROGRAM.md) ──
+# Passenger-table attachment in synthesis.py. Default OFF, same posture as
+# Sourcing's TABLE_CAPTURE flag -- table content is additive to an already-
+# valid prose answer, never load-bearing for it, so this stays opt-in until
+# Gate 3 (one query, a value that exists only inside the table) is run live.
+PASSENGER_TABLE_RETRIEVAL = os.getenv("PASSENGER_TABLE_RETRIEVAL", "false").lower() in ("true", "1", "yes")
+
 # ── Google Drive OAuth (optional) ────────────────────────────────────
 DRIVE_API_ENABLED = os.getenv("DRIVE_API_ENABLED", "false").lower() in ("true", "1", "yes")
 GOOGLE_DRIVE_CLIENT_ID = os.getenv("GOOGLE_DRIVE_CLIENT_ID")

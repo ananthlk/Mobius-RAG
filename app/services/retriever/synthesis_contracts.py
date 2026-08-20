@@ -269,3 +269,9 @@ class SynthesisResult:
     # control-flow boundary, reaffirmed by both Router and Eval
     # independently, unchanged by this field's addition).
     coverage_diagnostics: dict[str, CoverageDiagnostic] = field(default_factory=dict)
+    # Table Capture program stage 3 (Mobius/docs/TABLE_CAPTURE_PROGRAM.md) --
+    # tables tied back to `citations` via passenger_tables.py's breadcrumb +
+    # page-proximity resolution. Empty whenever PASSENGER_TABLE_RETRIEVAL is
+    # off (default) or a query's citations resolve to none -- additive to an
+    # already-complete prose answer, never load-bearing for it.
+    passenger_tables: list = field(default_factory=list)  # list[PassengerTable] -- loosely typed to avoid a passenger_tables.py import cycle here
