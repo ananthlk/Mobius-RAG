@@ -289,7 +289,7 @@
     $('#result').innerHTML='<div class="card pad" style="margin-top:1rem">'+degraded+flow+kpi+gapNote+tabbar+'<div class="tabbody" id="tabbody"></div></div>';
 
     var panels=[ ()=>emitsPanel(em,chunks), ()=>telemetryPanel(lat,tl), ()=>detailedPanel(dt,lat,tl), ()=>evalPanel(ev,body,evaled) ];
-    function show(i){ $('#tabbody').innerHTML=panels[i](); }
+    function show(i){ $('#tabbody').innerHTML=panels[i](); wireDocSearch(); }
     $$('#tabs .t').forEach(function(b){ b.addEventListener('click',function(){ $$('#tabs .t').forEach(function(x){x.classList.remove('on');}); b.classList.add('on'); show(+b.getAttribute('data-tab')); }); });
     show(0);
   }
@@ -310,15 +310,8 @@
         +'<div class="answer" style="font-family:var(--mono);font-size:.78rem;white-space:pre-wrap">'+esc(em.router_narrative)+'</div>';
     }
     out+='<div class="panel-h" style="margin-top:1rem">Chunks handed to chat <span class="chip">'+chunks.length+'</span></div>';
-    if(!chunks.length){ out+='<div class="empty">No chunks</div>'; return out; }
-    out+='<div class="tablewrap"><table><thead><tr><th>#</th><th>document</th><th>authority</th><th class="num">score</th></tr></thead><tbody>';
-    chunks.forEach(function(c,i){
-      var doc=c.document_name||c.doc||c.title||c.document_id||c.id||'—';
-      var auth=c.authority_level!=null?c.authority_level:(c.authority_sig!=null?c.authority_sig:'—');
-      var sc=c.composite_score!=null?c.composite_score:(c.score!=null?c.score:null);
-      out+='<tr><td class="num">'+(i+1)+'</td><td>'+esc(String(doc).slice(0,80))+'</td><td class="mono" style="font-size:.72rem">'+esc(auth)+'</td><td class="num">'+num(sc)+'</td></tr>';
-    });
-    return out+'</tbody></table></div>';
+    out+= chunks.length ? docTable(chunks,'emits') : '<div class="empty">No chunks</div>';
+    return out;
   }
 
   function telemetryPanel(lat,tl){
@@ -337,7 +330,9 @@
     function head(title,ms,present){ return '<div class="panel-h" style="margin-top:1rem">'+title
       +(ms!=null?' <span class="chip">'+Math.round(ms)+'ms</span>':'')
       +(present?'':' <span class="chip" style="color:var(--tx-3)">not run</span>')+'</div>'; }
-    var out='';
+    var out='<div class="row" style="align-items:center;margin-bottom:.3rem">'
+      +'<input class="inp mono" id="dt-search" placeholder="search documents &amp; text across all steps…" style="flex:1;font-size:.8rem">'
+      +'<span class="stamp" id="dt-count" style="white-space:nowrap"></span></div>';
 
     // 1 · Gate
     var g=dt.gate;
@@ -370,14 +365,10 @@
     if(sl){ var slots=sl.slots; if(slots) out+=codeRow('slots', Array.isArray(slots)?slots.map(function(s){return typeof s==='object'?(s.name||s.slot||JSON.stringify(s)):s;}):Object.keys(slots));
       if(sl.reason) out+='<div class="stamp">reason: '+esc(sl.reason)+'</div>'; }
 
-    // 5 · Pool (candidate retrieval)
-    var pool=dt.pool;
-    var poolN=Array.isArray(pool)?pool.length:(pool&&pool.count!=null?pool.count:null);
-    out+=head('Pool'+(poolN!=null?' · '+poolN+' candidates':''), lat.pool_ms, !!(pool&&(Array.isArray(pool)?pool.length:true)));
-    if(Array.isArray(pool)&&pool.length){ out+='<div class="tablewrap"><table><thead><tr><th>#</th><th>document</th><th class="num">score</th></tr></thead><tbody>';
-      pool.slice(0,8).forEach(function(c,i){ var doc=c.document_name||c.doc||c.title||c.id||'—'; var s=c.composite_score!=null?c.composite_score:(c.score!=null?c.score:null);
-        out+='<tr><td class="num">'+(i+1)+'</td><td>'+esc(String(doc).slice(0,70))+'</td><td class="num">'+num(s)+'</td></tr>'; });
-      out+='</tbody></table></div>'+(pool.length>8?'<div class="stamp">+'+(pool.length-8)+' more</div>':''); }
+    // 5 · Pool (candidate retrieval) — list ALL documents
+    var poolArr=asArr(dt.pool);
+    out+=head('Pool'+(poolArr.length?' · '+poolArr.length+' documents':''), lat.pool_ms, !!poolArr.length);
+    if(poolArr.length) out+='<div data-docgroup>'+docTable(poolArr,'pool')+'</div>';
 
     // 6 · Router
     var rt=dt.router;
@@ -392,7 +383,7 @@
     // 8 · Synthesis
     var sy=dt.synthesis, stel=tl.synthesis_telemetry;
     out+=head('Synthesis', lat.synthesis_ms, !!(sy||stel));
-    if(sy){ var cites=asArr(sy.citations); if(cites.length) out+=codeRow('citations', cites.map(function(c){return (c&&typeof c==='object')?(c.document_name||c.doc||c.id||'cite'):c;}));
+    if(sy){ var cites=asArr(sy.citations); if(cites.length) out+='<div class="stamp" style="margin:.4rem 0 .2rem">citations · '+cites.length+'</div><div data-docgroup>'+docTable(cites,'synthesis')+'</div>';
       if(sy.chunks_in!=null||sy.chunks_out!=null) out+='<div class="stamp">chunks in/out: '+num(sy.chunks_in,0)+' → '+num(sy.chunks_out,0)+'</div>'; }
     if(stel&&typeof stel==='object'){ out+='<div class="stamp">'+Object.keys(stel).slice(0,6).map(function(k){return esc(k)+': '+esc(String(stel[k]).slice(0,30));}).join(' · ')+'</div>'; }
 
@@ -402,6 +393,44 @@
   function cell(c){ return esc(typeof c==='object' ? JSON.stringify(c) : c); }
   function codeRow(label,arr){ arr=asArr(arr); if(!arr.length) return '<div class="stamp">'+label+': —</div>'; return '<div style="display:flex;gap:.5rem;align-items:baseline;margin:.35rem 0"><span class="stamp" style="min-width:120px;margin:0">'+label+'</span><span class="chips">'+arr.map(function(c){return '<span class="chip">'+cell(c)+'</span>';}).join('')+'</span></div>'; }
   function listRows(label,arr){ arr=asArr(arr); if(!arr.length) return ''; return '<div style="margin:.35rem 0"><span class="stamp">'+label+':</span><ul style="margin:.3rem 0 0;padding-left:1.1rem;font-size:.8rem;color:var(--tx-2)">'+arr.map(function(x){return '<li>'+cell(x)+'</li>';}).join('')+'</ul></div>'; }
+
+  // Full document/candidate table — lists EVERY row (no truncation). Each row
+  // carries data-search (doc + authority + text) so one search box can filter
+  // across all the steps at once. `step` labels which stage the row is from.
+  function docTable(cands, step){
+    cands=asArr(cands);
+    if(!cands.length) return '<div class="empty">no documents</div>';
+    var rows=cands.map(function(c,i){
+      c=c||{};
+      var doc=c.document_name||c.doc||c.title||c.document_id||c.id||'—';
+      var auth=c.authority_level!=null?c.authority_level:(c.authority_sig!=null?c.authority_sig:'');
+      var sc=c.composite_score; if(sc==null)sc=c.score; if(sc==null)sc=c.original_score; if(sc==null)sc=c.rerank_score;
+      var page=c.page_number!=null?c.page_number:(c.page!=null?c.page:null);
+      var text=String(c.text||c.snippet||'');
+      var hay=(String(doc)+' '+String(auth)+' '+text+' '+String(step||'')).toLowerCase();
+      return '<tr class="doc-row" data-search="'+esc(hay)+'">'
+        +'<td class="num">'+(i+1)+'</td>'
+        +'<td><span style="font-weight:500">'+esc(String(doc))+'</span>'+(page!=null?' <span class="stamp">p.'+esc(page)+'</span>':'')
+          +(text?'<div class="stamp" style="margin-top:.25rem;white-space:normal;color:var(--tx-3)">'+esc(text.slice(0,240))+(text.length>240?'…':'')+'</div>':'')+'</td>'
+        +'<td class="mono" style="font-size:.72rem;white-space:nowrap">'+esc(auth||'—')+'</td>'
+        +'<td class="num">'+num(sc)+'</td></tr>';
+    }).join('');
+    return '<div class="tablewrap"><table><thead><tr><th>#</th><th>document</th><th>authority</th><th class="num">score</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+  }
+
+  // Wire the one cross-step search box (present in the Detailed-trace panel).
+  function wireDocSearch(){
+    var s=document.getElementById('dt-search'); if(!s) return;
+    var rows=$$('#tabbody .doc-row'), count=document.getElementById('dt-count');
+    var groups=$$('#tabbody [data-docgroup]');
+    function upd(){
+      var q=s.value.trim().toLowerCase(), shown=0;
+      rows.forEach(function(r){ var hit=!q||r.getAttribute('data-search').indexOf(q)!==-1; r.style.display=hit?'':'none'; if(hit)shown++; });
+      groups.forEach(function(g){ var any=g.querySelectorAll('.doc-row:not([style*="display: none"])').length; g.style.opacity=(q&&!any)?'.45':'1'; });
+      if(count) count.textContent=shown+' / '+rows.length+' documents'+(q?' match':'');
+    }
+    s.addEventListener('input',upd); upd();
+  }
 
   function evalPanel(ev,body,evaled){
     if(!body.run_eval) return '<div class="empty"><b>Eval was off for this run.</b><br>Open ⋮ → Evaluate to score it reference-free or against a golden answer.</div>';
