@@ -413,6 +413,16 @@ async def adjudicate(
         elapsed = int((time.monotonic() - t0) * 1000)
         model = (llm_meta or {}).get("model") or (llm_meta or {}).get("provider") or "unknown"
 
+        # Locked-ruler parity (Eval, 2026-08-20). rag_eval_adjudicate is pinned
+        # to gemini-2.5-pro, but hard-falls-back to flash when pro is
+        # unavailable. A non-pro grade is not comparable to a pro-graded row
+        # (decalibrated), so quarantine it rather than let a flash score slip
+        # into an aggregate silently.
+        if "gemini-2.5-pro" not in (model or "").lower():
+            return ("ruler_quarantine", 0.0,
+                    f"quarantined: graded by {model}, not the locked gemini-2.5-pro",
+                    model, elapsed)
+
         if use_rubric:
             rubric = _parse_rubric_output(raw)
             verdict, score, reasoning = _score_rubric(expected, rubric)

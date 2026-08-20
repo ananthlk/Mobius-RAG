@@ -76,6 +76,18 @@ def load_bank(path: Path) -> tuple[list[dict[str, Any]], str]:
         "golden_citation", "answer_keywords", "must_cite_doc",
         "must_cite_url_contains", "fail_fast_reason", "notes",
     )
+    # Fact-store-generated banks (e.g. queries_ahca_facts.yaml) name the same
+    # fields differently — the fact store's native schema. Without this alias
+    # the judge sees NO golden_answer (only must_facts, which is null on most
+    # fact queries) → every such query scores ``unable`` and the "baseline" is
+    # degenerate. Alias fact-bank fields to the judge's names; the golden answer
+    # is the load-bearing one. (Eval, 2026-08-17 AHCA sprint — verified the
+    # mismatch empirically before adding this.)
+    _FACT_BANK_ALIASES = {
+        "expected_answer": "golden_answer",
+        "expected_document_id": "must_cite_doc_id",  # scored by doc-id in deterministic_checks
+        "expected_page": "expected_page",
+    }
     for q in queries:
         if not isinstance(q, dict):
             continue
@@ -83,6 +95,9 @@ def load_bank(path: Path) -> tuple[list[dict[str, Any]], str]:
         for k in _EXPECTED_KEYS:
             if k in q and k not in exp:
                 exp[k] = q[k]
+        for src, dst in _FACT_BANK_ALIASES.items():
+            if src in q and dst not in exp and q[src] is not None:
+                exp[dst] = q[src]
         q["expected"] = exp
     return queries, sha
 
@@ -137,8 +152,31 @@ def deterministic_checks(
             substr.lower() in u
             for substr in must_cite_url for u in urls
         ) if must_cite_url else False
-
         citation_hit = bool(doc_hit or url_hit)
+
+    # Doc-id citation path — fact-store banks cite by document_id + page rather
+    # than by document name/URL substring. Doc-level match (consistent with the
+    # name path above); page is left to the adjudicator layer. Conservative:
+    # if the response carries no id field at all, stays None (unscored) instead
+    # of a false miss. (Eval, 2026-08-17 AHCA sprint.)
+    must_cite_doc_id = expected.get("must_cite_doc_id")
+    if must_cite_doc_id:
+        want = str(must_cite_doc_id).lower()
+        chunks = response.get("chunks") or []
+        validated = response.get("validated_citations") or []
+        seen_ids = {
+            str(c.get("document_id") or c.get("doc_id") or "").lower()
+            for c in chunks
+        }
+        seen_ids |= {
+            str(v.get("document_id")
+                or (v.get("candidate") or {}).get("document_id") or "").lower()
+            for v in validated
+        }
+        seen_ids.discard("")
+        if seen_ids:
+            id_hit = want in seen_ids
+            citation_hit = bool(citation_hit) or id_hit if citation_hit is not None else id_hit
 
     return routing_correct, citation_hit, fail_fast_correct
 

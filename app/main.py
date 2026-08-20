@@ -15322,6 +15322,12 @@ async def _run_trace_for_query(
             # another row, without cross-referencing a deploy timeline.
             "fact_checker_version": FACT_CHECKER_VERSION,
             "judge_model": getattr(verdict, "model", None),
+            # Locked-ruler parity (Eval, 2026-08-20): the adjudicate stage is
+            # pinned to gemini-2.5-pro, but hard-falls-back to flash when pro is
+            # unavailable (rate-limit/degraded). A flash-graded row is NOT
+            # comparable to a pro-graded one (decalibrated). ruler_ok=False lets
+            # any consumer quarantine the row instead of silently trusting it.
+            "ruler_ok": ("gemini-2.5-pro" in (str(getattr(verdict, "model", "")) or "").lower()),
             "error": bool(getattr(verdict, "error", False)),
             "error_transient": bool(getattr(verdict, "error_transient", False)),
             "note": ("coverage = retrieval-recall (must_facts vs retrieved chunks, chunk-only "
