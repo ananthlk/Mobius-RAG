@@ -2291,8 +2291,26 @@ async def pipeline_health(db: AsyncSession = Depends(get_db)):
         chk_status = "red"
     else:
         chk_status = "yellow"
+    # Long windows. Without these the 24h/7d/all selections rendered "—" and read
+    # as broken rather than as "this stage has no series that far back". Cheap:
+    # completed_at is indexed and these are plain counts, no correlated scan.
+    async def _win_counts(table: str, ts_col: str, status_filter: str) -> dict:
+        try:
+            r = (await db.execute(_text(f"""
+                SELECT
+                  COUNT(*) FILTER (WHERE {ts_col} > now() - interval '24 hours') AS d1,
+                  COUNT(*) FILTER (WHERE {ts_col} > now() - interval '7 days')   AS d7,
+                  COUNT(*)                                                        AS all_time
+                FROM {table} WHERE status = '{status_filter}'
+            """))).first()
+            return {"last_24h": int(r.d1 or 0), "last_7d": int(r.d7 or 0),
+                    "all_time": int(r.all_time or 0)}
+        except Exception:
+            return {}
+
     out["chunking"] = {"active": chk_active, "pending": chk_pending,
-                       "last_hour": chk_lh, "status": chk_status}
+                       "last_hour": chk_lh, "status": chk_status,
+                       **(await _win_counts("chunking_jobs", "completed_at", "completed"))}
 
     # ── Rolling 30-min stats helper ──────────────────────────────────
     # Buckets the last 30 min into 6 × 5-min slices and returns:
@@ -2400,7 +2418,8 @@ async def pipeline_health(db: AsyncSession = Depends(get_db)):
     else:
         emb_status = "yellow"
     out["embedding"] = {"active": emb_active, "pending": emb_pending,
-                        "last_hour": emb_lh, "status": emb_status}
+                        "last_hour": emb_lh, "status": emb_status,
+                        **(await _win_counts("embedding_jobs", "completed_at", "completed"))}
     try:
         out["embedding"]["rolling"] = await _rolling_stats(
             "embedding_jobs", "completed_at", "completed", emb_pending,
@@ -2484,7 +2503,16 @@ async def pipeline_health(db: AsyncSession = Depends(get_db)):
         pub_status = "yellow"
     else:
         pub_status = "red"  # gap > 0 and no recent publishes
-    out["publishing"] = {"last_hour": pub_lh, "embedded_unpublished": pub_gap,
+    try:
+        _pub_win = (await db.execute(_text("""
+            SELECT COUNT(*) FILTER (WHERE published_at > now() - interval '24 hours') AS d1,
+                   COUNT(*) FILTER (WHERE published_at > now() - interval '7 days')   AS d7,
+                   COUNT(*) AS all_time FROM publish_events"""))).first()
+        _pubw = {"last_24h": int(_pub_win.d1 or 0), "last_7d": int(_pub_win.d7 or 0),
+                 "all_time": int(_pub_win.all_time or 0)}
+    except Exception:
+        _pubw = {}
+    out["publishing"] = {"last_hour": pub_lh, "embedded_unpublished": pub_gap, **_pubw,
                          "excluded_retired": int(rows.excl_retired or 0),
                          "excluded_shelved": int(rows.excl_shelved or 0),
                          "excluded_no_chunks": int(rows.excl_no_chunks or 0),

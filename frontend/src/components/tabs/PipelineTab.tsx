@@ -36,8 +36,11 @@ function windowedThroughput(st: Stage, win: string): number | null {
   const rolling = st.rolling as { buckets_5min?: number[] } | undefined;
   const b = rolling?.buckets_5min;
   if (b && BUCKET_SLICE[win]) return b.slice(-BUCKET_SLICE[win]).reduce((a, c) => a + c, 0);
-  if (win === '1h') return (st.last_hour as number) ?? null;
-  return null;                       // 24h/7d/all have no per-stage series yet
+  const direct: Record<string, string> = {
+    '1h': 'last_hour', '24h': 'last_24h', '7d': 'last_7d', 'all': 'all_time',
+  };
+  const v = st[direct[win]];
+  return typeof v === 'number' ? v : null;
 }
 
 function age(sec: number | null): string {
