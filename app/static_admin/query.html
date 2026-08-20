@@ -120,7 +120,22 @@
   .empty b{color:var(--tx)}
   .callout{border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:var(--r);background:var(--warn-w);padding:.65rem .85rem;font-size:.8rem;color:var(--tx-2);margin-top:.6rem}
   .stamp{font-family:var(--mono);font-size:.72rem;color:var(--tx-3);margin-top:.6rem}
-  @media(max-width:780px){.shell{grid-template-columns:1fr}.rail{position:static;height:auto;flex-direction:row;flex-wrap:wrap;border-right:0;border-bottom:1px solid var(--line)}.brand{width:100%}.railcap,.railsep,.railfoot{display:none}}
+  /* accordion (detailed-trace steps) */
+  .acc{border:1px solid var(--line);border-radius:var(--r);margin-top:.5rem;overflow:hidden;background:var(--card)}
+  .acc-head{width:100%;text-align:left;background:var(--bg-2);border:0;padding:.6rem .8rem;cursor:pointer;display:flex;align-items:center;gap:.6rem;font-family:var(--sans);font-size:.86rem;font-weight:600;color:var(--tx)}
+  .acc-head:hover{background:var(--bg-3)}
+  .acc-head .caret{width:.85rem;height:.85rem;color:var(--tx-3);transition:transform .15s;flex:none}
+  .acc-head .tw{margin-left:auto;color:var(--tx-3);font-family:var(--mono);font-size:.72rem;font-weight:400;white-space:nowrap}
+  .acc.open .acc-head{border-bottom:1px solid var(--line)}
+  .acc.open .acc-head .caret{transform:rotate(90deg)}
+  .acc.muted .acc-head{color:var(--tx-3)}
+  .acc-body{display:none;padding:.75rem .85rem}
+  .acc.open .acc-body{display:block}
+  .kv{display:grid;grid-template-columns:150px 1fr;gap:.35rem .9rem;font-size:.8rem}
+  .kv .k{font-family:var(--mono);font-size:.72rem;color:var(--tx-3);padding-top:.1rem}
+  .kv .v{color:var(--tx-2);word-break:break-word}
+  .kv .v .chip{margin:0 .2rem .2rem 0}
+  @media(max-width:780px){.shell{grid-template-columns:1fr}.rail{position:static;height:auto;flex-direction:row;flex-wrap:wrap;border-right:0;border-bottom:1px solid var(--line)}.brand{width:100%}.railcap,.railsep,.railfoot{display:none}.kv{grid-template-columns:1fr}}
   svg{display:block}
 </style>
 </head>
@@ -206,6 +221,8 @@
   kebab.querySelector('button').addEventListener('click',function(e){e.stopPropagation();kebab.classList.toggle('open');});
   kebab.querySelector('.pop').addEventListener('click',function(e){e.stopPropagation();});
   document.addEventListener('click',function(){kebab.classList.remove('open');});
+  // accordion toggle (detailed-trace steps) — delegated so it survives re-render
+  document.addEventListener('click',function(e){ var h=e.target.closest&&e.target.closest('.acc-head'); if(h){ h.parentNode.classList.toggle('open'); } });
   $('#advBtn').addEventListener('click',function(){var a=$('#adv');a.classList.toggle('show');this.textContent=a.classList.contains('show')?'▾ Advanced':'▸ Advanced';});
   $$('[data-group]').forEach(function(group){
     var g=group.getAttribute('data-group');
@@ -324,68 +341,71 @@
     return out;
   }
 
+  function themeLabels(themes){ return asArr(themes).map(function(t){return (t&&typeof t==='object')?(t.theme_label||t.label||JSON.stringify(t)):t;}); }
+  function slotNames(slots){ if(slots==null)return null; if(Array.isArray(slots))return slots.map(function(s){return (s&&typeof s==='object')?(s.name||s.slot||s.slot_id||JSON.stringify(s)):s;}); if(typeof slots==='object')return Object.keys(slots); return [slots]; }
   function detailedPanel(dt,lat,tl){
     dt=dt||{}; lat=lat||{}; tl=tl||{};
-    // stage header with timing + a "not run" marker when the stage produced nothing
-    function head(title,ms,present){ return '<div class="panel-h" style="margin-top:1rem">'+title
-      +(ms!=null?' <span class="chip">'+Math.round(ms)+'ms</span>':'')
-      +(present?'':' <span class="chip" style="color:var(--tx-3)">not run</span>')+'</div>'; }
-    var out='<div class="row" style="align-items:center;margin-bottom:.3rem">'
+    function code(v){ if(v==null||v==='')return null;
+      if(Array.isArray(v)) return v.length? v.map(function(x){return '<span class="chip">'+cell(x)+'</span>';}).join(' ') : null;
+      if(typeof v==='object') return '<span class="mono" style="font-size:.72rem">'+esc(JSON.stringify(v))+'</span>';
+      return '<span class="mono">'+esc(v)+'</span>'; }
+    function kv(pairs){ var rows=pairs.filter(function(p){return p[1]!=null&&p[1]!=='';}).map(function(p){return '<div class="k">'+esc(p[0])+'</div><div class="v">'+p[1]+'</div>';}).join(''); return rows?'<div class="kv">'+rows+'</div>':'<div class="stamp">no fields</div>'; }
+    function mss(x){ return x!=null?Math.round(x)+'ms':''; }
+    function acc(title,sub,body,open,present){
+      return '<div class="acc'+(open?' open':'')+(present?'':' muted')+'">'
+        +'<button class="acc-head"><svg class="caret" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 4l4 4-4 4"/></svg>'
+        +esc(title)+'<span class="tw">'+(sub||'')+(present?'':' · not run')+'</span></button>'
+        +'<div class="acc-body">'+(body||'<div class="stamp">no data</div>')+'</div></div>'; }
+
+    var out='<div class="row" style="align-items:center;margin-bottom:.4rem">'
       +'<input class="inp mono" id="dt-search" placeholder="search documents &amp; text across all steps…" style="flex:1;font-size:.8rem">'
       +'<span class="stamp" id="dt-count" style="white-space:nowrap"></span></div>';
 
-    // 1 · Gate
     var g=dt.gate;
-    out+=head('Gate', g?g.gate_ms:lat.gate_ms, !!g);
-    if(g){ out+=codeRow('domain (d)',g.d_codes)+codeRow('jurisdiction (j)',g.j_codes)+codeRow('procedure (p)',g.p_codes);
-      if(g.fanout_codes&&g.fanout_codes.length) out+=codeRow('fan-out codes',g.fanout_codes);
-      if(g.process_intent) out+='<div class="stamp">intent: '+esc(g.process_intent)+'</div>';
-      if(g.contour) out+='<div class="stamp">contour: '+esc(typeof g.contour==='object'?JSON.stringify(g.contour):g.contour)+'</div>';
-      if(g.reason) out+='<div class="stamp">reason: '+esc(g.reason)+'</div>'; }
+    out+=acc('Gate', mss(g?g.gate_ms:lat.gate_ms), g?kv([['domain (d)',code(g.d_codes)],['jurisdiction (j)',code(g.j_codes)],
+      ['procedure (p)',code(g.p_codes)],['fan-out codes',code(g.fanout_codes)],['expansion',code(g.expansion_phrases)],
+      ['intent',code(g.process_intent)],['contour',code(g.contour)],['missing kinds',code(g.missing_kinds)],
+      ['reason',g.reason?esc(g.reason):null]]):'', !!g, !!g);
 
-    // 2 · Reformat
     var rf=dt.reformat;
-    out+=head('Reformat'+(rf&&rf.posture?' · '+esc(rf.posture):''), rf?rf.reformat_ms:lat.reformat_ms, !!rf);
-    if(rf){ if(rf.rewritten_queries&&rf.rewritten_queries.length) out+=listRows('rewritten',rf.rewritten_queries);
-      if(rf.fanout_themes&&rf.fanout_themes.length) out+=codeRow('fan-out themes',rf.fanout_themes);
-      if(rf.clarify_questions&&rf.clarify_questions.length) out+=listRows('clarify',rf.clarify_questions);
-      if(rf.reason) out+='<div class="stamp">reason: '+esc(rf.reason)+'</div>'; }
+    out+=acc('Reformat'+(rf&&rf.posture?' · '+rf.posture:''), mss(rf?rf.reformat_ms:lat.reformat_ms), rf?kv([['posture',code(rf.posture)],
+      ['rewritten',code(rf.rewritten_queries)],['fan-out themes',code(themeLabels(rf.fanout_themes))],['clarify',code(rf.clarify_questions)],
+      ['external reason',rf.external_reason?esc(rf.external_reason):null],['decline reason',rf.decline_reason?esc(rf.decline_reason):null],
+      ['reason',rf.reason?esc(rf.reason):null]]):'', !!rf, !!rf);
 
-    // 3 · Structure
     var st=dt.structure;
-    out+=head('Structure'+(st&&st.posture?' · '+esc(st.posture):''), st?st.structure_ms:null, !!st);
-    if(st){ if(st.resource_posture) out+='<div class="stamp">resource posture: '+esc(st.resource_posture)+'</div>';
-      if(st.rewritten_queries&&st.rewritten_queries.length) out+=listRows('rewritten',st.rewritten_queries);
-      if(st.fanout_themes&&st.fanout_themes.length) out+=codeRow('fan-out themes',st.fanout_themes);
-      if(st.reason) out+='<div class="stamp">reason: '+esc(st.reason)+'</div>'; }
+    out+=acc('Structure'+(st&&st.posture?' · '+st.posture:''), mss(st?st.structure_ms:null), st?kv([['posture',code(st.posture)],
+      ['resource posture',code(st.resource_posture)],['rewritten',code(st.rewritten_queries)],['fan-out themes',code(themeLabels(st.fanout_themes))],
+      ['reason',st.reason?esc(st.reason):null]]):'', !!st, !!st);
 
-    // 4 · Slots
     var sl=dt.slots;
-    out+=head('Slots'+(sl&&sl.posture?' · '+esc(sl.posture):''), sl?sl.slots_ms:lat.slots_ms, !!sl);
-    if(sl){ var slots=sl.slots; if(slots) out+=codeRow('slots', Array.isArray(slots)?slots.map(function(s){return typeof s==='object'?(s.name||s.slot||JSON.stringify(s)):s;}):Object.keys(slots));
-      if(sl.reason) out+='<div class="stamp">reason: '+esc(sl.reason)+'</div>'; }
+    out+=acc('Slots'+(sl&&sl.posture?' · '+sl.posture:''), mss(sl?sl.slots_ms:lat.slots_ms), sl?kv([['posture',code(sl.posture)],
+      ['slots',code(slotNames(sl.slots))],['reason',sl.reason?esc(sl.reason):null]]):'', !!sl, !!sl);
 
-    // 5 · Pool (candidate retrieval) — list ALL documents
-    var poolArr=asArr(dt.pool);
-    out+=head('Pool'+(poolArr.length?' · '+poolArr.length+' documents':''), lat.pool_ms, !!poolArr.length);
-    if(poolArr.length) out+='<div data-docgroup>'+docTable(poolArr,'pool')+'</div>';
+    // Pool — one accordion per fan-out query, each with ITS candidates
+    var pools=asArr(dt.pool), themes=asArr(dt.reformat&&dt.reformat.fanout_themes);
+    if(pools.length){ pools.forEach(function(p,idx){ p=p||{}; var cands=asArr(p.candidates);
+      var label='Pool'+(pools.length>1?' · query '+(idx+1)+(themes[idx]&&themes[idx].theme_label?': '+themes[idx].theme_label:''):'');
+      out+=acc(label, mss(p.pool_ms||lat.pool_ms)+' · '+cands.length+' candidates',
+        cands.length?'<div data-docgroup>'+docTable(cands,'pool'+(idx+1))+'</div>':'<div class="empty">no candidates</div>', cands.length>0, true); });
+    } else out+=acc('Pool', mss(lat.pool_ms), '<div class="empty">no candidate pool (no-retrieval posture)</div>', false, false);
 
-    // 6 · Router
-    var rt=dt.router;
-    out+=head('Router', lat.router_ms, !!rt);
-    if(rt){ out+=codeRow('dispatch', rt.dispatch_path||rt.chain||[]); if(rt.reason) out+='<div class="stamp">reason: '+esc(rt.reason)+'</div>'; }
+    var rt=dt.router, rl=(rt&&rt.routing_ladder)||{};
+    out+=acc('Router'+(rt&&rt.dispatch_path?' · '+cell(rt.dispatch_path):''), mss(lat.router_ms), rt?kv([['dispatch path',code(rt.dispatch_path)],
+      ['reason',rt.reason?esc(rt.reason):null],['per-slot plan',code(rl.per_slot)],['per-slot status',code(rl.per_slot_status)],
+      ['terminal action',code(rl.terminal_action)],['helpers',code(rl.helpers)],['resource posture',code(rt.resource_posture)]]):'', !!rt, !!rt);
 
-    // 7 · Fillers
-    var fs=dt.filled_shape;
-    out+=head('Fillers', lat.fillers_ms, !!(fs||lat.fillers_ms));
-    if(fs&&fs.slots){ var fslots=Array.isArray(fs.slots)?fs.slots:(typeof fs.slots==='object'?Object.keys(fs.slots):asArr(fs.slots)); out+=codeRow('filled slots', fslots.map(function(s){return typeof s==='object'?(s.name||s.slot||'slot'):s;})); }
+    // Fillers — one accordion per slot, each with ITS chunks
+    var fslots=asArr(dt.filled_shape&&dt.filled_shape.slots);
+    if(fslots.length){ fslots.forEach(function(s){ s=s||{}; var ch=asArr(s.chunks);
+      out+=acc('Filler — slot '+cell(s.slot_id||'?'), 'occupancy '+num(s.occupancy,0)+'/'+num(s.capacity,0)+(s.under_filled?' · under-filled':''),
+        ch.length?'<div data-docgroup>'+docTable(ch,'filler')+'</div>':'<div class="empty">no chunks</div>', ch.length>0, true); });
+    } else out+=acc('Fillers', mss(lat.fillers_ms), '<div class="empty">no filler slots</div>', false, !!lat.fillers_ms);
 
-    // 8 · Synthesis
-    var sy=dt.synthesis, stel=tl.synthesis_telemetry;
-    out+=head('Synthesis', lat.synthesis_ms, !!(sy||stel));
-    if(sy){ var cites=asArr(sy.citations); if(cites.length) out+='<div class="stamp" style="margin:.4rem 0 .2rem">citations · '+cites.length+'</div><div data-docgroup>'+docTable(cites,'synthesis')+'</div>';
-      if(sy.chunks_in!=null||sy.chunks_out!=null) out+='<div class="stamp">chunks in/out: '+num(sy.chunks_in,0)+' → '+num(sy.chunks_out,0)+'</div>'; }
-    if(stel&&typeof stel==='object'){ out+='<div class="stamp">'+Object.keys(stel).slice(0,6).map(function(k){return esc(k)+': '+esc(String(stel[k]).slice(0,30));}).join(' · ')+'</div>'; }
+    var sy=dt.synthesis, cites=asArr(sy&&sy.citations);
+    out+=acc('Synthesis', mss(lat.synthesis_ms)+(cites.length?' · '+cites.length+' citations':''),
+      sy?((cites.length?'<div data-docgroup>'+docTable(cites,'synthesis')+'</div>':'<div class="empty">no citations</div>')
+        +kv([['chunks in→out',(sy.chunks_in!=null||sy.chunks_out!=null)?(num(sy.chunks_in,0)+' → '+num(sy.chunks_out,0)):null]])):'', !!sy, !!sy);
 
     return out;
   }
@@ -421,13 +441,17 @@
   // Wire the one cross-step search box (present in the Detailed-trace panel).
   function wireDocSearch(){
     var s=document.getElementById('dt-search'); if(!s) return;
-    var rows=$$('#tabbody .doc-row'), count=document.getElementById('dt-count');
-    var groups=$$('#tabbody [data-docgroup]');
+    var rows=$$('#tabbody .doc-row'), count=document.getElementById('dt-count'), accs=$$('#tabbody .acc');
     function upd(){
       var q=s.value.trim().toLowerCase(), shown=0;
       rows.forEach(function(r){ var hit=!q||r.getAttribute('data-search').indexOf(q)!==-1; r.style.display=hit?'':'none'; if(hit)shown++; });
-      groups.forEach(function(g){ var any=g.querySelectorAll('.doc-row:not([style*="display: none"])').length; g.style.opacity=(q&&!any)?'.45':'1'; });
-      if(count) count.textContent=shown+' / '+rows.length+' documents'+(q?' match':'');
+      accs.forEach(function(a){
+        var arows=$$('.doc-row',a); if(!arows.length) return;
+        var m=arows.filter(function(r){return r.style.display!=='none';}).length;
+        if(q){ if(m>0){ a.classList.add('open'); a.style.opacity='1'; } else { a.classList.remove('open'); a.style.opacity='.5'; } }
+        else { a.style.opacity='1'; }
+      });
+      if(count) count.textContent = q ? (shown+' documents match') : (rows.length+' documents across steps');
     }
     s.addEventListener('input',upd); upd();
   }
