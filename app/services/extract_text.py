@@ -1,4 +1,5 @@
 import re
+import os
 import fitz  # PyMuPDF
 from google.cloud import storage
 from bs4 import BeautifulSoup
@@ -33,6 +34,12 @@ class FileTooLarge(ExtractionError):
 # A single document should never be able to exhaust the worker. download_as_bytes
 # pulls the whole object into memory with no ceiling; one 2 GB scan would take the
 # process down and look like an unrelated crash.
+# Table capture. OFF by default: it REWRITES page text (tables excised to a
+# breadcrumb), so it changes what gets chunked, embedded and — because page text
+# is the input to the normalized-md5 that duplicate determination rests on — what
+# the dedup gate compares. Enabled per-run for the stage-2 milestone only.
+TABLE_CAPTURE = os.getenv("TABLE_CAPTURE", "").lower() in ("1", "true", "on", "yes")
+
 MAX_DOWNLOAD_BYTES = 300 * 1024 * 1024
 
 
@@ -424,6 +431,33 @@ async def extract_text_from_gcs(gcs_path: str) -> list[dict]:
                     page_data["extraction_status"] = "empty"
                     page_data["extraction_error"] = "No text found on this page (may be image-only or blank)"
                 else:
+                    # TABLE CAPTURE (Table Capture program, stage 1).
+                    #
+                    # THIS is the seam, not main.py. main.py builds DocumentPage in
+                    # EIGHT places; six of them source pages from here, and only here
+                    # do we still hold the live fitz page — lines, words, bboxes —
+                    # which is what line-based table detection needs. By the time
+                    # main.py sees a page it has only the string.
+                    #
+                    # capture_page_tables() is Sourcing's, and pure. The wrapper is
+                    # mine and is the whole safety story: ANY failure inside it
+                    # degrades to today's behaviour — original text, no tables. A
+                    # document must never fail to ingest because a table was hard to
+                    # read. Ingest availability outranks table quality.
+                    if TABLE_CAPTURE:
+                        try:
+                            from app.services.table_capture import capture_page_tables
+                            text, tables = capture_page_tables(page, text, page_num + 1)
+                            page_data["tables"] = tables
+                        except Exception as cap_err:
+                            logger.warning(
+                                "table_capture failed on page %s, falling back to raw text: %s",
+                                page_num + 1, cap_err)
+                            page_data["tables"] = []
+                        # text may have been rewritten (tables excised -> breadcrumb),
+                        # so length is recomputed rather than carried from before.
+                        text_length = len(text.strip())
+
                     page_data["extraction_status"] = "success"
                     page_data["text"] = text
                     page_data["text_length"] = text_length

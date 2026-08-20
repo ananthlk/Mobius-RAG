@@ -94,6 +94,47 @@ def _glue_code_list_fragments(
     return merged
 
 
+# --- interim min-substance guard -------------------------------------------
+# Sourcing, S-2 (2026-08-19): "Interim min-substance guard: FINE as a bleed-stop,
+# and it *complements* the real fix — it covers docs extraction can't yet handle.
+# Keep it minimal; do not let it grow into pseudo-table logic."
+#
+# WHY. Table extraction currently flattens a markdown table into one line per
+# cell. An empty cell arrives here as a lone "-" (or U+2010 "‐"), survives the
+# only filter this function had (`if not para: continue`), and becomes a chunk.
+# 229,870 such chunks — 11.9% of the live index — were purged on 2026-08-19;
+# 185,261 of them were literally the single character "-". They all embed to
+# nearly the same vector, so they crowd real content out of top-k at a uniform
+# similarity (~0.684 in the ZORPTIDE query that exposed this).
+#
+# The REAL fix is upstream: Sourcing's extractor excises tables before this
+# function ever sees them, so the splitter is starved of the noise rather than
+# taught to recognise it. This guard is the bleed-stop until that lands, and it
+# stays afterwards for formats their extractor does not cover.
+#
+# PARITY (A-43): this threshold is the same rule the purge applied, expressed
+# once. Postgres:  length(regexp_replace(trim(text),'[^[:alnum:]]','','g')) < 3
+# Changing one without the other silently re-admits what the purge removed.
+MIN_SUBSTANCE_ALNUM = 3
+
+
+def has_min_substance(text: str) -> bool:
+    """True if `text` carries at least MIN_SUBSTANCE_ALNUM alphanumeric characters.
+
+    Deliberately counts alphanumerics only, so punctuation, box-drawing, dashes
+    (ASCII and Unicode) and whitespace cannot make a fragment look substantive.
+    "-", "‐", "0\n0\n-", "| |" are all rejected; "N/A", "$12", "see" are kept —
+    short real answers must survive, this is a noise floor and not a length rule.
+    """
+    n = 0
+    for ch in text:
+        if ch.isalnum():
+            n += 1
+            if n >= MIN_SUBSTANCE_ALNUM:
+                return True
+    return False
+
+
 def split_paragraphs_from_markdown(md: str) -> List[Dict[str, Any]]:
     """
     Split markdown string into paragraphs with section context.
@@ -130,7 +171,7 @@ def split_paragraphs_from_markdown(md: str) -> List[Dict[str, Any]]:
         for k in range(len(starts)):
             segment = block[starts[k]:ends[k]]
             para = segment.strip()
-            if not para:
+            if not para or not has_min_substance(para):
                 continue
             body_start_in_block = len(segment) - len(segment.lstrip())
             start_offset = current_pos + starts[k] + body_start_in_block
