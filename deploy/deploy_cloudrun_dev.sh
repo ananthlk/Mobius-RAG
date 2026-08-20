@@ -159,6 +159,30 @@ COMMON_ENV=(
   # Org-docs DB: per-org namespace in mobius_org_docs (same Cloud SQL instance).
   # Gates POST /org-docs/ingest + GET /org-docs/search.
   "ORG_DOCS_DATABASE_URL=${ORG_DOCS_DB_URL}"
+
+  # ---- Feature flags -------------------------------------------------------
+  # DECLARE FLAGS HERE, NEVER OUT OF BAND.
+  #
+  # This deploy uses `--set-env-vars`, which REPLACES the whole environment.
+  # Anything set afterwards with `gcloud run services update` survives only
+  # until the next deploy silently wipes it. That is not hypothetical: the
+  # AUTO_PUBLISH_ON_EMBED comment above records 23 humana docs stranded on
+  # 2026-04-27 by exactly this, and on 2026-08-19 a deploy wiped TABLE_CAPTURE
+  # mid-milestone — the same bug, two flags, four months apart. The lesson had
+  # been applied to one variable instead of made general.
+  #
+  # So the script is the single source of truth for the environment. Each flag
+  # takes its value from the shell when set, so a one-off run can flip it
+  # (`TABLE_CAPTURE=off ./deploy/deploy_cloudrun_dev.sh`) without an edit, and
+  # the default here is what dev returns to otherwise.
+
+  # Table capture: rewrites page text, excising detected tables into
+  # document_tables and leaving a breadcrumb. Changes what gets chunked AND what
+  # the dedup gate compares, so it is a deliberate on, not a default on.
+  "TABLE_CAPTURE=${TABLE_CAPTURE:-on}"
+  # Passenger tables: attaches a retrieved chunk's table to the answer, by
+  # breadcrumb or by (document_id, page_number) proximity.
+  "PASSENGER_TABLE_RETRIEVAL=${PASSENGER_TABLE_RETRIEVAL:-true}"
 )
 
 COMMON_SECRETS=(
@@ -234,6 +258,34 @@ deploy_service "mobius-rag-embedding-worker" \
   1 1 "no" "2Gi"   # 2Gi: auto-publish-on-embed loads a giant's ~9k embeddings; OOM'd at 1Gi
 
 # 6. Print URLs
+
+# --- Verify the environment actually landed ------------------------------
+# READ THE WRITE BACK. Declaring a var and assuming it deployed is precisely
+# how TABLE_CAPTURE went missing: the deploy reported success, the flag was
+# gone, and the only symptom was a feature quietly not running. This compares
+# what COMMON_ENV declared against what the live revision actually serves, and
+# fails loudly on a mismatch rather than leaving it to be discovered later.
+echo ""
+echo "--- verifying environment on mobius-rag ---"
+live_env="$(gcloud run services describe mobius-rag \
+  --project="$PROJECT_ID" --region="$REGION" \
+  --format='value(spec.template.spec.containers[0].env)' 2>/dev/null)"
+env_missing=0
+for pair in "${COMMON_ENV[@]}"; do
+  key="${pair%%=*}"
+  if ! grep -q "'${key}'" <<<"$live_env"; then
+    echo "  MISSING: ${key}"
+    env_missing=$((env_missing + 1))
+  fi
+done
+if [[ "$env_missing" -gt 0 ]]; then
+  echo "  ERROR: ${env_missing} declared env var(s) are not on the live revision."
+  echo "  The deploy reported success but the service is not running the declared"
+  echo "  configuration. Do not treat this deploy as good."
+  exit 1
+fi
+echo "  OK — all ${#COMMON_ENV[@]} declared env vars present on the live revision."
+
 echo ""
 echo "=============================================================="
 echo "Deploy complete. URLs:"
