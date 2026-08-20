@@ -288,7 +288,7 @@
       : '';
     $('#result').innerHTML='<div class="card pad" style="margin-top:1rem">'+degraded+flow+kpi+gapNote+tabbar+'<div class="tabbody" id="tabbody"></div></div>';
 
-    var panels=[ ()=>emitsPanel(em,chunks), ()=>telemetryPanel(lat,tl), ()=>detailedPanel(dt), ()=>evalPanel(ev,body,evaled) ];
+    var panels=[ ()=>emitsPanel(em,chunks), ()=>telemetryPanel(lat,tl), ()=>detailedPanel(dt,lat,tl), ()=>evalPanel(ev,body,evaled) ];
     function show(i){ $('#tabbody').innerHTML=panels[i](); }
     $$('#tabs .t').forEach(function(b){ b.addEventListener('click',function(){ $$('#tabs .t').forEach(function(x){x.classList.remove('on');}); b.classList.add('on'); show(+b.getAttribute('data-tab')); }); });
     show(0);
@@ -296,8 +296,19 @@
   function kcard(v,l,cls){ return '<div class="k'+(cls?' '+cls:'')+'"><div class="v">'+v+'</div><div class="l">'+l+'</div></div>'; }
 
   function emitsPanel(em,chunks){
-    var ans=em.narrative||em.narrative_full||'';
-    var out='<div class="panel-h">Answer chat receives</div>'+(ans?'<div class="answer">'+esc(ans)+'</div>':'<div class="empty">No narrative emitted'+(em.status?' · status '+esc(em.status):'')+'</div>');
+    var out='';
+    // Short (production) narrative — the answer card
+    out+='<div class="panel-h">Answer chat receives'+(em.status?' <span class="chip">'+esc(em.status)+'</span>':'')+'</div>';
+    out+= em.narrative ? '<div class="answer">'+esc(em.narrative)+'</div>' : '<div class="empty">No narrative emitted</div>';
+    // Running commentary — the pipeline's own play-by-play (Gate + Reformat, unabridged)
+    if(em.narrative_full){
+      out+='<div class="panel-h" style="margin-top:1rem">Running commentary <span class="chip">narrative_full</span></div>'
+        +'<div class="answer" style="font-family:var(--mono);font-size:.78rem;white-space:pre-wrap;max-height:340px;overflow:auto">'+esc(em.narrative_full)+'</div>';
+    }
+    if(em.router_narrative){
+      out+='<div class="panel-h" style="margin-top:1rem">Router commentary <span class="chip">router_narrative</span></div>'
+        +'<div class="answer" style="font-family:var(--mono);font-size:.78rem;white-space:pre-wrap">'+esc(em.router_narrative)+'</div>';
+    }
     out+='<div class="panel-h" style="margin-top:1rem">Chunks handed to chat <span class="chip">'+chunks.length+'</span></div>';
     if(!chunks.length){ out+='<div class="empty">No chunks</div>'; return out; }
     out+='<div class="tablewrap"><table><thead><tr><th>#</th><th>document</th><th>authority</th><th class="num">score</th></tr></thead><tbody>';
@@ -320,18 +331,72 @@
     return out;
   }
 
-  function detailedPanel(dt){
+  function detailedPanel(dt,lat,tl){
+    dt=dt||{}; lat=lat||{}; tl=tl||{};
+    // stage header with timing + a "not run" marker when the stage produced nothing
+    function head(title,ms,present){ return '<div class="panel-h" style="margin-top:1rem">'+title
+      +(ms!=null?' <span class="chip">'+Math.round(ms)+'ms</span>':'')
+      +(present?'':' <span class="chip" style="color:var(--tx-3)">not run</span>')+'</div>'; }
     var out='';
-    var g=dt.gate; if(g){ out+='<div class="panel-h">Gate <span class="chip">'+num(g.gate_ms,0)+'ms</span></div>';
-      out+=codeRow('domain (d)',g.d_codes)+codeRow('jurisdiction (j)',g.j_codes)+codeRow('procedure (p)',g.p_codes);
-      if(g.process_intent) out+='<div class="stamp">intent: '+esc(g.process_intent)+(g.reason?' · '+esc(g.reason):'')+'</div>'; }
-    var rf=dt.reformat; if(rf){ out+='<div class="panel-h" style="margin-top:1rem">Reformat <span class="chip">'+esc(rf.posture||'—')+'</span></div>';
-      if(rf.rewritten_queries&&rf.rewritten_queries.length) out+=listRows('rewritten',rf.rewritten_queries);
-      if(rf.fanout_themes&&rf.fanout_themes.length) out+=codeRow('fan-out themes',rf.fanout_themes); }
-    var sl=dt.slots; if(sl&&sl.slots){ out+='<div class="panel-h" style="margin-top:1rem">Slots <span class="chip">'+esc(sl.posture||'—')+'</span></div>'+codeRow('slots', Array.isArray(sl.slots)?sl.slots:Object.keys(sl.slots)); }
-    var rt=dt.router; if(rt){ out+='<div class="panel-h" style="margin-top:1rem">Router</div>'+codeRow('dispatch', rt.dispatch_path||[]); }
-    var sy=dt.synthesis; if(sy){ out+='<div class="panel-h" style="margin-top:1rem">Synthesis</div>'+codeRow('citations', (sy.citations||[]).map(function(c){return c.document_name||c.doc||c.id||'cite';})); }
-    return out||'<div class="empty">No detailed-trace data on this run</div>';
+
+    // 1 · Gate
+    var g=dt.gate;
+    out+=head('Gate', g?g.gate_ms:lat.gate_ms, !!g);
+    if(g){ out+=codeRow('domain (d)',g.d_codes)+codeRow('jurisdiction (j)',g.j_codes)+codeRow('procedure (p)',g.p_codes);
+      if(g.fanout_codes&&g.fanout_codes.length) out+=codeRow('fan-out codes',g.fanout_codes);
+      if(g.process_intent) out+='<div class="stamp">intent: '+esc(g.process_intent)+'</div>';
+      if(g.contour) out+='<div class="stamp">contour: '+esc(typeof g.contour==='object'?JSON.stringify(g.contour):g.contour)+'</div>';
+      if(g.reason) out+='<div class="stamp">reason: '+esc(g.reason)+'</div>'; }
+
+    // 2 · Reformat
+    var rf=dt.reformat;
+    out+=head('Reformat'+(rf&&rf.posture?' · '+esc(rf.posture):''), rf?rf.reformat_ms:lat.reformat_ms, !!rf);
+    if(rf){ if(rf.rewritten_queries&&rf.rewritten_queries.length) out+=listRows('rewritten',rf.rewritten_queries);
+      if(rf.fanout_themes&&rf.fanout_themes.length) out+=codeRow('fan-out themes',rf.fanout_themes);
+      if(rf.clarify_questions&&rf.clarify_questions.length) out+=listRows('clarify',rf.clarify_questions);
+      if(rf.reason) out+='<div class="stamp">reason: '+esc(rf.reason)+'</div>'; }
+
+    // 3 · Structure
+    var st=dt.structure;
+    out+=head('Structure'+(st&&st.posture?' · '+esc(st.posture):''), st?st.structure_ms:null, !!st);
+    if(st){ if(st.resource_posture) out+='<div class="stamp">resource posture: '+esc(st.resource_posture)+'</div>';
+      if(st.rewritten_queries&&st.rewritten_queries.length) out+=listRows('rewritten',st.rewritten_queries);
+      if(st.fanout_themes&&st.fanout_themes.length) out+=codeRow('fan-out themes',st.fanout_themes);
+      if(st.reason) out+='<div class="stamp">reason: '+esc(st.reason)+'</div>'; }
+
+    // 4 · Slots
+    var sl=dt.slots;
+    out+=head('Slots'+(sl&&sl.posture?' · '+esc(sl.posture):''), sl?sl.slots_ms:lat.slots_ms, !!sl);
+    if(sl){ var slots=sl.slots; if(slots) out+=codeRow('slots', Array.isArray(slots)?slots.map(function(s){return typeof s==='object'?(s.name||s.slot||JSON.stringify(s)):s;}):Object.keys(slots));
+      if(sl.reason) out+='<div class="stamp">reason: '+esc(sl.reason)+'</div>'; }
+
+    // 5 · Pool (candidate retrieval)
+    var pool=dt.pool;
+    var poolN=Array.isArray(pool)?pool.length:(pool&&pool.count!=null?pool.count:null);
+    out+=head('Pool'+(poolN!=null?' · '+poolN+' candidates':''), lat.pool_ms, !!(pool&&(Array.isArray(pool)?pool.length:true)));
+    if(Array.isArray(pool)&&pool.length){ out+='<div class="tablewrap"><table><thead><tr><th>#</th><th>document</th><th class="num">score</th></tr></thead><tbody>';
+      pool.slice(0,8).forEach(function(c,i){ var doc=c.document_name||c.doc||c.title||c.id||'—'; var s=c.composite_score!=null?c.composite_score:(c.score!=null?c.score:null);
+        out+='<tr><td class="num">'+(i+1)+'</td><td>'+esc(String(doc).slice(0,70))+'</td><td class="num">'+num(s)+'</td></tr>'; });
+      out+='</tbody></table></div>'+(pool.length>8?'<div class="stamp">+'+(pool.length-8)+' more</div>':''); }
+
+    // 6 · Router
+    var rt=dt.router;
+    out+=head('Router', lat.router_ms, !!rt);
+    if(rt){ out+=codeRow('dispatch', rt.dispatch_path||rt.chain||[]); if(rt.reason) out+='<div class="stamp">reason: '+esc(rt.reason)+'</div>'; }
+
+    // 7 · Fillers
+    var fs=dt.filled_shape;
+    out+=head('Fillers', lat.fillers_ms, !!(fs||lat.fillers_ms));
+    if(fs&&fs.slots){ out+=codeRow('filled slots', (Array.isArray(fs.slots)?fs.slots:Object.keys(fs.slots)).map(function(s){return typeof s==='object'?(s.name||s.slot||'slot'):s;})); }
+
+    // 8 · Synthesis
+    var sy=dt.synthesis, stel=tl.synthesis_telemetry;
+    out+=head('Synthesis', lat.synthesis_ms, !!(sy||stel));
+    if(sy){ if(sy.citations&&sy.citations.length) out+=codeRow('citations', sy.citations.map(function(c){return c.document_name||c.doc||c.id||'cite';}));
+      if(sy.chunks_in!=null||sy.chunks_out!=null) out+='<div class="stamp">chunks in/out: '+num(sy.chunks_in,0)+' → '+num(sy.chunks_out,0)+'</div>'; }
+    if(stel&&typeof stel==='object'){ out+='<div class="stamp">'+Object.keys(stel).slice(0,6).map(function(k){return esc(k)+': '+esc(String(stel[k]).slice(0,30));}).join(' · ')+'</div>'; }
+
+    return out;
   }
   function codeRow(label,arr){ if(!arr||!arr.length) return '<div class="stamp">'+label+': —</div>'; return '<div style="display:flex;gap:.5rem;align-items:baseline;margin:.35rem 0"><span class="stamp" style="min-width:120px;margin:0">'+label+'</span><span class="chips">'+arr.map(function(c){return '<span class="chip">'+esc(c)+'</span>';}).join('')+'</span></div>'; }
   function listRows(label,arr){ return '<div style="margin:.35rem 0"><span class="stamp">'+label+':</span><ul style="margin:.3rem 0 0;padding-left:1.1rem;font-size:.8rem;color:var(--tx-2)">'+arr.map(function(x){return '<li>'+esc(x)+'</li>';}).join('')+'</ul></div>'; }
