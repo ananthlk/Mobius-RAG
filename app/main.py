@@ -9695,6 +9695,19 @@ class ImportScrapedPagesRequest(BaseModel):
     program: Optional[str] = None
     auto_chunk: bool = True
 
+    # RUN PROVENANCE (Fact Store A-52, 2026-08-20). A crawl initiated on our side
+    # still belongs to a Fact Store run — theirs is the seat that owns source
+    # config and adjudication, and their Runs tab is where a human looks to see
+    # what a fetch did. Without these the run is invisible to them: this model
+    # sets extra="forbid", so the first attempt to pass a stamp failed with 422
+    # and the pages would have landed unattributed.
+    #
+    # Carried into source_metadata unchanged rather than interpreted here. RAG
+    # does not own their meaning; it owns not losing them.
+    source_run_id: Optional[str] = None
+    payor_id: Optional[str] = None
+    health_plan_id: Optional[str] = None
+
 
 @app.post("/documents/import-scraped-pages")
 async def import_scraped_pages(
@@ -9759,6 +9772,13 @@ async def import_scraped_pages(
         "scraped_page_count": len(body.pages),
         "scraped_page_urls": urls,
     }
+    # Run provenance, carried verbatim (Fact Store A-52). Only set when supplied,
+    # so an ad-hoc scrape does not claim membership in a run that does not exist.
+    for _k, _v in (("source_run_id", body.source_run_id),
+                   ("payor_id", body.payor_id),
+                   ("health_plan_id", body.health_plan_id)):
+        if _v:
+            source_metadata[_k] = _v
     # An explicitly supplied termination date is a claim someone made and is
     # worth keeping; the invented default is not. Provenance is stamped either
     # way, which is the whole point of the constraint.
@@ -16614,6 +16634,38 @@ async def trace_explorer_page():
     gated by the normal /admin/* auth middleware."""
     import os as _os
     path = _os.path.join(_os.path.dirname(__file__), "static_admin", "trace_explorer.html")
+    with open(path, encoding="utf-8") as f:
+        return HTMLResponse(content=f.read())
+
+
+@app.get("/eval/runs", response_class=HTMLResponse)
+async def eval_runs_page():
+    """Serves the Runs surface of the Eval Console -- the one-purpose page
+    that answers "is anything running?" and follows every bank job live
+    (running / done-unack'd / finished), unifying what used to be split
+    across the trace-explorer's "Watch job" + "Browse previous runs".
+
+    Same precedent as /trace-explorer: the page shell reveals no data, so
+    it's safe to be reachable without a token. Its JS prompts for the admin
+    key (shared localStorage with /trace-explorer) and attaches it as
+    X-Admin-Key on its fetch() calls to /admin/trace-explorer/run-bank/*,
+    which stay gated by the normal /admin/* auth middleware."""
+    import os as _os
+    path = _os.path.join(_os.path.dirname(__file__), "static_admin", "runs.html")
+    with open(path, encoding="utf-8") as f:
+        return HTMLResponse(content=f.read())
+
+
+@app.get("/eval/query", response_class=HTMLResponse)
+async def eval_query_page():
+    """Serves the Query surface of the Eval Console — run a single query and
+    review its telemetry, with eval off / reference-free / vs a golden answer.
+    Built on the existing POST /admin/trace-explorer/run; no new backend.
+    Same precedent as /trace-explorer and /eval/runs: the page shell reveals
+    no data, its JS prompts for the admin key (shared localStorage) and sends
+    it as X-Admin-Key on the gated /admin/* call."""
+    import os as _os
+    path = _os.path.join(_os.path.dirname(__file__), "static_admin", "query.html")
     with open(path, encoding="utf-8") as f:
         return HTMLResponse(content=f.read())
 
