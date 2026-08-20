@@ -6800,6 +6800,32 @@ async def restart_extraction(
                         await db_session.commit()
                         if _t['failed']:
                             logger.warning('document_tables: %s table(s) lost for %s — breadcrumbs in page text have no row behind them', _t['failed'], doc_uuid)
+                    # RE-CLASSIFY. Re-extraction REWRITES document_pages, so any
+                    # classification on the document was derived from text that no
+                    # longer exists. Inheriting it means serving a verdict about
+                    # content the document no longer contains -- and with table
+                    # capture that is not hypothetical, since excision can remove
+                    # most of a page. The upload/import paths already classify
+                    # after extraction; this path never did, so a re-extracted
+                    # document silently kept a stale verdict.
+                    #
+                    # Fail-open, deliberately: a classifier outage must not leave
+                    # the document un-extracted. The old verdict then stands, which
+                    # is why the failure is logged loudly rather than swallowed --
+                    # a stale verdict nobody knows about is the thing being fixed.
+                    try:
+                        _clf = await classify_for_ingest(
+                            document_id=str(doc_uuid),
+                            caller="mobius-rag:extract_restart",
+                        )
+                        await _persist_classification(db_session, doc, _clf)
+                        await db_session.commit()
+                    except Exception as clf_err:
+                        logger.warning(
+                            "re-classification failed for %s after re-extraction; the "
+                            "PREVIOUS verdict still stands and now describes text that "
+                            "has changed: %s", doc_uuid, clf_err)
+
                     logger.info(f"Extraction restarted and completed for document {document_id}")
                 except Exception as e:
                     logger.error(f"Extraction error: {e}", exc_info=True)
