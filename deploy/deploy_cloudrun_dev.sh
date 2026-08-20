@@ -250,7 +250,10 @@ deploy_service() {
 #    THE REAL FIX, not done here: move extraction to its own self-polling worker
 #    like chunking and embedding, so the API serves requests and nothing else.
 #    That also removes the reason min=max=1 exists.
-deploy_service "mobius-rag" "" 1 1 "no" "2Gi"   # 2Gi: publishing a giant doc (~9k embeddings) OOM'd at 1Gi
+deploy_service "mobius-rag" "" 1 1 "no" "8Gi"   # 8Gi (2026-08-20, corpus-scale run): publishing a giant doc
+                                                #      (~9k embeddings) OOM'd at 1Gi; 2Gi held for single
+                                                #      documents but not for a sustained batch. Scale back
+                                                #      down after the AHCA run.
 
 # 4. Chunking worker. Self-polling supervisor (FOR UPDATE SKIP LOCKED
 #    handles dedup across instances), so Cloud Run autoscaling never
@@ -261,7 +264,7 @@ deploy_service "mobius-rag" "" 1 1 "no" "2Gi"   # 2Gi: publishing a giant doc (~
 #    than instant-rag SLA.
 deploy_service "mobius-rag-chunking-worker" \
   "uvicorn,app.worker_server_chunking:app,--host,0.0.0.0,--port,8080" \
-  12 12 "no" "2Gi"
+  12 12 "no" "8Gi"
 
 # 5. Embedding worker. Same self-polling shape as chunking, so instance count IS
 #    the parallelism — and at 1 it was the serial bottleneck of the whole
@@ -272,7 +275,7 @@ deploy_service "mobius-rag-chunking-worker" \
 #    in memory at publish time, and Vertex quota is the next ceiling anyway.
 deploy_service "mobius-rag-embedding-worker" \
   "uvicorn,app.worker_server_embedding:app,--host,0.0.0.0,--port,8080" \
-  6 6 "no" "2Gi"   # 2Gi: auto-publish-on-embed loads a giant's ~9k embeddings; OOM'd at 1Gi
+  6 6 "no" "8Gi"   # 8Gi: auto-publish-on-embed loads a giant's ~9k embeddings into memory
 
 # 6. Print URLs
 
