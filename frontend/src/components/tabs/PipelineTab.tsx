@@ -55,7 +55,8 @@ const STAGES: { key: string; label: string; fields: [string, string][] }[] = [
       ['total', 'crawled documents'], ['last_24h', 'last 24h'],
       ['with_source_url', 'with source URL'] ] },
   { key: 'gcs', label: 'GCS', fields: [
-      ['stored', 'objects stored'], ['missing_object', 'row without object|good'] ] },
+      ['@throughput', 'landed'], ['stored', 'objects stored'],
+      ['missing_object', 'row without object|good'] ] },
   { key: 'extract', label: 'Extract', fields: [
       ['extracting', 'in flight'], ['no_text', 'produced no text'],
       ['failed_typed', 'typed failures'], ['tables_captured', 'tables captured'] ] },

@@ -2581,11 +2581,26 @@ async def pipeline_health(db: AsyncSession = Depends(get_db)):
         gcs_missing = await _one("""SELECT count(*) FROM documents
             WHERE (file_path IS NULL OR file_path = '')
               AND lifecycle_state IS DISTINCT FROM 'retired'""")
+        # GCS needs a throughput number like every other stage. Without one the
+        # card showed only cumulative totals, so "is anything landing right now"
+        # — the question you actually ask during a crawl — had no answer here.
+        # 5-minute buckets to match what chunking/embedding already expose, so
+        # the window selector drives this card too.
+        gcs_buckets = []
+        for i in range(5, -1, -1):
+            gcs_buckets.append(await _one(f"""SELECT count(*) FROM documents
+                WHERE file_path IS NOT NULL AND file_path <> ''
+                  AND created_at >= now() - interval '{(i+1)*5} minutes'
+                  AND created_at <  now() - interval '{i*5} minutes'"""))
         slow["gcs"] = {
             "stored": await _one("""SELECT count(*) FROM documents
                 WHERE file_path IS NOT NULL AND file_path <> ''
                   AND lifecycle_state IS DISTINCT FROM 'retired'"""),
             "missing_object": gcs_missing,
+            "last_hour": await _one("""SELECT count(*) FROM documents
+                WHERE file_path IS NOT NULL AND file_path <> ''
+                  AND created_at > now() - interval '1 hour'"""),
+            "rolling": {"buckets_5min": gcs_buckets},
             "status": "red" if gcs_missing > 50 else ("yellow" if gcs_missing > 0 else "green"),
         }
 
