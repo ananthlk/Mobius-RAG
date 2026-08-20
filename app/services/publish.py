@@ -6,6 +6,7 @@ build one row per contract schema, then DELETE existing published rows for that 
 After write, runs an integrity check (row count + optional spot-check) and returns verification result.
 """
 import hashlib
+import logging
 import random
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -14,6 +15,7 @@ from uuid import UUID
 from sqlalchemy import select, delete, func, text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.chunking import has_min_substance
 from app.models import (
     Document,
     ChunkEmbedding,
@@ -21,6 +23,8 @@ from app.models import (
     ExtractedFact,
     RagPublishedEmbedding,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -190,6 +194,7 @@ async def publish_document(
     _src_p = sum(1 for _v in _chunk_tags_by_pos.values() if _v["p"])
     _src_j = sum(1 for _v in _chunk_tags_by_pos.values() if _v["j"])
     _j_d = _j_p = _j_j = 0
+    _skipped_no_substance = 0
 
     # Document metadata (contract: empty string when null)
     doc_filename = _str_or_empty(doc.filename)
@@ -254,6 +259,24 @@ async def publish_document(
             if _ct_dd["j"]:
                 _j_j += 1
 
+        # MIN-SUBSTANCE GUARD AT THE PUBLISH BOUNDARY.
+        #
+        # The chunker carries this same rule, but the chunker only governs NEW
+        # chunks. Publish reads `hierarchical_chunks`, which can be months old and
+        # predate the guard entirely — on 2026-08-19 a republish of one document
+        # pushed 4,063 chunks that were literally "-" straight back into the live
+        # index, from chunks written in May. The 229,870-chunk purge had removed
+        # exactly those, and re-publishing restored them.
+        #
+        # That is the flaw in leaving `hierarchical_chunks` intact as reversal
+        # fuel: republish is the restore mechanism, so it restores the junk too.
+        # Publish is the LAST gate before the index and the only one every chunk
+        # must pass regardless of age, generator or code path — so the rule has to
+        # live here as well, not only at the point of creation.
+        if not has_min_substance(text or ""):
+            _skipped_no_substance += 1
+            continue
+
         row = RagPublishedEmbedding(
             id=ce.id,
             document_id=document_id,
@@ -291,6 +314,15 @@ async def publish_document(
             } if _ct_dd else {}),
         )
         rows.append(row)
+
+    # A silent filter is its own defect. Say what was withheld and why, so a
+    # document that publishes far fewer chunks than it has is explainable from
+    # the logs rather than by re-deriving it from the database months later.
+    if _skipped_no_substance:
+        logger.warning(
+            "publish: withheld %s no-substance chunk(s) for %s (kept %s) — "
+            "source chunks predate the chunker guard; re-chunk to clear them at source",
+            _skipped_no_substance, document_id, len(rows))
 
     # Emit per-doc tag-join coverage (built above) as a structured signal BEFORE
     # downstream reads it, and shout on a full-miss (source tagged but nothing
