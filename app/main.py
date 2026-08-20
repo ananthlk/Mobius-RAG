@@ -6789,6 +6789,17 @@ async def restart_extraction(
                         db_session.add(page)
                     doc.status = "completed"
                     await db_session.commit()
+
+                    # Persist captured tables AFTER the page commit — document_tables
+                    # carries a composite FK to (document_id, page_number), so the pages
+                    # must already exist. Never raises: a table that cannot be stored must
+                    # not cost the document its ingest.
+                    if any('tables' in p for p in (pages or [])):
+                        from app.services.table_persist import persist_document_tables
+                        _t = await persist_document_tables(db_session, str(doc_uuid), pages)
+                        await db_session.commit()
+                        if _t['failed']:
+                            logger.warning('document_tables: %s table(s) lost for %s — breadcrumbs in page text have no row behind them', _t['failed'], doc_uuid)
                     logger.info(f"Extraction restarted and completed for document {document_id}")
                 except Exception as e:
                     logger.error(f"Extraction error: {e}", exc_info=True)
@@ -7649,6 +7660,17 @@ async def upload_file(
             # Update status to completed (even if some pages had issues)
             document.status = "completed"
             await db.commit()
+
+            # Persist captured tables AFTER the page commit — document_tables
+            # carries a composite FK to (document_id, page_number), so the pages
+            # must already exist. Never raises: a table that cannot be stored must
+            # not cost the document its ingest.
+            if any('tables' in p for p in (pages or [])):
+                from app.services.table_persist import persist_document_tables
+                _t = await persist_document_tables(db, str(document.id), pages)
+                await db.commit()
+                if _t['failed']:
+                    logger.warning('document_tables: %s table(s) lost for %s — breadcrumbs in page text have no row behind them', _t['failed'], document.id)
             
         except Exception as e:
             # Mark as failed
@@ -7884,6 +7906,17 @@ async def retry_document(
 
         document.status = "completed"
         await db.commit()
+
+        # Persist captured tables AFTER the page commit — document_tables
+        # carries a composite FK to (document_id, page_number), so the pages
+        # must already exist. Never raises: a table that cannot be stored must
+        # not cost the document its ingest.
+        if any('tables' in p for p in (pages or [])):
+            from app.services.table_persist import persist_document_tables
+            _t = await persist_document_tables(db, str(document.id), pages)
+            await db.commit()
+            if _t['failed']:
+                logger.warning('document_tables: %s table(s) lost for %s — breadcrumbs in page text have no row behind them', _t['failed'], document.id)
     except Exception as _ex:
         document.status = "failed"
         await db.commit()
@@ -8117,6 +8150,17 @@ async def import_document_from_gcs(
                 db.add(page)
             document.status = "completed"
             await db.commit()
+
+            # Persist captured tables AFTER the page commit — document_tables
+            # carries a composite FK to (document_id, page_number), so the pages
+            # must already exist. Never raises: a table that cannot be stored must
+            # not cost the document its ingest.
+            if any('tables' in p for p in (pages or [])):
+                from app.services.table_persist import persist_document_tables
+                _t = await persist_document_tables(db, str(document.id), pages)
+                await db.commit()
+                if _t['failed']:
+                    logger.warning('document_tables: %s table(s) lost for %s — breadcrumbs in page text have no row behind them', _t['failed'], document.id)
         except Exception as e:
             document.status = "failed"
             await db.commit()
@@ -8889,6 +8933,17 @@ async def import_from_drive(
                 db.add(page)
             doc.status = "completed"
             await db.commit()
+
+            # Persist captured tables AFTER the page commit — document_tables
+            # carries a composite FK to (document_id, page_number), so the pages
+            # must already exist. Never raises: a table that cannot be stored must
+            # not cost the document its ingest.
+            if any('tables' in p for p in (pages or [])):
+                from app.services.table_persist import persist_document_tables
+                _t = await persist_document_tables(db, str(document.id), pages)
+                await db.commit()
+                if _t['failed']:
+                    logger.warning('document_tables: %s table(s) lost for %s — breadcrumbs in page text have no row behind them', _t['failed'], document.id)
         except Exception as e:
             doc.status = "failed"
             await db.commit()
@@ -9160,6 +9215,17 @@ async def drive_import_folder(
                 db.add(page)
             doc.status = "completed"
             await db.commit()
+
+            # Persist captured tables AFTER the page commit — document_tables
+            # carries a composite FK to (document_id, page_number), so the pages
+            # must already exist. Never raises: a table that cannot be stored must
+            # not cost the document its ingest.
+            if any('tables' in p for p in (pages or [])):
+                from app.services.table_persist import persist_document_tables
+                _t = await persist_document_tables(db, str(document.id), pages)
+                await db.commit()
+                if _t['failed']:
+                    logger.warning('document_tables: %s table(s) lost for %s — breadcrumbs in page text have no row behind them', _t['failed'], document.id)
         except Exception as e:
             doc.status = "failed"
             await db.commit()
