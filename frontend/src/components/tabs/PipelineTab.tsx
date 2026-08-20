@@ -210,6 +210,42 @@ export function PipelineTab() {
         ))}
       </div>
 
+      {/* Reconciliation — the shape that catches silent loss.
+          A count of what SUCCEEDED can never reveal what vanished; only the
+          difference can. `unaccounted` is always a bug, never a state. */}
+      {h?.reconcile ? (
+        <div className="pl-recon">
+          {Object.entries(h.reconcile as Record<string, any>).map(([k, r]) => (
+            <div key={k} className={`pl-rcard${r.balanced ? '' : ' pl-unbal'}`}>
+              <div className="pl-rhead">
+                <strong>{k}</strong>
+                {r.balanced
+                  ? <span className="pl-bal">balances ✓</span>
+                  : <span className="pl-gap">{Math.abs(r.unaccounted).toLocaleString()} unaccounted</span>}
+              </div>
+              <div className="pl-rflow">
+                <span className="pl-rstep"><b>{(r.in ?? 0).toLocaleString()}</b> discovered</span>
+                <span className="pl-rop">−</span>
+                <span className="pl-rstep pl-rex"><b>{(r.excluded_total ?? 0).toLocaleString()}</b> stopped</span>
+                <span className="pl-rop">=</span>
+                <span className="pl-rstep"><b>{(r.processed ?? 0).toLocaleString()}</b> processed</span>
+              </div>
+              <ul className="pl-rwhy">
+                {(r.excluded || []).filter((e: any) => e.count > 0).map((e: any) => (
+                  <li key={e.reason}><b>{e.count.toLocaleString()}</b> {e.reason}</li>
+                ))}
+                {!r.balanced && (
+                  <li className="pl-rbad">
+                    <b>{Math.abs(r.unaccounted).toLocaleString()}</b> unexplained —
+                    neither processed nor stopped for a stated reason
+                  </li>
+                )}
+              </ul>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
       <div className="pl-grid">
         {STAGES.map(s => {
           const st = (h?.[s.key] || {}) as Stage;

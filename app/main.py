@@ -2696,6 +2696,59 @@ async def pipeline_health(db: AsyncSession = Depends(get_db)):
             pass
 
 
+        # ── RECONCILIATION: discovered − excluded(why) − processed ────────
+        #
+        # Ananth, 2026-08-20: "discovered .. stopped/planned (why) to be
+        # processed .. processed. this is the start of the pipeline."
+        #
+        # This is the shape that catches silent loss, and the AHCA run proved it.
+        # That job reported status=completed, error=null, 185 documents — and had
+        # quietly dropped 56 eligible files whose URLs contained a space, because
+        # nothing anywhere subtracted. A count of what SUCCEEDED can never reveal
+        # what vanished; only the difference can.
+        #
+        # So every stage answers three questions instead of one: what arrived,
+        # what was deliberately stopped AND WHY, and what came out. When those do
+        # not balance, the remainder is `unaccounted` — and unaccounted is always
+        # a bug, never a state.
+        def _recon(name, came_in, processed, excluded):
+            ex_total = sum(e["count"] for e in excluded if e["count"] and e["count"] > 0)
+            unacc = (came_in or 0) - ex_total - (processed or 0)
+            return {"in": came_in, "excluded": excluded, "excluded_total": ex_total,
+                    "processed": processed, "unaccounted": unacc,
+                    "balanced": unacc == 0}
+
+        active_docs = await _one("""SELECT count(*) FROM documents
+            WHERE lifecycle_state IS DISTINCT FROM 'retired'""")
+
+        slow["reconcile"] = {
+            # EXTRACT: every active document should have produced pages, or carry
+            # a typed reason why it did not. Anything left over is unexplained.
+            "extract": _recon(
+                "documents", active_docs,
+                await _one("""SELECT count(*) FROM documents d
+                    WHERE d.lifecycle_state IS DISTINCT FROM 'retired'
+                      AND EXISTS (SELECT 1 FROM document_pages p WHERE p.document_id=d.id)"""),
+                [{"reason": "typed ingest failure", "count": await _one(
+                    """SELECT count(*) FROM documents WHERE ingest_failure_reason IS NOT NULL
+                       AND lifecycle_state IS DISTINCT FROM 'retired'""")}]),
+            # PUBLISH: the number that was wrong for months. Retired and shelved
+            # are DELIBERATE exclusions and must be named as such, not counted as
+            # a backlog.
+            "publish": _recon(
+                "chunked documents",
+                await _one("""SELECT count(DISTINCT document_id) FROM hierarchical_chunks"""),
+                await _one("""SELECT count(DISTINCT document_id) FROM rag_published_embeddings"""),
+                [{"reason": "retired (duplicate)", "count": await _one(
+                    "SELECT count(*) FROM documents WHERE lifecycle_state='retired'")},
+                 {"reason": "shelved (withheld)", "count": await _one(
+                    "SELECT count(*) FROM documents WHERE lifecycle_state='shelved'")},
+                 {"reason": "held by classifier", "count": await _one(
+                    """SELECT count(*) FROM documents
+                       WHERE source_metadata->'payor_classification'->>'decision'='hold'
+                         AND lifecycle_state IS DISTINCT FROM 'retired'""")}]),
+        }
+
         _PIPE_SLOW_CACHE["data"] = slow
         _PIPE_SLOW_CACHE["at"] = _t.time()
         out.update(slow)
