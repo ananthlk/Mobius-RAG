@@ -387,19 +387,21 @@
     // 7 · Fillers
     var fs=dt.filled_shape;
     out+=head('Fillers', lat.fillers_ms, !!(fs||lat.fillers_ms));
-    if(fs&&fs.slots){ out+=codeRow('filled slots', (Array.isArray(fs.slots)?fs.slots:Object.keys(fs.slots)).map(function(s){return typeof s==='object'?(s.name||s.slot||'slot'):s;})); }
+    if(fs&&fs.slots){ var fslots=Array.isArray(fs.slots)?fs.slots:(typeof fs.slots==='object'?Object.keys(fs.slots):asArr(fs.slots)); out+=codeRow('filled slots', fslots.map(function(s){return typeof s==='object'?(s.name||s.slot||'slot'):s;})); }
 
     // 8 · Synthesis
     var sy=dt.synthesis, stel=tl.synthesis_telemetry;
     out+=head('Synthesis', lat.synthesis_ms, !!(sy||stel));
-    if(sy){ if(sy.citations&&sy.citations.length) out+=codeRow('citations', sy.citations.map(function(c){return c.document_name||c.doc||c.id||'cite';}));
+    if(sy){ var cites=asArr(sy.citations); if(cites.length) out+=codeRow('citations', cites.map(function(c){return (c&&typeof c==='object')?(c.document_name||c.doc||c.id||'cite'):c;}));
       if(sy.chunks_in!=null||sy.chunks_out!=null) out+='<div class="stamp">chunks in/out: '+num(sy.chunks_in,0)+' → '+num(sy.chunks_out,0)+'</div>'; }
     if(stel&&typeof stel==='object'){ out+='<div class="stamp">'+Object.keys(stel).slice(0,6).map(function(k){return esc(k)+': '+esc(String(stel[k]).slice(0,30));}).join(' · ')+'</div>'; }
 
     return out;
   }
-  function codeRow(label,arr){ if(!arr||!arr.length) return '<div class="stamp">'+label+': —</div>'; return '<div style="display:flex;gap:.5rem;align-items:baseline;margin:.35rem 0"><span class="stamp" style="min-width:120px;margin:0">'+label+'</span><span class="chips">'+arr.map(function(c){return '<span class="chip">'+esc(c)+'</span>';}).join('')+'</span></div>'; }
-  function listRows(label,arr){ return '<div style="margin:.35rem 0"><span class="stamp">'+label+':</span><ul style="margin:.3rem 0 0;padding-left:1.1rem;font-size:.8rem;color:var(--tx-2)">'+arr.map(function(x){return '<li>'+esc(x)+'</li>';}).join('')+'</ul></div>'; }
+  function asArr(v){ return v==null ? [] : (Array.isArray(v) ? v : [v]); }
+  function cell(c){ return esc(typeof c==='object' ? JSON.stringify(c) : c); }
+  function codeRow(label,arr){ arr=asArr(arr); if(!arr.length) return '<div class="stamp">'+label+': —</div>'; return '<div style="display:flex;gap:.5rem;align-items:baseline;margin:.35rem 0"><span class="stamp" style="min-width:120px;margin:0">'+label+'</span><span class="chips">'+arr.map(function(c){return '<span class="chip">'+cell(c)+'</span>';}).join('')+'</span></div>'; }
+  function listRows(label,arr){ arr=asArr(arr); if(!arr.length) return ''; return '<div style="margin:.35rem 0"><span class="stamp">'+label+':</span><ul style="margin:.3rem 0 0;padding-left:1.1rem;font-size:.8rem;color:var(--tx-2)">'+arr.map(function(x){return '<li>'+cell(x)+'</li>';}).join('')+'</ul></div>'; }
 
   function evalPanel(ev,body,evaled){
     if(!body.run_eval) return '<div class="empty"><b>Eval was off for this run.</b><br>Open ⋮ → Evaluate to score it reference-free or against a golden answer.</div>';
