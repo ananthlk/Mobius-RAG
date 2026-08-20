@@ -42,11 +42,23 @@
   .mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
   a{color:var(--accent);text-decoration:none} button{font-family:inherit}
   :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
-  .shell{display:grid;grid-template-columns:224px 1fr;min-height:100vh}
-  .rail{background:var(--bg-2);border-right:1px solid var(--line);padding:.9rem .7rem;display:flex;flex-direction:column;gap:.15rem;position:sticky;top:0;height:100vh}
-  .brand{display:flex;align-items:center;gap:.55rem;padding:.35rem .5rem .9rem}
-  .brand .mk{width:1.4rem;height:1.4rem;border-radius:var(--r-sm);background:conic-gradient(from 210deg,var(--accent),#22d3ee,var(--ok),var(--accent))}
-  .brand b{font-size:.9rem;font-weight:600;letter-spacing:-.01em}.brand b span{color:var(--muted)}
+  /* ---- Mobius app-header (follows the RAG app's Header.css standard) ---- */
+  .app-header{background:var(--card);border-bottom:1px solid var(--line)}
+  .app-header-inner{display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:.875rem 1.5rem}
+  .app-header-left{display:flex;align-items:center;gap:1rem;flex-wrap:wrap}
+  .app-header-brand{display:flex;align-items:center;gap:.625rem}
+  .app-header-logo{flex-shrink:0;display:block}
+  .app-header h1{font-family:var(--sans);font-size:1.25rem;font-weight:700;color:var(--tx);letter-spacing:-.025em;margin:0}
+  .header-module-badge{display:inline-block;font-size:.6875rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);background:rgba(59,130,246,.10);border:1px solid rgba(59,130,246,.22);padding:.15rem .5rem;border-radius:var(--r-full);margin-left:.5rem;vertical-align:middle;position:relative;top:-1px}
+  .app-header .subtitle{color:var(--muted);font-size:.833rem;font-weight:400;margin:0;letter-spacing:.01em}
+  .app-header-right{flex-shrink:0;display:flex;gap:.5rem}
+  .hbtn{display:flex;align-items:center;justify-content:center;width:36px;height:36px;padding:0;border:1px solid var(--line);border-radius:var(--r);background:var(--card);color:var(--muted);cursor:pointer;transition:background .2s,border-color .2s,color .2s;font-size:1rem}
+  .hbtn:hover{background:var(--hover);border-color:var(--line-2);color:var(--tx)}
+  .shell{display:grid;grid-template-columns:var(--rail-w,224px) 1fr;min-height:calc(100vh - 61px)}
+  .shell.collapsed{--rail-w:60px}
+  .rail{background:var(--bg-2);border-right:1px solid var(--line);padding:.9rem .7rem;display:flex;flex-direction:column;gap:.15rem;position:sticky;top:0;align-self:start;max-height:100vh;overflow:auto}
+  .shell.collapsed .nav .lbl,.shell.collapsed .railcap,.shell.collapsed .railfoot,.shell.collapsed .nav .bdg{display:none}
+  .shell.collapsed .nav{justify-content:center;padding:.5rem 0}
   .nav{display:flex;align-items:center;gap:.65rem;padding:.5rem .6rem;border-radius:var(--r);color:var(--tx-2);font-size:.86rem;font-weight:500;cursor:pointer;border:0;background:none;width:100%;text-align:left;white-space:nowrap}
   .nav .ic{width:1.05rem;height:1.05rem;flex:none;color:var(--tx-3)}
   .nav:hover{background:var(--card);color:var(--tx)} .nav.on{background:var(--accent-weak);color:var(--tx);font-weight:600}.nav.on .ic{color:var(--accent)}
@@ -151,16 +163,29 @@
 </style>
 </head>
 <body>
-<div class="shell">
+<header class="app-header">
+  <div class="app-header-inner">
+    <div class="app-header-left">
+      <button class="hbtn" id="rail-toggle" title="Collapse menu" aria-label="Toggle menu">☰</button>
+      <div class="app-header-brand">
+        <img src="/logo.svg" class="app-header-logo" width="28" height="28" alt="Mobius">
+        <h1>Mobius<span class="header-module-badge">Eval</span></h1>
+      </div>
+      <p class="subtitle">Query &amp; trace</p>
+    </div>
+    <div class="app-header-right">
+      <button class="hbtn" id="theme-btn" title="Toggle theme" aria-label="Toggle theme">◐</button>
+    </div>
+  </div>
+</header>
+<div class="shell" id="shell">
   <nav class="rail">
-    <div class="brand"><span class="mk"></span><b>Mobius <span>Eval</span></b></div>
-    <button class="nav on"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="7" cy="7" r="4.2"/><path d="M10 10l3.5 3.5"/></svg>Query</button>
-    <a class="nav" href="/trace-explorer"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 12V4M6 12V7M9.5 12V5M13 12V8.5"/></svg>Question bank</a>
-    <a class="nav" href="/trace-explorer"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 13c3-1 4-8 6-8s3 5 6 4"/></svg>Priors</a>
-    <a class="nav" href="/eval/runs"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="6"/><path d="M8 5v3l2 1.4"/></svg>Runs</a>
+    <button class="nav on"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="7" cy="7" r="4.2"/><path d="M10 10l3.5 3.5"/></svg><span class="lbl">Query</span></button>
+    <a class="nav" href="/trace-explorer"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 12V4M6 12V7M9.5 12V5M13 12V8.5"/></svg><span class="lbl">Question bank</span></a>
+    <a class="nav" href="/trace-explorer"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 13c3-1 4-8 6-8s3 5 6 4"/></svg><span class="lbl">Priors</span></a>
+    <a class="nav" href="/eval/runs"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="6"/><path d="M8 5v3l2 1.4"/></svg><span class="lbl">Runs</span></a>
     <div class="railfoot">
       <input class="keyin" id="admin-key" type="password" placeholder="X-Admin-Key" autocomplete="off">
-      <button class="themebtn" id="theme-btn">Toggle theme</button>
     </div>
   </nav>
 
@@ -226,6 +251,10 @@
   function authHeaders(){var k=keyIn.value.trim();return k?{'X-Admin-Key':k,'Content-Type':'application/json'}:{'Content-Type':'application/json'};}
   var savedTheme=store.get(THEME_STORAGE); if(savedTheme)document.documentElement.setAttribute('data-theme',savedTheme);
   $('#theme-btn').addEventListener('click',function(){var c=document.documentElement.getAttribute('data-theme');var n=c==='dark'?'light':'dark';document.documentElement.setAttribute('data-theme',n);store.set(THEME_STORAGE,n);});
+  // collapsible left panel (persisted)
+  var RAIL_STORAGE='eval_console_rail_collapsed', shellEl=$('#shell');
+  if(store.get(RAIL_STORAGE)==='1') shellEl.classList.add('collapsed');
+  $('#rail-toggle').addEventListener('click',function(){ var c=shellEl.classList.toggle('collapsed'); store.set(RAIL_STORAGE, c?'1':'0'); });
 
   // config state (defaults)
   var cfg={runtype:'chat.default', eval:'golden', strat:''};
