@@ -2142,7 +2142,8 @@ _PIPE_SLOW_CACHE: dict = {"at": 0.0, "data": {}}
 # Windows the Pipeline tab offers. "all" is deliberately included: a stall is
 # often a document that entered a stage days ago and never left, and an
 # hour-scoped view hides exactly that.
-_PIPE_WINDOWS = {"1h": "1 hour", "24h": "24 hours", "7d": "7 days", "all": None}
+_PIPE_WINDOWS = {"5m": "5 minutes", "15m": "15 minutes", "30m": "30 minutes",
+                 "1h": "1 hour", "24h": "24 hours", "7d": "7 days", "all": None}
 
 
 @app.get("/pipeline_health/stage/{stage}")

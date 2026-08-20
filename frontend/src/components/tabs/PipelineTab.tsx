@@ -23,7 +23,22 @@ const REFRESH_MS = 10_000;
 
 // "all" matters more than it looks: a stall is usually a document that entered a
 // stage days ago and never left, which an hour-scoped view hides completely.
-const WINDOWS: [string, string][] = [['1h', 'last hour'], ['24h', '24h'], ['7d', '7d'], ['all', 'all time']];
+const WINDOWS: [string, string][] = [
+  ['5m', '5m'], ['15m', '15m'], ['30m', '30m'], ['1h', '1h'], ['24h', '24h'], ['7d', '7d'], ['all', 'all time'],
+];
+
+// The backend already buckets the last 30 minutes into 6 × 5-minute slices
+// (oldest → newest), so short windows need no extra query — they are a slice of
+// data the card is already carrying.
+const BUCKET_SLICE: Record<string, number> = { '5m': 1, '15m': 3, '30m': 6 };
+
+function windowedThroughput(st: Stage, win: string): number | null {
+  const rolling = st.rolling as { buckets_5min?: number[] } | undefined;
+  const b = rolling?.buckets_5min;
+  if (b && BUCKET_SLICE[win]) return b.slice(-BUCKET_SLICE[win]).reduce((a, c) => a + c, 0);
+  if (win === '1h') return (st.last_hour as number) ?? null;
+  return null;                       // 24h/7d/all have no per-stage series yet
+}
 
 function age(sec: number | null): string {
   if (sec == null) return '—';
@@ -40,7 +55,7 @@ const STAGES: { key: string; label: string; fields: [string, string][] }[] = [
       ['total', 'crawled documents'], ['last_24h', 'last 24h'],
       ['with_source_url', 'with source URL'] ] },
   { key: 'gcs', label: 'GCS', fields: [
-      ['stored', 'objects stored'], ['missing_object', 'row without object'] ] },
+      ['stored', 'objects stored'], ['missing_object', 'row without object|good'] ] },
   { key: 'extract', label: 'Extract', fields: [
       ['extracting', 'in flight'], ['no_text', 'produced no text'],
       ['failed_typed', 'typed failures'], ['tables_captured', 'tables captured'] ] },
@@ -48,14 +63,14 @@ const STAGES: { key: string; label: string; fields: [string, string][] }[] = [
       ['classified', 'classified'], ['held_for_human', 'held for human'],
       ['unclassified', 'not yet classified'] ] },
   { key: 'chunking', label: 'Chunking', fields: [
-      ['active', 'active workers'], ['pending', 'pending'], ['last_hour', 'last hour'] ] },
+      ['@throughput', 'completed'], ['active', 'active workers'], ['pending', 'pending|good'] ] },
   { key: 'embedding', label: 'Embedding', fields: [
-      ['active', 'active workers'], ['pending', 'pending'], ['last_hour', 'last hour'] ] },
+      ['@throughput', 'completed'], ['active', 'active workers'], ['pending', 'pending|good'] ] },
   { key: 'versioning', label: 'Versioning / dedup', fields: [
       ['pairs_scored', 'pairs scored'], ['duplicates', 'duplicates'],
       ['retired', 'retired'], ['shelved', 'shelved'] ] },
   { key: 'publishing', label: 'Publishing', fields: [
-      ['last_hour', 'last hour'], ['embedded_unpublished', 'genuinely unpublished'],
+      ['embedded_unpublished', 'genuinely unpublished'],
       ['excluded_retired', 'excluded: retired'], ['excluded_shelved', 'excluded: shelved'],
       ['excluded_no_chunks', 'excluded: no chunks'] ] },
 ];
@@ -68,7 +83,7 @@ function fmt(v: unknown): string {
 
 /** A value that changed since the last poll gets a brief highlight — that is
  *  the whole point of a tab you leave open. */
-function Metric({ label, value }: { label: string; value: unknown }) {
+function Metric({ label, value, good }: { label: string; value: unknown; good?: boolean }) {
   const prev = useRef<unknown>(value);
   const [bump, setBump] = useState(false);
   useEffect(() => {
@@ -80,10 +95,14 @@ function Metric({ label, value }: { label: string; value: unknown }) {
     }
     prev.current = value;
   }, [value]);
+  // A zero that means "healthy" and a zero that means "stalled" look identical
+  // in a count. `good` marks the ones where empty IS the correct state, so the
+  // card does not read as a problem when the queue has simply drained.
+  const zeroIsGood = good && (value === 0 || value === '0');
   return (
     <div className={`pl-metric${bump ? ' pl-bump' : ''}`}>
-      <span className="pl-mv">{fmt(value)}</span>
-      <span className="pl-ml">{label}</span>
+      <span className={`pl-mv${zeroIsGood ? ' pl-ok0' : ''}`}>{fmt(value)}</span>
+      <span className="pl-ml">{label}{zeroIsGood ? ' ✓' : ''}</span>
     </div>
   );
 }
@@ -193,9 +212,16 @@ export function PipelineTab() {
                 <h3>{s.label}</h3>
                 <span className="pl-open">open ›</span>
               </header>
-              {s.fields.map(([f, label]) => (
-                <Metric key={f} label={label} value={st[f]} />
-              ))}
+              {s.fields.map(([f, rawLabel]) => {
+                const [label, flag] = rawLabel.split('|');
+                const value = f === '@throughput'
+                  ? windowedThroughput(st, win)
+                  : st[f];
+                const shown = f === '@throughput'
+                  ? `${label} (${WINDOWS.find(w => w[0] === win)?.[1]})`
+                  : label;
+                return <Metric key={f} label={shown} value={value} good={flag === 'good'} />;
+              })}
               {s.key === 'versioning' && st.last_run_at ? (
                 <div className="pl-note">last gate run {String(st.last_run_at).slice(0, 19)}</div>
               ) : null}

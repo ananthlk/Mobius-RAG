@@ -83,3 +83,5 @@
   .pl-sheethead{border-color:#374151}
   .pl-stale{color:#fbbf24}
 }
+.pl-ok0{color:#059669}
+@media (prefers-color-scheme:dark){ .pl-ok0{color:#34d399} }
