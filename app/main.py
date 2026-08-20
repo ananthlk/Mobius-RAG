@@ -2139,6 +2139,117 @@ async def publish_unpublished(
 _PIPE_SLOW_CACHE: dict = {"at": 0.0, "data": {}}
 
 
+# Windows the Pipeline tab offers. "all" is deliberately included: a stall is
+# often a document that entered a stage days ago and never left, and an
+# hour-scoped view hides exactly that.
+_PIPE_WINDOWS = {"1h": "1 hour", "24h": "24 hours", "7d": "7 days", "all": None}
+
+
+@app.get("/pipeline_health/stage/{stage}")
+async def pipeline_stage_documents(
+    stage: str,
+    window: str = "1h",
+    limit: int = 200,
+    db: AsyncSession = Depends(get_db),
+):
+    """The documents behind one stage's number, so a count can be opened.
+
+    A dashboard that shows "41 pending" and cannot tell you WHICH 41 sends you to
+    psql to find out — and the number you most want to open is always the one
+    that is stuck. Every row carries a timestamp and an age, because "when did
+    this enter the stage" is the question that separates busy from stalled.
+    """
+    from sqlalchemy import text as _text
+    if stage not in ("scrape", "gcs", "extract", "classify", "chunking",
+                     "embedding", "versioning", "publishing"):
+        raise HTTPException(status_code=404, detail=f"unknown stage: {stage}")
+    if window not in _PIPE_WINDOWS:
+        raise HTTPException(status_code=400, detail=f"window must be one of {list(_PIPE_WINDOWS)}")
+    iv = _PIPE_WINDOWS[window]
+    limit = max(1, min(int(limit), 500))
+
+    # Each stage answers "what is IN me right now", not "what passed through" —
+    # the point of opening a bucket is to see what has not moved on.
+    Q = {
+        "scrape": ("""SELECT d.id::text, d.filename, d.created_at AS ts,
+                        d.source_metadata->>'source_url' AS detail
+                      FROM documents d
+                      WHERE d.file_path LIKE '%%web-scraper%%' {W}
+                      ORDER BY d.created_at DESC""", "created_at"),
+        "gcs":    ("""SELECT d.id::text, d.filename, d.created_at AS ts,
+                        'no stored object' AS detail
+                      FROM documents d
+                      WHERE (d.file_path IS NULL OR d.file_path='')
+                        AND d.lifecycle_state IS DISTINCT FROM 'retired' {W}
+                      ORDER BY d.created_at DESC""", "created_at"),
+        "extract":("""SELECT d.id::text, d.filename, d.created_at AS ts,
+                        COALESCE(d.ingest_failure_reason, d.status) AS detail
+                      FROM documents d
+                      WHERE d.lifecycle_state IS DISTINCT FROM 'retired'
+                        AND (d.status='extracting'
+                             OR NOT EXISTS (SELECT 1 FROM document_pages p WHERE p.document_id=d.id)) {W}
+                      ORDER BY d.created_at DESC""", "created_at"),
+        "classify":("""SELECT d.id::text, d.filename, d.created_at AS ts,
+                        COALESCE(d.source_metadata->'payor_classification'->>'why',
+                                 'not yet classified') AS detail
+                      FROM documents d
+                      WHERE d.lifecycle_state IS DISTINCT FROM 'retired'
+                        AND (d.source_metadata->'payor_classification'->>'decision'='hold'
+                             OR NOT (d.source_metadata ? 'payor_classification')) {W}
+                      ORDER BY d.created_at DESC""", "created_at"),
+        "chunking":("""SELECT d.id::text, d.filename, j.created_at AS ts,
+                        j.status AS detail
+                      FROM chunking_jobs j JOIN documents d ON d.id=j.document_id
+                      WHERE j.status IN ('pending','processing','blocked') {W}
+                      ORDER BY j.created_at ASC""", "j.created_at"),
+        "embedding":("""SELECT d.id::text, d.filename, e.created_at AS ts,
+                        e.status AS detail
+                      FROM embedding_jobs e JOIN documents d ON d.id=e.document_id
+                      WHERE e.status IN ('pending','processing') {W}
+                      ORDER BY e.created_at ASC""", "e.created_at"),
+        "versioning":("""SELECT d.id::text, d.filename, g.decided_at AS ts,
+                        g.duplicate_kind AS detail
+                      FROM gate_decisions g JOIN documents d ON d.id=g.document_id
+                      WHERE g.duplicate_kind IS NOT NULL {W}
+                      ORDER BY g.decided_at DESC""", "g.decided_at"),
+        # Publishing opens the GENUINELY stuck set — the same definition the
+        # headline uses, so the modal can never disagree with the card.
+        "publishing":("""SELECT d.id::text, d.filename, d.created_at AS ts,
+                        'embedded, has chunks, not published' AS detail
+                      FROM embedding_jobs ej JOIN documents d ON d.id=ej.document_id
+                      WHERE ej.status='completed'
+                        AND d.lifecycle_state IS DISTINCT FROM 'retired'
+                        AND COALESCE(d.lifecycle_state,'') <> 'shelved'
+                        AND EXISTS (SELECT 1 FROM hierarchical_chunks h WHERE h.document_id=d.id)
+                        AND NOT EXISTS (SELECT 1 FROM rag_published_embeddings r
+                                        WHERE r.document_id=ej.document_id) {W}
+                      ORDER BY d.created_at DESC""", "d.created_at"),
+    }
+    sql, ts_col = Q[stage]
+    sql = sql.replace("{W}", f"AND {ts_col} > now() - interval '{iv}'" if iv else "")
+    try:
+        rows = (await db.execute(_text(sql + f" LIMIT {limit}"))).fetchall()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}"[:200])
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    items = []
+    for r in rows:
+        ts = r.ts
+        age = None
+        if ts is not None:
+            try:
+                age = int((now - (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc))).total_seconds())
+            except Exception:
+                age = None
+        items.append({"document_id": r[0], "filename": r.filename,
+                      "at": str(ts) if ts else None, "age_seconds": age,
+                      "detail": r.detail})
+    return {"stage": stage, "window": window, "count": len(items),
+            "truncated": len(items) >= limit, "items": items}
+
+
+
 @app.get("/pipeline_health")
 @app.get("/admin/pipeline_health")  # legacy alias — frontend uses /pipeline_health
 async def pipeline_health(db: AsyncSession = Depends(get_db)):

@@ -16,8 +16,22 @@ import './PipelineTab.css';
 
 type Stage = Record<string, unknown>;
 type Health = Record<string, Stage> & { totals?: Record<string, number> };
+type DrillItem = { document_id: string; filename: string; at: string | null;
+                   age_seconds: number | null; detail: string | null };
 
 const REFRESH_MS = 10_000;
+
+// "all" matters more than it looks: a stall is usually a document that entered a
+// stage days ago and never left, which an hour-scoped view hides completely.
+const WINDOWS: [string, string][] = [['1h', 'last hour'], ['24h', '24h'], ['7d', '7d'], ['all', 'all time']];
+
+function age(sec: number | null): string {
+  if (sec == null) return '—';
+  if (sec < 90) return `${sec}s`;
+  if (sec < 5400) return `${Math.round(sec / 60)}m`;
+  if (sec < 172800) return `${Math.round(sec / 3600)}h`;
+  return `${Math.round(sec / 86400)}d`;
+}
 
 // Stage order IS the pipeline order. Rendering it in any other order would
 // misrepresent what feeds what.
@@ -79,6 +93,10 @@ export function PipelineTab() {
   const [err, setErr] = useState<string | null>(null);
   const [at, setAt] = useState<Date | null>(null);
   const [live, setLive] = useState(true);
+  const [win, setWin] = useState('1h');
+  const [drill, setDrill] = useState<{ stage: string; label: string } | null>(null);
+  const [items, setItems] = useState<DrillItem[] | null>(null);
+  const [dErr, setDErr] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -98,6 +116,24 @@ export function PipelineTab() {
     const t = setInterval(load, REFRESH_MS);
     return () => clearInterval(t);
   }, [load, live]);
+
+  // Opening a bucket answers "which ones", which is always the question a
+  // stuck count provokes.
+  useEffect(() => {
+    if (!drill) { setItems(null); setDErr(null); return; }
+    let dead = false;
+    (async () => {
+      try {
+        const r = await fetch(`/pipeline_health/stage/${drill.stage}?window=${win}&limit=200`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const j = await r.json();
+        if (!dead) { setItems(j.items || []); setDErr(null); }
+      } catch (e) {
+        if (!dead) { setItems([]); setDErr(e instanceof Error ? e.message : String(e)); }
+      }
+    })();
+    return () => { dead = true; };
+  }, [drill, win]);
 
   const t = h?.totals || {};
   const inFlight = STAGES.flatMap(s => {
@@ -121,6 +157,12 @@ export function PipelineTab() {
             {live ? '● live' : '❙❙ paused'}
           </button>
           <button className="pl-btn" onClick={load}>refresh</button>
+          <span className="pl-winbar">
+            {WINDOWS.map(([k, label]) => (
+              <button key={k} className={`pl-win${win === k ? ' on' : ''}`}
+                      onClick={() => setWin(k)}>{label}</button>
+            ))}
+          </span>
           <span className="pl-when">{at ? `updated ${at.toLocaleTimeString()}` : 'loading…'}</span>
         </div>
       </div>
@@ -142,10 +184,14 @@ export function PipelineTab() {
           const st = (h?.[s.key] || {}) as Stage;
           const status = (st.status as string) || 'grey';
           return (
-            <section key={s.key} className={`pl-card pl-${status}`}>
+            <section key={s.key} className={`pl-card pl-${status} pl-click`}
+                     role="button" tabIndex={0}
+                     onClick={() => setDrill({ stage: s.key, label: s.label })}
+                     onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') setDrill({ stage: s.key, label: s.label }); }}>
               <header>
                 <span className={`pl-dot pl-d-${status}`} />
                 <h3>{s.label}</h3>
+                <span className="pl-open">open ›</span>
               </header>
               {s.fields.map(([f, label]) => (
                 <Metric key={f} label={label} value={st[f]} />
@@ -157,6 +203,55 @@ export function PipelineTab() {
           );
         })}
       </div>
+
+      {drill && (
+        <div className="pl-modal" onClick={() => setDrill(null)}>
+          <div className="pl-sheet" onClick={e => e.stopPropagation()}>
+            <div className="pl-sheethead">
+              <div>
+                <h3>{drill.label}</h3>
+                <p className="pl-sub">
+                  {items == null ? 'loading…'
+                    : `${items.length} document${items.length === 1 ? '' : 's'} · ${WINDOWS.find(w => w[0] === win)?.[1]}`}
+                </p>
+              </div>
+              <div className="pl-controls">
+                <span className="pl-winbar">
+                  {WINDOWS.map(([k, label]) => (
+                    <button key={k} className={`pl-win${win === k ? ' on' : ''}`}
+                            onClick={() => setWin(k)}>{label}</button>
+                  ))}
+                </span>
+                <button className="pl-btn" onClick={() => setDrill(null)}>close</button>
+              </div>
+            </div>
+            {dErr && <div className="pl-err">could not load — {dErr}</div>}
+            <div className="pl-scroll pl-sheetbody">
+              <table className="pl-table">
+                <thead><tr><th>age</th><th>document</th><th>state</th><th>entered</th></tr></thead>
+                <tbody>
+                  {(items || []).map(it => (
+                    <tr key={it.document_id + String(it.at)}>
+                      <td className={`pl-mono${(it.age_seconds ?? 0) > 3600 ? ' pl-stale' : ''}`}>
+                        {age(it.age_seconds)}
+                      </td>
+                      <td className="pl-mono">{(it.filename || it.document_id).slice(0, 62)}</td>
+                      <td className="pl-mono pl-dim">{(it.detail || '—').slice(0, 70)}</td>
+                      <td className="pl-mono pl-dim">{(it.at || '—').slice(0, 19)}</td>
+                    </tr>
+                  ))}
+                  {items && items.length === 0 && (
+                    <tr><td colSpan={4} className="pl-dim" style={{ padding: '16px' }}>
+                      Nothing in this stage for the selected window. Widen to “all time” — a
+                      stalled document usually entered long before the last hour.
+                    </td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
 
       <h3 className="pl-h3">In-process jobs {inFlight.length ? `(${inFlight.length})` : ''}</h3>
       {inFlight.length === 0 ? (
