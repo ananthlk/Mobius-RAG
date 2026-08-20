@@ -225,6 +225,16 @@ async def _process_paragraphs(
             doc_id, current_page_number, page_num, ctx.total_pages, len(paragraphs),
         )
 
+        # Drop chunks past the new end of this page. Re-extraction can SHORTEN a
+        # page — excising a table replaces dozens of orphaned cells with one
+        # breadcrumb — and without this the surplus rows survive holding text
+        # that no longer exists in the document, then get published as if it did.
+        _pruned = await db_handler.prune_page_chunks(
+            db, doc_uuid, current_page_number, len(paragraphs))
+        if _pruned:
+            logger.info("[%s] Page %s: pruned %s stale chunk(s) past the new end",
+                        doc_id, current_page_number, _pruned)
+
         for para_idx, para_data in enumerate(paragraphs):
             paragraph_text = para_data["text"] if isinstance(para_data, dict) else para_data
             section_path = para_data.get("section_path") if isinstance(para_data, dict) else None

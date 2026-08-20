@@ -449,11 +449,62 @@ async def persist_chunk(
         db.add(chunk)
         await db.flush()
     else:
-        # Patch offset if it was missing
-        if getattr(chunk, "start_offset_in_page", None) is None and start_offset_in_page is not None:
+        # REFRESH THE TEXT WHEN IT HAS CHANGED.
+        #
+        # This used to only patch a missing offset, which made re-chunking a
+        # silent no-op: the row is keyed on (document, page, paragraph_index), so
+        # a document whose PAGE TEXT changed got its old chunk back verbatim and
+        # kept it forever. Found 2026-08-19 — after table capture rewrote the
+        # pages of 5 documents, a full re-chunk created 0 new rows and left 4,063
+        # chunks from May in place, still holding the pre-excision text.
+        #
+        # Any re-extraction that changes page text hits this, not just table
+        # capture: the chunk silently disagrees with the page it came from.
+        if (chunk.text or "") != (paragraph_text or ""):
+            chunk.text = paragraph_text
+            chunk.text_length = len(paragraph_text or "")
+            chunk.section_path = section_path
+            chunk.start_offset_in_page = start_offset_in_page
+            # The content changed, so prior enrichment describes text that no
+            # longer exists. Re-open it rather than leaving a stale verdict.
+            chunk.extraction_status = extraction_status
+            chunk.critique_status = critique_status
+            chunk.summary = summary
+            await db.flush()
+        elif getattr(chunk, "start_offset_in_page", None) is None and start_offset_in_page is not None:
             chunk.start_offset_in_page = start_offset_in_page
             await db.flush()
     return chunk
+
+
+async def prune_page_chunks(db: AsyncSession, doc_uuid: UUID, page_number: int,
+                            keep_count: int) -> int:
+    """Delete chunks for one page whose paragraph_index is past the new end.
+
+    Updating text in place is not enough. Excising a table SHORTENS a page, so a
+    page that produced 40 paragraphs may now produce 3 — and rows 3..39 would
+    survive untouched, holding text that no longer appears in the document.
+    Sunshine carried paragraph_index up to 785 while the fresh chunking produced
+    362 paragraphs in total.
+
+    Returns the number of rows removed. `extracted_facts` references chunks, so
+    its rows are cleared first — a fact derived from text that no longer exists
+    is not a fact worth keeping.
+    """
+    ids = (await db.execute(
+        select(HierarchicalChunk.id).where(
+            HierarchicalChunk.document_id == doc_uuid,
+            HierarchicalChunk.page_number == page_number,
+            HierarchicalChunk.paragraph_index >= keep_count,
+        )
+    )).scalars().all()
+    if not ids:
+        return 0
+    await db.execute(delete(ExtractedFact).where(
+        ExtractedFact.hierarchical_chunk_id.in_(ids)))
+    await db.execute(delete(HierarchicalChunk).where(HierarchicalChunk.id.in_(ids)))
+    await db.flush()
+    return len(ids)
 
 
 # ---------------------------------------------------------------------------
