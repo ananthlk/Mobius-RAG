@@ -27,7 +27,9 @@ import uuid
 
 logger = logging.getLogger(__name__)
 
-CODE = re.compile(r"[A-Z]\d{4}|(?<!\d)\d{5}(?!\d)")   # HCPCS Level-II + CPT-ish (IDs filtered later by registry)
+CODE = re.compile(r"[A-Z]\d{4}")   # HCPCS Level-II only — unambiguous. Bare 5-digit CPT is
+#   indistinguishable from a facility/Medicaid ID without the code registry, so it is NOT
+#   matched here; CPT coverage is a downstream registry-validation step (Service Line Registry).
 
 _STRATEGIES = [
     ("lines", None),
