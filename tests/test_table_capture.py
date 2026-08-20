@@ -22,7 +22,12 @@ class _FakeFinder:
         self.tables = tables
 
 
+class _IdentityMatrix:
+    a, b, c, d, e, f = 1.0, 0.0, 0.0, 1.0, 0.0, 0.0   # unrotated: derotation is a no-op
+
+
 class _FakePage:
+    derotation_matrix = _IdentityMatrix()
     def __init__(self, tables, blocks):
         self._tables, self._blocks = tables, blocks
     def find_tables(self, **kwargs):
