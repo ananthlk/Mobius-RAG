@@ -38,6 +38,11 @@ class FileTooLarge(ExtractionError):
 # breadcrumb), so it changes what gets chunked, embedded and — because page text
 # is the input to the normalized-md5 that duplicate determination rests on — what
 # the dedup gate compares. Enabled per-run for the stage-2 milestone only.
+# Minimum characters a block must reach before html_to_plain_text emits a
+# paragraph break. Tuned on real AHCA pages: 400 keeps nav/link lists together
+# while letting real prose paragraphs stand alone.
+_MIN_BLOCK_CHARS = 400
+
 TABLE_CAPTURE = os.getenv("TABLE_CAPTURE", "").lower() in ("1", "true", "on", "yes")
 
 MAX_DOWNLOAD_BYTES = 300 * 1024 * 1024
@@ -84,10 +89,63 @@ def html_to_plain_text(html: str) -> str:
         raise ExtractionError(f"html parse failed: {type(e).__name__}: {e}") from e
     for tag in soup(["script", "style"]):
         tag.decompose()
+
+    # PARAGRAPH BREAKS ARE LOAD-BEARING, and this used to emit none.
+    #
+    # The old implementation joined every line with a SINGLE newline and dropped
+    # empties, so the output could not contain a blank line by construction. The
+    # chunker splits paragraphs on `\n\s*\n+` — blank lines — so an entire HTML
+    # page collapsed into ONE chunk. Measured on a real AHCA fetch (2026-08-20):
+    # a 14,226-character page produced exactly 1 chunk of 14,226 characters, and
+    # 3 scraped pages produced 3 chunks between them. Corpus-wide the signature is
+    # 797 chunks over 8,000 characters across 38 documents.
+    #
+    # Two consequences, and the second is why it was invisible: retrieval
+    # granularity is destroyed (a whole page is one citation, so nothing can be
+    # cited precisely), and the mega-chunk then exceeds the embedder's input
+    # limit, so the document embeds to NOTHING and never reaches the index. The
+    # embedding job still reports "completed".
+    #
+    # Fix: insert a real blank line at block-level boundaries, which is where a
+    # paragraph break actually belongs in HTML. Inline tags are left alone so a
+    # <b> or <a> mid-sentence does not fragment it.
+    BLOCK = ("p", "div", "section", "article", "li", "tr", "br",
+             "h1", "h2", "h3", "h4", "h5", "h6",
+             "blockquote", "pre", "table", "ul", "ol", "header", "footer")
+    for tag in soup.find_all(BLOCK):
+        tag.append(soup.new_string("\n\n"))
+
     text = soup.get_text(separator="\n")
-    lines = (line.strip() for line in text.splitlines())
-    chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-    return "\n".join(chunk for chunk in chunks if chunk)
+    # Normalise within a paragraph, but PRESERVE the blank lines between them.
+    blocks, para = [], []
+    for raw in text.splitlines():
+        line = " ".join(raw.split())          # collapse runs of whitespace
+        if line:
+            para.append(line)
+        elif para:
+            blocks.append("\n".join(para)); para = []
+    if para:
+        blocks.append("\n".join(para))
+
+    # COALESCE SHORT BLOCKS, or we trade one failure for its mirror image.
+    # Breaking at every block tag turns a nav menu into one chunk per link: the
+    # first version of this fix took a 14,226-character page from 1 chunk to 535
+    # with a MEAN of 25 characters. A 25-character chunk retrieves as badly as a
+    # 14,000-character one, just for the opposite reason — it carries no context
+    # to match a query against.
+    #
+    # So a paragraph break is only emitted once enough text has accumulated to be
+    # worth retrieving on its own. Short runs (list items, link lists, table
+    # cells) join into one block; a genuinely substantial block still breaks
+    # immediately after it.
+    merged, buf = [], []
+    for b in blocks:
+        buf.append(b)
+        if sum(len(x) for x in buf) >= _MIN_BLOCK_CHARS:
+            merged.append("\n".join(buf)); buf = []
+    if buf:
+        merged.append("\n".join(buf))
+    return "\n\n".join(merged)
 
 
 # Site chrome. Stripping these is the difference between storing a policy and
