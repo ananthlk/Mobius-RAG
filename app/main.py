@@ -2218,14 +2218,26 @@ async def pipeline_integrity(window: str = "24h", db: AsyncSession = Depends(get
                 "stopped": stopped, "stopped_total": st,
                 "gap": max(gap, 0), "balanced": gap == 0}
 
+    # STAGE ORDER MUST MATCH THE REAL DEPENDENCY, not the conceptual one.
+    #
+    # My first version chained classify → chunk and produced `in 6,201 → reached
+    # 9,268` — more documents leaving a stage than entered it, which is
+    # impossible in a funnel and meant the model was wrong, not the data.
+    # Classification is a GATE that can hold a document; it is not a prerequisite
+    # for chunking, and thousands of documents were chunked before the classifier
+    # existed at all. Chaining through it invented a 3,654-document "gap" that was
+    # really just the classifier's backfill debt.
+    #
+    # The true chain is: discovered → stored → extracted → chunked → embedded →
+    # published. Classification rides ALONGSIDE it as a gate, reported with its
+    # own coverage rather than as a link in the chain.
     stages = [
         step("discovered", cohort, cohort, []),
         step("stored in GCS", cohort, stored, []),
         step("text extracted", stored, extracted,
              [{"reason": "typed ingest failure (no text layer, unsupported, encrypted…)",
                "count": typed_fail}]),
-        step("classified", extracted, classified, []),
-        step("chunked", classified, chunked,
+        step("chunked", extracted, chunked,
              [{"reason": "held by classifier, awaiting a human", "count": held}]),
         step("embedded", chunked, embedded, []),
         step("published to index", embedded, published,
@@ -2234,6 +2246,9 @@ async def pipeline_integrity(window: str = "24h", db: AsyncSession = Depends(get
     ]
     worst = max((x["gap"] for x in stages), default=0)
     return {"window": window, "cohort": cohort, "stages": stages,
+            # The classify gate, reported beside the chain rather than inside it.
+            "classify_gate": {"extracted": extracted, "classified": classified,
+                              "held": held, "unclassified": max(extracted - classified, 0)},
             "total_gap": sum(x["gap"] for x in stages),
             "worst_gap": worst,
             "status": "green" if worst == 0 else ("yellow" if worst < 50 else "red")}

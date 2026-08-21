@@ -252,6 +252,14 @@ export function PipelineTab() {
               ))}
             </tbody>
           </table>
+          {integ.classify_gate ? (
+            <p className="pl-acctnote">
+              <b>classify gate</b> (beside the chain, not in it):
+              {' '}{integ.classify_gate.classified.toLocaleString()} of {integ.classify_gate.extracted.toLocaleString()} extracted are classified
+              {integ.classify_gate.unclassified ? ` · ${integ.classify_gate.unclassified.toLocaleString()} never classified` : ''}
+              {integ.classify_gate.held ? ` · ${integ.classify_gate.held.toLocaleString()} held for a human` : ''}
+            </p>
+          ) : null}
           <p className="pl-acctnote">
             <b>stopped</b> cannot progress and the reason is stated — deliberate, not a fault.
             <b> gap</b> left the stage above and arrived nowhere; it is always a bug, never a state.
