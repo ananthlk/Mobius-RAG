@@ -669,15 +669,27 @@ function TimelinePanel({ runs, onPick }: { runs: TimelineRun[]; onPick: (id: str
   const activeKeys = keys.filter((k) => series.some((r) => seriesVal(r, k) != null))
   const vmax = Math.max(0.6, ...series.flatMap((r) => activeKeys.map((k) => seriesVal(r, k) ?? 0)))
   const ys = (v: number) => PT + (1 - v / vmax) * (H - PT - PB)
-  const linePath = (key: SeriesKey) =>
-    series
+  const linePath = (key: SeriesKey) => {
+    // The M/L choice must key on the first EMITTED point, not the first index.
+    //
+    // It used to read `i === 0 ? 'M' : 'L'` and then `.filter(Boolean)` the nulls
+    // AFTERWARDS — so whenever series[0] had no value for this key, the first
+    // surviving point carried 'L', the path had no moveto, and the browser
+    // refused to render the line at all:
+    //   Error: <path> attribute d: Expected moveto path command, "L129.3,42.0 L145…"
+    // Intermittent by nature: it only bites when the leading point is null.
+    let started = false
+    return series
       .map((r, i) => {
         const v = seriesVal(r, key)
         if (v === null || v === undefined) return null
-        return `${i === 0 ? 'M' : 'L'}${xs(i).toFixed(1)},${ys(v).toFixed(1)}`
+        const cmd = started ? 'L' : 'M'
+        started = true
+        return `${cmd}${xs(i).toFixed(1)},${ys(v).toFixed(1)}`
       })
       .filter(Boolean)
       .join(' ')
+  }
   const changes: number[] = []
   for (let i = 1; i < n; i++) if (fpSig(series[i].fingerprint) !== fpSig(series[i - 1].fingerprint)) changes.push(i)
   const gridlines = [0.2, 0.4, 0.6, 0.8].filter((g) => g <= vmax)
