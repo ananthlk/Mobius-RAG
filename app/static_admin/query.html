@@ -209,17 +209,39 @@
         </div>
       </div>
       <div class="composer-bar">
-        <div class="cfg-summary" id="summary">
-          <span class="c" data-slot="runtype">Normal</span>
-          <span class="c" data-slot="eval">Vs golden</span>
-          <span class="c" data-slot="strat" style="display:none"></span>
-        </div>
+        <div class="cfg-summary" id="summary"></div>
         <div class="grow"></div>
         <div class="kebab" data-kebab>
           <button title="Configure this run" aria-label="Configure"><svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="3" r="1.4"/><circle cx="8" cy="8" r="1.4"/><circle cx="8" cy="13" r="1.4"/></svg></button>
           <div class="pop">
-            <div class="ph">Run type</div>
-            <div class="seg" data-group="runtype"><span class="o on" data-sum="Normal" data-val="chat.default">Normal</span><span class="o" data-sum="Thinking" data-val="chat.thinking">Thinking</span></div>
+            <div class="ph">Mode</div>
+            <select class="inp" id="cf-mode">
+              <optgroup label="Router policies">
+                <option value="auto">Auto — system default (≈ optimizer)</option>
+                <option value="alloc:optimizer">Optimizer</option>
+                <option value="alloc:greedy">Greedy</option>
+                <option value="alloc:bayesian">Bayesian</option>
+                <option value="alloc:portfolio">Portfolio (blend)</option>
+              </optgroup>
+              <optgroup label="Force one arm — diagnostic">
+                <option value="arm:a">a — BM25</option>
+                <option value="arm:b">b — Vector / themes</option>
+                <option value="arm:c">c — Reverse-RAG (llm_validate)</option>
+                <option value="arm:d">d — Web search</option>
+                <option value="arm:s">s — Payor Fact Store</option>
+              </optgroup>
+            </select>
+            <div class="ph">Caller mode</div>
+            <select class="inp" id="cf-caller">
+              <option value="chat.default">chat.default — 6s allowance</option>
+              <option value="chat.copilot">chat.copilot — fast (4s)</option>
+              <option value="chat.thinking">chat.thinking — patient (16s)</option>
+            </select>
+            <div class="ph">Authority</div>
+            <select class="inp" id="cf-authority">
+              <option value="">any</option>
+              <option value="citable_required">citable_required</option>
+            </select>
             <div class="ph">Evaluate this run?</div>
             <div class="seg" data-group="eval"><span class="o" data-sum="No eval" data-val="off">Off</span><span class="o" data-sum="Ref-free" data-val="reffree">Reference-free</span><span class="o on" data-sum="Vs golden" data-val="golden">Vs golden</span></div>
             <div class="goldwrap show" id="goldwrap">
@@ -228,8 +250,13 @@
             </div>
             <div class="disc" id="advBtn">▸ Advanced</div>
             <div class="adv" id="adv">
-              <div class="ph">Forced strategy <span style="text-transform:none;letter-spacing:0;color:var(--tx-3)">— skips the allocator</span></div>
-              <div class="seg" data-group="strat"><span class="o on" data-sum="" data-val="">None</span><span class="o" data-sum="a" data-val="a">a</span><span class="o" data-sum="b" data-val="b">b</span><span class="o" data-sum="c" data-val="c">c</span><span class="o" data-sum="d" data-val="d">d</span><span class="o" data-sum="s" data-val="s">s</span></div>
+              <div class="ph">ReAct turn <span style="text-transform:none;letter-spacing:0;color:var(--tx-3)">— call_number</span></div>
+              <input class="inp" id="cf-call" type="number" min="1" step="1" placeholder="1" style="width:110px">
+              <div class="ph">Budgets <span style="text-transform:none;letter-spacing:0;color:var(--tx-3)">— blank = per-mode default</span></div>
+              <div style="display:flex;gap:14px">
+                <label style="font-size:.7rem;color:var(--tx-3);display:flex;flex-direction:column;gap:3px">token<input class="inp" id="cf-token" type="number" min="0" step="500" placeholder="auto" style="width:110px"></label>
+                <label style="font-size:.7rem;color:var(--tx-3);display:flex;flex-direction:column;gap:3px">latency&nbsp;ms<input class="inp" id="cf-latency" type="number" min="0" step="500" placeholder="auto" style="width:110px"></label>
+              </div>
             </div>
           </div>
         </div>
@@ -280,8 +307,35 @@
   if(store.get(RAIL_STORAGE)==='1') shellEl.classList.add('collapsed');
   $('#rail-toggle').addEventListener('click',function(){ var c=shellEl.classList.toggle('collapsed'); store.set(RAIL_STORAGE, c?'1':'0'); });
 
-  // config state (defaults)
-  var cfg={runtype:'chat.default', eval:'golden', strat:''};
+  // config state — the SAME invocation filters as the bank runner (mode /
+  // caller / authority / ReAct turn / budgets), plus this surface's own eval
+  // controls. Persisted per-browser.
+  var CFG_STORAGE='eval_query_cfg';
+  var cfg={mode:'alloc:optimizer', caller:'chat.default', authority:'', eval:'golden', call:'', token:'', latency:''};
+  try{var _sv=JSON.parse(store.get(CFG_STORAGE)||'null'); if(_sv)cfg=Object.assign(cfg,_sv);}catch(e){}
+  var MODE_LABEL={ 'auto':'auto','alloc:optimizer':'optimizer','alloc:greedy':'greedy','alloc:bayesian':'bayesian','alloc:portfolio':'portfolio',
+                   'arm:a':'a·BM25','arm:b':'b·vector','arm:c':'c·revRAG','arm:d':'d·web','arm:s':'s·payor' };
+  var EVAL_LABEL={ 'off':'No eval','reffree':'Ref-free','golden':'Vs golden' };
+  function modeToFields(m){
+    if(m.indexOf('alloc:')===0) return {forced_strategy:null, allocator_override:m.slice(6)};
+    if(m.indexOf('arm:')===0) return {forced_strategy:m.slice(4), allocator_override:null};
+    return {forced_strategy:null, allocator_override:null};   // auto
+  }
+  function renderSummary(){
+    var parts=['mode <b>'+esc(MODE_LABEL[cfg.mode]||cfg.mode)+'</b>','caller <b>'+esc(cfg.caller)+'</b>','<b>'+esc(EVAL_LABEL[cfg.eval]||cfg.eval)+'</b>'];
+    if(cfg.authority)parts.push('auth <b>'+esc(cfg.authority)+'</b>');
+    if(cfg.call)parts.push('turn <b>'+esc(cfg.call)+'</b>');
+    if(cfg.token)parts.push('token <b>'+esc(cfg.token)+'</b>');
+    if(cfg.latency)parts.push('latency <b>'+esc(cfg.latency)+'ms</b>');
+    $('#summary').innerHTML=parts.map(function(p){return '<span class="c">'+p+'</span>';}).join('');
+  }
+  function syncCfgInputs(){
+    $('#cf-mode').value=cfg.mode; $('#cf-caller').value=cfg.caller; $('#cf-authority').value=cfg.authority;
+    $('#cf-call').value=cfg.call; $('#cf-token').value=cfg.token; $('#cf-latency').value=cfg.latency;
+    $$('[data-group="eval"] .o').forEach(function(o){ o.classList.toggle('on', o.getAttribute('data-val')===cfg.eval); });
+    $('#goldwrap').classList.toggle('show', cfg.eval==='golden');
+  }
+  function persist(){ store.set(CFG_STORAGE, JSON.stringify(cfg)); }
 
   // kebab
   var kebab=$('[data-kebab]');
@@ -291,20 +345,26 @@
   // accordion toggle (detailed-trace steps) — delegated so it survives re-render
   document.addEventListener('click',function(e){ var h=e.target.closest&&e.target.closest('.acc-head'); if(h){ h.parentNode.classList.toggle('open'); } });
   $('#advBtn').addEventListener('click',function(){var a=$('#adv');a.classList.toggle('show');this.textContent=a.classList.contains('show')?'▾ Advanced':'▸ Advanced';});
-  $$('[data-group]').forEach(function(group){
-    var g=group.getAttribute('data-group');
-    group.querySelectorAll('.o').forEach(function(opt){
-      opt.addEventListener('click',function(){
-        group.querySelectorAll('.o').forEach(function(o){o.classList.remove('on');}); opt.classList.add('on');
-        cfg[g]=opt.getAttribute('data-val');
-        // summary chip
-        var slot=$('#summary [data-slot="'+g+'"]'); var sum=opt.getAttribute('data-sum');
-        if(slot){ if(sum){slot.textContent=sum;slot.style.display='';} else {slot.style.display='none';} }
-        // golden reveal only in golden eval mode
-        if(g==='eval'){ $('#goldwrap').classList.toggle('show', cfg.eval==='golden'); }
-      });
+  // the shared invocation filters (selects + number inputs)
+  ['cf-mode','cf-caller','cf-authority','cf-call','cf-token','cf-latency'].forEach(function(id){
+    var el=$('#'+id);
+    el.addEventListener('change',readInputs); el.addEventListener('input',readInputs);
+  });
+  function readInputs(){
+    cfg.mode=$('#cf-mode').value; cfg.caller=$('#cf-caller').value; cfg.authority=$('#cf-authority').value;
+    cfg.call=$('#cf-call').value.trim(); cfg.token=$('#cf-token').value.trim(); cfg.latency=$('#cf-latency').value.trim();
+    persist(); renderSummary();
+  }
+  // eval seg (this surface's own control)
+  $$('[data-group="eval"] .o').forEach(function(opt){
+    opt.addEventListener('click',function(){
+      $$('[data-group="eval"] .o').forEach(function(o){o.classList.remove('on');}); opt.classList.add('on');
+      cfg.eval=opt.getAttribute('data-val');
+      $('#goldwrap').classList.toggle('show', cfg.eval==='golden');
+      persist(); renderSummary();
     });
   });
+  syncCfgInputs(); renderSummary();
 
   // ---- run ----
   var runBtn=$('#runBtn');
@@ -358,8 +418,14 @@
     var q=$('#q').value.trim();
     if(!q){ $('#q').focus(); return; }
     if(!keyIn.value.trim()){ setStatus('err','enter admin key'); keyIn.focus(); return; }
-    var body={ query:q, caller_mode:cfg.runtype };
-    if(cfg.strat) body.forced_strategy=cfg.strat;
+    var mf=modeToFields(cfg.mode);
+    var body={ query:q, caller_mode:cfg.caller||'chat.default' };
+    if(mf.forced_strategy) body.forced_strategy=mf.forced_strategy;
+    if(mf.allocator_override) body.allocator_override=mf.allocator_override;
+    if(cfg.authority) body.authority_requirement=cfg.authority;
+    if(cfg.call) body.call_number=parseInt(cfg.call,10);
+    if(cfg.token) body.token_budget_for_retrieval=parseInt(cfg.token,10);
+    if(cfg.latency) body.latency_budget_ms=parseInt(cfg.latency,10);
     if(cfg.eval!=='off'){ body.run_eval=true;
       if(cfg.eval==='golden'){ var g=$('#golden').value.trim();
         if(g) body.must_facts=g.split(/\r?\n/).map(function(x){return x.trim();}).filter(Boolean);

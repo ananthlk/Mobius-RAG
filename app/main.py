@@ -15623,6 +15623,11 @@ class TraceExplorerRequest(BaseModel):
     # to turn 1. Diagnostic surface only -- exposes the same field
     # RetrieverAnswerRequest carries for real callers.
     call_number: Optional[int] = None
+    # Per-request retrieval budgets (2026-08-21) -- same knobs the bank runner
+    # exposes, so the single-query and bank surfaces invoke the RAG identically.
+    # None → each falls through to the caller_mode-derived default.
+    token_budget_for_retrieval: Optional[int] = None
+    latency_budget_ms: Optional[int] = None
 
 
 async def _run_trace_for_query(
@@ -15996,6 +16001,7 @@ async def trace_explorer_run(
         body.must_facts, body.run_eval, body.force_fanout_queries,
         allocator_override=body.allocator_override, authority_requirement=body.authority_requirement,
         call_number=body.call_number,
+        token_budget_for_retrieval=body.token_budget_for_retrieval, latency_budget_ms=body.latency_budget_ms,
     )
     _persist_single_trace(result)
     return result
