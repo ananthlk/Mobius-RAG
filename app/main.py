@@ -17146,6 +17146,25 @@ async def trace_explorer_page():
         return HTMLResponse(content=f.read())
 
 
+@app.get("/eval", response_class=HTMLResponse)
+async def eval_portal_page():
+    """Serves the unified Eval Console portal -- a single-page shell whose
+    collapsible left rail swaps the right panel between the surfaces (Trace a
+    query / Run the bank / Runs / Calibrate) with no page reload. The panel is
+    an <iframe> loading each surface in ?embed=1 mode (its own header+rail
+    hidden); theme + admin key are shared across frames via same-origin
+    localStorage, and in-frame navigation is routed back up to the portal via
+    postMessage so it stays one page and one URL (#query / #bank / #runs).
+
+    Same auth precedent as the individual surfaces: the shell reveals no data;
+    each embedded view prompts for / carries the admin key and sends it on the
+    gated /admin/* calls."""
+    import os as _os
+    path = _os.path.join(_os.path.dirname(__file__), "static_admin", "portal.html")
+    with open(path, encoding="utf-8") as f:
+        return HTMLResponse(content=f.read())
+
+
 @app.get("/eval/runs", response_class=HTMLResponse)
 async def eval_runs_page():
     """Serves the Runs surface of the Eval Console -- the one-purpose page
@@ -17174,6 +17193,23 @@ async def eval_query_page():
     it as X-Admin-Key on the gated /admin/* call."""
     import os as _os
     path = _os.path.join(_os.path.dirname(__file__), "static_admin", "query.html")
+    with open(path, encoding="utf-8") as f:
+        return HTMLResponse(content=f.read())
+
+
+@app.get("/eval/bank", response_class=HTMLResponse)
+async def eval_bank_page():
+    """Serves the Question-bank runner surface of the Eval Console -- the
+    in-console home for the old trace-explorer func-02 "Run the Full Bank":
+    configure + start a 22-query bank job, watch it live, load/watch any
+    job_id, browse previous runs, and compare a finished run to the oracle.
+    Replaces the nav links that used to bounce out to /trace-explorer.
+
+    Same precedent as /eval/runs and /eval/query: the page shell reveals no
+    data; its JS prompts for the admin key (shared localStorage) and sends it
+    as X-Admin-Key on the gated /admin/trace-explorer/run-bank/* calls."""
+    import os as _os
+    path = _os.path.join(_os.path.dirname(__file__), "static_admin", "bank.html")
     with open(path, encoding="utf-8") as f:
         return HTMLResponse(content=f.read())
 
