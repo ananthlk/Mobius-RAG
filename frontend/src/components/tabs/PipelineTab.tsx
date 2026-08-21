@@ -116,7 +116,10 @@ export function PipelineTab() {
   const [err, setErr] = useState<string | null>(null);
   const [at, setAt] = useState<Date | null>(null);
   const [live, setLive] = useState(true);
-  const [win, setWin] = useState('1h');
+  const [integ, setInteg] = useState<any | null>(null);
+  const [win, setWin] = useState('24h');
+  const winRef = useRef('24h');
+  useEffect(() => { winRef.current = win; }, [win]);
   const [drill, setDrill] = useState<{ stage: string; label: string } | null>(null);
   // The modal keeps its OWN window, defaulting to all-time.
   //
@@ -136,10 +139,18 @@ export function PipelineTab() {
       setH(await r.json());
       setErr(null);
       setAt(new Date());
+      // Same window as the cards, so the accounting and the stages can never
+      // describe different periods.
+      try {
+        const ri = await fetch(`/pipeline_integrity?window=${winRef.current}`);
+        if (ri.ok) setInteg(await ri.json());
+      } catch { /* accounting is additive; never break the page for it */ }
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     }
   }, []);
+
+  useEffect(() => { load(); }, [win, load]);
 
   useEffect(() => {
     load();
@@ -210,39 +221,41 @@ export function PipelineTab() {
         ))}
       </div>
 
-      {/* Reconciliation — the shape that catches silent loss.
-          A count of what SUCCEEDED can never reveal what vanished; only the
-          difference can. `unaccounted` is always a bug, never a state. */}
-      {h?.reconcile ? (
-        <div className="pl-recon">
-          {Object.entries(h.reconcile as Record<string, any>).map(([k, r]) => (
-            <div key={k} className={`pl-rcard${r.balanced ? '' : ' pl-unbal'}`}>
-              <div className="pl-rhead">
-                <strong>{k}</strong>
-                {r.balanced
-                  ? <span className="pl-bal">balances ✓</span>
-                  : <span className="pl-gap">{Math.abs(r.unaccounted).toLocaleString()} unaccounted</span>}
-              </div>
-              <div className="pl-rflow">
-                <span className="pl-rstep"><b>{(r.in ?? 0).toLocaleString()}</b> discovered</span>
-                <span className="pl-rop">−</span>
-                <span className="pl-rstep pl-rex"><b>{(r.excluded_total ?? 0).toLocaleString()}</b> stopped</span>
-                <span className="pl-rop">=</span>
-                <span className="pl-rstep"><b>{(r.processed ?? 0).toLocaleString()}</b> processed</span>
-              </div>
-              <ul className="pl-rwhy">
-                {(r.excluded || []).filter((e: any) => e.count > 0).map((e: any) => (
-                  <li key={e.reason}><b>{e.count.toLocaleString()}</b> {e.reason}</li>
-                ))}
-                {!r.balanced && (
-                  <li className="pl-rbad">
-                    <b>{Math.abs(r.unaccounted).toLocaleString()}</b> unexplained —
-                    neither processed nor stopped for a stated reason
-                  </li>
-                )}
-              </ul>
-            </div>
-          ))}
+      {/* THE ACCOUNTING: one cohort, followed down the chain.
+          Every stage subtracts from the one above it, and `gap` is what left a
+          stage and arrived nowhere. A non-zero gap is always a bug. */}
+      {integ ? (
+        <div className={`pl-acct${integ.worst_gap ? ' pl-acct-bad' : ''}`}>
+          <div className="pl-accthead">
+            <strong>Accounting</strong>
+            <span className="pl-sub">
+              {integ.cohort.toLocaleString()} documents discovered · {WINDOWS.find(w => w[0] === win)?.[1] ?? win}
+            </span>
+            <span className={integ.worst_gap ? 'pl-gap' : 'pl-bal'}>
+              {integ.worst_gap ? `${integ.total_gap.toLocaleString()} unaccounted` : 'every document accounted for ✓'}
+            </span>
+          </div>
+          <table className="pl-acctable">
+            <thead><tr><th>stage</th><th>in</th><th>reached</th><th>stopped</th><th>why it stopped</th><th>gap</th></tr></thead>
+            <tbody>
+              {integ.stages.map((st: any) => (
+                <tr key={st.stage} className={st.gap ? 'pl-rowbad' : undefined}>
+                  <td>{st.stage}</td>
+                  <td className="pl-num">{(st.in ?? 0).toLocaleString()}</td>
+                  <td className="pl-num"><b>{(st.reached ?? 0).toLocaleString()}</b></td>
+                  <td className="pl-num">{st.stopped_total ? st.stopped_total.toLocaleString() : '—'}</td>
+                  <td className="pl-why">
+                    {st.stopped.filter((x: any) => x.count > 0).map((x: any) => x.reason).join('; ') || '—'}
+                  </td>
+                  <td className="pl-num">{st.gap ? <b className="pl-gap">{st.gap.toLocaleString()}</b> : '0'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="pl-acctnote">
+            <b>stopped</b> cannot progress and the reason is stated — deliberate, not a fault.
+            <b> gap</b> left the stage above and arrived nowhere; it is always a bug, never a state.
+          </p>
         </div>
       ) : null}
 

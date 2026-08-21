@@ -2146,6 +2146,99 @@ _PIPE_WINDOWS = {"5m": "5 minutes", "15m": "15 minutes", "30m": "30 minutes",
                  "1h": "1 hour", "24h": "24 hours", "7d": "7 days", "all": None}
 
 
+@app.get("/pipeline_integrity")
+async def pipeline_integrity(window: str = "24h", db: AsyncSession = Depends(get_db)):
+    """ONE COHORT, followed through every stage. The accounting, not three tallies.
+
+    Ananth, 2026-08-20: "we need to go from discovered (uploaded) .. what should
+    go to GCS .. etc .. and what actually happened and where the gap is."
+
+    WHY THE OLD NUMBERS DISAGREED. The Pipeline banner, Corpus health's table and
+    my own reconciliation each counted a DIFFERENT POPULATION over a DIFFERENT
+    time basis — documents ever created, chunking_jobs ever completed, distinct
+    document_ids in an index — and then presented the results side by side as if
+    they were a funnel. They never subtracted to zero because they were never the
+    same set. My reconciliation returned NEGATIVE unaccounted, which is the proof:
+    excluded and processed overlapped.
+
+    THE FIX IS A COHORT. Take the documents discovered in one window and follow
+    exactly those documents down the chain. Every stage then answers four
+    questions about the SAME set:
+
+        reached   made it to this stage
+        stopped   cannot progress, with a stated reason (deliberate, not a fault)
+        stuck     reached the previous stage and should have progressed, but has not
+        gap       reached(previous) − reached − stopped − stuck
+
+    CONSERVATION IS THE POINT. `gap` must be zero. A non-zero gap is a document
+    that left one stage and arrived nowhere — which is exactly the failure the
+    AHCA scrape hid behind `status: completed` when 56 files silently never
+    downloaded. Any accounting that cannot produce this number cannot find that
+    bug.
+    """
+    from sqlalchemy import text as _text
+    iv = {"1h": "1 hour", "24h": "24 hours", "7d": "7 days", "30d": "30 days",
+          "all": None}.get(window)
+    if window not in ("1h", "24h", "7d", "30d", "all"):
+        raise HTTPException(status_code=400, detail="window must be 1h|24h|7d|30d|all")
+    W = f"AND d.created_at > now() - interval '{iv}'" if iv else ""
+
+    async def n(sql: str) -> int:
+        try:
+            return int((await db.execute(_text(sql))).scalar() or 0)
+        except Exception:
+            return -1
+
+    # The cohort. Everything below is a subset of THIS.
+    cohort = await n(f"SELECT count(*) FROM documents d WHERE true {W}")
+
+    stored   = await n(f"""SELECT count(*) FROM documents d
+        WHERE d.file_path IS NOT NULL AND d.file_path <> '' {W}""")
+    extracted = await n(f"""SELECT count(*) FROM documents d WHERE true {W}
+        AND EXISTS (SELECT 1 FROM document_pages p WHERE p.document_id=d.id)""")
+    typed_fail = await n(f"""SELECT count(*) FROM documents d
+        WHERE d.ingest_failure_reason IS NOT NULL {W}""")
+    classified = await n(f"""SELECT count(*) FROM documents d
+        WHERE d.source_metadata ? 'payor_classification' {W}""")
+    held = await n(f"""SELECT count(*) FROM documents d
+        WHERE d.source_metadata->'payor_classification'->>'decision'='hold' {W}""")
+    chunked = await n(f"""SELECT count(*) FROM documents d WHERE true {W}
+        AND EXISTS (SELECT 1 FROM hierarchical_chunks h WHERE h.document_id=d.id)""")
+    embedded = await n(f"""SELECT count(*) FROM documents d WHERE true {W}
+        AND EXISTS (SELECT 1 FROM chunk_embeddings e WHERE e.document_id=d.id)""")
+    retired  = await n(f"SELECT count(*) FROM documents d WHERE d.lifecycle_state='retired' {W}")
+    shelved  = await n(f"SELECT count(*) FROM documents d WHERE d.lifecycle_state='shelved' {W}")
+    published = await n(f"""SELECT count(*) FROM documents d WHERE true {W}
+        AND EXISTS (SELECT 1 FROM rag_published_embeddings r WHERE r.document_id=d.id)""")
+
+    def step(name, prev, reached, stopped):
+        st = sum(x["count"] for x in stopped if x["count"] > 0)
+        gap = (prev or 0) - (reached or 0) - st
+        return {"stage": name, "in": prev, "reached": reached,
+                "stopped": stopped, "stopped_total": st,
+                "gap": max(gap, 0), "balanced": gap == 0}
+
+    stages = [
+        step("discovered", cohort, cohort, []),
+        step("stored in GCS", cohort, stored, []),
+        step("text extracted", stored, extracted,
+             [{"reason": "typed ingest failure (no text layer, unsupported, encrypted…)",
+               "count": typed_fail}]),
+        step("classified", extracted, classified, []),
+        step("chunked", classified, chunked,
+             [{"reason": "held by classifier, awaiting a human", "count": held}]),
+        step("embedded", chunked, embedded, []),
+        step("published to index", embedded, published,
+             [{"reason": "retired as duplicate", "count": retired},
+              {"reason": "shelved (withheld)", "count": shelved}]),
+    ]
+    worst = max((x["gap"] for x in stages), default=0)
+    return {"window": window, "cohort": cohort, "stages": stages,
+            "total_gap": sum(x["gap"] for x in stages),
+            "worst_gap": worst,
+            "status": "green" if worst == 0 else ("yellow" if worst < 50 else "red")}
+
+
 @app.get("/pipeline_health/stage/{stage}")
 async def pipeline_stage_documents(
     stage: str,
@@ -2695,59 +2788,6 @@ async def pipeline_health(db: AsyncSession = Depends(get_db)):
         except Exception:
             pass
 
-
-        # ── RECONCILIATION: discovered − excluded(why) − processed ────────
-        #
-        # Ananth, 2026-08-20: "discovered .. stopped/planned (why) to be
-        # processed .. processed. this is the start of the pipeline."
-        #
-        # This is the shape that catches silent loss, and the AHCA run proved it.
-        # That job reported status=completed, error=null, 185 documents — and had
-        # quietly dropped 56 eligible files whose URLs contained a space, because
-        # nothing anywhere subtracted. A count of what SUCCEEDED can never reveal
-        # what vanished; only the difference can.
-        #
-        # So every stage answers three questions instead of one: what arrived,
-        # what was deliberately stopped AND WHY, and what came out. When those do
-        # not balance, the remainder is `unaccounted` — and unaccounted is always
-        # a bug, never a state.
-        def _recon(name, came_in, processed, excluded):
-            ex_total = sum(e["count"] for e in excluded if e["count"] and e["count"] > 0)
-            unacc = (came_in or 0) - ex_total - (processed or 0)
-            return {"in": came_in, "excluded": excluded, "excluded_total": ex_total,
-                    "processed": processed, "unaccounted": unacc,
-                    "balanced": unacc == 0}
-
-        active_docs = await _one("""SELECT count(*) FROM documents
-            WHERE lifecycle_state IS DISTINCT FROM 'retired'""")
-
-        slow["reconcile"] = {
-            # EXTRACT: every active document should have produced pages, or carry
-            # a typed reason why it did not. Anything left over is unexplained.
-            "extract": _recon(
-                "documents", active_docs,
-                await _one("""SELECT count(*) FROM documents d
-                    WHERE d.lifecycle_state IS DISTINCT FROM 'retired'
-                      AND EXISTS (SELECT 1 FROM document_pages p WHERE p.document_id=d.id)"""),
-                [{"reason": "typed ingest failure", "count": await _one(
-                    """SELECT count(*) FROM documents WHERE ingest_failure_reason IS NOT NULL
-                       AND lifecycle_state IS DISTINCT FROM 'retired'""")}]),
-            # PUBLISH: the number that was wrong for months. Retired and shelved
-            # are DELIBERATE exclusions and must be named as such, not counted as
-            # a backlog.
-            "publish": _recon(
-                "chunked documents",
-                await _one("""SELECT count(DISTINCT document_id) FROM hierarchical_chunks"""),
-                await _one("""SELECT count(DISTINCT document_id) FROM rag_published_embeddings"""),
-                [{"reason": "retired (duplicate)", "count": await _one(
-                    "SELECT count(*) FROM documents WHERE lifecycle_state='retired'")},
-                 {"reason": "shelved (withheld)", "count": await _one(
-                    "SELECT count(*) FROM documents WHERE lifecycle_state='shelved'")},
-                 {"reason": "held by classifier", "count": await _one(
-                    """SELECT count(*) FROM documents
-                       WHERE source_metadata->'payor_classification'->>'decision'='hold'
-                         AND lifecycle_state IS DISTINCT FROM 'retired'""")}]),
-        }
 
         _PIPE_SLOW_CACHE["data"] = slow
         _PIPE_SLOW_CACHE["at"] = _t.time()

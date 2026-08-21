@@ -109,3 +109,27 @@
   .pl-rcard.pl-unbal{background:#2a1f08;border-color:#b45309}
   .pl-rstep b{color:#e5e7eb}.pl-rwhy b{color:#d1d5db}
 }
+
+/* accounting */
+.pl-acct{background:#fff;border:1px solid #e5e7eb;border-radius:9px;padding:14px 16px;margin-bottom:20px}
+.pl-acct-bad{border-color:#f59e0b;background:#fffbeb}
+.pl-accthead{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:10px}
+.pl-accthead strong{font-size:14px}
+.pl-accthead .pl-bal{margin-left:auto;color:#059669;font-size:12px;font-family:ui-monospace,Menlo,monospace}
+.pl-accthead .pl-gap{margin-left:auto;color:#b45309;font-size:12px;font-weight:600;font-family:ui-monospace,Menlo,monospace}
+.pl-acctable{width:100%;border-collapse:collapse;font-size:12.5px}
+.pl-acctable th{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;color:#6b7280;
+  font-weight:500;padding:7px 10px;border-bottom:1px solid #e5e7eb}
+.pl-acctable td{padding:7px 10px;border-bottom:1px solid #f3f4f6}
+.pl-acctable tr:last-child td{border-bottom:none}
+.pl-num{text-align:right;font-variant-numeric:tabular-nums;font-family:ui-monospace,Menlo,monospace;width:82px}
+.pl-why{color:#6b7280;font-size:11.5px}
+.pl-rowbad{background:#fffbeb}
+.pl-acctnote{margin:9px 0 0;font-size:11.5px;color:#6b7280}
+.pl-acctnote b{color:#374151}
+@media (prefers-color-scheme:dark){
+  .pl-acct{background:#111827;border-color:#374151}
+  .pl-acct-bad{background:#2a1f08;border-color:#b45309}
+  .pl-acctable td{border-color:#1f2937}
+  .pl-rowbad{background:#2a1f08}
+}
