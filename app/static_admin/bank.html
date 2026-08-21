@@ -282,30 +282,50 @@
           <button class="kebab" id="kebab" title="Run settings" aria-label="Run settings">⋮</button>
           <div class="pop" id="pop">
             <div class="fld">
-              <label class="hd">Bank (strategy)</label>
-              <select id="cf-strategy">
-                <option value="a">a — BM25</option>
-                <option value="b">b — Wide / themes (vector)</option>
-                <option value="c">c — reverse-RAG (llm_validate)</option>
-                <option value="d">d — Web search</option>
-                <option value="s">s — Payor Fact Store</option>
-                <option value="">auto (real router)</option>
+              <label class="hd">Mode</label>
+              <select id="cf-mode">
+                <optgroup label="Router policies">
+                  <option value="auto">Auto — system default (≈ optimizer)</option>
+                  <option value="alloc:optimizer">Optimizer</option>
+                  <option value="alloc:greedy">Greedy</option>
+                  <option value="alloc:bayesian">Bayesian</option>
+                  <option value="alloc:portfolio">Portfolio (blend)</option>
+                </optgroup>
+                <optgroup label="Force one arm — diagnostic">
+                  <option value="arm:a">a — BM25</option>
+                  <option value="arm:b">b — Vector / themes</option>
+                  <option value="arm:c">c — Reverse-RAG (llm_validate)</option>
+                  <option value="arm:d">d — Web search</option>
+                  <option value="arm:s">s — Payor Fact Store</option>
+                </optgroup>
+              </select>
+              <div class="hint">A router policy lets the allocator pick arms per query; forcing one arm pins it (diagnostic) and skips the allocator. <b>Auto</b> follows the system default (currently optimizer, adaptive).</div>
+            </div>
+            <div class="fld">
+              <label class="hd">Caller mode</label>
+              <select id="cf-caller">
+                <option value="chat.default">chat.default — 6s allowance</option>
+                <option value="chat.copilot">chat.copilot — fast (4s)</option>
+                <option value="chat.thinking">chat.thinking — patient (16s, more attempts)</option>
               </select>
             </div>
             <div class="fld">
-              <label class="hd">Router allocator</label>
-              <select id="cf-allocator">
-                <option value="">auto (normal dispatch draw)</option>
-                <option value="greedy">greedy (pinned)</option>
-                <option value="optimizer">optimizer (pinned)</option>
-                <option value="bayesian">bayesian (pinned)</option>
+              <label class="hd">Authority</label>
+              <select id="cf-authority">
+                <option value="">any</option>
+                <option value="citable_required">citable_required</option>
               </select>
-              <div class="hint">To eval the real greedy allocator: set Bank to <b>auto</b> (a forced strategy skips the allocator) and allocator to <b>greedy</b> — pins which allocator runs while it makes its own per-query pick.</div>
             </div>
             <div class="fld adv">
               <label class="chk"><input type="checkbox" id="cf-fanout-llm"> auto-decompose via LLM (real mechanism)</label>
               <label class="chk"><input type="checkbox" id="cf-fanout-corpus"> auto-decompose via corpus tags (no LLM)</label>
-              <div class="hint">Both force FAN_OUT with multi-slot retrieval overhead — noticeably slower than a normal run.</div>
+              <label class="chk"><input type="checkbox" id="cf-fanout-facts"> from-facts (debug — reads answer key)</label>
+              <div class="hint">Decomposition forces FAN_OUT with multi-slot retrieval overhead — slower than a normal run.</div>
+            </div>
+            <div class="fld adv">
+              <label class="hd">ReAct turn <span style="text-transform:none;color:var(--faint)">(call_number — advanced)</span></label>
+              <input type="number" id="cf-call" min="1" step="1" placeholder="1" style="width:90px">
+              <div class="hint">Which ReAct turn Chat is on. Gates cost — strategy c is held until turn 3; flips greedy↔portfolio. Blank = turn 1.</div>
             </div>
             <div class="fld">
               <label class="hd">Run name <span style="text-transform:none;color:var(--faint)">(optional)</span></label>
@@ -398,29 +418,41 @@
   $('rail-toggle').addEventListener('click',function(){var c=shellEl.classList.toggle('collapsed');store.set(RAIL_STORAGE,c?'1':'0');});
 
   // ---- config (kebab) ----
-  var cfg={strategy:'a',allocator:'',fanoutLlm:false,fanoutCorpus:false,name:''};
+  // mode default = optimizer (Ananth); auto stays an option (system default, adaptive)
+  var cfg={mode:'alloc:optimizer', caller:'chat.default', authority:'', fanoutLlm:false, fanoutCorpus:false, fanoutFacts:false, call:'', name:''};
   try{var sv=JSON.parse(store.get(CFG_STORAGE)||'null');if(sv)cfg=Object.assign(cfg,sv);}catch(e){}
+  var MODE_LABEL={ 'auto':'auto', 'alloc:optimizer':'optimizer', 'alloc:greedy':'greedy', 'alloc:bayesian':'bayesian', 'alloc:portfolio':'portfolio',
+                   'arm:a':'a·BM25', 'arm:b':'b·vector', 'arm:c':'c·revRAG', 'arm:d':'d·web', 'arm:s':'s·payor' };
+  // one Mode value -> the two mutually-exclusive backend fields
+  function modeToFields(m){
+    if(m==='auto') return {forced_strategy:null, allocator_override:null};
+    if(m.indexOf('alloc:')===0) return {forced_strategy:null, allocator_override:m.slice(6)};
+    if(m.indexOf('arm:')===0) return {forced_strategy:m.slice(4), allocator_override:null};
+    return {forced_strategy:null, allocator_override:null};
+  }
   function syncCfgInputs(){
-    $('cf-strategy').value=cfg.strategy; $('cf-allocator').value=cfg.allocator;
-    $('cf-fanout-llm').checked=cfg.fanoutLlm; $('cf-fanout-corpus').checked=cfg.fanoutCorpus;
-    $('cf-name').value=cfg.name;
+    $('cf-mode').value=cfg.mode; $('cf-caller').value=cfg.caller; $('cf-authority').value=cfg.authority;
+    $('cf-fanout-llm').checked=cfg.fanoutLlm; $('cf-fanout-corpus').checked=cfg.fanoutCorpus; $('cf-fanout-facts').checked=cfg.fanoutFacts;
+    $('cf-call').value=cfg.call; $('cf-name').value=cfg.name;
   }
   function readCfgInputs(){
-    cfg.strategy=$('cf-strategy').value; cfg.allocator=$('cf-allocator').value;
-    cfg.fanoutLlm=$('cf-fanout-llm').checked; cfg.fanoutCorpus=$('cf-fanout-corpus').checked;
-    cfg.name=$('cf-name').value.trim();
+    cfg.mode=$('cf-mode').value; cfg.caller=$('cf-caller').value; cfg.authority=$('cf-authority').value;
+    cfg.fanoutLlm=$('cf-fanout-llm').checked; cfg.fanoutCorpus=$('cf-fanout-corpus').checked; cfg.fanoutFacts=$('cf-fanout-facts').checked;
+    cfg.call=$('cf-call').value.trim(); cfg.name=$('cf-name').value.trim();
     store.set(CFG_STORAGE,JSON.stringify(cfg)); renderChips();
   }
   function renderChips(){
-    var stratLabel=cfg.strategy===''?'auto':cfg.strategy;
-    var parts=['bank <b>'+esc(stratLabel)+'</b>','allocator <b>'+esc(cfg.allocator||'auto')+'</b>'];
+    var parts=['mode <b>'+esc(MODE_LABEL[cfg.mode]||cfg.mode)+'</b>','caller <b>'+esc(cfg.caller)+'</b>'];
+    if(cfg.authority)parts.push('auth <b>'+esc(cfg.authority)+'</b>');
+    if(cfg.call)parts.push('turn <b>'+esc(cfg.call)+'</b>');
     if(cfg.fanoutLlm)parts.push('<b>fan-out: LLM</b>');
     if(cfg.fanoutCorpus)parts.push('<b>fan-out: corpus</b>');
+    if(cfg.fanoutFacts)parts.push('<b>fan-out: facts</b>');
     if(cfg.name)parts.push('name <b>'+esc(cfg.name)+'</b>');
     $('chips').innerHTML=parts.map(function(p){return '<span class="c">'+p+'</span>';}).join('');
   }
   syncCfgInputs(); renderChips();
-  ['cf-strategy','cf-allocator','cf-fanout-llm','cf-fanout-corpus','cf-name'].forEach(function(id){
+  ['cf-mode','cf-caller','cf-authority','cf-fanout-llm','cf-fanout-corpus','cf-fanout-facts','cf-call','cf-name'].forEach(function(id){
     $(id).addEventListener('change',readCfgInputs); $(id).addEventListener('input',readCfgInputs);
   });
   // kebab open/close
@@ -608,7 +640,12 @@
     readCfgInputs();
     var btn=$('run-btn'); btn.disabled=true; status('starting…'); setBeacon('busy','live · starting');
     fetch('/admin/trace-explorer/run-bank',{method:'POST',headers:jsonHeaders(),
-      body:JSON.stringify({forced_strategy:cfg.strategy||null, caller_mode:'chat.default', auto_fanout_llm:cfg.fanoutLlm, auto_fanout_corpus:cfg.fanoutCorpus, name:cfg.name||null, allocator_override:cfg.allocator||null})})
+      body:JSON.stringify((function(){ var mf=modeToFields(cfg.mode); return {
+        forced_strategy:mf.forced_strategy, allocator_override:mf.allocator_override,
+        caller_mode:cfg.caller||'chat.default', authority_requirement:cfg.authority||null,
+        call_number:(cfg.call?parseInt(cfg.call,10):null),
+        auto_fanout_llm:cfg.fanoutLlm, auto_fanout_corpus:cfg.fanoutCorpus, auto_fanout_from_facts:cfg.fanoutFacts,
+        name:cfg.name||null }; })())})
       .then(function(r){ if(!r.ok)return r.text().then(function(t){throw new Error(r.status+': '+t.slice(0,300));}); return r.json(); })
       .then(function(d){ watchBankJob(d.job_id, btn); })
       .catch(function(e){ status('request failed: '+e.message); btn.disabled=false; setBeacon('','idle'); });
