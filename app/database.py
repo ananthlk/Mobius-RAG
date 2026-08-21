@@ -1,10 +1,28 @@
-"""Single async engine and session factory for mobius-rag.
+"""Async engine and session factory for mobius-rag.
 
-All components share the same connection pool: FastAPI (get_db),
-chunking worker, embedding worker, and any code using
+Components sharing one event loop share one connection pool: FastAPI
+(get_db), chunking worker, embedding worker, and any code using
 ``AsyncSessionLocal``. One session = one connection from the pool;
 sessions close after each request/job so connections return to the
 pool.
+
+2026-08-21: per-event-loop engines.
+
+  asyncpg binds every connection to the event loop that created it.
+  The chunking worker runs two lanes (batch + instant) in two threads,
+  each with its own ``asyncio.run()`` loop, but both drew from this
+  single module-level pool. Whichever lane checked out a connection
+  first became the pool's de-facto loop owner; the other lane's first
+  checkout awaited a future owned by a foreign loop and hung forever —
+  after the TCP connect but before any statement, so the backend sat
+  ``idle`` in ``ClientRead`` with an empty query and nothing crashed,
+  nothing logged, and the supervisor never restarted it. Observed as
+  1 of 4 chunking instances consuming the queue while 3 sat silent.
+
+  ``AsyncSessionLocal()`` now resolves a sessionmaker for the *running*
+  loop. Single-loop processes (the API, the embedding worker) keep the
+  original module-level engine and are unaffected. Additional loops get
+  their own smaller pool.
 
 2026-04-21 hardening:
 
@@ -18,8 +36,15 @@ pool.
 * Any dialect quirks tolerated: the pg-only server_settings are only
   attached when the URL is an asyncpg URL.
 """
+import asyncio
+import logging
+import threading
+import weakref
+
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
+
+logger = logging.getLogger(__name__)
 
 from app.config import (
     DATABASE_URL,
@@ -56,16 +81,81 @@ if "asyncpg" in DATABASE_URL:
         },
     }
 
-engine = create_async_engine(
-    DATABASE_URL,
-    echo=False,
-    connect_args=_connect_args,
-    pool_size=DB_POOL_SIZE,
-    max_overflow=DB_MAX_OVERFLOW,
-    pool_pre_ping=True,
-    pool_recycle=300,
+def _make_engine(pool_size: int, max_overflow: int):
+    return create_async_engine(
+        DATABASE_URL,
+        echo=False,
+        connect_args=_connect_args,
+        pool_size=pool_size,
+        max_overflow=max_overflow,
+        pool_pre_ping=True,
+        pool_recycle=300,
+    )
+
+
+engine = _make_engine(DB_POOL_SIZE, DB_MAX_OVERFLOW)
+_default_sessionmaker = async_sessionmaker(
+    engine, class_=AsyncSession, expire_on_commit=False
 )
-AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+# Secondary loops (the chunking worker's second lane) get a deliberately
+# small pool: they are a single serial consumer, not a request fan-out,
+# and every extra pool multiplies against Cloud Run instance count
+# against a shared max_connections budget.
+_SECONDARY_POOL_SIZE = 2
+_SECONDARY_MAX_OVERFLOW = 3
+
+_owner_loop_ref: "weakref.ref | None" = None
+_loop_sessionmakers: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+_loop_engines: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+_loop_lock = threading.Lock()
+
+
+def _sessionmaker_for_running_loop():
+    """Return the sessionmaker whose pool belongs to the running loop.
+
+    The first loop to ask claims the module-level ``engine``; any other
+    loop gets its own engine so asyncpg never hands a connection created
+    on loop A to code awaiting on loop B.
+    """
+    global _owner_loop_ref
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop (sync context / engine used directly) — the
+        # caller is not about to await on a foreign loop.
+        return _default_sessionmaker
+
+    with _loop_lock:
+        owner = _owner_loop_ref() if _owner_loop_ref is not None else None
+        if owner is None:
+            _owner_loop_ref = weakref.ref(loop)
+            return _default_sessionmaker
+        if owner is loop:
+            return _default_sessionmaker
+
+        maker = _loop_sessionmakers.get(loop)
+        if maker is None:
+            lane_engine = _make_engine(
+                _SECONDARY_POOL_SIZE, _SECONDARY_MAX_OVERFLOW
+            )
+            maker = async_sessionmaker(
+                lane_engine, class_=AsyncSession, expire_on_commit=False
+            )
+            _loop_engines[loop] = lane_engine
+            _loop_sessionmakers[loop] = maker
+            logger.warning(
+                "[db] second event loop detected (%r) — created a dedicated "
+                "pool (size=%d overflow=%d). Sharing one asyncpg pool across "
+                "loops deadlocks; see module docstring.",
+                loop, _SECONDARY_POOL_SIZE, _SECONDARY_MAX_OVERFLOW,
+            )
+        return maker
+
+
+def AsyncSessionLocal() -> AsyncSession:
+    """Session bound to the running loop's pool. Call, don't subclass."""
+    return _sessionmaker_for_running_loop()()
 
 Base = declarative_base()
 
