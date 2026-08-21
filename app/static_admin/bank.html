@@ -216,6 +216,18 @@
   .meter i{display:block;height:100%;border-radius:99px;background:var(--accent);transition:width .4s ease}
   .meter i.good{background:var(--ok)} .meter i.warn{background:var(--warn)} .meter i.bad{background:var(--bad)}
 
+  /* ---- recall@K mini bar-chart ---- */
+  .khead{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;font-size:12px;color:var(--dim)}
+  .khead .kmeta{font-family:"JetBrains Mono",monospace;font-size:11px} .khead b{color:var(--text)}
+  .kchart{overflow-x:auto;padding-bottom:2px}
+  .kcurve{display:flex;align-items:flex-end;gap:3px;height:78px;min-width:100%}
+  .kbar{flex:1 0 13px;height:100%;display:flex;align-items:flex-end}
+  .kbar>i{width:100%;background:var(--accent);border-radius:3px 3px 0 0;min-height:2px;opacity:.88;transition:height .4s ease}
+  .kbar>i.good{background:var(--ok)} .kbar>i.low{background:var(--warn)}
+  .kbar:hover>i{opacity:1;filter:brightness(1.12)}
+  .klabels{display:flex;gap:3px;margin-top:5px;min-width:100%}
+  .klab{flex:1 0 13px;text-align:center;font-family:"JetBrains Mono",monospace;font-size:9px;color:var(--faint)}
+
   /* ---- embed mode: rendered inside the /eval portal shell ---- */
   html.embed .app-header, html.embed .rail{display:none!important}
   html.embed .shell{grid-template-columns:1fr!important;min-height:100vh}
@@ -418,6 +430,7 @@
 
   // ---- state ----
   var bankJobId=null, bankPollTimer=null;
+  var accOpen={};   // persists accordion open/closed state across the 2s re-render
   function setBeacon(state,label){ $('beacon').className='beacon'+(state?' '+state:''); $('live-label').textContent=label; }
   function status(msg){ $('statusline').textContent=msg; }
 
@@ -425,6 +438,8 @@
 
   // ---- render bank log (ported from trace-explorer func-02) ----
   function renderBankLog(state){
+    // remember which accordions are open before we blow away the DOM
+    Array.prototype.forEach.call(document.querySelectorAll('#bank-log details.acc'),function(d){ accOpen[d.getAttribute('data-k')]=d.open; });
     var idCell=function(id){return '<td class="mono" style="white-space:nowrap">'+esc(id)+'</td>';};
     var rows=(state.summaries||[]).map(function(s){
       if(s.status==='error'){
@@ -487,16 +502,20 @@
     var maxK=Math.max.apply(null,[10].concat(sums.map(function(s){return s.chunks_out||0;})));
     var kVals=[]; for(var k=1;k<=maxK;k++){ var pts=sums.map(function(s){return (s.recall_at_k||{})[k];}).filter(function(v){return v!=null;}); kVals.push(pts.length?pts.reduce(function(a,b){return a+b;},0)/pts.length:null); }
     if(!kVals.every(function(v){return v==null;})){
-      var cells=kVals.map(function(v,i){return '<div class="metric" style="flex:1;min-width:0"><div class="num" style="font-size:16px">'+(v!=null?v.toFixed(2):'—')+'</div><div class="lbl">K='+(i+1)+'</div></div>';}).join('');
-      recallKHtml='<div class="metric-row" style="margin-top:10px;flex-wrap:wrap">'+cells+'</div>'
-        +'<div class="callout" style="margin-top:6px">recall@K: averaged over queries that served at least K chunks (fewer-than-K excluded, not counted 0). Truncates each query&rsquo;s ranked served-chunk list at K and sums each fact&rsquo;s graded support (0/0.5/1). Range extends to this run&rsquo;s max chunks_out.</div>';
+      var bars=kVals.map(function(v,i){ var h=v==null?0:Math.round(v*100); var cls=v==null?'':(v>=0.7?'good':(v>=0.4?'':'low')); return '<div class="kbar" title="K='+(i+1)+' · recall '+(v!=null?v.toFixed(2):'—')+'"><i class="'+cls+'" style="height:'+h+'%"></i></div>'; }).join('');
+      var labs=kVals.map(function(v,i){ return '<div class="klab">'+(i+1)+'</div>'; }).join('');
+      var kFirst=null; for(var ki=0;ki<kVals.length;ki++){ if(kVals[ki]!=null){ kFirst=kVals[ki]; break; } }
+      var kLast=kVals[kVals.length-1];
+      recallKHtml='<div class="khead"><span>recall improves as K grows</span><span class="kmeta">K=1 <b>'+(kFirst!=null?kFirst.toFixed(2):'—')+'</b> &rarr; K='+kVals.length+' <b>'+(kLast!=null?kLast.toFixed(2):'—')+'</b></span></div>'
+        +'<div class="kchart"><div class="kcurve">'+bars+'</div><div class="klabels">'+labs+'</div></div>'
+        +'<div class="callout" style="margin-top:10px">Averaged over queries that served at least K chunks (fewer-than-K excluded, not counted 0). Truncates each query&rsquo;s ranked served-chunk list at K and sums each fact&rsquo;s graded support (0/0.5/1). Hover a bar for its value; range extends to this run&rsquo;s max chunks_out.</div>';
     }
 
     // --- render helpers ---
     function meterBar(pct, cls){ if(pct==null) return ''; return '<div class="meter"><i class="'+(cls||'')+'" style="width:'+Math.max(0,Math.min(100,pct))+'%"></i></div>'; }
     function htile(v,label,o){ o=o||{}; return '<div class="htile'+(o.lead?' lead':'')+(o.cls?' '+o.cls:'')+'"><div class="hv">'+v+'</div><div class="hl">'+label+'</div>'+(o.sub?'<div class="hsub">'+o.sub+'</div>':'')+(o.meter!=null?meterBar(o.meter,o.mcls):'')+'</div>'; }
     function met(v,label,cls){ return '<div class="metric"><div class="num'+(cls?' bank-recall '+cls:'')+'">'+v+'</div><div class="lbl">'+label+'</div></div>'; }
-    function acc(title,cnt,body,open){ return '<details class="acc"'+(open?' open':'')+'><summary>'+title+'<span class="cnt">'+(cnt||'')+'</span></summary><div class="accbody">'+body+'</div></details>'; }
+    function acc(key,title,cnt,body,defOpen){ var op=(key in accOpen)?accOpen[key]:defOpen; return '<details class="acc" data-k="'+key+'"'+(op?' open':'')+'><summary>'+title+'<span class="cnt">'+(cnt||'')+'</span></summary><div class="accbody">'+body+'</div></details>'; }
 
     var gap=(avg!=null&&avgAnswer!=null)?(avg-avgAnswer):null;
     var gapCls=gap==null?'':(gap>0.15?'bad':(gap>0.05?'warn':'good'));
@@ -539,12 +558,12 @@
         +(totalJudgeErrors?'<span style="color:var(--bad)">'+totalJudgeErrors+' judge error(s) excluded from averages</span>':'')
       +'</div>'
       +'<div class="hero">'+hero+'</div>'
-      +acc('Correctness &amp; coverage','',accCorrect,true)
-      +acc('Retrieval quality','',accRetr,true)
-      +acc('Latency',(avgRetrievalSeconds!=null?avgRetrievalSeconds.toFixed(1)+'s':''),accLatency,false)
-      +(recallKHtml?acc('recall@K curve','',recallKHtml,false):'')
-      +acc('Per-query results',String(sums.length),tableHtml,true)
-      +acc('Diagnostics &amp; caveats','',diag,false);
+      +acc('correct','Correctness &amp; coverage','',accCorrect,true)
+      +acc('retr','Retrieval quality','',accRetr,true)
+      +acc('latency','Latency',(avgRetrievalSeconds!=null?avgRetrievalSeconds.toFixed(1)+'s':''),accLatency,false)
+      +(recallKHtml?acc('kcurve','recall@K curve','',recallKHtml,false):'')
+      +acc('table','Per-query results',String(sums.length),tableHtml,true)
+      +acc('diag','Diagnostics &amp; caveats','',diag,false);
 
     // row click -> open the per-query trace in the Query surface (console sibling)
     Array.prototype.forEach.call(document.querySelectorAll('.bank-row'),function(row){
