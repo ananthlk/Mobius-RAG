@@ -70,6 +70,20 @@ ORG_DOCS_DATABASE_URL: str | None = (
 # TimeoutErrors on /documents during ingestion. Bump to comfortable
 # shared pool; Cloud SQL db-custom-2-7680 supports 100 conns, so 5+10
 # per service instance leaves plenty of headroom.
+#
+# 2026-08-21: "per service instance leaves plenty of headroom" held while each
+# service WAS one instance. The pool is per-instance; max_connections is global,
+# so the demand multiplies with the fleet and the ceiling does not. At 12
+# chunking + 6 embedding instances this default alone reserves 360 connections
+# against max_connections=200 — which took the DB to 203/200, rendered -1
+# sentinels on the pipeline accounting panel, and convoyed every worker's claim
+# query behind a blocked ALTER TABLE.
+#
+# Measured peak was ~3.3 connections per instance: the default is right for a
+# request-serving API and roughly 5x oversized for a queue worker, which is a
+# SERIAL consumer holding one job at a time. Both workers now override this to
+# 2+3 via env (deploy_cloudrun_dev.sh, which carries the budget arithmetic).
+# Keep the default as-is for the API; size any new fleet service explicitly.
 DB_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "5"))
 DB_MAX_OVERFLOW = int(os.getenv("DB_MAX_OVERFLOW", "10"))
 

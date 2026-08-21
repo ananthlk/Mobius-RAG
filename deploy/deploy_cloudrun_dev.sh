@@ -201,6 +201,29 @@ deploy_service() {
   local max_instances="$4"
   local cpu_throttling="$5"  # --no-cpu-throttling vs default
   local memory="$6"
+  local extra_env="$7"       # optional per-service env, comma-separated
+
+  # CONNECTION BUDGET (2026-08-21). Pool size is PER INSTANCE; max_connections
+  # is GLOBAL. config.py sized the pool at 5+10 with the note "5+10 per service
+  # instance leaves plenty of headroom" — true when each service was ONE
+  # instance, false the moment the workers became a fleet.
+  #
+  #     12 chunking x (15 batch + 5 instant) + 6 embedding x 15 + API 15 = 360
+  #     against max_connections = 200
+  #
+  # That is what took the DB to 203/200 today: the accounting panel rendered
+  # -1 sentinels, ALTER TABLE convoyed behind them, and every worker claim
+  # query queued behind the ALTER. Measured actual usage was ~3.3 connections
+  # per instance — the pools were oversized about 5x.
+  #
+  # A worker is a SERIAL consumer: it claims one job at a time. It has no use
+  # for a 15-connection fan-out pool; that shape is right for a request-serving
+  # API and wrong for a queue worker. Workers get 2+3; the API keeps 5+10
+  # because it is a single instance serving 20 concurrent requests.
+  #
+  #     8 chunking x (5+5) + 6 embedding x 5 + API 15 + other 15 = 140 of 190
+  #
+  # If you raise an instance count, redo this arithmetic first.
 
   echo ""
   echo "--- deploying ${name} ---"
@@ -215,7 +238,7 @@ deploy_service() {
     --timeout=3600
     --add-cloudsql-instances="$CLOUD_SQL_CONNECTION"
     --service-account="mobius-platform-dev@${PROJECT_ID}.iam.gserviceaccount.com"
-    --set-env-vars="$(join_with ',' "${COMMON_ENV[@]}")"
+    --set-env-vars="$(join_with ',' "${COMMON_ENV[@]}")${extra_env:+,${extra_env}}"
     --set-secrets="$(join_with ',' "${COMMON_SECRETS[@]}")"
     --min-instances="$min_instances"
     --max-instances="$max_instances"
@@ -264,7 +287,7 @@ deploy_service "mobius-rag" "" 1 1 "no" "8Gi"   # 8Gi (2026-08-20, corpus-scale 
 #    than instant-rag SLA.
 deploy_service "mobius-rag-chunking-worker" \
   "uvicorn,app.worker_server_chunking:app,--host,0.0.0.0,--port,8080" \
-  12 12 "no" "8Gi"
+  8 8 "no" "8Gi" "DB_POOL_SIZE=2,DB_MAX_OVERFLOW=3"
 
 # 5. Embedding worker. Same self-polling shape as chunking, so instance count IS
 #    the parallelism — and at 1 it was the serial bottleneck of the whole
@@ -275,7 +298,7 @@ deploy_service "mobius-rag-chunking-worker" \
 #    in memory at publish time, and Vertex quota is the next ceiling anyway.
 deploy_service "mobius-rag-embedding-worker" \
   "uvicorn,app.worker_server_embedding:app,--host,0.0.0.0,--port,8080" \
-  6 6 "no" "8Gi"   # 8Gi: auto-publish-on-embed loads a giant's ~9k embeddings into memory
+  6 6 "no" "8Gi" "DB_POOL_SIZE=2,DB_MAX_OVERFLOW=3"   # 8Gi: auto-publish-on-embed loads a giant's ~9k embeddings into memory
 
 # 6. Print URLs
 
@@ -305,6 +328,48 @@ if [[ "$env_missing" -gt 0 ]]; then
   exit 1
 fi
 echo "  OK — all ${#COMMON_ENV[@]} declared env vars present on the live revision."
+
+# READ THE INSTANCE COUNT BACK TOO — for the same reason, on a setting that
+# already lied to us once today.
+#
+# `gcloud run deploy --min-instances/--max-instances` writes the knative
+# annotation on the REVISION template. Cloud Run's v2 API also carries a
+# SERVICE-level `scaling` block, and when that is set it wins. This service had
+# service-level {min:4,max:4} while the script declared 12 12 and every revision
+# annotation said 12. The revision sat at `MinInstancesProvisioned: Unknown /
+# MinInstancesWarming` indefinitely and ran exactly 4 instances. Nothing failed;
+# the fleet was simply a third of the declared size, for as long as nobody
+# checked.
+#
+# gcloud cannot read or clear the service-level block, so this asks the v2 API
+# directly and fails the deploy on a mismatch.
+echo ""
+echo "--- verifying instance scaling ---"
+scaling_bad=0
+_tok="$(gcloud auth print-access-token)"
+check_scaling() {
+  local svc="$1" want="$2"
+  local got
+  got="$(curl -s -H "Authorization: Bearer ${_tok}" \
+    "https://run.googleapis.com/v2/projects/${PROJECT_ID}/locations/${REGION}/services/${svc}" \
+    | python3 -c "import sys,json;d=json.load(sys.stdin);s=d.get('scaling') or {};print(s.get('maxInstanceCount') or 0)" 2>/dev/null)"
+  if [[ "$got" != "0" && "$got" != "$want" ]]; then
+    echo "  MISMATCH ${svc}: script declared ${want}, service-level scaling caps at ${got}"
+    echo "    fix: curl -X PATCH .../services/${svc}?updateMask=scaling \\"
+    echo "         -d '{\"scaling\":{\"minInstanceCount\":${want},\"maxInstanceCount\":${want}}}'"
+    scaling_bad=$((scaling_bad + 1))
+  else
+    printf "  OK  %-34s %s instances\n" "$svc" "$want"
+  fi
+}
+check_scaling "mobius-rag"                   1
+check_scaling "mobius-rag-chunking-worker"   8
+check_scaling "mobius-rag-embedding-worker"  6
+if [[ "$scaling_bad" -gt 0 ]]; then
+  echo "  ERROR: the fleet is not the size this script declared. Connection-budget"
+  echo "  arithmetic in deploy_service() assumes the declared counts."
+  exit 1
+fi
 
 echo ""
 echo "=============================================================="
