@@ -2728,11 +2728,60 @@ async def pipeline_health(db: AsyncSession = Depends(get_db)):
         # Every count is a live query. Where a stage has no queue of its own its
         # "pending" is derived from the state documents are actually sitting in,
         # because that is the honest answer to "what is stuck here".
+        async def _one_text(sql: str):
+            """Scalar text query. Returns None on failure — an unknown run id is
+            not an error, it just means there is no active crawl to report."""
+            try:
+                return (await db.execute(_text(sql))).scalar()
+            except Exception:
+                return None
+
         async def _one(sql: str) -> int:
             try:
                 return int((await db.execute(_text(sql))).scalar() or 0)
             except Exception:
                 return -1                      # -1 renders as "—", never as zero
+
+        # ACTIVE CRAWL — what is being scraped RIGHT NOW, not what has landed.
+        #
+        # The Scrape card used to count `documents WHERE file_path LIKE
+        # '%web-scraper%'` — documents already IN RAG. So a crawl in flight was
+        # invisible: during the 2026-08-20 AHCA run the bucket held 525 objects
+        # while the card sat frozen at 6,813, because none had been pushed yet.
+        # That is the same defect the Accounting table exists to prevent — I
+        # measured the PROCESSED end and called it the discovered end.
+        #
+        # The truth lives in the scraper's own `downloads` block, which it
+        # computes and we do not re-derive: discovered / suppressed / attempted /
+        # succeeded / failed, plus the push leg. One source, owned by the seat
+        # that owns the fact. Cheap (one HTTP call), and failure here degrades to
+        # "no active run" rather than breaking the panel.
+        active_run = await _one_text("""SELECT source_metadata->>'source_run_id'
+            FROM documents WHERE source_metadata ? 'source_run_id'
+            ORDER BY created_at DESC LIMIT 1""")
+        slow["active_crawl"] = {"run_id": active_run}
+        if active_run:
+            try:
+                import urllib.request as _u, json as _j
+                _r = _j.loads(_u.urlopen(
+                    f"https://mobius-web-scraper-ortabkknqa-uc.a.run.app/scrape/{active_run}",
+                    timeout=12).read())
+                _dl = _r.get("downloads") or {}
+                _n = _r.get("nodes") or []
+                slow["active_crawl"].update({
+                    "status": _r.get("status"),
+                    "pages_scraped": _r.get("pages_scraped") or 0,
+                    "files_discovered": len([x for x in _n if x.get("content_kind") != "page"]),
+                    "suppressed_cpt": (_r.get("cpt_screen") or {}).get("files_suppressed", 0),
+                    "downloaded": _dl.get("succeeded", 0),
+                    "download_failed": _dl.get("failed_count", 0),
+                    "push_sent": (_dl.get("push") or {}).get("sent", 0),
+                    "push_duplicate": (_dl.get("push") or {}).get("duplicate", 0),
+                    "push_failed": (_dl.get("push") or {}).get("failed_count", 0),
+                    "conserved": _dl.get("conserved"),
+                })
+            except Exception as _e:
+                slow["active_crawl"]["error"] = f"{type(_e).__name__}"
 
         # SCRAPE — documents whose origin is a crawl, and how recent that was.
         scraped_total = await _one("""SELECT count(*) FROM documents

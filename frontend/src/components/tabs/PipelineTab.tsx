@@ -237,6 +237,41 @@ export function PipelineTab() {
         ))}
       </div>
 
+      {/* LIVE CRAWL — what is being scraped right NOW.
+          The Scrape card counts documents already in RAG, so a crawl in flight
+          was invisible until it landed: during the AHCA run the bucket held 525
+          objects while the card sat frozen at 6,813. This reads the scraper's
+          own downloads block — the seat that owns the fact — so the in-flight
+          lag is visible rather than inferred. */}
+      {(h?.active_crawl as any)?.status ? (() => {
+        const a = h!.active_crawl as any;
+        const live = a.status === 'running';
+        return (
+          <div className={`pl-crawl${live ? ' pl-crawl-live' : ''}`}>
+            <div className="pl-crawlhead">
+              <span className={`pl-dot ${live ? 'pl-d-green' : 'pl-d-grey'}`} />
+              <strong>{live ? 'Crawl running' : `Crawl ${a.status}`}</strong>
+              <code className="pl-runid">{String(a.run_id || '').slice(0, 8)}</code>
+              {a.conserved === false && <span className="pl-gap">not conserved</span>}
+              {a.push_failed > 0 && <span className="pl-gap">{a.push_failed} push failures</span>}
+            </div>
+            <div className="pl-crawlflow">
+              {[['pages_scraped', 'pages'], ['files_discovered', 'files found'],
+                ['suppressed_cpt', 'CPT-suppressed'], ['downloaded', 'downloaded'],
+                ['download_failed', 'download failed'], ['push_sent', 'pushed'],
+                ['push_duplicate', 'already held']].map(([k, label]) => (
+                <span key={k} className="pl-cstep">
+                  <b className={(k === 'download_failed' || k === 'push_failed') && a[k] > 0 ? 'pl-gap' : ''}>
+                    {(a[k] ?? 0).toLocaleString()}
+                  </b> {label}
+                </span>
+              ))}
+            </div>
+            {a.error ? <div className="pl-acctnote">scraper unreachable ({a.error}) — counts are last known</div> : null}
+          </div>
+        );
+      })() : null}
+
       {/* THE ACCOUNTING: one cohort, followed down the chain.
           Every stage subtracts from the one above it, and `gap` is what left a
           stage and arrived nowhere. A non-zero gap is always a bug. */}

@@ -136,3 +136,18 @@
 .pl-lenstag{font-size:10.5px;font-family:ui-monospace,Menlo,monospace;color:#6b7280;
   border:1px solid #e5e7eb;border-radius:99px;padding:2px 8px}
 @media (prefers-color-scheme:dark){ .pl-lenstag{border-color:#374151;color:#9ca3af} }
+
+/* live crawl banner */
+.pl-crawl{background:#fff;border:1px solid #e5e7eb;border-radius:9px;padding:12px 16px;margin-bottom:16px}
+.pl-crawl-live{border-color:#10b981;background:#f0fdf4}
+.pl-crawlhead{display:flex;align-items:center;gap:9px;margin-bottom:8px;font-size:13.5px}
+.pl-runid{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#6b7280;
+  background:#f3f4f6;padding:1px 7px;border-radius:4px}
+.pl-crawlflow{display:flex;flex-wrap:wrap;gap:6px 20px;font-size:12px;color:#6b7280}
+.pl-cstep b{font-size:15px;color:#111827;font-variant-numeric:tabular-nums;margin-right:4px}
+@media (prefers-color-scheme:dark){
+  .pl-crawl{background:#111827;border-color:#374151}
+  .pl-crawl-live{background:#0f2318;border-color:#10b981}
+  .pl-runid{background:#1f2937;color:#9ca3af}
+  .pl-cstep b{color:#e5e7eb}
+}
