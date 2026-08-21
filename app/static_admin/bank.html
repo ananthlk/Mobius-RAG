@@ -186,6 +186,36 @@
   }
   svg{display:block}
 
+  /* ---- sub-tabs: Run / Browse / Compare ---- */
+  .subtabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin:20px 0 4px}
+  .stab{font-size:13px;font-weight:600;color:var(--dim);background:none;border:0;border-bottom:2px solid transparent;padding:9px 15px;cursor:pointer;margin-bottom:-1px}
+  .stab:hover{color:var(--text)}
+  .stab.on{color:var(--accent);border-bottom-color:var(--accent)}
+  .tabpane{display:none} .tabpane.on{display:block}
+
+  /* ---- accordions ---- */
+  details.acc{border:1px solid var(--line);border-radius:13px;background:var(--card);margin-top:11px;box-shadow:var(--shadow);overflow:hidden}
+  details.acc>summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:11px;padding:13px 16px;font-weight:600;font-size:13.5px;user-select:none}
+  details.acc>summary::-webkit-details-marker{display:none}
+  details.acc>summary .cnt{margin-left:auto;font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--faint);font-weight:500}
+  details.acc>summary::after{content:"";width:7px;height:7px;border-right:1.7px solid var(--faint);border-bottom:1.7px solid var(--faint);transform:rotate(-45deg);transition:transform .15s;flex:none;margin-left:12px}
+  details.acc[open]>summary::after{transform:rotate(45deg)}
+  details.acc[open]>summary{border-bottom:1px solid var(--line)}
+  details.acc .accbody{padding:14px 16px 16px}
+
+  /* ---- hero scorecard ---- */
+  .hero{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:12px;margin-top:14px}
+  .htile{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:15px 16px 16px;box-shadow:var(--shadow);position:relative;overflow:hidden}
+  .htile.lead{border-color:var(--line-2)}
+  .htile.lead::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--accent)}
+  .htile .hv{font-family:"JetBrains Mono",monospace;font-variant-numeric:tabular-nums;font-size:29px;font-weight:600;letter-spacing:-.02em;line-height:1}
+  .htile .hl{font-size:11.5px;color:var(--faint);margin-top:7px}
+  .htile .hsub{font-size:10.5px;color:var(--dim);margin-top:3px}
+  .htile.good .hv{color:var(--ok)} .htile.warn .hv{color:var(--warn)} .htile.bad .hv{color:var(--bad)}
+  .meter{height:5px;border-radius:99px;background:var(--line);overflow:hidden;margin-top:10px}
+  .meter i{display:block;height:100%;border-radius:99px;background:var(--accent);transition:width .4s ease}
+  .meter i.good{background:var(--ok)} .meter i.warn{background:var(--warn)} .meter i.bad{background:var(--bad)}
+
   /* ---- embed mode: rendered inside the /eval portal shell ---- */
   html.embed .app-header, html.embed .rail{display:none!important}
   html.embed .shell{grid-template-columns:1fr!important;min-height:100vh}
@@ -276,25 +306,39 @@
       <div class="statusline" id="statusline"></div>
     </div>
 
-    <!-- watch / browse -->
-    <div class="row2">
-      <input class="in" id="watch-id" placeholder="load a job_id — yours or shared" style="min-width:240px">
-      <button class="btn sm" id="watch-btn">Watch job</button>
-      <button class="btn sm" id="browse-btn">Browse previous runs</button>
-      <span style="font-size:11.5px;color:var(--faint)">Follow any job live — polls until done, same as one you start here. Also reads <span class="mono">?job_id=</span>.</span>
+    <!-- sub-tabs: Run / Browse / Compare -->
+    <div class="subtabs" id="subtabs">
+      <button class="stab on" data-tab="run">Run</button>
+      <button class="stab" data-tab="browse">Browse runs</button>
+      <button class="stab" data-tab="compare">Compare to oracle</button>
     </div>
-    <div id="browse-panel"></div>
 
-    <div id="bank-log"></div>
+    <!-- RUN -->
+    <section class="tabpane on" id="pane-run">
+      <div class="row2" style="margin-top:8px">
+        <input class="in" id="watch-id" placeholder="load a job_id — yours or shared" style="min-width:240px">
+        <button class="btn sm" id="watch-btn">Watch job</button>
+        <span style="font-size:11.5px;color:var(--faint)">Follow any job live — polls until done. Also reads <span class="mono">?job_id=</span>.</span>
+      </div>
+      <div id="bank-log"><div class="empty" style="margin-top:14px"><b>No run loaded.</b><br>Configure above and hit <b>Run full bank</b>, or paste a job_id to watch one.</div></div>
+    </section>
 
-    <!-- oracle -->
-    <div class="card" id="oracle-card">
-      <div class="card-title">Oracle comparison</div>
-      <div style="font-size:12px;color:var(--faint);margin-bottom:12px">Compare the loaded run against the per-query oracle (best single arm among a/b/c/d, Eval&rsquo;s ship-gate SCORE) — auto-resolves the latest single-arm job per strategy at the same caller_mode.</div>
+    <!-- BROWSE -->
+    <section class="tabpane" id="pane-browse">
+      <div class="row2" style="margin-top:8px">
+        <button class="btn sm" id="browse-refresh">Refresh</button>
+        <span style="font-size:11.5px;color:var(--faint)">Every persisted run — click <b>Watch</b> to load one into the Run tab.</span>
+      </div>
+      <div id="browse-panel"></div>
+    </section>
+
+    <!-- COMPARE -->
+    <section class="tabpane" id="pane-compare">
+      <div style="font-size:12.5px;color:var(--dim);margin:12px 0 12px">Compare the loaded run against the per-query oracle (best single arm among a/b/c/d, Eval&rsquo;s ship-gate SCORE) — auto-resolves the latest single-arm job per strategy at the same caller_mode. Load or finish a run in the <b>Run</b> tab first.</div>
       <button class="btn" id="oracle-btn" disabled>Compare loaded run to oracle</button>
       <div id="oracle-status" style="margin-top:8px;font-size:12.5px;color:var(--dim)"></div>
       <div id="oracle-result"></div>
-    </div>
+    </section>
   </main>
 </div>
 
@@ -448,41 +492,59 @@
         +'<div class="callout" style="margin-top:6px">recall@K: averaged over queries that served at least K chunks (fewer-than-K excluded, not counted 0). Truncates each query&rsquo;s ranked served-chunk list at K and sums each fact&rsquo;s graded support (0/0.5/1). Range extends to this run&rsquo;s max chunks_out.</div>';
     }
 
+    // --- render helpers ---
+    function meterBar(pct, cls){ if(pct==null) return ''; return '<div class="meter"><i class="'+(cls||'')+'" style="width:'+Math.max(0,Math.min(100,pct))+'%"></i></div>'; }
+    function htile(v,label,o){ o=o||{}; return '<div class="htile'+(o.lead?' lead':'')+(o.cls?' '+o.cls:'')+'"><div class="hv">'+v+'</div><div class="hl">'+label+'</div>'+(o.sub?'<div class="hsub">'+o.sub+'</div>':'')+(o.meter!=null?meterBar(o.meter,o.mcls):'')+'</div>'; }
+    function met(v,label,cls){ return '<div class="metric"><div class="num'+(cls?' bank-recall '+cls:'')+'">'+v+'</div><div class="lbl">'+label+'</div></div>'; }
+    function acc(title,cnt,body,open){ return '<details class="acc"'+(open?' open':'')+'><summary>'+title+'<span class="cnt">'+(cnt||'')+'</span></summary><div class="accbody">'+body+'</div></details>'; }
+
+    var gap=(avg!=null&&avgAnswer!=null)?(avg-avgAnswer):null;
+    var gapCls=gap==null?'':(gap>0.15?'bad':(gap>0.05?'warn':'good'));
+    var hero=''
+      +htile(state.done+'<span style="font-size:16px;color:var(--faint)">/'+(state.total||'?')+'</span>','queries run',{sub:(state.status==='running'?'running…':(state.status==='error'?'errored':'complete'))})
+      +htile(avg!=null?avg.toFixed(3):'—','recall · retrieval',{lead:true,cls:avgCls,meter:avg!=null?avg*100:null,mcls:avgCls})
+      +htile(avgAnswer!=null?avgAnswer.toFixed(3):'—','recall · answer',{lead:true,cls:avgAnswerCls,meter:avgAnswer!=null?avgAnswer*100:null,mcls:avgAnswerCls})
+      +htile(gap!=null?gap.toFixed(3):'—','synthesis loss',{cls:gapCls,sub:'retriever &minus; answer'})
+      +htile(avgAuthPct!=null?avgAuthPct+'%':'—','authority',{cls:avgAuthCls,meter:avgAuthPct,mcls:avgAuthCls});
+
+    var accCorrect='<div class="metric-row">'
+      +met(totalContradicted,'contradicted facts',totalContradicted?'bad':'good')
+      +met(totalHallucinated,'hallucinated claims',totalHallucinated?'warn':'good')
+      +met(totalFactsHit+'/'+totalFactsAll,'facts hit / total')
+      +'</div>';
+    var accRetr='<div class="metric-row">'
+      +met(avgChunks!=null?avgChunks.toFixed(1):'—','avg chunks')
+      +met(avgSignalPct!=null?avgSignalPct+'%':'—','signal/noise',avgSignalCls)
+      +met(avgDensityPct!=null?avgDensityPct+'%':'—','signal density',avgDensityCls)
+      +met(avgRedundancy!=null?avgRedundancy.toFixed(2):'—','fact redundancy')
+      +met(avgPoolSize!=null?Math.round(avgPoolSize):'—','avg pool size')
+      +met(avgBm25Top10!=null?avgBm25Top10.toFixed(3):'—','avg BM25 top-10')
+      +met(avgVectorTop10!=null?avgVectorTop10.toFixed(3):'—','avg vector top-10')
+      +met(avgReqCoverage!=null?Math.round(avgReqCoverage*100)+'%':'—','required-tag coverage')
+      +met(avgBoostCoverage!=null?Math.round(avgBoostCoverage*100)+'%':'—','boosted-tag coverage')
+      +'</div>';
+    var accLatency='<div class="metric-row">'
+      +met(avgRetrievalSeconds!=null?avgRetrievalSeconds.toFixed(1)+'s':'—','avg latency (retrieval)')
+      +met(avgSeconds!=null?avgSeconds.toFixed(1)+'s':'—','avg latency (incl eval)')
+      +'</div><div class="callout" style="margin-top:10px">&ldquo;retrieval&rdquo; is what a real Chat turn pays (Gate&rarr;&hellip;&rarr;Synthesis). &ldquo;incl eval&rdquo; also counts this runner&rsquo;s extra judge/synth calls per query and is NOT production latency.</div>';
+    var tableHtml='<div class="tablewrap">'
+      +'<table><thead><tr><th style="width:70px">id</th><th class="col-text">query</th><th style="width:70px">persona</th><th style="width:130px">expected &rarr; executed</th><th class="col-score">recall</th><th style="width:90px">facts</th><th style="width:80px">authority</th><th style="width:200px">chunks / latency</th></tr></thead>'
+      +'<tbody>'+rows+'</tbody></table></div>';
+    var diag='<div class="callout">signal density 100% = every fact-backing chunk sat at rank 1; 0% = buried at the end. <b>Diagnostic only</b> — unvalidated hypothesis signals, not wired into routing/priors. &ldquo;avg recall (answer)&rdquo; is a single-shot synth, not prod&rsquo;s draft&rarr;critique&rarr;final loop, so &ldquo;synthesis loss&rdquo; is a probable over-estimate of the true gap.</div>';
+
     $('bank-log').innerHTML=''
       +'<div class="viewing-banner" style="margin-top:16px;'+(graderMixed?'border-color:var(--bad)':(rulerOk?'':'border-color:var(--warn)'))+'">'
         +'<span>grader: <b>'+esc(graderLabel)+'</b></span>'
         +(rulerOk?'<span class="chip ok">ruler ok · pro</span>':'<span class="chip bad">ruler quarantine — not the locked gemini-2.5-pro; treat as non-authoritative</span>')
         +(totalJudgeErrors?'<span style="color:var(--bad)">'+totalJudgeErrors+' judge error(s) excluded from averages</span>':'')
       +'</div>'
-      +'<div class="metric-row" style="margin-top:14px">'
-        +'<div class="metric"><div class="num">'+state.done+'/'+(state.total||'?')+'</div><div class="lbl">queries run</div></div>'
-        +'<div class="metric"><div class="num'+(avgCls?' bank-recall '+avgCls:'')+'">'+(avg!=null?avg.toFixed(3):'—')+'</div><div class="lbl">avg recall (retrieval)</div></div>'
-        +'<div class="metric"><div class="num'+(avgAnswerCls?' bank-recall '+avgAnswerCls:'')+'">'+(avgAnswer!=null?avgAnswer.toFixed(3):'—')+'</div><div class="lbl">avg recall (answer)</div></div>'
-        +synthLossHtml
-        +'<div class="metric"><div class="num'+(avgAuthCls?' bank-recall '+avgAuthCls:'')+'">'+(avgAuthPct!=null?avgAuthPct+'%':'—')+'</div><div class="lbl">avg authority</div></div>'
-        +'<div class="metric"><div class="num'+(totalContradicted?' bank-recall bad':'')+'">'+totalContradicted+'</div><div class="lbl">contradicted facts</div></div>'
-        +'<div class="metric"><div class="num'+(totalHallucinated?' bank-recall warn':'')+'">'+totalHallucinated+'</div><div class="lbl">hallucinated claims</div></div>'
-        +'<div class="metric"><div class="num">'+totalFactsHit+'/'+totalFactsAll+'</div><div class="lbl">facts hit / total</div></div>'
-        +'<div class="metric"><div class="num">'+(avgChunks!=null?avgChunks.toFixed(1):'—')+'</div><div class="lbl">avg chunks</div></div>'
-        +'<div class="metric"><div class="num'+(avgSignalCls?' bank-recall '+avgSignalCls:'')+'">'+(avgSignalPct!=null?avgSignalPct+'%':'—')+'</div><div class="lbl">signal/noise</div></div>'
-        +'<div class="metric"><div class="num'+(avgDensityCls?' bank-recall '+avgDensityCls:'')+'">'+(avgDensityPct!=null?avgDensityPct+'%':'—')+'</div><div class="lbl">signal density</div></div>'
-        +'<div class="metric"><div class="num">'+(avgRedundancy!=null?avgRedundancy.toFixed(2):'—')+'</div><div class="lbl">fact redundancy</div></div>'
-        +'<div class="metric"><div class="num">'+(avgRetrievalSeconds!=null?avgRetrievalSeconds.toFixed(1)+'s':'—')+'</div><div class="lbl">avg latency (retrieval)</div></div>'
-        +'<div class="metric"><div class="num" style="color:var(--faint)">'+(avgSeconds!=null?avgSeconds.toFixed(1)+'s':'—')+'</div><div class="lbl">avg latency (incl eval)</div></div>'
-      +'</div>'
-      +'<div class="metric-row" style="margin-top:10px">'
-        +'<div class="metric"><div class="num">'+(avgPoolSize!=null?Math.round(avgPoolSize):'—')+'</div><div class="lbl">avg pool size</div></div>'
-        +'<div class="metric"><div class="num">'+(avgBm25Top10!=null?avgBm25Top10.toFixed(3):'—')+'</div><div class="lbl">avg BM25 top-10</div></div>'
-        +'<div class="metric"><div class="num">'+(avgVectorTop10!=null?avgVectorTop10.toFixed(3):'—')+'</div><div class="lbl">avg vector top-10</div></div>'
-        +'<div class="metric"><div class="num">'+(avgReqCoverage!=null?Math.round(avgReqCoverage*100)+'%':'—')+'</div><div class="lbl">required-tag coverage</div></div>'
-        +'<div class="metric"><div class="num">'+(avgBoostCoverage!=null?Math.round(avgBoostCoverage*100)+'%':'—')+'</div><div class="lbl">boosted-tag coverage</div></div>'
-      +'</div>'
-      +recallKHtml
-      +'<div class="callout" style="margin-top:10px">signal density 100% = every fact-backing chunk sat at rank 1; 0% = buried at the end. <b>Diagnostic only</b> — unvalidated hypothesis signals, not wired into routing/priors. &ldquo;avg recall (answer)&rdquo; is a single-shot synth, not prod&rsquo;s draft→critique→final loop, so &ldquo;synthesis loss&rdquo; is a probable over-estimate. &ldquo;avg latency (incl eval)&rdquo; counts this runner&rsquo;s extra judge/synth calls and is NOT production latency.</div>'
-      +'<div class="tablewrap">'
-        +'<table><thead><tr><th style="width:70px">id</th><th class="col-text">query</th><th style="width:70px">persona</th><th style="width:130px">expected → executed</th><th class="col-score">recall</th><th style="width:90px">facts</th><th style="width:80px">authority</th><th style="width:200px">chunks / latency</th></tr></thead>'
-        +'<tbody>'+rows+'</tbody></table>'
-      +'</div>';
+      +'<div class="hero">'+hero+'</div>'
+      +acc('Correctness &amp; coverage','',accCorrect,true)
+      +acc('Retrieval quality','',accRetr,true)
+      +acc('Latency',(avgRetrievalSeconds!=null?avgRetrievalSeconds.toFixed(1)+'s':''),accLatency,false)
+      +(recallKHtml?acc('recall@K curve','',recallKHtml,false):'')
+      +acc('Per-query results',String(sums.length),tableHtml,true)
+      +acc('Diagnostics &amp; caveats','',diag,false);
 
     // row click -> open the per-query trace in the Query surface (console sibling)
     Array.prototype.forEach.call(document.querySelectorAll('.bank-row'),function(row){
@@ -536,26 +598,39 @@
   // ---- watch by id ----
   $('watch-btn').addEventListener('click',function(){ var id=$('watch-id').value.trim(); if(id)watchBankJob(id,$('watch-btn')); });
 
-  // ---- browse previous runs ----
-  $('browse-btn').addEventListener('click',function(){
-    var panel=$('browse-panel'); panel.innerHTML='<div class="statusline">loading previous runs…</div>';
+  // ---- sub-tabs: Run / Browse / Compare ----
+  function switchTab(name){
+    Array.prototype.forEach.call(document.querySelectorAll('.stab'),function(b){ b.classList.toggle('on', b.getAttribute('data-tab')===name); });
+    ['run','browse','compare'].forEach(function(n){ var pane=$('pane-'+n); if(pane) pane.classList.toggle('on', n===name); });
+    if(name==='browse') loadBrowse();
+  }
+  Array.prototype.forEach.call(document.querySelectorAll('.stab'),function(b){
+    b.addEventListener('click',function(){ switchTab(b.getAttribute('data-tab')); });
+  });
+
+  // ---- browse previous runs (auto-loads when the Browse tab opens) ----
+  var browseLoaded=false;
+  function loadBrowse(){
+    var panel=$('browse-panel'); panel.innerHTML='<div class="statusline" style="margin-top:10px">loading previous runs…</div>';
     fetch('/admin/trace-explorer/run-bank/list',{headers:authHeaders()})
       .then(function(r){ if(!r.ok)throw r.status; return r.json(); })
       .then(function(d){
+        browseLoaded=true;
         var runs=(d.runs||[]);
-        if(!runs.length){ panel.innerHTML='<div class="empty"><b>No runs persisted yet.</b><br>Start one above and it&rsquo;ll appear here.</div>'; return; }
-        panel.innerHTML='<div class="sech">Previous runs</div><div class="browse">'+runs.slice(0,40).map(function(r){
+        if(!runs.length){ panel.innerHTML='<div class="empty"><b>No runs persisted yet.</b><br>Start one in the Run tab and it&rsquo;ll appear here.</div>'; return; }
+        panel.innerHTML='<div class="browse">'+runs.slice(0,60).map(function(r){
           var chip=r.status==='running'?'<span class="chip run">RUNNING</span>':r.status==='error'?'<span class="chip bad">FAILED</span>':'<span class="chip ok">DONE</span>';
           var nm=r.name?'<span class="nm">'+esc(r.name)+'</span> <span class="jid">'+esc(r.job_id)+'</span>':'<span class="jid">'+esc(r.job_id)+'</span>';
           var strat=esc(r.forced_strategy||'auto')+(r.allocator_override?' · '+esc(r.allocator_override):'');
           return '<div class="brow">'+nm+' '+chip+'<span class="meta">'+(r.done!=null?r.done:'?')+'/'+(r.total!=null?r.total:'?')+' · '+strat+'</span><button class="btn sm" data-watch="'+esc(r.job_id)+'">Watch</button></div>';
         }).join('')+'</div>';
         Array.prototype.forEach.call(panel.querySelectorAll('[data-watch]'),function(b){
-          b.addEventListener('click',function(){ watchBankJob(b.getAttribute('data-watch'),null); window.scrollTo({top:$('bank-log').offsetTop-80,behavior:'smooth'}); });
+          b.addEventListener('click',function(){ watchBankJob(b.getAttribute('data-watch'),null); switchTab('run'); });
         });
       })
       .catch(function(code){ panel.innerHTML='<div class="empty">could not list runs (HTTP '+code+')</div>'; });
-  });
+  }
+  $('browse-refresh').addEventListener('click', loadBrowse);
 
   // ---- oracle comparison ----
   function renderOracleMatrix(d){
