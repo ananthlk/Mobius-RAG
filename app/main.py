@@ -2783,6 +2783,34 @@ async def pipeline_health(db: AsyncSession = Depends(get_db)):
             except Exception as _e:
                 slow["active_crawl"]["error"] = f"{type(_e).__name__}"
 
+            # GCS OBJECT COUNT — during a crawl this is the ONLY number that
+            # moves. The scraper publishes progress solely at job completion, so
+            # its `downloads` block reads zero for the entire run; on the AHCA
+            # base-root crawl the bucket held 1,654 objects while every reported
+            # counter sat at 0 and RAG sat at 138.
+            #
+            # Without this, the panel cannot tell "crawl running well, push
+            # batches at the end" from "push silently dead" — the two look
+            # identical until the job finishes, and the second is exactly what
+            # happened on the pilot (72 import-endpoint 500s, one log line).
+            #
+            # Rides the 60s slow-stage cache, so this is one bucket listing per
+            # minute, not per request. Bounded and best-effort: a failure leaves
+            # the count absent rather than breaking the panel.
+            try:
+                from google.cloud import storage as _st
+                _bkt = os.getenv("GCS_BUCKET", "mobius-rag-uploads-dev")
+                _n = sum(1 for _ in _st.Client().list_blobs(
+                    _bkt, prefix=f"web-scraper/{active_run}/", max_results=20000))
+                slow["active_crawl"]["gcs_objects"] = _n
+                _in_rag = await _one(f"""SELECT count(*) FROM documents
+                    WHERE file_path LIKE '%%{active_run}%%'""")
+                slow["active_crawl"]["in_rag"] = _in_rag
+                # The lag IS the story: objects fetched but not yet ingested.
+                slow["active_crawl"]["awaiting_push"] = max(_n - max(_in_rag, 0), 0)
+            except Exception as _e:
+                slow["active_crawl"]["gcs_error"] = f"{type(_e).__name__}"
+
         # SCRAPE — documents whose origin is a crawl, and how recent that was.
         scraped_total = await _one("""SELECT count(*) FROM documents
             WHERE file_path LIKE '%%web-scraper%%'""")

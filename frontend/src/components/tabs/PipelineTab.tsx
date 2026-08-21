@@ -256,18 +256,26 @@ export function PipelineTab() {
               {a.push_failed > 0 && <span className="pl-gap">{a.push_failed} push failures</span>}
             </div>
             <div className="pl-crawlflow">
-              {[['pages_scraped', 'pages'], ['files_discovered', 'files found'],
+              {[['gcs_objects', 'in GCS'], ['in_rag', 'in RAG'], ['awaiting_push', 'awaiting push'],
+                ['pages_scraped', 'pages'], ['files_discovered', 'files found'],
                 ['suppressed_cpt', 'CPT-suppressed'], ['downloaded', 'downloaded'],
                 ['download_failed', 'download failed'], ['push_sent', 'pushed'],
                 ['push_duplicate', 'already held']].map(([k, label]) => (
                 <span key={k} className="pl-cstep">
-                  <b className={(k === 'download_failed' || k === 'push_failed') && a[k] > 0 ? 'pl-gap' : ''}>
+                  <b className={((k === 'download_failed' || k === 'push_failed') && a[k] > 0)
+                                 || (k === 'awaiting_push' && a[k] > 200) ? 'pl-gap' : ''}>
                     {(a[k] ?? 0).toLocaleString()}
                   </b> {label}
                 </span>
               ))}
             </div>
             {a.error ? <div className="pl-acctnote">scraper unreachable ({a.error}) — counts are last known</div> : null}
+            {a.gcs_objects != null && a.pages_scraped === 0 ? (
+              <div className="pl-acctnote">
+                The scraper reports progress only at job completion, so its counters read 0 mid-run.
+                <b> in GCS</b> is the live signal; <b>awaiting push</b> is what has been fetched but not yet ingested.
+              </div>
+            ) : null}
           </div>
         );
       })() : null}
