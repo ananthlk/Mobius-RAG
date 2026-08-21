@@ -233,12 +233,63 @@ async def process_job(job: ChunkingJob, db: AsyncSession, *, worker_cfg: WorkerC
         )
         pages = pages_result.scalars().all()
         if not pages:
-            logger.error("[JOB %s] No pages for document %s", job.id, job.document_id)
-            job.status = "failed"
-            job.error_message = f"No pages found for document {job.document_id}"
-            job.completed_at = _utc_now_naive()
-            await db.commit()
-            return
+            # DEFERRED INGEST (2026-08-21). "No pages" used to be a terminal
+            # failure, because extraction always happened in the API before the
+            # job was queued. It no longer does: /documents/import-from-gcs now
+            # returns as soon as the row and this job exist, so the first worker
+            # to claim the job is the one that extracts.
+            #
+            # This moved ~16s (p50) of blob download + page extraction off a
+            # service pinned to a single instance, where it was parking
+            # concurrency slots and causing Cloud Run to 429 95% of the push.
+            #
+            # A job that arrives with no pages AND no GCS path is still a real
+            # failure — extract_and_persist_pages says so via ingest_failure_reason.
+            from app.services.ingest_stages import (
+                classify_and_gate, extract_and_persist_pages,
+            )
+            logger.info("[JOB %s] No pages yet — extracting %s now",
+                        job.id, document.file_path)
+            n_pages = await extract_and_persist_pages(db, document)
+            if not n_pages:
+                logger.error("[JOB %s] Extraction produced no pages for %s (%s)",
+                             job.id, job.document_id, document.ingest_failure_reason)
+                job.status = "failed"
+                job.error_message = (
+                    f"extraction produced no pages: "
+                    f"{document.ingest_failure_reason or 'unknown'}")
+                job.completed_at = _utc_now_naive()
+                await db.commit()
+                return
+
+            # Classification gate, in the same position it held inside the API:
+            # after pages exist, before any chunking. may_index=False is a
+            # deliberate hold, not a fault — the job completes, the document
+            # carries the reason, and nothing gets indexed.
+            may_index = await classify_and_gate(
+                db, document, caller="mobius-rag:chunking-worker")
+            if not may_index:
+                logger.info("[JOB %s] Held by classifier (%s) — not chunking",
+                            job.id, document.ingest_failure_reason)
+                job.status = "completed"
+                job.error_message = (
+                    f"held by classifier: {document.ingest_failure_reason}")
+                job.completed_at = _utc_now_naive()
+                await db.commit()
+                return
+
+            pages_result = await db.execute(
+                select(DocumentPage)
+                .where(DocumentPage.document_id == doc_uuid)
+                .order_by(DocumentPage.page_number)
+            )
+            pages = pages_result.scalars().all()
+            if not pages:
+                job.status = "failed"
+                job.error_message = "pages vanished between extraction and read-back"
+                job.completed_at = _utc_now_naive()
+                await db.commit()
+                return
 
         logger.info("[JOB %s] Document: %s (%s pages)", job.id, document.filename, len(pages))
 

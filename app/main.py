@@ -92,71 +92,14 @@ async def run_startup_migrations():
 
 
 async def _persist_classification(db, doc, clf: dict) -> None:
-    """Merge Payor Platform classification into source_metadata and emit a ChunkingEvent.
+    """Delegates to app.services.ingest_stages.persist_classification.
 
-    Called at all import call sites after doc+pages are committed and before
-    the chunking gate.  ``clf`` is the raw response from classify_for_ingest().
+    The body moved there (2026-08-21) so the chunking worker can persist a
+    classification without importing the FastAPI app. Kept under the old
+    private name: seven call sites in this module still use it.
     """
-    existing = doc.source_metadata or {}
-    doc.source_metadata = {
-        **existing,
-        "payor_classification": {
-            "decision": clf.get("decision"),
-            "may_index": clf.get("may_index"),
-            "needs_human": clf.get("needs_human"),
-            "why": clf.get("why"),
-            "review_url": clf.get("review_url"),
-            "contract_version": clf.get("contract_version"),
-            "attributed_to": "payor_platform",
-            "stages": clf.get("stages"),
-        },
-    }
-    flag_modified(doc, "source_metadata")
-
-    # MAKE THE HOLD VISIBLE.
-    #
-    # A classifier hold stops the pipeline before chunking, so the document ends
-    # up status=completed, unchunked, unpublished — and, until now, carrying no
-    # failure reason at all. It looked healthy on every dashboard and was
-    # invisible to retrieval. The only reason we found it was running one document
-    # end to end.
-    #
-    # Two different situations, deliberately given different reasons:
-    #   classifier_unavailable — the service was unreachable and the FALLBACK
-    #     fired. Not a decision about the document; a decision about our ability
-    #     to ask. Retryable: when the classifier returns, this should re-run.
-    #   classifier_held — the classifier answered and said no. A real policy
-    #     verdict that a person owns; retrying changes nothing.
-    #
-    # Fail-closed on PHI is right — you do not index what you could not screen.
-    # Failing SILENTLY is not.
-    if not clf.get("may_index", True):
-        if str(clf.get("contract_version") or "") == "fallback":
-            doc.ingest_failure_reason = "classifier_unavailable"
-            doc.ingest_error_message = (clf.get("why") or "classifier unreachable")[:1000]
-        else:
-            doc.ingest_failure_reason = "classifier_held"
-            doc.ingest_error_message = (clf.get("why") or "held by classifier")[:1000]
-        doc.ingest_last_attempt_at = datetime.utcnow()
-        doc.ingest_attempts = (doc.ingest_attempts or 0) + 1
-    elif doc.ingest_failure_reason in ("classifier_unavailable", "classifier_held"):
-        # It cleared — a later run got an answer. Do not leave the old hold behind.
-        doc.ingest_failure_reason = None
-        doc.ingest_error_message = None
-
-    db.add(ChunkingEvent(
-        document_id=doc.id,
-        event_type="payor_classification",
-        event_data={
-            "decision": clf.get("decision"),
-            "may_index": clf.get("may_index"),
-            "needs_human": clf.get("needs_human"),
-            "why": clf.get("why"),
-            "review_url": clf.get("review_url"),
-            "attributed_to": "payor_platform",
-        },
-    ))
-    await db.commit()
+    from app.services.ingest_stages import persist_classification
+    await persist_classification(db, doc, clf)
 
 
 async def _warm_embed_provider() -> None:
@@ -8730,113 +8673,60 @@ async def import_document_from_gcs(
                           file_hash=getattr(document, "file_hash", None),
                           source_url=getattr(document, "file_path", None))
 
+        # DEFERRED INGEST (2026-08-21). Extraction, table capture and the
+        # classifier call used to run HERE, inline, before this endpoint
+        # returned. That is what stalled the AHCA push.
+        #
+        # `mobius-rag` is pinned min=max=1 for correctness (in-process eval and
+        # nightly-orchestrator state live on one instance), so its 20
+        # concurrency slots are the whole service. Inline extraction held a slot
+        # for the length of the PDF — measured p50 16.6s, p90 38.6s, max 381s —
+        # and Cloud Run 429'd every push that arrived while the slots were
+        # parked. Over one 15-minute window: 309 push requests, 295 of them 429,
+        # 6 admitted. 0.4 documents/minute against ~6,000 waiting in GCS.
+        #
+        # Import is now row + queued job + return. The chunking worker claims
+        # the job, finds no pages, and runs extract → classify → chunk off the
+        # request path (app/services/ingest_stages.py). Same stages, same order,
+        # same failure reasons — just not while a caller holds a slot open.
         try:
-            document.status = "extracting"
-            await db.commit()
-            from app.services.page_to_markdown import raw_page_to_markdown
-            pages = await extract_text_from_gcs(gcs_path)
-            for page_data in pages:
-                raw_text = sanitize_text_for_db(page_data.get("text") or "") or ""
-                md = raw_page_to_markdown(raw_text) if raw_text else None
-                page = DocumentPage(
-                    document_id=document.id,
-                    page_number=page_data["page_number"],
-                    text=raw_text,
-                    text_markdown=sanitize_text_for_db(md),
-                    extraction_status=page_data.get("extraction_status", "failed"),
-                    extraction_error=page_data.get("extraction_error"),
-                    text_length=page_data.get("text_length", 0),
-                )
-                db.add(page)
-            document.status = "completed"
-            await db.commit()
-
-            # Persist captured tables AFTER the page commit — document_tables
-            # carries a composite FK to (document_id, page_number), so the pages
-            # must already exist. Never raises: a table that cannot be stored must
-            # not cost the document its ingest.
-            if any('tables' in p for p in (pages or [])):
-                from app.services.table_persist import persist_document_tables
-                _t = await persist_document_tables(db, str(document.id), pages)
-                await db.commit()
-                if _t['failed']:
-                    logger.warning('document_tables: %s table(s) lost for %s — breadcrumbs in page text have no row behind them', _t['failed'], document.id)
-        except Exception as e:
-            document.status = "failed"
-            await db.commit()
-            logger.warning("Extraction failed for import-from-gcs %s: %s", gcs_path, e)
-
-        # Classification gate: call Payor Platform before indexing
-        if document.status == "completed":
-            _src_url = (document.source_metadata or {}).get("source_url") or body_source_url
-            clf = await classify_for_ingest(
-                document_id=str(document.id),
-                source_url=_src_url,
-                caller="mobius-rag:import-from-gcs",
+            _existing = await db.execute(
+                select(ChunkingJob).where(
+                    ChunkingJob.document_id == document.id,
+                    ChunkingJob.generator_id == "B",
+                    ChunkingJob.status.in_(["pending", "processing"]),
+                ).limit(1)
             )
-            await _persist_classification(db, document, clf)
-            if not clf.get("may_index", True):
-                return {
-                    "document_id": str(document.id),
-                    "filename": filename,
-                    "status": "completed",
-                    "payor_classification": document.source_metadata.get("payor_classification"),
-                }
-
-        # Auto-chunk when extraction succeeded: queue Path B so chunk → embed run automatically
-        if document.status == "completed":
-            try:
-                where_gen = ChunkingJob.generator_id == "B"
-                existing = await db.execute(
-                    select(ChunkingJob).where(
-                        ChunkingJob.document_id == document.id,
-                        where_gen,
-                        ChunkingJob.status.in_(["pending", "processing"]),
-                    ).limit(1)
+            if _existing.scalar_one_or_none() is None:
+                _job = ChunkingJob(
+                    document_id=document.id,
+                    generator_id="B",
+                    status="pending",
+                    threshold="0.6",
+                    critique_enabled="false",
+                    max_retries=0,
+                    extraction_enabled="false",
                 )
-                if existing.scalar_one_or_none() is None:
-                    job = ChunkingJob(
-                        document_id=document.id,
-                        generator_id="B",
-                        status="pending",
-                        threshold="0.6",
-                        critique_enabled="false",
-                        max_retries=0,
-                        extraction_enabled="false",
-                    )
-                    db.add(job)
-                    await db.commit()
-                    logger.info("Auto-queued Path B chunking job %s for import-from-gcs document %s", job.id, document.id)
-            except Exception as chunk_err:
-                logger.warning("Auto-chunk after import-from-gcs failed (non-fatal): %s", chunk_err)
-                await db.rollback()
-
-        # Phase 13.3c (2026-04-26) — link this document to its
-        # discovered_sources row when source_url was provided. Closes
-        # the gap that left ingested PDFs disconnected from the URL
-        # registry, surfacing as ingested=false in chat ReAct's
-        # lookup_authoritative_sources tool. Best-effort: a missing
-        # registry row is fine (back-compat for callers that don't
-        # pass source_url; the doc still imports).
-        source_url = getattr(body, "source_url", None)
-        if source_url:
-            try:
-                from app.curator import service as curator_service
-                await curator_service.mark_ingested(
-                    db, url=source_url, document_id=document.id,
-                )
+                db.add(_job)
                 await db.commit()
-            except Exception as cur_err:
-                logger.debug(
-                    "import-from-gcs curator linkage skipped for %s: %s",
-                    source_url, cur_err,
-                )
+                logger.info(
+                    "[import-from-gcs] queued job %s for %s (extraction deferred to worker)",
+                    _job.id, document.id)
+        except Exception as queue_err:
+            # A document with no job is invisible work. Surface it rather than
+            # returning 200 on a row nothing will ever pick up.
+            logger.error("[import-from-gcs] could not queue job for %s: %s",
+                         document.id, queue_err)
+            raise HTTPException(
+                status_code=500,
+                detail=f"document created but chunking job could not be queued: {queue_err}")
 
         return {
             "filename": filename,
             "gcs_path": gcs_path,
             "document_id": str(document.id),
             "status": document.status,
+            "queued": True,
         }
     except HTTPException:
         raise
