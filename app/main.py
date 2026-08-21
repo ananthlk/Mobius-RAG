@@ -2177,10 +2177,12 @@ async def pipeline_integrity(window: str = "24h", db: AsyncSession = Depends(get
     bug.
     """
     from sqlalchemy import text as _text
-    iv = {"1h": "1 hour", "24h": "24 hours", "7d": "7 days", "30d": "30 days",
+    iv = {"5m": "5 minutes", "15m": "15 minutes", "30m": "30 minutes",
+          "1h": "1 hour", "24h": "24 hours", "7d": "7 days", "30d": "30 days",
           "all": None}.get(window)
-    if window not in ("1h", "24h", "7d", "30d", "all"):
-        raise HTTPException(status_code=400, detail="window must be 1h|24h|7d|30d|all")
+    if window not in ("5m", "15m", "30m", "1h", "24h", "7d", "30d", "all"):
+        raise HTTPException(status_code=400,
+                            detail="window must be 5m|15m|30m|1h|24h|7d|30d|all")
     W = f"AND d.created_at > now() - interval '{iv}'" if iv else ""
 
     async def n(sql: str) -> int:
@@ -2196,27 +2198,43 @@ async def pipeline_integrity(window: str = "24h", db: AsyncSession = Depends(get
         WHERE d.file_path IS NOT NULL AND d.file_path <> '' {W}""")
     extracted = await n(f"""SELECT count(*) FROM documents d WHERE true {W}
         AND EXISTS (SELECT 1 FROM document_pages p WHERE p.document_id=d.id)""")
+    # STOPPED IS A SUBSET OF NOT-REACHED, always.
+    #
+    # Counting it globally is what broke both earlier attempts: held documents DO
+    # get chunked (may_index stays true), so subtracting all of them from a stage
+    # they already reached double-counts and drives the arithmetic negative. A
+    # document can only be "stopped at" a stage it did not reach.
     typed_fail = await n(f"""SELECT count(*) FROM documents d
-        WHERE d.ingest_failure_reason IS NOT NULL {W}""")
+        WHERE d.ingest_failure_reason IS NOT NULL {W}
+          AND NOT EXISTS (SELECT 1 FROM document_pages p WHERE p.document_id=d.id)""")
     classified = await n(f"""SELECT count(*) FROM documents d
         WHERE d.source_metadata ? 'payor_classification' {W}""")
+    held_unchunked = await n(f"""SELECT count(*) FROM documents d
+        WHERE d.source_metadata->'payor_classification'->>'decision'='hold' {W}
+          AND NOT EXISTS (SELECT 1 FROM hierarchical_chunks h WHERE h.document_id=d.id)""")
     held = await n(f"""SELECT count(*) FROM documents d
         WHERE d.source_metadata->'payor_classification'->>'decision'='hold' {W}""")
     chunked = await n(f"""SELECT count(*) FROM documents d WHERE true {W}
         AND EXISTS (SELECT 1 FROM hierarchical_chunks h WHERE h.document_id=d.id)""")
     embedded = await n(f"""SELECT count(*) FROM documents d WHERE true {W}
         AND EXISTS (SELECT 1 FROM chunk_embeddings e WHERE e.document_id=d.id)""")
-    retired  = await n(f"SELECT count(*) FROM documents d WHERE d.lifecycle_state='retired' {W}")
-    shelved  = await n(f"SELECT count(*) FROM documents d WHERE d.lifecycle_state='shelved' {W}")
+    retired  = await n(f"""SELECT count(*) FROM documents d WHERE d.lifecycle_state='retired' {W}
+        AND NOT EXISTS (SELECT 1 FROM rag_published_embeddings r WHERE r.document_id=d.id)""")
+    shelved  = await n(f"""SELECT count(*) FROM documents d WHERE d.lifecycle_state='shelved' {W}
+        AND NOT EXISTS (SELECT 1 FROM rag_published_embeddings r WHERE r.document_id=d.id)""")
     published = await n(f"""SELECT count(*) FROM documents d WHERE true {W}
         AND EXISTS (SELECT 1 FROM rag_published_embeddings r WHERE r.document_id=d.id)""")
 
     def step(name, prev, reached, stopped):
         st = sum(x["count"] for x in stopped if x["count"] > 0)
         gap = (prev or 0) - (reached or 0) - st
+        # `balanced` must judge the SAME number the UI renders. Clamping the
+        # display while testing the raw value produced rows reading "gap 0" and
+        # flagged unbalanced at the same time.
+        shown = max(gap, 0)
         return {"stage": name, "in": prev, "reached": reached,
                 "stopped": stopped, "stopped_total": st,
-                "gap": max(gap, 0), "balanced": gap == 0}
+                "gap": shown, "balanced": shown == 0}
 
     # STAGE ORDER MUST MATCH THE REAL DEPENDENCY, not the conceptual one.
     #
@@ -2238,7 +2256,7 @@ async def pipeline_integrity(window: str = "24h", db: AsyncSession = Depends(get
              [{"reason": "typed ingest failure (no text layer, unsupported, encrypted…)",
                "count": typed_fail}]),
         step("chunked", extracted, chunked,
-             [{"reason": "held by classifier, awaiting a human", "count": held}]),
+             [{"reason": "held by classifier, awaiting a human", "count": held_unchunked}]),
         step("embedded", chunked, embedded, []),
         step("published to index", embedded, published,
              [{"reason": "retired as duplicate", "count": retired},
