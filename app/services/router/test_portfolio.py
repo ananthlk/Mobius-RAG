@@ -168,6 +168,56 @@ class TestAllocation:
         assert ks == sorted(ks, reverse=True)  # k desc (scheduling hint)
 
 
+class TestTurnFloorNeverWaived:
+    """2026-08-19, Ananth (live-trace latency work): the chat.thinking+any
+    bypass on _STRATEGY_MIN_TURN was reverted -- d (3000ms p50, the slowest
+    strategy in the roster) must never contribute on round 1, no matter the
+    caller_mode or authority_requirement. Round 1 stays fast for everyone;
+    d/c are still available, just starting at their normal min-turn round."""
+
+    def test_d_excluded_on_round_1_even_under_chat_thinking_plus_any(self):
+        """This is the exact combination the old bypass targeted -- the
+        regression guard for the revert."""
+        ladder = allocate_portfolio(
+            [make_slot()], {"slot_0": POOL_DEPTH_2},
+            posture(caller_mode="chat.thinking", authority_requirement="any",
+                    call_number=1))
+        assert "d" not in ladder.per_slot_portfolio["slot_0"]
+
+    def test_c_excluded_on_round_1_and_2_even_under_chat_thinking_plus_any(self):
+        for call_number in (1, 2):
+            ladder = allocate_portfolio(
+                [make_slot()], {"slot_0": POOL_DEPTH_2},
+                posture(caller_mode="chat.thinking", authority_requirement="any",
+                        call_number=call_number))
+            assert "c" not in ladder.per_slot_portfolio["slot_0"], call_number
+
+    def test_d_becomes_eligible_at_its_own_min_turn_round_2(self):
+        """Same posture as the round-1 exclusion above -- only call_number
+        changes. d isn't blocked outright, just held to its real turn floor."""
+        ladder = allocate_portfolio(
+            [make_slot()], {"slot_0": POOL_DEPTH_2},
+            posture(caller_mode="chat.thinking", authority_requirement="any",
+                    call_number=2))
+        assert "d" in ladder.per_slot_portfolio["slot_0"]
+
+    def test_c_becomes_eligible_at_its_own_min_turn_round_3(self):
+        ladder = allocate_portfolio(
+            [make_slot()], {"slot_0": POOL_DEPTH_2},
+            posture(caller_mode="chat.thinking", authority_requirement="any",
+                    call_number=3))
+        assert "c" in ladder.per_slot_portfolio["slot_0"]
+
+    def test_default_caller_mode_round_1_unaffected_by_the_revert(self):
+        """chat.default was never covered by the old bypass -- confirms the
+        revert didn't change behavior for the common case, only reverted the
+        thinking+any carve-out."""
+        ladder = allocate_portfolio(
+            [make_slot()], {"slot_0": POOL_DEPTH_2},
+            posture(caller_mode="chat.default", call_number=1))
+        assert "d" not in ladder.per_slot_portfolio["slot_0"]
+
+
 class TestShadowWiring:
     """Portfolio rides as the FOURTH allocator, shadow-only at bootstrap."""
 

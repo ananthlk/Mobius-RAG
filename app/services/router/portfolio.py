@@ -432,20 +432,18 @@ def allocate_portfolio(
                     sid, "skipped", skip_reason="crawl_gated_payer_not_crawlable"))
                 continue
             _min_turn = _STRATEGY_MIN_TURN.get(sid)
-            # THINKING+ANY BYPASS (2026-08-07, Ananth: "d and c can come in
-            # r1 if authority=any and thinking mode"). Both signals already
-            # say "take your time, don't be strict" -- chat.thinking accepts
-            # higher latency by construction (that's the mode's whole
-            # point), and authority=any means the caller isn't demanding
-            # citable sources, so there's no reason to withhold c/d for cost
-            # or latency caution on round 1 specifically in this combo.
-            _turn_floor_waived = (
-                c["caller_mode"] == "chat.thinking"
-                and c["authority_requirement"] != "citable_required"
-            )
-            _turn_unlocked = (
-                _min_turn is None or _turn_floor_waived or c["call_number"] >= _min_turn
-            )
+            # REVERTED the THINKING+ANY BYPASS (2026-08-19, Ananth, live-trace
+            # latency work: "hold c/d for 1st round anyways ... will make 1st
+            # round fast"). The bypass (2026-08-07) let chat.thinking +
+            # authority=any skip the turn floor entirely, so d -- priced at a
+            # 3000ms p50 prior, the slowest strategy in the roster -- could
+            # land on round 1 even though round 1 is exactly the round every
+            # caller is waiting on synchronously. The floor is now absolute:
+            # d/c never contribute before their _STRATEGY_MIN_TURN round,
+            # regardless of caller_mode or authority_requirement. A caller
+            # that wants d's recall lift still gets it -- just starting round
+            # 2, once round 1's a/b/s answer is already in hand.
+            _turn_unlocked = _min_turn is None or c["call_number"] >= _min_turn
             if _min_turn is not None and not _turn_unlocked:
                 st.steps.append(StrategyStep(
                     sid, "skipped",
