@@ -2754,7 +2754,38 @@ async def pipeline_health(db: AsyncSession = Depends(get_db)):
                     WHERE file_path LIKE '%%{active_run}%%'""")
                 slow["active_crawl"]["in_rag"] = _in_rag
                 # The lag IS the story: objects fetched but not yet ingested.
-                slow["active_crawl"]["awaiting_push"] = max(_n - max(_in_rag, 0), 0)
+                # NOT "awaiting push". This is objects-in-GCS minus documents
+                # whose file_path carries THIS run's prefix, which counts an
+                # object as unpushed whenever the corpus already holds it from
+                # an earlier ingest under a different path. Sampling 300 objects
+                # from run 977b22af: 100 present under the run path, 16 present
+                # under another path, 184 genuinely absent — so ~5% of what this
+                # number called "awaiting" needed no push at all.
+                #
+                # Crawler's own tally closes exactly and does not have that flaw:
+                #   1,287 pushed + 1,504 already held + 4,079 failures = 6,870
+                #   downloaded. My subtraction said 5,209 against a real re-push
+                #   target of 4,079 — overstated by 1,130.
+                #
+                # So: prefer Crawler's push_failures when the run reports it, and
+                # when it does not, say upper_bound rather than dressing a
+                # subtraction up as a fact.
+                # While the crawl RUNS, the subtraction is still the signal we
+                # want — it is the lag, and it is what distinguishes "push
+                # batches at the end" from "push silently dead". Once the crawl
+                # COMPLETES, Crawler knows the real answer and we should use it
+                # instead of guessing. Either way the basis is labelled, so the
+                # number is never read as something it is not.
+                _fails = slow["active_crawl"].get("push_failed")
+                _done = str(slow["active_crawl"].get("status") or "").startswith("completed")
+                if _done and _fails is not None:
+                    slow["active_crawl"]["awaiting_push"] = int(_fails)
+                    slow["active_crawl"]["awaiting_push_basis"] = "crawler push failures"
+                else:
+                    slow["active_crawl"]["awaiting_push"] = max(_n - max(_in_rag, 0), 0)
+                    slow["active_crawl"]["awaiting_push_basis"] = (
+                        "upper bound — GCS minus this run's path; includes objects "
+                        "already in the corpus under an earlier path")
             except Exception as _e:
                 slow["active_crawl"]["gcs_error"] = f"{type(_e).__name__}"
 

@@ -263,7 +263,8 @@ export function PipelineTab() {
                 ['push_duplicate', 'already held']].map(([k, label]) => (
                 <span key={k} className="pl-cstep">
                   <b className={((k === 'download_failed' || k === 'push_failed') && a[k] > 0)
-                                 || (k === 'awaiting_push' && a[k] > 200) ? 'pl-gap' : ''}>
+                                 || (k === 'awaiting_push' && a[k] > 200) ? 'pl-gap' : ''}
+                                 title={k === 'awaiting_push' ? (a.awaiting_push_basis || '') : undefined}>
                     {(a[k] ?? 0).toLocaleString()}
                   </b> {label}
                 </span>
