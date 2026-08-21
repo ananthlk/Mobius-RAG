@@ -2420,17 +2420,36 @@ async def pipeline_health(db: AsyncSession = Depends(get_db)):
     # Long windows. Without these the 24h/7d/all selections rendered "—" and read
     # as broken rather than as "this stage has no series that far back". Cheap:
     # completed_at is indexed and these are plain counts, no correlated scan.
+    # TRANSACTIONS AND UNIQUE DOCUMENTS ARE DIFFERENT QUESTIONS.
+    #
+    # Ananth, 2026-08-20: "we also get tripped between unique docs and
+    # transactions .. corpus health is a unique document view, pipeline is a
+    # transaction view."
+    #
+    # That is why these numbers never reconciled with Corpus health and never
+    # could: a document is chunked 2.5 times on average (24,973 completed
+    # chunking jobs across 9,853 distinct documents), embedded 1.4x, published
+    # 1.2x. Both counts are correct; putting them in one funnel is not.
+    #
+    # So every job-backed stage now reports BOTH, and the UI names which lens it
+    # is showing. A number whose unit is ambiguous is worse than no number.
     async def _win_counts(table: str, ts_col: str, status_filter: str) -> dict:
         try:
             r = (await db.execute(_text(f"""
                 SELECT
                   COUNT(*) FILTER (WHERE {ts_col} > now() - interval '24 hours') AS d1,
                   COUNT(*) FILTER (WHERE {ts_col} > now() - interval '7 days')   AS d7,
-                  COUNT(*)                                                        AS all_time
+                  COUNT(*)                                                        AS all_time,
+                  COUNT(DISTINCT document_id) FILTER (WHERE {ts_col} > now() - interval '24 hours') AS u1,
+                  COUNT(DISTINCT document_id) FILTER (WHERE {ts_col} > now() - interval '7 days')   AS u7,
+                  COUNT(DISTINCT document_id)                                     AS u_all,
+                  COUNT(DISTINCT document_id) FILTER (WHERE {ts_col} > now() - interval '1 hour')   AS u_h
                 FROM {table} WHERE status = '{status_filter}'
             """))).first()
             return {"last_24h": int(r.d1 or 0), "last_7d": int(r.d7 or 0),
-                    "all_time": int(r.all_time or 0)}
+                    "all_time": int(r.all_time or 0),
+                    "docs_last_hour": int(r.u_h or 0), "docs_last_24h": int(r.u1 or 0),
+                    "docs_last_7d": int(r.u7 or 0), "docs_all_time": int(r.u_all or 0)}
         except Exception:
             return {}
 

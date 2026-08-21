@@ -32,7 +32,15 @@ const WINDOWS: [string, string][] = [
 // data the card is already carrying.
 const BUCKET_SLICE: Record<string, number> = { '5m': 1, '15m': 3, '30m': 6 };
 
-function windowedThroughput(st: Stage, win: string): number | null {
+function windowedThroughput(st: Stage, win: string, lens: 'tx' | 'docs' = 'tx'): number | null {
+  if (lens === 'docs') {
+    const m: Record<string, string> = {
+      '1h': 'docs_last_hour', '24h': 'docs_last_24h', '7d': 'docs_last_7d', 'all': 'docs_all_time',
+    };
+    const dv = st[m[win]];
+    if (typeof dv === 'number') return dv;
+    return null;                      // short windows have no distinct-doc series
+  }
   const rolling = st.rolling as { buckets_5min?: number[] } | undefined;
   const b = rolling?.buckets_5min;
   if (b && BUCKET_SLICE[win]) return b.slice(-BUCKET_SLICE[win]).reduce((a, c) => a + c, 0);
@@ -118,6 +126,10 @@ export function PipelineTab() {
   const [live, setLive] = useState(true);
   const [integ, setInteg] = useState<any | null>(null);
   const [win, setWin] = useState('24h');
+  // Corpus health counts DOCUMENTS; this tab counts TRANSACTIONS. A document is
+  // chunked 2.5x on average, so the two can never match and it is not a bug —
+  // it is two different questions. Naming the lens is the fix.
+  const [lens, setLens] = useState<'tx' | 'docs'>('tx');
   const winRef = useRef('24h');
   useEffect(() => { winRef.current = win; }, [win]);
   const [drill, setDrill] = useState<{ stage: string; label: string } | null>(null);
@@ -199,6 +211,10 @@ export function PipelineTab() {
             {live ? '● live' : '❙❙ paused'}
           </button>
           <button className="pl-btn" onClick={load}>refresh</button>
+          <span className="pl-winbar" title="Transactions counts processing runs; documents counts distinct documents. A document is chunked ~2.5x on average.">
+            <button className={`pl-win${lens === 'tx' ? ' on' : ''}`} onClick={() => setLens('tx')}>transactions</button>
+            <button className={`pl-win${lens === 'docs' ? ' on' : ''}`} onClick={() => setLens('docs')}>unique docs</button>
+          </span>
           <span className="pl-winbar">
             {WINDOWS.map(([k, label]) => (
               <button key={k} className={`pl-win${win === k ? ' on' : ''}`}
@@ -228,6 +244,7 @@ export function PipelineTab() {
         <div className={`pl-acct${integ.worst_gap ? ' pl-acct-bad' : ''}`}>
           <div className="pl-accthead">
             <strong>Accounting</strong>
+            <span className="pl-lenstag">unique documents</span>
             <span className="pl-sub">
               {integ.cohort.toLocaleString()} documents discovered · {WINDOWS.find(w => w[0] === win)?.[1] ?? win}
             </span>
@@ -284,10 +301,10 @@ export function PipelineTab() {
               {s.fields.map(([f, rawLabel]) => {
                 const [label, flag] = rawLabel.split('|');
                 const value = f === '@throughput'
-                  ? windowedThroughput(st, win)
+                  ? windowedThroughput(st, win, lens)
                   : st[f];
                 const shown = f === '@throughput'
-                  ? `${label} (${WINDOWS.find(w => w[0] === win)?.[1]})`
+                  ? `${label} (${WINDOWS.find(w => w[0] === win)?.[1]}, ${lens === 'tx' ? 'runs' : 'docs'})`
                   : label;
                 return <Metric key={f} label={shown} value={value} good={flag === 'good'} />;
               })}

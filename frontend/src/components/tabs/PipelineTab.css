@@ -133,3 +133,6 @@
   .pl-acctable td{border-color:#1f2937}
   .pl-rowbad{background:#2a1f08}
 }
+.pl-lenstag{font-size:10.5px;font-family:ui-monospace,Menlo,monospace;color:#6b7280;
+  border:1px solid #e5e7eb;border-radius:99px;padding:2px 8px}
+@media (prefers-color-scheme:dark){ .pl-lenstag{border-color:#374151;color:#9ca3af} }
