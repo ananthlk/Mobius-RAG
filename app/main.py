@@ -2798,8 +2798,12 @@ async def pipeline_health(db: AsyncSession = Depends(get_db)):
             # minute, not per request. Bounded and best-effort: a failure leaves
             # the count absent rather than breaking the panel.
             try:
+                import os as _os
                 from google.cloud import storage as _st
-                _bkt = os.getenv("GCS_BUCKET", "mobius-rag-uploads-dev")
+                # main.py has no module-level `os` import — using it here raised
+                # NameError, which the except swallowed into gcs_error. Import
+                # locally rather than adding a module-level import for one use.
+                _bkt = _os.getenv("GCS_BUCKET", "mobius-rag-uploads-dev")
                 _n = sum(1 for _ in _st.Client().list_blobs(
                     _bkt, prefix=f"web-scraper/{active_run}/", max_results=20000))
                 slow["active_crawl"]["gcs_objects"] = _n
