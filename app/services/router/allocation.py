@@ -593,8 +593,13 @@ def resolve_constraints(resource_posture: dict[str, Any]) -> dict[str, Any]:
     confidence_bar = float(resource_posture.get("confidence_bar", 0.85))
     allocator_override_ms = CALLER_MODE_LATENCY_ALLOWANCE_OVERRIDE_MS.get(
         resource_posture.get("caller_mode"))
+    # per-request latency budget (2026-08-21, Ananth): a caller-supplied
+    # latency_budget_ms overrides BOTH the caller_mode allowance and the
+    # speed_budget-derived value. Absent/None/0 → exact prior behavior.
+    per_request_latency_ms = resource_posture.get("latency_budget_ms")
     latency_allowance_ms = (
-        float(allocator_override_ms) if allocator_override_ms is not None
+        float(per_request_latency_ms) if per_request_latency_ms
+        else float(allocator_override_ms) if allocator_override_ms is not None
         else speed_budget_ms * (1.0 + tolerance_pct))
     return {
         "tolerance_pct": tolerance_pct,

@@ -39,6 +39,7 @@ class ResourcePosture:
     # If Structure ever redefines this as a QUERY-level total, the router.py
     # bridge is the single translation point to change.
     token_budget: Optional[int] = None
+    latency_budget_ms: Optional[int] = None  # per-request latency override (None → caller_mode/speed_budget derived)
     # Caller-declared citability (Ananth's bifurcation): "any" | "citable_required"
     authority_requirement: str = "any"
 

@@ -15633,6 +15633,8 @@ async def _run_trace_for_query(
     allocator_override: str | None = None,
     authority_requirement: str | None = None,
     call_number: int | None = None,
+    token_budget_for_retrieval: int | None = None,
+    latency_budget_ms: int | None = None,
 ) -> dict:
     """Core of the Trace Explorer: run one query through the real pipeline,
     return {query, forced_strategy, emits, telemetry, detailed_trace, eval}.
@@ -15654,7 +15656,8 @@ async def _run_trace_for_query(
         db, query, caller_mode=caller_mode, forced_strategy=forced_strategy,
         force_fanout_queries=force_fanout_queries, emit_progress=emit_progress,
         allocator_override=allocator_override, authority_requirement=authority_requirement,
-        call_number=call_number,
+        call_number=call_number, token_budget_for_retrieval=token_budget_for_retrieval,
+        latency_budget_ms=latency_budget_ms,
     )
     wall_ms = int((time.monotonic() - t0) * 1000)
     envelope = build_contract(result, result.synthesis)
@@ -16284,6 +16287,12 @@ class BankRunRequest(BaseModel):
     # (same as any other caller) -- pass 2 or 3 to test the unlocked
     # behavior across a full bank, same param TraceExplorerRequest carries.
     call_number: Optional[int] = None
+    # Per-request retrieval budgets (2026-08-21, Ananth) applied to every query
+    # in the bank. token_budget_for_retrieval → Structure's payload ceiling;
+    # latency_budget_ms → Router's latency allowance override. None → each
+    # falls through to the caller_mode-derived default (no behavior change).
+    token_budget_for_retrieval: Optional[int] = None
+    latency_budget_ms: Optional[int] = None
 
 
 _DECOMPOSE_SYSTEM_PROMPT = (
@@ -16492,6 +16501,7 @@ async def _run_bank_job(
     auto_fanout_from_facts: bool = False, auto_fanout_llm: bool = False,
     auto_fanout_corpus: bool = False, allocator_override: str | None = None,
     authority_requirement: str | None = None, call_number: int | None = None,
+    token_budget_for_retrieval: int | None = None, latency_budget_ms: int | None = None,
 ):
     import yaml as _yaml
     from app.database import AsyncSessionLocal
@@ -16567,6 +16577,7 @@ async def _run_bank_job(
                         force_fanout_queries=force_fanout_queries,
                         allocator_override=allocator_override, authority_requirement=authority_requirement,
                         call_number=call_number,
+                        token_budget_for_retrieval=token_budget_for_retrieval, latency_budget_ms=latency_budget_ms,
                     )
                     logging.getLogger("app.main").warning(
                         "bank run %s: finished qid=%s", job_id, qid,
@@ -16835,6 +16846,7 @@ async def trace_explorer_run_bank(body: BankRunRequest = Body(...)):
         auto_fanout_from_facts=body.auto_fanout_from_facts, auto_fanout_llm=body.auto_fanout_llm,
         auto_fanout_corpus=body.auto_fanout_corpus, allocator_override=body.allocator_override,
         authority_requirement=body.authority_requirement, call_number=body.call_number,
+        token_budget_for_retrieval=body.token_budget_for_retrieval, latency_budget_ms=body.latency_budget_ms,
     ))
     return {"job_id": job_id}
 

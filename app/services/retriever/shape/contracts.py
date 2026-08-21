@@ -252,6 +252,11 @@ class ResourcePosture:
     # shim, not a real answer.
     token_budget: int = 10**9
 
+    # Caller-supplied latency budget in ms (2026-08-21, Ananth): overrides the
+    # caller_mode/speed_budget-derived latency allowance in the Router when set.
+    # None → derived as before (no behavior change).
+    latency_budget_ms: int | None = None
+
     # Caller-DECLARED citability requirement (Ananth via Router, 2026-07-23)
     # — NOT computed by Structure, purely threaded through, same "consume
     # don't assemble" pattern already applied to scope/auth and caller_mode.

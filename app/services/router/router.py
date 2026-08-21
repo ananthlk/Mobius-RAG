@@ -111,6 +111,8 @@ async def route(db_session_factory, ctx: RoutingContext) -> RouterDecision:
         "authority_requirement": resource_posture.authority_requirement,
         # call_number → portfolio's cost gate (c restricted until turn 3)
         "call_number": ctx.call_number,
+        # per-request latency override → resolve_constraints latency_allowance_ms
+        "latency_budget_ms": resource_posture.latency_budget_ms,
     }
     per_slot_depth = {
         sid: compute_depth_bucket(meta) for sid, meta in ctx.pool_metadata.items()

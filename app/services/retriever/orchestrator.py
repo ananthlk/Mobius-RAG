@@ -372,6 +372,7 @@ async def _run_router(
             # key (2026-07-23, closing the 3-layer gap Structure caught).
             token_budget=resource_posture.token_budget,
             authority_requirement=resource_posture.authority_requirement,
+            latency_budget_ms=resource_posture.latency_budget_ms,
         ),
         slots=slots,  # verbatim AnswerSlot objects -- authoritative for slot construction
         pool_metadata=pool_metadata,  # depth signal only, per Router's real-seam fix
@@ -979,6 +980,7 @@ async def run_retriever_partial(
     authority_requirement: str | None = None,
     correlation_id: str | None = None,
     call_number: int | None = None,
+    latency_budget_ms: int | None = None,
 ) -> RetrieverPartialResult:
     """Sequence Gate → Reformat → Structure → Slots → Pool. Stops there —
     Router onward doesn't exist yet. This function's own scope will shrink
@@ -1053,7 +1055,7 @@ async def run_retriever_partial(
         )
     structure_result = run_structure(
         reformat_result, caller_mode=caller_mode, token_budget_for_retrieval=token_budget_for_retrieval,
-        authority_requirement=authority_requirement,
+        authority_requirement=authority_requirement, latency_budget_ms=latency_budget_ms,
     )
     slots_result = run_slots(structure_result)
     if emit_progress:
@@ -1344,6 +1346,7 @@ async def run_retriever_partial_with_retry(
     authority_requirement: str | None = None,
     correlation_id: str | None = None,
     call_number: int | None = None,
+    latency_budget_ms: int | None = None,
 ) -> RetrieverPartialResult:
     """Whole-loop retry on TECHNICAL failure (Ananth, 2026-07-24): "ask
     once, we try our best to get first-pass resolution." If ANY unhandled
@@ -1392,6 +1395,7 @@ async def run_retriever_partial_with_retry(
                 force_fanout_queries=force_fanout_queries,
                 emit_progress=emit_progress, authority_requirement=authority_requirement,
                 correlation_id=correlation_id, call_number=call_number,
+                latency_budget_ms=latency_budget_ms,
             )
         except Exception as exc:
             last_exc = exc

@@ -208,7 +208,7 @@ _VALID_AUTHORITY_REQUIREMENTS = frozenset({"any", "citable_required"})
 
 def run_structure(
     reformat: ReformatResult, caller_mode: str | None = None, authority_requirement: str | None = None,
-    token_budget_for_retrieval: int | None = None,
+    token_budget_for_retrieval: int | None = None, latency_budget_ms: int | None = None,
 ) -> StructureResult:
     """`token_budget_for_retrieval` (2026-07-24, Ananth's direct correction:
     "RAG does not have to guess"): Chat's real, request-level context-window
@@ -228,7 +228,7 @@ def run_structure(
     t0 = time.monotonic()
     mode = caller_mode if caller_mode in _ACCURACY_NEED else DEFAULT_CALLER_MODE
     authority = authority_requirement if authority_requirement in _VALID_AUTHORITY_REQUIREMENTS else "any"
-    resource_posture = _resolve_resource_posture(reformat.posture, mode, authority, token_budget_for_retrieval)
+    resource_posture = _resolve_resource_posture(reformat.posture, mode, authority, token_budget_for_retrieval, latency_budget_ms)
     result = StructureResult(
         query=reformat.query,
         rewritten_queries=list(reformat.rewritten_queries),
@@ -243,7 +243,7 @@ def run_structure(
 
 def _resolve_resource_posture(
     posture: ReformatPosture, mode: str, authority_requirement: str,
-    token_budget_for_retrieval: int | None = None,
+    token_budget_for_retrieval: int | None = None, latency_budget_ms: int | None = None,
 ) -> ResourcePosture:
     if posture in _NO_RETRIEVAL_POSTURES:
         return _ZERO_RESOURCE_POSTURE
@@ -275,6 +275,7 @@ def _resolve_resource_posture(
         token_budget=token_budget,
         max_attempts=max_attempts,
         authority_requirement=authority_requirement,
+        latency_budget_ms=latency_budget_ms,
     )
 
 
