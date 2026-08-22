@@ -254,27 +254,64 @@ export function PipelineTab() {
               <code className="pl-runid">{String(a.run_id || '').slice(0, 8)}</code>
               {a.conserved === false && <span className="pl-gap">not conserved</span>}
               {a.push_failed > 0 && <span className="pl-gap">{a.push_failed} push failures</span>}
+              {/* R2 — a stalled push and a working push must never look alike. */}
+              {a.push_in_progress && (
+                <span className="pl-cstep pl-pushing">
+                  pushing {(a.push_sent ?? 0).toLocaleString()} of {(a.downloaded ?? 0).toLocaleString()}
+                </span>
+              )}
+              {/* R3 — a completed run's push figures are only true as of when
+                  they were last reported. A later re-push updates the RECORD,
+                  and the banner follows it. */}
+              {!a.push_in_progress && a.push_updated_at && (
+                <span className="pl-asof" title={a.push_reporter ? `reported by ${a.push_reporter}` : ''}>
+                  push as of {new Date(a.push_updated_at).toLocaleTimeString()}
+                </span>
+              )}
             </div>
             <div className="pl-crawlflow">
-              {[['gcs_objects', 'in GCS'], ['in_rag', 'in RAG'], ['awaiting_push', 'awaiting push'],
+              {/* R1' — every figure below is REPORTED by the job record, never
+                  derived here. `awaiting push` is gone: it was set-subtraction
+                  presented as a work queue and counted cross-path duplicates as
+                  outstanding forever. `already held` is a verified 409 from our
+                  own endpoint — terminal success, not pending work. */}
+              {[['gcs_objects', 'in GCS'], ['in_rag', 'in RAG'],
                 ['pages_scraped', 'pages'], ['files_discovered', 'files found'],
                 ['suppressed_cpt', 'CPT-suppressed'], ['downloaded', 'downloaded'],
                 ['download_failed', 'download failed'], ['push_sent', 'pushed'],
-                ['push_duplicate', 'already held']].map(([k, label]) => (
+                ['push_duplicate', 'already held'], ['push_skipped_local', 'skipped (unverified)'],
+                ['push_pending', 'pending']].map(([k, label]) => (
                 <span key={k} className="pl-cstep">
-                  <b className={((k === 'download_failed' || k === 'push_failed') && a[k] > 0)
-                                 || (k === 'awaiting_push' && a[k] > 200) ? 'pl-gap' : ''}
-                                 title={k === 'awaiting_push' ? (a.awaiting_push_basis || '') : undefined}>
+                  <b className={((k === 'download_failed' || k === 'push_failed'
+                                  || k === 'push_skipped_local') && a[k] > 0) ? 'pl-gap' : ''}
+                     title={k === 'push_skipped_local'
+                              ? 'crawler-side pre-filter — NOT confirmed by a 409 from RAG; unverified until reconciled'
+                              : (k === 'push_sent' || k === 'push_duplicate' || k === 'push_pending')
+                                ? `counted per ${a.push_frame || 'download entries'}` : undefined}>
                     {(a[k] ?? 0).toLocaleString()}
                   </b> {label}
                 </span>
               ))}
             </div>
+            {/* R1' reconciliation. Reported state is authoritative; this is the
+                check on it. Deliberately in the OBJECT frame — comparing against
+                push_sent, which counts download entries, would re-import the
+                denominator confusion that produced "3,332 awaiting push". */}
+            {a.reconcile_delta != null && (
+              <div className={`pl-reconcile${a.reconcile_delta !== 0 ? ' pl-gap' : ''}`}>
+                observed in RAG <b>{(a.observed_in_rag ?? 0).toLocaleString()}</b>
+                {' · '}delta <b>{a.reconcile_delta}</b>
+                {a.reconcile_delta === 0
+                  ? ' \u2713 reported and observed agree'
+                  : ' \u2014 reported and observed disagree; this is a defect in one of the two systems'}
+                <span className="pl-frame"> ({a.reconcile_frame || 'gcs objects'})</span>
+              </div>
+            )}
             {a.error ? <div className="pl-acctnote">scraper unreachable ({a.error}) — counts are last known</div> : null}
             {a.gcs_objects != null && a.pages_scraped === 0 ? (
               <div className="pl-acctnote">
-                The scraper reports progress only at job completion, so its counters read 0 mid-run.
-                <b> in GCS</b> is the live signal; <b>awaiting push</b> is what has been fetched but not yet ingested.
+                <b>in GCS</b> is the live signal while a crawl is early. Push tallies now update
+                mid-run (Crawler C3), so <b>pushing N of M</b> appears whenever a push is actually working.
               </div>
             ) : null}
           </div>

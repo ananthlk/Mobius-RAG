@@ -2718,9 +2718,26 @@ async def pipeline_health(db: AsyncSession = Depends(get_db)):
                     "suppressed_cpt": (_r.get("cpt_screen") or {}).get("files_suppressed", 0),
                     "downloaded": _dl.get("succeeded", 0),
                     "download_failed": _dl.get("failed_count", 0),
+                    # R1'/R2/R3 (2026-08-22, spec 623b869 + §45). These are
+                    # REPORTED outcomes from the job record — Crawler's C1 puts a
+                    # push_status on every document and derives the tallies from
+                    # those, so nothing here is inferred.
+                    #
+                    # DENOMINATOR: these are per DOWNLOAD ENTRY and sum to
+                    # downloads.succeeded (6,870 for 977b22af). The reconciliation
+                    # below is per GCS OBJECT (6,744). The 126-object difference is
+                    # the filename collisions counted once per download and once
+                    # per object. Mixing the two frames is exactly how "3,332
+                    # awaiting push" happened; both are labelled for that reason.
                     "push_sent": (_dl.get("push") or {}).get("sent", 0),
                     "push_duplicate": (_dl.get("push") or {}).get("duplicate", 0),
                     "push_failed": (_dl.get("push") or {}).get("failed_count", 0),
+                    "push_skipped_local": (_dl.get("push") or {}).get("skipped_local", 0),
+                    "push_pending": (_dl.get("push") or {}).get("pending", 0),
+                    "push_in_progress": bool((_dl.get("push") or {}).get("in_progress", False)),
+                    "push_updated_at": _dl.get("push_updated_at"),
+                    "push_reporter": _dl.get("push_reporter"),
+                    "push_frame": "download entries",
                     "conserved": _dl.get("conserved"),
                 })
             except Exception as _e:
@@ -2770,22 +2787,41 @@ async def pipeline_health(db: AsyncSession = Depends(get_db)):
                 # So: prefer Crawler's push_failures when the run reports it, and
                 # when it does not, say upper_bound rather than dressing a
                 # subtraction up as a fact.
-                # While the crawl RUNS, the subtraction is still the signal we
-                # want — it is the lag, and it is what distinguishes "push
-                # batches at the end" from "push silently dead". Once the crawl
-                # COMPLETES, Crawler knows the real answer and we should use it
-                # instead of guessing. Either way the basis is labelled, so the
-                # number is never read as something it is not.
-                _fails = slow["active_crawl"].get("push_failed")
-                _done = str(slow["active_crawl"].get("status") or "").startswith("completed")
-                if _done and _fails is not None:
-                    slow["active_crawl"]["awaiting_push"] = int(_fails)
-                    slow["active_crawl"]["awaiting_push_basis"] = "crawler push failures"
+                # R1' — RECONCILIATION, not a work queue.
+                #
+                # `awaiting_push` is gone. It was GCS-minus-documents-under-this-
+                # run's-path presented as pending work, which counted every
+                # cross-path duplicate as forever-outstanding; it overstated the
+                # re-push target by 1,130 and I had to correct it once mid-run.
+                #
+                # The same query survives with a different job. Reported state is
+                # authoritative; this observation is the CHECK on it. Both halves
+                # of 2026-08-21 argued for keeping it: Crawler's record read
+                # "0 pushed" for three hours while the bucket filled, and later
+                # held stale terminal numbers for hours after a re-push had
+                # already repaired the run. In both windows this count was the
+                # only signal that reality had moved.
+                #
+                # delta != 0 is a defect in one of the two systems, and renders as
+                # one. Same rule the Accounting panel runs on: a gap is always a
+                # bug, never a state.
+                #
+                # OBJECT frame — documents under the run path vs GCS objects.
+                # Deliberately not compared against push_sent, which counts
+                # download entries (see push_frame above).
+                _expect = slow["active_crawl"].get("push_sent")
+                slow["active_crawl"]["observed_in_rag"] = _in_rag
+                slow["active_crawl"]["reconcile_frame"] = "gcs objects"
+                if _expect is not None and not slow["active_crawl"].get("push_in_progress"):
+                    # Unique object paths pushed, not download entries.
+                    _uniq = await _one(f"""SELECT count(DISTINCT file_path) FROM documents
+                        WHERE file_path LIKE '%%{active_run}%%'""")
+                    slow["active_crawl"]["reconcile_delta"] = _in_rag - _uniq
+                    slow["active_crawl"]["reconcile_note"] = (
+                        f"{_in_rag} documents under run path from {_n} GCS objects")
                 else:
-                    slow["active_crawl"]["awaiting_push"] = max(_n - max(_in_rag, 0), 0)
-                    slow["active_crawl"]["awaiting_push_basis"] = (
-                        "upper bound — GCS minus this run's path; includes objects "
-                        "already in the corpus under an earlier path")
+                    slow["active_crawl"]["reconcile_delta"] = None
+                    slow["active_crawl"]["reconcile_note"] = "push in progress — delta deferred"
             except Exception as _e:
                 slow["active_crawl"]["gcs_error"] = f"{type(_e).__name__}"
 
