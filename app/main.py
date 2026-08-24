@@ -2699,16 +2699,48 @@ async def pipeline_health(db: AsyncSession = Depends(get_db)):
         # succeeded / failed, plus the push leg. One source, owned by the seat
         # that owns the fact. Cheap (one HTTP call), and failure here degrades to
         # "no active run" rather than breaking the panel.
-        active_run = await _one_text("""SELECT source_metadata->>'source_run_id'
-            FROM documents WHERE source_metadata ? 'source_run_id'
-            ORDER BY created_at DESC LIMIT 1""")
+        # RUN SELECTOR (fixed 2026-08-24, found by the HQA joint acceptance test).
+        #
+        # This used to read source_metadata->>'source_run_id'. /documents/import-
+        # from-gcs never accepted that field, so every document Crawler pushes
+        # through the GCS path arrives without it. The selector therefore kept
+        # returning a single stale row from 2026-08-20 and the panel stayed
+        # pinned to run 977b22af while a 3,531-document HQA crawl ran past it
+        # completely unseen.
+        #
+        # file_path already carries the run: gs://<bucket>/web-scraper/<run>/<obj>.
+        # Deriving from it needs no contract change and cannot drift from the
+        # documents actually in the corpus. source_run_id is still preferred when
+        # present (non-GCS inlets set it); this is the fallback that always works.
+        active_run = await _one_text("""
+            SELECT COALESCE(
+                     d.source_metadata->>'source_run_id',
+                     (regexp_match(d.file_path, 'web-scraper/([0-9a-f-]{36})/'))[1])
+            FROM documents d
+            WHERE d.source_metadata ? 'source_run_id'
+               OR d.file_path LIKE '%%web-scraper/%%'
+            ORDER BY d.created_at DESC LIMIT 1""")
         slow["active_crawl"] = {"run_id": active_run}
         if active_run:
             try:
                 import urllib.request as _u, json as _j
-                _r = _j.loads(_u.urlopen(
-                    f"https://mobius-web-scraper-ortabkknqa-uc.a.run.app/scrape/{active_run}",
-                    timeout=12).read())
+                from urllib.error import HTTPError as _HTTPError
+                # Job records expire from Redis. A 404 here is "the record is
+                # gone", NOT "the crawl failed" — swallowing both into a bare
+                # HTTPError is how the panel rendered an empty banner with no
+                # explanation while everything downstream was fine.
+                try:
+                    _r = _j.loads(_u.urlopen(
+                        f"https://mobius-web-scraper-ortabkknqa-uc.a.run.app/scrape/{active_run}",
+                        timeout=20).read())
+                except _HTTPError as _he:
+                    if _he.code == 404:
+                        slow["active_crawl"]["record_expired"] = True
+                        slow["active_crawl"]["note"] = (
+                            "crawler job record expired — corpus figures below are "
+                            "from RAG and remain valid")
+                        raise
+                    raise
                 _dl = _r.get("downloads") or {}
                 _n = _r.get("nodes") or []
                 slow["active_crawl"].update({
@@ -8593,6 +8625,14 @@ class ImportFromGcsRequest(BaseModel):
     # from the hostname when the scraper doesn't know it (and the
     # frontend doesn't surface a payer picker for scrape flows).
     source_url: Optional[str] = None
+    # 2026-08-24: ImportScrapedPagesRequest has carried source_run_id for a
+    # while; this endpoint never did, so every document pushed through the GCS
+    # path arrived with no way to say which crawl produced it. The pipeline
+    # panel's run selector read that field and consequently could not see the
+    # HQA run at all. The panel now falls back to parsing the run out of
+    # file_path, but the field belongs in the contract: file_path is a storage
+    # detail and should not be the only place provenance lives.
+    source_run_id: Optional[str] = None
 
 
 @app.post("/documents/import-from-gcs")
@@ -8705,6 +8745,9 @@ async def import_document_from_gcs(
         body_source_url = getattr(body, "source_url", None)
         if body_source_url:
             meta_dict = {"source_url": body_source_url}
+        _body_run_id = getattr(body, "source_run_id", None)
+        if _body_run_id:
+            meta_dict = {**(meta_dict or {}), "source_run_id": _body_run_id}
 
         # NO default termination date. A TTL invented at ingest is not a policy
         # date, and pretending otherwise is what produced the 9,871 rows now
