@@ -8633,6 +8633,19 @@ class ImportFromGcsRequest(BaseModel):
     # file_path, but the field belongs in the contract: file_path is a storage
     # detail and should not be the only place provenance lives.
     source_run_id: Optional[str] = None
+    # 2026-08-24: the page that LINKED this file, not the file's own URL.
+    #
+    # Every AHCA PDF is served from /content/download/NNNN/file/, so source_url
+    # says nothing about which part of the site it belongs to. My HQA coverage
+    # query keyed on source_url path segments and reported 3 documents for
+    # office-of-plans-and-construction when 38 of its 39 linked PDFs were
+    # already in the corpus. I used that same query to size the gap and choose
+    # the crawl target — the instrument I was steering by could not see most of
+    # what it was measuring.
+    #
+    # The crawler knows the linking page; RAG does not, and cannot derive it.
+    # Optional, so nothing breaks if it is absent.
+    source_page_url: Optional[str] = None
 
 
 @app.post("/documents/import-from-gcs")
@@ -8748,6 +8761,9 @@ async def import_document_from_gcs(
         _body_run_id = getattr(body, "source_run_id", None)
         if _body_run_id:
             meta_dict = {**(meta_dict or {}), "source_run_id": _body_run_id}
+        _body_page_url = getattr(body, "source_page_url", None)
+        if _body_page_url:
+            meta_dict = {**(meta_dict or {}), "source_page_url": _body_page_url}
 
         # NO default termination date. A TTL invented at ingest is not a policy
         # date, and pretending otherwise is what produced the 9,871 rows now
