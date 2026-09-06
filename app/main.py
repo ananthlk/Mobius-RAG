@@ -8954,6 +8954,22 @@ class ImportFromHtmlRequest(BaseModel):
     state: str | None = None
     program: str | None = None
     authority_level: str | None = None
+    # 2026-09-06: PARITY WITH import-from-gcs.
+    #
+    # Crawler pushes crawled PAGES here (1,063 calls on the Sunshine run) and
+    # PDFs to import-from-gcs (760). Both fields were added to the GCS request
+    # and not to this one, so every page arrived with no run provenance and no
+    # linking page: 174 documents with no source_run_id, no source_page_url,
+    # and therefore no possible product_line — the whole A-55 attribution chain
+    # inert for exactly the half of the corpus that comes through this door.
+    #
+    # A field added where you happen to be looking and missed where you are
+    # not is the same defect as the run selector that could only see runs which
+    # had already landed a document.
+    source_run_id: str | None = None
+    # The page that LINKED this one. For a page the parent is what situates it
+    # in the site; Crawler's frontier records url -> first-seen linking page.
+    source_page_url: str | None = None
     # Phase 13.8 (2026-04-26) — chain ingest → chunk → embed → publish
     # in one synchronous call when auto_publish=true. Caller blocks
     # for ~10-60s (depends on doc size) instead of needing to poll
@@ -9097,7 +9113,9 @@ async def import_document_from_html(
         file_path=gcs_html_path,
         source_metadata=ingest_source_metadata(
             "html_import", source_url=url,
-            raw_html_stored=gcs_html_path.startswith("gs://")),
+            raw_html_stored=gcs_html_path.startswith("gs://"),
+            **({"source_run_id": body.source_run_id} if body.source_run_id else {}),
+            **({"source_page_url": body.source_page_url} if body.source_page_url else {})),
         payer=payer_val,
         state=state_val,
         program=program_val,
@@ -9155,6 +9173,7 @@ async def import_document_from_html(
         clf = await classify_for_ingest(
             document_id=str(document.id),
             source_url=url,
+            source_page_url=body.source_page_url,
             caller="mobius-rag:import-from-html",
         )
         await _persist_classification(db, document, clf)
@@ -10320,6 +10339,11 @@ class ImportScrapedPagesRequest(BaseModel):
     # Carried into source_metadata unchanged rather than interpreted here. RAG
     # does not own their meaning; it owns not losing them.
     source_run_id: Optional[str] = None
+    # Parity with the other two inlets (2026-09-06). source_run_id was added
+    # here and to import-from-gcs but source_page_url only to import-from-gcs,
+    # which is how the HTML inlet ended up unable to attribute a product line.
+    # Adding it here now rather than discovering the same gap a third time.
+    source_page_url: Optional[str] = None
     payor_id: Optional[str] = None
     health_plan_id: Optional[str] = None
 
@@ -10453,6 +10477,7 @@ async def import_scraped_pages(
     clf = await classify_for_ingest(
         document_id=str(document.id),
         source_url=_first_source_url,
+        source_page_url=getattr(body, "source_page_url", None),
         caller="mobius-rag:import-scraped-pages",
     )
     await _persist_classification(db, document, clf)
