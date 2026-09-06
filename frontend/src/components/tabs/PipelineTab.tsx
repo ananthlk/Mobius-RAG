@@ -307,6 +307,17 @@ export function PipelineTab() {
                 <span className="pl-frame"> ({a.reconcile_frame || 'gcs objects'})</span>
               </div>
             )}
+            {/* Serial worker (maxScale=1) means a queued crawl is imminent real
+                work, not a maybe. Invisible before, so launching two jobs looked
+                identical to launching one. */}
+            {Array.isArray(a.queued_runs) && a.queued_runs.length > 0 && (
+              <div className="pl-acctnote">
+                <b>{a.queued_runs.length} crawl{a.queued_runs.length > 1 ? 's' : ''} queued</b>
+                {' '}behind this one — the worker runs jobs serially:{' '}
+                {a.queued_runs.map((q: any) => String(q.run_id || '').slice(0, 8)).join(', ')}
+              </div>
+            )}
+            {a.record_expired ? <div className="pl-acctnote">{a.note || 'crawler job record expired'}</div> : null}
             {a.error ? <div className="pl-acctnote">scraper unreachable ({a.error}) — counts are last known</div> : null}
             {a.gcs_objects != null && a.pages_scraped === 0 ? (
               <div className="pl-acctnote">

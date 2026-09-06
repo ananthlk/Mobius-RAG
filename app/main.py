@@ -2720,7 +2720,46 @@ async def pipeline_health(db: AsyncSession = Depends(get_db)):
             WHERE d.source_metadata ? 'source_run_id'
                OR d.file_path LIKE '%%web-scraper/%%'
             ORDER BY d.created_at DESC LIMIT 1""")
+
+        # A RUNNING CRAWL OUTRANKS THE DOCUMENT-DERIVED GUESS (2026-09-06).
+        #
+        # The query above answers "which run produced the newest document",
+        # which is a proxy for "which run is active" and fails in exactly the
+        # case the panel exists for: a crawl that has not landed a document
+        # yet. A crawl spends its first phase walking pages and downloading
+        # nothing, so during that whole window it is invisible here.
+        #
+        # Caught live: two Sunshine crawls were running (983bf4c1 walking,
+        # b1e6ae56 queued behind it — the worker is maxScale=1 so jobs are
+        # serial) and the panel showed 83978868, an unrelated ONE-document
+        # run from nine days earlier, simply because it owned the newest
+        # document. Nothing was wrong with the crawls; the board was answering
+        # a different question than the one being asked of it.
+        #
+        # Ask the crawler what is actually running. Falls back to the derived
+        # run when nothing is in flight, which is the right answer for a
+        # completed run.
+        _queued: list[dict] = []
+        try:
+            import urllib.request as _u0, json as _j0
+            _act = _j0.loads(_u0.urlopen(
+                "https://mobius-web-scraper-ortabkknqa-uc.a.run.app/jobs/active",
+                timeout=10).read()).get("jobs") or []
+            _live = [j for j in _act if j.get("status") == "running"]
+            _queued = [j for j in _act if j.get("status") == "pending"]
+            if _live:
+                active_run = _live[0].get("job_id") or active_run
+        except Exception:
+            # Best-effort: a crawler that cannot be reached must not blank the
+            # panel's corpus figures, which come from our own DB.
+            pass
+
         slow["active_crawl"] = {"run_id": active_run}
+        if _queued:
+            # Serial execution means a queued job is real, imminent work. It was
+            # invisible before, so a two-job launch looked like a one-job launch.
+            slow["active_crawl"]["queued_runs"] = [
+                {"run_id": j.get("job_id"), "url": j.get("url")} for j in _queued]
         if active_run:
             try:
                 import urllib.request as _u, json as _j
