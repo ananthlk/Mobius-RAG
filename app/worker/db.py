@@ -65,10 +65,35 @@ async def recover_stale_jobs(
     no embedding job, invisible until someone notices weeks later.
     (Observed dev-smoke 2026-04-23.)
 
-    ``chunking_events`` is written by ``ctx.emit`` after every
-    paragraph + progress tick. A live worker under any real workload
-    emits far more often than once per 5 minutes; 5 minutes of
-    silence means the worker process is actually dead.
+    3. No ``hierarchical_chunks`` or ``policy_lines`` row has been
+       WRITTEN for that document in the same window.
+
+    Gate 3 exists because gate 2's premise was false. This docstring
+    used to claim "``chunking_events`` is written after every paragraph;
+    a live worker emits far more often than once per 5 minutes, so 5
+    minutes of silence means the process is dead." Measured on 2026-08-24
+    against the five jobs it had just killed:
+
+        chunks already written   4,042
+        heartbeat events emitted   157
+        chunks per event            26
+
+    Events are emitted per progress tick, not per paragraph, and a big
+    document can write hundreds of chunks between two ticks. Every one of
+    those five jobs was alive and producing — 651, 2,212, 423, 478 and 278
+    chunks respectively — and all five were reset, three times each, until
+    failure_count crossed the threshold and they were marked ``blocked``.
+    Work thrown away because the liveness signal was the convenient one
+    rather than the true one.
+
+    The cure is to heartbeat the thing that PROVES work rather than the
+    thing that is easy to emit: a job writing chunks is alive by definition,
+    whether or not anything emitted an event about it. Events remain a
+    valid liveness signal — they just are not the only one, and they were
+    never the load-bearing one.
+
+    Cheap to check: both tables are indexed on document_id, and the
+    NOT EXISTS short-circuits on the first row newer than the cutoff.
 
     Returns the number of recovered jobs.
     """
@@ -107,12 +132,27 @@ async def recover_stale_jobs(
               WHERE e.document_id = j.document_id
                 AND e.created_at > :heartbeat_cutoff
           )
+          -- WORK IS LIVENESS. A job writing chunks is alive whether or not
+          -- anything emitted an event saying so. Without this, long documents
+          -- were killed mid-run and their work discarded.
+          AND NOT EXISTS (
+              SELECT 1 FROM hierarchical_chunks h
+              WHERE h.document_id = j.document_id
+                AND h.created_at > :heartbeat_cutoff
+          )
+          -- Path A writes policy_lines rather than chunks; same argument.
+          AND NOT EXISTS (
+              SELECT 1 FROM policy_lines pl
+              WHERE pl.document_id = j.document_id
+                AND pl.created_at > :heartbeat_cutoff
+          )
         RETURNING j.id, j.document_id, j.status, j.failure_count
         """
     )
     msg = (
-        f"Auto-recovered: started >{timeout_minutes}min ago AND no heartbeat "
-        f"in last {heartbeat_timeout_minutes}min (by {worker_id or 'unknown'})"
+        f"Auto-recovered: started >{timeout_minutes}min ago AND no heartbeat, "
+        f"no chunks and no policy_lines written in last "
+        f"{heartbeat_timeout_minutes}min (by {worker_id or 'unknown'})"
     )
     result = await db.execute(
         stmt,
