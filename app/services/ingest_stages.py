@@ -56,6 +56,22 @@ async def persist_classification(db, doc, clf: dict) -> None:
             "stages": clf.get("stages"),
         },
     }
+    # PRODUCT LINE — PERSISTED VERBATIM, NEVER COMPUTED (Fact Store A-55).
+    #
+    # Fact Store owns and versions the path->line mapping; it lives in their
+    # classifier and comes back in the verdict. We are the scribe. Writing our
+    # own value here would give one field two authors, which is the defect
+    # A-23 named and the reason my own derive_product_line was deleted.
+    #
+    # ABSENT MEANS NOT-PATH-SCOPED, AND ABSENT MUST STAY ABSENT. When no path
+    # decides, the verdict carries no product_line key and we write nothing.
+    # Defaulting to "all_products" here would make silence and a decision look
+    # identical afterwards — exactly what mark_product_variant's 409 exists to
+    # prevent.
+    _pl = clf.get("product_line")
+    if _pl:
+        doc.source_metadata = {**doc.source_metadata, "product_line": _pl}
+
     flag_modified(doc, "source_metadata")
 
     # MAKE THE HOLD VISIBLE.
@@ -169,10 +185,11 @@ async def classify_and_gate(db, document: Document, *, caller: str) -> bool:
     False means the caller must stop before chunking — the document is held
     and ``ingest_failure_reason`` states why.
     """
-    src_url = (document.source_metadata or {}).get("source_url")
+    meta = document.source_metadata or {}
     clf = await classify_for_ingest(
         document_id=str(document.id),
-        source_url=src_url,
+        source_url=meta.get("source_url"),
+        source_page_url=meta.get("source_page_url"),
         caller=caller,
     )
     await persist_classification(db, document, clf)
@@ -186,60 +203,14 @@ async def has_pages(db, document_id) -> bool:
     return r.scalar_one_or_none() is not None
 
 
-# ── Product-line attribution (Fact Store A-54, 2026-09-06) ───────────────
+# ── Product-line attribution ─────────────────────────────────────────────
 #
-# Fact Store ratified the Sunshine root as ONE root and ruled explicitly: do
-# NOT create health_plan rows. Everything attributes to the single existing
-# tuple (FL | Sunshine Health | Medicaid) and carries a product_line stamp.
-# Ananth deferred product modelling (coord A-23), so inventing plan rows here
-# would manufacture exactly the reconciliation debt that deferral avoids.
+# derive_product_line() lived here from 2026-09-06 and was DELETED the same
+# day. Fact Store took the mapping into their classifier (A-55) and now
+# returns product_line in the ingest verdict; persist_classification writes it
+# verbatim.
 #
-# WHY THE LINKING PAGE AND NOT THE DOCUMENT'S OWN URL: Sunshine serves every
-# PDF from /content/dam/centene/..., which carries no product path at all. The
-# product line is only visible on the page that LINKED the file. That is what
-# source_page_url exists for — added 2026-08-24 after my HQA coverage query
-# reported 3 documents for a page holding 38, because it keyed on source_url
-# path segments that CDN-served files do not have.
-#
-# PATH IS A PRIOR, NOT AN AUTHORITY (Fact Store A-24 discipline): where a
-# document's own text declares a plan, the text wins. Nothing here reads text
-# — that needs calibration and is Fact Store's call — so every stamp records
-# basis='path_prior' and is safe for a text-derived value to supersede later.
-
-PRODUCT_LINES = ("MMA", "LTC", "CWSP", "HealthyKids", "all_products")
-
-# Ordered: first match wins. Keys are lowercased path fragments.
-_PRODUCT_LINE_PATHS = (
-    ("/members/longtermcare", "LTC"),
-    ("/members/child-welfare-plan", "CWSP"),   # the CMS Health Plan (Children's
-                                               # Medical Services). Deliberately
-                                               # NOT stamped 'CMS': Fact Store
-                                               # measured 4 of 45 CMS-* docs as
-                                               # genuinely federal CMS, so the
-                                               # abbreviation is ambiguous here.
-    ("/members/healthykids", "HealthyKids"),   # CHIP/KidCare — arguably a
-                                               # different PROGRAM, not a product.
-                                               # Stamp it and leave the program
-                                               # question to the deferred model;
-                                               # do not invent a program value.
-    ("/members/medicaid", "MMA"),
-)
-
-
-def derive_product_line(source_page_url: str | None,
-                        source_url: str | None) -> tuple[str, str]:
-    """Return ``(product_line, basis)`` for a Sunshine document.
-
-    Prefers the linking page, falls back to the document's own URL, and
-    defaults to ``all_products`` when neither path decides — provider manuals
-    and shared criteria are genuinely cross-line, not unknown.
-    """
-    for candidate, basis in ((source_page_url, "path_prior:page"),
-                             (source_url, "path_prior:self")):
-        if not candidate:
-            continue
-        low = candidate.lower()
-        for fragment, line in _PRODUCT_LINE_PATHS:
-            if fragment in low:
-                return line, basis
-    return "all_products", "default:not_path_scoped"
+# Deliberately not kept "just in case". A second copy of a mapping someone
+# else versions is the two-authors defect wearing a different hat: it would
+# drift silently and there would be no way to tell which value a document
+# carried. One author, their pen, our scribe.

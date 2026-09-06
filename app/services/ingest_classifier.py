@@ -36,6 +36,7 @@ async def classify_for_ingest(
     payor: str | None = None,
     filename: str | None = None,
     source_url: str | None = None,
+    source_page_url: str | None = None,
     text_sample: str | None = None,
     caller: str = "mobius-rag:unknown",
 ) -> dict:
@@ -44,9 +45,22 @@ async def classify_for_ingest(
     Pass ``document_id`` when the row already exists (post-commit).
     Pass ``payor``/``filename``/``source_url`` for pre-ingest classification.
 
+    ``source_page_url`` is the page that LINKED the document, and it is sent
+    ALONGSIDE document_id rather than instead of it (Fact Store A-55). The
+    classifier derives product_line from it: Sunshine serves every PDF from
+    /content/dam/centene/..., which carries no product path, so only the
+    linking page can decide the line. Fact Store owns that mapping — we send
+    the input and persist the verdict; we do not compute it.
+
     Never raises — returns _FALLBACK (hold) on any network failure.
     """
     payload: dict = {"caller": caller}
+    # Sent regardless of which identification path is used below: document_id
+    # identifies the row, source_page_url is evidence about it. The original
+    # source_url/document_id branch dropped every non-id field, which is how
+    # source_url silently stopped reaching the classifier for months.
+    if source_page_url:
+        payload["source_page_url"] = source_page_url
     if document_id:
         payload["document_id"] = str(document_id)
     else:

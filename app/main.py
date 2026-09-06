@@ -8804,31 +8804,19 @@ async def import_document_from_gcs(
         if _body_page_url:
             meta_dict = {**(meta_dict or {}), "source_page_url": _body_page_url}
 
-        # PRODUCT-LINE ATTRIBUTION — DELIBERATELY NOT WRITTEN HERE.
+        # PRODUCT-LINE ATTRIBUTION — RESOLVED, AND NOT WRITTEN HERE.
         #
-        # Fact Store's A-54 asks me to stamp source_metadata.product_line for
-        # Sunshine documents. I wired it, then found two reasons not to, both
-        # in this file:
+        # A-54 asked me to stamp source_metadata.product_line. I wired it, then
+        # reverted: the field is an OBJECT that mark_product_variant reads as
+        # ->>'value' (a bare string would make that NULL and silently un-decide
+        # the pair), and the comment at keep_both already said product
+        # assignment is Fact Store's write under A-23. Two authors on one field
+        # is the defect that started that thread.
         #
-        #   1. SHAPE. product_line is an OBJECT, not a string:
-        #        {"value": "CMS", "by": "human:console", "under": "Medicaid",
-        #         "via": "dedup_product_variant", "explicit": true}
-        #      62 documents carry it and mark_product_variant reads
-        #      source_metadata->'product_line'->>'value'. Writing a bare string
-        #      makes that read return NULL — the pair silently becomes
-        #      undecidable again, which is the exact failure that endpoint's
-        #      409 exists to prevent.
-        #
-        #   2. AUTHORSHIP. The comment at the keep_both branch says it plainly:
-        #      "Product assignment itself is Fact Store's write
-        #      (source_metadata.product_line, A-23) — duplicating it here would
-        #      give one field two authors, which is the defect that started
-        #      this whole thread."
-        #
-        # A-54 and A-23 disagree about who writes this field. That is Fact
-        # Store's to resolve, not mine to settle by writing. derive_product_line
-        # in ingest_stages.py holds the ratified path→line mapping and is ready
-        # for whichever side ends up calling it.
+        # Fact Store resolved it in A-55 by taking the mapping into their
+        # classifier. product_line now arrives in the ingest verdict and
+        # persist_classification writes it verbatim — one author, their pen,
+        # our scribe. Nothing to compute here.
 
         # NO default termination date. A TTL invented at ingest is not a policy
         # date, and pretending otherwise is what produced the 9,871 rows now
