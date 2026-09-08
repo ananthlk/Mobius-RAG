@@ -121,6 +121,11 @@ async def upsert_source(
     # the time we append the attempt row below it is already gone.
     hash_before = row.content_hash
 
+    # Capture the pre-fetch hash BEFORE the liveness block overwrites it —
+    # content_hash_before is the whole basis of drift attribution, and by
+    # the time we append the attempt row below it is already gone.
+    hash_before = row.content_hash
+
     # Always-update fields (liveness)
     row.last_seen_at = now
     if fetch_status is not None:

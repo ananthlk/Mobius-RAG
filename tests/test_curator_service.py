@@ -412,7 +412,6 @@ async def test_reupsert_with_fetch_status_none_leaves_last_fetch_status_null(ses
     assert row.last_fetch_status is None
     assert row.fetch_attempt_count in (0, None)
 
-
 # ── Attempt-audit trail (source_fetch_attempts) ──────────────────────
 #
 # DB seat ruled the need ACCEPTED 2026-08-12 and authored the DDL. These
